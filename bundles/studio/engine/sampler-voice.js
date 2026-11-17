@@ -69,6 +69,24 @@
  * release, a fade (`beginFadeOut`) drops it on its way out, and a start clears
  * it, so a reused slot never comes back held.
  *
+ * ## Pause-all
+ *
+ * The operator's Pause-all (`pause()`) ducks a voice to silence over
+ * `FADE_FRAMES` while the voice still advances, and then freezes it: the read
+ * position, the envelope and the gate countdown all stand still, and nothing is
+ * written at all. `resume()` ramps the level back up over the same 64 frames
+ * from the very frame it stopped on, so nothing jumps and no voice is cut at
+ * full level. `pauseLevel` is the ducking multiplier the render loop applies;
+ * `pauseFrames` and `pauseStep` are the ramp in progress.
+ *
+ * A voice that is already on its way out (its range ran out, or it is fading)
+ * is not paused: a fade is short, and a pause would keep a dead voice alive. For
+ * the same reason a stolen voice's tail never carries `paused`.
+ *
+ * A voice STARTED under Pause-all (M22) is created paused: silent and frozen
+ * from its own first frame, with no ramp to run, and heard when it is resumed.
+ * Its hit and its light still fire, because the voice really did start.
+ *
  * ## A live reverse flip
  *
  * `flipReverse` turns a sounding voice round where it stands: it negates `dir`
@@ -257,6 +275,17 @@
        */
       held: false,
       paused: false,
+      /**
+       * Pause-all's ramp: `pauseLevel` is the ducking multiplier the render loop
+       * applies (1 audible, 0 silent), `pauseFrames` the frames left of the
+       * 64-frame ramp in progress and `pauseStep` its per-frame increment. A
+       * voice that is `paused` with no ramp left and no level stands frozen:
+       * silent, with its position, its envelope and its gate countdown held
+       * exactly where they were.
+       */
+      pauseLevel: 1,
+      pauseFrames: 0,
+      pauseStep: 0,
       /** dB gain × (velocity/127)², and the constant-power pan pair. */
       gain: 0,
       panLeft: 1,
@@ -459,7 +488,9 @@
    *
    * Everything the voice needs is worked out here, once, so the render loop is
    * plain arithmetic. A range with no frames, or a sample with no PCM, is
-   * refused by returning false and leaving the voice silent.
+   * refused by returning false and leaving the voice silent. A `paused` start is
+   * the one Pause-all asks for (M22): the voice is silent and frozen from this
+   * frame, and it is heard when the pause is let go.
    * @param {object} voice a record from `createVoice()`
    * @param {{channels: Float32Array[], frames?: number, start?: number,
    *          end?: number, reverse?: boolean, pitch?: number,
@@ -467,7 +498,7 @@
    *          attackMs?: number, decayMs?: number, sustain?: number,
    *          releaseMs?: number, holdMs?: number, filterType?: string, cutoffHz?: number,
    *          resonance?: number, gateFrames?: number, choke?: number,
-   *          mode?: string, loop?: string, speed?: number,
+   *          mode?: string, loop?: string, speed?: number, paused?: boolean,
    *          trackId?: string, bankId?: string, index?: number,
    *          serial?: number, sampleRate: number}} config
    * @returns {boolean} whether the voice started
@@ -504,9 +535,15 @@
     voice.loop = loop;
     voice.looping = loop !== "off";
     // A start is a clean slot: whatever live state the voice it reuses carried
-    // (a HOLD latch, Pause-all) belongs to the trigger that has just ended.
+    // (a HOLD latch, Pause-all) belongs to the trigger that has just ended. A
+    // start made WHILE Pause-all is on (M22) is the exception: it is created
+    // paused, silent and frozen from its own first frame, and it ramps up on
+    // resume like any other. Neither leaves a ramp running.
     voice.held = false;
-    voice.paused = false;
+    voice.paused = settings.paused === true;
+    voice.pauseLevel = voice.paused ? 0 : 1;
+    voice.pauseFrames = 0;
+    voice.pauseStep = 0;
     voice.gain = dbToLinear(settings.gainDb) * velocityGain;
     voice.panLeft = pan.left;
     voice.panRight = pan.right;
@@ -615,6 +652,93 @@
     if (!voice.sounding) return;
     voice.held = false;
     releaseVoice(voice);
+  }
+
+  /**
+   * Raise Pause-all on a voice: its level ramps to 0 over `FADE_FRAMES` while it
+   * still advances, and it then stands frozen until `resumeVoice` lets it go.
+   *
+   * A voice that is already on its way out is not paused: one whose range ran
+   * out (`ending`), and one that is fading (a choke, a steal) — those carry
+   * `fadeRemaining`, and a pause would freeze the very ramp that is meant to end
+   * them. A voice that is already paused keeps the ramp it has.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function pauseVoice(voice) {
+    if (!voice.sounding) return;
+    if (voice.ending || voice.fadeRemaining > 0) return;
+    if (voice.paused) return;
+    voice.paused = true;
+    if (!(voice.pauseLevel > 0)) {
+      // Already silent — a voice that started under Pause-all (M22): there is
+      // nothing to ramp down, so it is frozen where it stands.
+      voice.pauseLevel = 0;
+      voice.pauseFrames = 0;
+      voice.pauseStep = 0;
+      return;
+    }
+    voice.pauseFrames = FADE_FRAMES;
+    voice.pauseStep = -voice.pauseLevel / FADE_FRAMES;
+  }
+
+  /**
+   * Let Pause-all go on a voice: the level ramps back up to 1 over
+   * `FADE_FRAMES` from the frame it was frozen on, and the voice advances again
+   * while it climbs, so the resume is continuous with the pause.
+   *
+   * A voice that is not paused has nothing to resume, and a voice that is on its
+   * way out is left to finish its fade.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function resumeVoice(voice) {
+    if (!voice.sounding) return;
+    if (!voice.paused) return;
+    voice.paused = false;
+    if (voice.pauseLevel >= 1) {
+      voice.pauseLevel = 1;
+      voice.pauseFrames = 0;
+      voice.pauseStep = 0;
+      return;
+    }
+    voice.pauseFrames = FADE_FRAMES;
+    voice.pauseStep = (1 - voice.pauseLevel) / FADE_FRAMES;
+  }
+
+  /**
+   * Whether Pause-all has a voice standing still: it was ramped down to silence
+   * and the ramp is over, so the render loop leaves everything it holds — its
+   * read position, its envelope, its gate countdown — exactly as it is and
+   * writes nothing for it.
+   *
+   * A voice with a fade still running is never frozen: that fade is what ends
+   * it, so it runs on (silently) to its own end instead of being kept alive at
+   * level 0 by a pause it can no longer reach.
+   * @param {object} voice
+   * @returns {boolean}
+   */
+  function frozenByPause(voice) {
+    if (voice.paused !== true) return false;
+    if (voice.pauseFrames > 0 || voice.pauseLevel > 0) return false;
+    return !(voice.fadeRemaining > 0);
+  }
+
+  /**
+   * Step the pause ramp on by one frame, after that frame was rendered. The
+   * ramp's last step lands on its target exactly, so a voice is never left a
+   * rounding error away from silence (or from full level).
+   * @param {object} voice
+   * @returns {void}
+   */
+  function advancePause(voice) {
+    if (voice.pauseFrames === 0) return;
+    voice.pauseLevel += voice.pauseStep;
+    voice.pauseFrames -= 1;
+    if (voice.pauseFrames === 0) {
+      voice.pauseLevel = voice.pauseStep < 0 ? 0 : 1;
+      voice.pauseStep = 0;
+    }
   }
 
   /**
@@ -762,6 +886,9 @@
 
     for (let frame = 0; frame < frames; frame += 1) {
       if (!voice.sounding) break;
+      // A voice Pause-all has ramped down and frozen stands exactly where it is:
+      // nothing advances and nothing is heard until it is resumed (M17).
+      if (frozenByPause(voice)) continue;
       countdown(voice);
       if (voice.stage === STAGE_DONE) {
         voice.sounding = false;
@@ -868,11 +995,13 @@
 
       if (audible) {
         const at = offset + frame;
-        if (left !== null && leftGain !== 0) left[at] += signalLeft * voice.gain * fade * leftGain;
-        if (right !== null && rightGain !== 0) right[at] += signalRight * voice.gain * fade * rightGain;
+        const duck = voice.pauseLevel;
+        if (left !== null && leftGain !== 0) left[at] += signalLeft * voice.gain * fade * duck * leftGain;
+        if (right !== null && rightGain !== 0) right[at] += signalRight * voice.gain * fade * duck * rightGain;
       }
 
       advanceEnvelope(voice);
+      advancePause(voice);
     }
   }
 
@@ -884,6 +1013,9 @@
     /** Latch a sounding voice (HOLD), and let that latch go again. */
     hold: holdVoice,
     releaseHeld: releaseHeldVoice,
+    /** Pause-all on one voice: ramp it down and freeze it, and let it go again. */
+    pause: pauseVoice,
+    resume: resumeVoice,
     beginFadeOut: beginFadeOut,
     flipReverse: flipReverse,
     refreshStep: refreshStep,

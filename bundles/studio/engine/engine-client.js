@@ -200,7 +200,10 @@
  *   answers `false` when the song has no Gate pad there, so a HOLD on a pad of
  *   another mode is refused (M15); `releaseHeld(track, bank, index)` lets that
  *   latch go again, and with no argument every latch. HOLD is page state, never
- *   song data. `resetLive()` releases the pads' live state (every loop and every
+ *   song data. `pauseVoices(on)` is Pause-all: it ramps every sounding pad voice
+ *   down and freezes it where it stands, and ramps it back up on resume (M17); a
+ *   start made while it is on is created paused and heard on resume (M22).
+ *   `resetLive()` releases the pads' live state (every loop and every
  *   HOLD), and the page sends it when a DIFFERENT song opens — never on an
  *   ordinary song update, which runs on every edit.
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
@@ -1055,6 +1058,7 @@
    *                    play: function(): void,
    *                    stop: function(): void,
    *                    resetLive: function(): void,
+   *                    pauseVoices: function(boolean): void,
    *                    setMode: function(string): void,
    *                    seek: function(number): void,
    *                    setMetronome: function(boolean): void,
@@ -2638,6 +2642,30 @@
           bank_id: String(bankId),
           index: Math.trunc(Number(index) || 0),
         });
+      },
+
+      /**
+       * Pause everything the pads are playing, or let it go (the SP-404's
+       * SHIFT+HOLD Pause-all).
+       *
+       * A voice ducks to silence over 64 frames and then stands frozen where it
+       * reached: its read position, its envelope and its gate countdown stop
+       * with it, and resuming ramps it back up over the same 64 frames from that
+       * very frame (M17). Nothing is cut at full level, and a voice that is
+       * already ending or fading is not paused; it finishes.
+       *
+       * While the pause is on, every new start — a live press, a step, a roll
+       * repeat — is created paused: silent and frozen from its own first frame,
+       * and heard (ramping up) on resume (M22). Its hit and its light still land
+       * at the frame it starts on, because the voice really did start.
+       *
+       * It is live state: never a command, never a history step, never in the
+       * song. Stop and `resetLive` clear it in the engine.
+       * @param {boolean} on
+       * @returns {void}
+       */
+      pauseVoices(on) {
+        post({ type: "pause_voices", on: on === true });
       },
 
       /**

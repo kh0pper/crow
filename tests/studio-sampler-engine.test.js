@@ -499,6 +499,8 @@ async function createProcessor(song, samples) {
     messages: messages,
     /** The processor itself, so a test can read (or flag) one voice's live state. */
     processor: processor,
+    /** The stand-in global scope, so a test can call the voice module's own API. */
+    scope: scope,
     /** Post one protocol message, the way the worklet's port does. */
     post,
     /** @returns {Promise<{left: Float32Array, right: Float32Array}>} the mix, in `blockSize` blocks */
@@ -3991,6 +3993,221 @@ test("the song-wide cut clears looping, held and paused on the voice it takes", 
   assert.equal(dead[0].looping, false, "a cut voice does not loop");
   assert.equal(dead[0].held, false, "it holds nothing");
   assert.equal(dead[0].paused, false, "and it is not left paused");
+});
+
+// --- Pause-all (C1b) -------------------------------------------------------
+
+test("pauseVoices(true) then Stop clears the pause", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0)], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  pressPad(engine, 0);
+  const playing = await engine.process(128, 256);
+  assertLevel(playing.left[255], ONE_VOICE, "the one-shot sounds");
+
+  engine.post({ type: "pause_voices", on: true });
+  assert.equal(engine.processor.pauseAll, true, "the engine holds Pause-all");
+  // The 64-frame ramp still lets the voice advance; from then on it is silent.
+  await engine.process(128, 64);
+  const record = recordOf(engine, "track-1");
+  const voice = soundingOf(record)[0];
+  assert.equal(voice.paused, true, "the voice is paused");
+  assert.equal(voice.pauseLevel, 0, "and at silence");
+  const stood = voice.position;
+  const frozen = await engine.process(128, 1000);
+  assert.equal(peakOf(frozen.left), 0, "a frozen voice is silent");
+  assert.equal(voice.position, stood, "and stands where the ramp left it");
+
+  // Stop is what clears it: the voice comes back up from that very frame.
+  engine.post({ type: "stop" });
+  assert.equal(engine.processor.pauseAll, false, "Stop clears Pause-all");
+  const lifted = await engine.process(128, 64 + 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(lifted.left[lifted.left.length - 1], ONE_VOICE, "the voice is heard again after Stop");
+  assert.ok(voice.position > stood, "from the frame it was frozen on");
+});
+
+test("a paused looping and a paused held voice resume where they were", async () => {
+  const frames = 48000;
+  const samples = ramp(frames);
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "gate", loop: "loop" }), pad("track-1", 1, { mode: "gate" })],
+    frames,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [samples] }]);
+
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "the Gate+Loop pad latches");
+  pressPad(engine, 1);
+  assert.equal(holdPadOf(engine, 1), true, "the Gate pad latches too");
+  await engine.process(128, 256);
+  const record = recordOf(engine, "track-1");
+  const loop = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  const held = soundingOf(record).filter((voice) => voice.index === 1)[0];
+  assert.equal(loop.looping, true, "pad 0 loops");
+  assert.equal(held.held, true, "pad 1 is held");
+  const stood = [loop.position, held.position];
+
+  engine.post({ type: "pause_voices", on: true });
+  await engine.process(128, 64);
+  assert.deepEqual(
+    [loop.position, held.position],
+    [stood[0] + 64, stood[1] + 64],
+    "the ramp still advances both voices",
+  );
+  const frozen = await engine.process(128, 1000);
+  assert.equal(peakOf(frozen.left), 0, "both are silent while frozen");
+  assert.deepEqual(
+    [loop.position, held.position],
+    [stood[0] + 64, stood[1] + 64],
+    "and neither moves",
+  );
+
+  engine.post({ type: "pause_voices", on: false });
+  const lifted = await engine.process(128, 64 + 100);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(loop.looping, true, "the loop is still a loop");
+  assert.equal(held.held, true, "and the latch is still on");
+  const resumed = stood[0] + 64 + 164;
+  assert.deepEqual([loop.position, held.position], [resumed, resumed], "both carry on from where they stopped");
+  // Both voices read the very same frame of the very same sample, so the mix
+  // holds it twice at full level.
+  const read = resumed - 1;
+  assertLevel(
+    lifted.left[lifted.left.length - 1],
+    samples[read] * CENTRE + samples[read] * CENTRE,
+    "and both are heard again",
+  );
+});
+
+test("a paused voice is protected from steals", async () => {
+  const pads = [];
+  for (let index = 0; index < 16; index += 1) pads.push(pad("track-1", index));
+  const song = kitSong({ pads, frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  for (let index = 0; index < 16; index += 1) pressPad(engine, index);
+  await engine.process(128, 128);
+
+  // Pause-all is the live flag the voice carries (C1b); pad 0's voice is paused
+  // through the voice module's own API, which is what ramps it down and freezes
+  // it. Pad 0 is the oldest voice of the track, so it is the one a steal would
+  // reach for first.
+  const record = recordOf(engine, "track-1");
+  const paused = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  engine.scope.StudioSamplerVoice.pause(paused);
+  await engine.process(128, 64 + 128);
+  assert.equal(paused.paused, true, "pad 0's voice is paused");
+  assert.equal(paused.pauseLevel, 0, "and silent");
+
+  // Every slot sounds, so this press has to steal: it takes the oldest voice
+  // that is NOT paused, and the paused one is left alone.
+  pressPad(engine, 1);
+  await engine.process(128, 32);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(paused.sounding, true, "the paused voice is not stolen while another voice exists");
+  assert.equal(paused.index, 0, "it is still pad 0's voice");
+  const tails = tailsOf(record);
+  assert.equal(tails.length, 1, "the steal rang one voice out in a tail");
+  assert.equal(tails[0].index, 1, "and it is the oldest unprotected voice, not the paused one");
+});
+
+test("steal a paused voice, then resume: the tail finishes and nothing stays frozen", async () => {
+  const pads = [];
+  for (let index = 0; index < 16; index += 1) pads.push(pad("track-1", index));
+  const song = kitSong({ pads, frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  for (let index = 0; index < 16; index += 1) pressPad(engine, index);
+  await engine.process(128, 128);
+
+  // Every slot is in use, so this press steals the oldest one — pad 0's voice,
+  // which Pause-all had frozen (every voice is equally protected, so the oldest
+  // goes).
+  engine.post({ type: "pause_voices", on: true });
+  await engine.process(128, 64);
+  pressPad(engine, 0);
+  await engine.process(128, 32);
+
+  const record = recordOf(engine, "track-1");
+  const tails = tailsOf(record);
+  assert.equal(tails.length, 1, "the stolen voice rings out in one fade tail");
+  assert.equal(tails[0].index, 0, "it is pad 0's voice");
+  assert.equal(tails[0].paused, false, "the tail carries no pause, so its fade runs to its end");
+  await engine.process(128, 128);
+  assert.equal(tailsOf(record).length, 0, "and the tail is over within its fade");
+
+  // Resuming lets every voice go: nothing is left frozen anywhere.
+  engine.post({ type: "pause_voices", on: false });
+  assert.equal(engine.processor.pauseAll, false, "the pause is let go");
+  assert.deepEqual(
+    soundingOf(record).map((voice) => voice.paused),
+    soundingOf(record).map(() => false),
+    "no sounding voice is paused any more",
+  );
+  const before = soundingOf(record).map((voice) => voice.position);
+  await engine.process(128, 64 + 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  const after = soundingOf(record).map((voice) => voice.position);
+  assert.equal(after.length, before.length, "every voice that sounded still does");
+  for (let at = 0; at < after.length; at += 1) {
+    assert.ok(after[at] > before[at], `voice ${at} advances again instead of standing frozen`);
+  }
+});
+
+test("M22 a live press, a step and a roll-style start while paused make no sound until resume, then ramp up", async () => {
+  // Pad 0 is started by a step at beat 2 (frame 48000 at 120 bpm), pad 1 by the
+  // operator's own presses — the very start a ROLL repeat is.
+  const song = kitSong({
+    pads: [pad("track-1", 0, { gain_db: -12 }), pad("track-1", 1, { gain_db: -12 })],
+    clips: [patternClip("clip-1", "track-1")],
+    steps: [step("clip-1", 8, 0, { v: 127 })],
+    frames: 48000,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+  engine.post({ type: "pause_voices", on: true });
+
+  pressPad(engine, 1);
+  pressPad(engine, 1);
+  const pressed = await engine.process(128, 1024);
+  assert.equal(peakOf(pressed.left), 0, "a start made under Pause-all is silent");
+  const record = recordOf(engine, "track-1");
+  assert.deepEqual(
+    soundingOf(record).map((voice) => voice.paused),
+    soundingOf(record).map(() => true),
+    "both press voices are paused",
+  );
+  assert.equal(soundingOf(record).length, 2, "both presses started a voice");
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages), (event) => event.index === 1),
+    [["track-1", BANK, 1, StudioPadEvents.STATE_ON]],
+    "the pad's light shows as soon as it starts",
+  );
+  assert.equal(
+    allPadEvents(engine.messages).filter((event) => event.kind === "hit").length,
+    2,
+    "each press still reports its hit at the frame it starts on",
+  );
+
+  // The step fires at beat 2 and its voice is frozen on its own first frame.
+  const later = await engine.process(128, 48000);
+  assert.equal(peakOf(later.left), 0, "the step is silent too");
+  const stepped = soundingOf(record).filter((voice) => voice.index === 0);
+  assert.equal(stepped.length, 1, "the step started a voice");
+  assert.equal(stepped[0].paused, true, "and it is paused");
+  assert.equal(stepped[0].position, stepped[0].start, "with not one frame of it read");
+
+  // Resume: every one of them ramps up and is heard.
+  engine.post({ type: "pause_voices", on: false });
+  const lifted = await engine.process(128, 64 + 256);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  const each = ONE_VOICE * Math.pow(10, -12 / 20);
+  assertLevel(
+    lifted.left[lifted.left.length - 1],
+    each + each + each,
+    "all three voices are heard after the resume",
+  );
 });
 
 // --- a sounding voice follows its pad: tempo and Reverse (B4c) ---------------

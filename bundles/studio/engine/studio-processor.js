@@ -188,8 +188,9 @@
  *   on every edit, releases nothing that still exists: only a voice whose pad is
  *   gone from the new snapshot, or whose pad no longer names the sample (or
  *   slice) that voice is playing, ends, through the normal release.
- * - **Stop** releases the live state — every loop and every HOLD — and so does
- *   `{type:"reset_live"}`, which the page sends when a DIFFERENT song opens.
+ * - **Stop** releases the live state — every loop, every HOLD and the pause —
+ *   and so does `{type:"reset_live"}`, which the page sends when a DIFFERENT
+ *   song opens.
  *   Neither touches the song, and an ordinary song update never sends one.
  * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
@@ -207,6 +208,15 @@
  *   it stands. A held voice is the last one a steal takes (see `stealRank`), a
  *   mute group's choke and a fade tail drop the flag, and a start clears it, so
  *   a latched light always ends through the same scan as any other.
+ * - **Pause-all:** `{type:"pause_voices", on:true}` ramps every sounding pad
+ *   voice down to silence over 64 frames and then freezes it — the read
+ *   position, the envelope and the gate countdown stop with it — and
+ *   `{on:false}` ramps it back up over the same 64 frames from the frame it
+ *   stopped on (M17). Nothing is cut at full level, and a voice that is already
+ *   ending or fading is left to finish. While it is on, every start (a step, a
+ *   live press, a roll repeat) is created paused: silent and frozen from its own
+ *   first frame and heard on resume (M22), with its hit and its light landing at
+ *   the frame it starts on. Stop and `reset_live` clear the pause.
  * - **Speed:** `speed_pct` (50..150 %) and, while `bpm_sync` is on and the pad
  *   names a `source_bpm_x10`, the song's tempo against the sample's own move
  *   the voice's playback speed, held inside 0.25×..4×. It is varispeed: the
@@ -630,7 +640,8 @@
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
  * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}` (which also releases
- * the pads' live state — every loop and every HOLD), `{type:"reset_live"}` (the
+ * the pads' live state — every loop, every HOLD and the pause),
+ * `{type:"reset_live"}` (the
  * same release,
  * sent when a DIFFERENT song opens), `{type:"setMode", mode}`,
  * `{type:"seek", bar}` (a bar at beat resolution), `{type:"metronome", on}`,
@@ -643,7 +654,8 @@
  * `{type:"nam-wasm", bytes}` (the NAM engine binary, once per page),
  * `{type:"monitor", track_id, on}`, `{type:"live", track_id,
  * bank_id, index, v, on}`, `{type:"hold", track_id, bank_id, index}`,
- * `{type:"release_held", track_id?, bank_id?, index?}`, `{type:"tap", target, on}`,
+ * `{type:"release_held", track_id?, bank_id?, index?}`,
+ * `{type:"pause_voices", on}`, `{type:"tap", target, on}`,
  * `{type:"fx", name,
  * amount, on}`, `{type:"looper", action}`, `{type:"looper_buffers", left,
  * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`,
@@ -2287,6 +2299,14 @@
       this.padEventsOn = false;
 
       /**
+       * Whether Pause-all is on (`{type:"pause_voices", on:true}`). It is live
+       * state, never song data: every sounding pad voice is ramped down and
+       * frozen while it is on, and every start made while it is on is created
+       * paused (M22). Stop and `reset_live` clear it (`releaseLive`).
+       */
+      this.pauseAll = false;
+
+      /**
        * The pad lights' state, one entry per bank: `codes[0]` is the packed
        * state the last block reported and `codes[1]` the one this block holds,
        * two bits per pad (`PAD_STATE_*`). The arrays are allocated in `readKit`
@@ -2769,6 +2789,12 @@
           // No ids lets every latch go (Stop's business in the engine); a track
           // or a pad releases just those.
           this.releaseHeld(message.track_id, message.bank_id, message.index);
+          break;
+        case "pause_voices":
+          // Pause-all is live state: the voices ramp down and freeze where they
+          // stand, and ramping them back up carries on from that very frame. It
+          // is never a command and never a history step.
+          this.pauseVoices(message.on === true);
           break;
         case "tap":
           this.setTap(message.target, message.on === true);
@@ -8247,6 +8273,9 @@
         choke: pad.choke,
         mode: mode,
         loop: loop,
+        // Pause-all creates its start silent and frozen (M22); the hit and the
+        // light below still land on this voice's own frame.
+        paused: this.pauseAll === true,
         trackId: asId(event.track_id),
         bankId: bankId,
         index: index,
@@ -8435,7 +8464,12 @@
       // alive beside the voice that took the slot.
       tail.looping = false;
       tail.held = false;
+      // A paused voice's tail is silent and over within its fade: the flag goes
+      // and no ramp keeps running, so nothing is left frozen beside the voice
+      // that took the slot.
       tail.paused = false;
+      tail.pauseFrames = 0;
+      tail.pauseStep = 0;
       // The tail is on its way out, so no curve is read for it (see
       // `renderSampler`): it keeps the very values it had at the moment it was
       // stolen, instead of jumping back to its pad's own during the 64-frame
@@ -8616,6 +8650,39 @@
     }
 
     /**
+     * Pause-all: every sounding pad voice ducks to silence over the 64-frame
+     * ramp and stands frozen there — its read position, its envelope and its
+     * gate countdown with it — and resuming ramps the voice back up over the
+     * same 64 frames from the frame it stopped on (M17). A voice that is already
+     * ending or fading is not paused; it finishes its fade.
+     *
+     * While it is on, every start (a step, a live press, a roll repeat) is
+     * created paused: silent and frozen from its own first frame and heard when
+     * the pause is let go (M22). Its hit and its light still fire, because the
+     * voice really did start.
+     *
+     * It is the page's live state: never a command, never a history step, never
+     * in the song. Stop and `reset_live` clear it (`releaseLive`). A message that
+     * repeats the state the engine is in changes nothing, so a second pause does
+     * not restart a ramp.
+     * @param {boolean} on
+     * @returns {void}
+     */
+    pauseVoices(on) {
+      const paused = on === true;
+      if (this.pauseAll === paused) return;
+      this.pauseAll = paused;
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding) continue;
+          if (paused) StudioSamplerVoice.pause(voice);
+          else StudioSamplerVoice.resume(voice);
+        }
+      }
+    }
+
+    /**
      * End one sampler voice through the normal release, latch and all.
      *
      * A HOLD outranks a live release (that is what makes it a hold) but it never
@@ -8683,6 +8750,10 @@
      * @returns {void}
      */
     releaseLive() {
+      // Stop and `reset_live` clear Pause-all too: a frozen voice starts from the
+      // frame it stood on, and the loops and holds then go as they always did.
+      // An ordinary song update never comes here.
+      this.pauseVoices(false);
       for (const record of this.slots) {
         if (!record || !record.sampler) continue;
         for (const voice of record.voices) {
