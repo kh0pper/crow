@@ -24,9 +24,8 @@
  * only when a notification was really created, and the `missed` card state is the primary signal
  * either way.
  *
- * Every sentence is fixed: a `fail_reason` is one of `SEND_FAIL_REASONS`' phrases (plus the one reason
- * the sweep adds, below) and nothing else, a log line carries an event name and a code, and the bell
- * never carries mail content.
+ * Every sentence is fixed: a `fail_reason` is one of `SEND_FAIL_REASONS`' phrases and nothing else, a
+ * log line carries an event name and a code, and the bell never carries mail content.
  */
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
@@ -39,8 +38,9 @@ import { createNotification } from "../../../shared/notifications.js";
 import { instanceZone } from "../../../shared/schedule-store.js";
 import { validTimeZone } from "../../../shared/relative-dates.js";
 import {
-  GRACE_MS, KEYCHAIN_KEY_MISSING_SENTENCE, SEND_FAIL_REASONS, STALE_SENDING_MS,
-  deliver, inFlight as sendInFlight, isStaleSending, nextReconcileAt, reconcileUnknown,
+  GRACE_MS, KEYCHAIN_KEY_MISSING_SENTENCE, SEND_FAIL_REASONS,
+  deliver, inFlight as sendInFlight, isStaleSending, markStaleUnknown, reconcileUnknown,
+  sendRuntimeReady,
 } from "./send-service.js";
 
 /** The soonest a message may be scheduled for: one minute ahead, so no tap is already late. */
@@ -51,17 +51,6 @@ export const SCHEDULE_MAX_AHEAD_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** The title of every bell this module rings. The text carries no mail content, so the title says which. */
 export const MISSED_TITLE = "Crow Mail";
-
-/**
- * The one reason the sweep adds to Task 5's table: the account a scheduled message was made from is
- * gone, so there is no mailbox left to send from. The plan names the key (`account_removed`) but gives
- * no sentence for it, and Task 5's table is not this task's to edit; the fixed `not_found` phrase is
- * the plan's own wording for a mailbox that is no longer there, so that is what the row carries. The
- * key moves into `SEND_FAIL_REASONS` when that module is next opened.
- */
-export const SCHEDULE_FAIL_REASONS = Object.freeze({
-  account_removed: SEND_FAIL_REASONS.not_found,
-});
 
 /** The states a schedule may be taken from. */
 const SCHEDULABLE_STATES = Object.freeze(["draft", "failed", "missed"]);
@@ -92,6 +81,9 @@ function resolveDeps(db, deps) {
     isClaimedElsewhere: fn("isClaimedElsewhere", makeIsClaimedElsewhere(db)),
     createNotification: fn("createNotification", createNotification),
     loadKey: fn("loadKey", defaultLoadKey),
+    // The send service's "is there anywhere to send from" answer needs to know whether the caller
+    // brought its own adapter; the flag is set here so both services read the same shape.
+    hasAdapter: typeof given.withAdapter === "function",
     zone: typeof given.zone === "function" ? given.zone : () => instanceZone(db),
     now: fn("now", Date.now),
     inFlight: given.inFlight instanceof Map ? given.inFlight : sendInFlight,
@@ -117,7 +109,7 @@ function logCode(event, code) {
 
 /** The failure phrase for a reason key; an unlisted key still says something true and fixed. */
 function phraseFor(reason) {
-  return SCHEDULE_FAIL_REASONS[reason] ?? SEND_FAIL_REASONS[reason] ?? SEND_FAIL_REASONS.send_failed;
+  return SEND_FAIL_REASONS[reason] ?? SEND_FAIL_REASONS.send_failed;
 }
 
 /** Zones already validated, so the repeated reads below validate each one once. */
@@ -326,6 +318,21 @@ export function dueAtInstant(value, zone) {
 }
 
 /**
+ * A due time from an owner route: zone-qualified ISO text and nothing else. A number is refused here,
+ * before it can reach `dueAtInstant`, so no request body can hand the tap an epoch-ms value the sheet
+ * never displayed. `dueAtInstant` is the parser the tap itself uses, so the offset and wall-clock checks
+ * are the same two.
+ *
+ * @param {unknown} value the posted `dueAt`
+ * @param {{zone?: string}} [options] the instance zone (`instanceZone(db)`)
+ * @returns {number} epoch ms
+ */
+export function parseRouteDueAt(value, options = {}) {
+  if (typeof value !== "string" || value.trim() === "") throw new MailError("BAD_INPUT", "due_at");
+  return dueAtInstant(value, options?.zone);
+}
+
+/**
  * Freeze one draft until a due time: the person's tap, taken with the hash their card was drawn from.
  *
  * The checks are a send's checks, run now so a doomed schedule is refused up front rather than at the
@@ -335,6 +342,13 @@ export function dueAtInstant(value, zone) {
  * tapped hash` — carrying `due_at`, a fresh per-tap id and the seal over the due time, the account and
  * the From address. A missing or empty hash is refused `changed` before anything is read or written; a
  * hash that is no longer the head loses the UPDATE and is refused `changed` with nothing written.
+ *
+ * A numeric `dueAt` is epoch ms and is for trusted callers only — the server's own presets, and a
+ * test — and is stored exactly as given. The owner route (Task 7) must accept only zone-qualified
+ * text and passes the posted value through `parseRouteDueAt`, which refuses every non-string, so no
+ * request can reach this function with a number. Without a running mail connection the tap is refused
+ * `not_sendable`/`supervisor_missing` before anything is frozen, exactly as `requestSend` refuses a
+ * send.
  *
  * @param {object} db
  * @param {object} deps see the module note
@@ -354,6 +368,10 @@ export async function scheduleDraft(db, deps, options = {}) {
   const row = await getDraft(db, draftId);
   if (!row) return { ok: false, code: "not_found" };
   if (!SCHEDULABLE_STATES.includes(row.state)) return { ok: false, code: "frozen", state: row.state };
+
+  // Nowhere to send from: refuse the tap before anything is frozen, so the row is not left scheduled
+  // for a due time this Crow has no connection to honour. The same answer `requestSend` gives.
+  if (!sendRuntimeReady(d)) return { ok: false, code: "not_sendable", reason: "supervisor_missing" };
 
   const zone = await zoneOf(d);
   let dueAt;
@@ -541,7 +559,8 @@ async function failDue(db, d, row, now, block) {
  *   (2) the same states past the grace window: `missed`, one bell, `notified_at` only when a
  *       notification was really created;
  *   (3) `sending` rows this process is not sending whose attempt is older than `STALE_SENDING_MS`:
- *       `unknown`, with the reconcile pointed at its first check;
+ *       `unknown`, through the send service's `markStaleUnknown`, which is guarded by the claim token
+ *       and points the first Sent-folder check a minute after the attempt;
  *   (4) `unknown` rows whose reconcile is due and whose account still exists: one Sent-folder check;
  *   (5) the daily prune — a no-op placeholder this task leaves for Task 13.
  *
@@ -549,6 +568,9 @@ async function failDue(db, d, row, now, block) {
  * (`auth_failed`, with a bell) or connected on another Crow (`claimed_elsewhere`) — never a socket, never
  * a silent drop. Two ticks seeing the same due row produce one claim and one send, because `deliver`'s
  * claim is the same single guarded UPDATE this sweep leaves to it.
+ *
+ * `delivered` counts the deliveries this tick started, not the ones that finished; `missed`, `unknown`
+ * and `reconciled` count the rows this tick moved or checked.
  *
  * @param {object} db
  * @param {object} deps see the module note
@@ -602,9 +624,11 @@ export async function sweepMailSends(db, deps, options = {}) {
     }
   }
 
-  // ---- (3) a claimed send this process is not running and has not run for the cutoff.
+  // ---- (3) a claimed send this process is not running and has not run for the cutoff. The move is
+  // the send service's own, so a row whose claim token changed under the sweep is left for the claim
+  // that owns it, and a late success can still settle the row by that token.
   const sending = await db.execute({
-    sql: "SELECT id, state, attempt_at, claimed_at FROM mail_drafts WHERE state = 'sending'",
+    sql: "SELECT id, state, attempt_at, claimed_at, claim_token FROM mail_drafts WHERE state = 'sending'",
     args: [],
   });
   for (const raw of sending.rows) {
@@ -613,13 +637,10 @@ export async function sweepMailSends(db, deps, options = {}) {
       state: String(raw.state),
       attemptAt: raw.attempt_at == null ? null : Number(raw.attempt_at),
       claimedAt: raw.claimed_at == null ? null : Number(raw.claimed_at),
+      claimToken: raw.claim_token ?? null,
     };
     if (!isStaleSending(row, now, d.inFlight)) continue;
-    const moved = await transition(db, row.id, ["sending"], "unknown", {
-      fail_reason: SEND_FAIL_REASONS.send_failed,
-      reconcile_count: 0,
-      next_reconcile_at: nextReconcileAt(now, 0),
-    }, { now });
+    const moved = await markStaleUnknown(db, row, now);
     if (moved) counts.unknown += 1;
   }
 

@@ -29,10 +29,12 @@ const REPO = new URL("..", import.meta.url).pathname;
 
 const { default: express } = await import("express");
 const { createDbClient } = await import("../servers/db.js");
-const { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } = await import("../servers/shared/mail-schema.js");
+const { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } = await import("../servers/shared/mail-schema.js");
 const { startMailSync, stopMailSync } = await import("../servers/gateway/boot/mail-boot.js");
 const { createAccount, getAccount, getSyncState } = await import("../servers/gateway/mail/store/accounts.js");
 const { CLAIM_RETRY_MS } = await import("../servers/gateway/mail/sync/supervisor.js");
+const { sendRuntimeReady } = await import("../servers/gateway/mail/send/send-service.js");
+const { runSchedulerHooks } = await import("../servers/gateway/scheduler-hooks.js");
 const { mailApiRouter, MAIL_API_PREFIX } = await import("../servers/gateway/routes/mail-api.js");
 const { listClaims, releaseClaim, writeClaim } = await import("../servers/gateway/mail/claims.js");
 const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs");
@@ -104,6 +106,8 @@ async function freshDb() {
   mkdirSync(dir, { recursive: true });
   const db = createDbClient(join(dir, "crow.db"));
   await db.executeMultiple(MAIL_DDL + SETTINGS_DDL);
+  // The draft tables the mail-send sweep reads: the gate's tick must find them, not trip over them.
+  await db.executeMultiple(MAIL_DRAFTS_DDL);
   // The account send columns (plan 3's A3) are ADD COLUMN specs of their own, not part of MAIL_DDL.
   for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
     await db.execute({ sql: `ALTER TABLE ${spec.table} ADD COLUMN ${spec.column} ${spec.definition}`, args: [] });
@@ -591,6 +595,78 @@ test("stop closes the supervisor once, clears the runtime the routes read, and i
 });
 
 /* -------------------------------------------------------------------- wiring */
+
+/**
+ * A db client that counts the mail-send sweep's own first query, so a tick can be seen to have run one
+ * sweep. Everything else passes straight through.
+ */
+function countingSweeps(db, counts) {
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === "execute") {
+        return (statement) => {
+          const sql = typeof statement === "string" ? statement : (statement?.sql ?? "");
+          if (sql.includes("FROM mail_drafts") && sql.includes("'holding', 'scheduled'")) counts.sweeps += 1;
+          return target.execute(statement);
+        };
+      }
+      const value = target[prop];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+test("the mail-send hook rides the tick only with the flag on, once, and stopMailSync takes it back", async () => {
+  const db = await freshDb();
+  await addAccount(db);
+  const counts = { sweeps: 0 };
+  const counting = countingSweeps(db, counts);
+  const credentials = { get: async () => null };
+
+  // Flag unset: the gate builds nothing, so the tick has no mail work to do at all.
+  const closed = await startMailSync({
+    db: counting, env: {}, noAuth: false, credentials, localInstance: LOCAL, log: () => {},
+  });
+  assert.equal(closed.started, false);
+  assert.equal(closed.reason, "disabled");
+  await runSchedulerHooks("tick", counting);
+  assert.equal(counts.sweeps, 0, "no hook is registered behind a closed gate");
+  assert.equal(sendRuntimeReady(), false, "and the send service has nowhere to send from");
+
+  let stopped = 0;
+  const supervisor = {
+    start: async () => {},
+    async stop() { stopped += 1; },
+    withAdapter: async (accountId, fn) => fn(null),
+  };
+  const options = {
+    db: counting,
+    env: { CROW_MAIL: "1" },
+    noAuth: false,
+    credentials,
+    adapterFactory: () => createFakeMailAdapter(),
+    createSupervisor: () => supervisor,
+    localInstance: LOCAL,
+    log: () => {},
+  };
+  const handle = await startMailSync(options);
+  assert.equal(handle.started, true);
+  assert.equal(sendRuntimeReady(), true, "the send service's defaults are this running supervisor's");
+
+  await runSchedulerHooks("tick", counting);
+  assert.equal(counts.sweeps, 1, "one tick, one sweep");
+
+  // A second start adopts the running handle, so the tick still runs exactly one sweep.
+  assert.equal(await startMailSync(options), handle);
+  await runSchedulerHooks("tick", counting);
+  assert.equal(counts.sweeps, 2, "the hook is registered once, whatever the number of starts");
+
+  assert.equal(await stopMailSync(), true);
+  assert.equal(stopped, 1, "the supervisor was stopped");
+  assert.equal(sendRuntimeReady(), false, "and cleared from the send service");
+  await runSchedulerHooks("tick", counting);
+  assert.equal(counts.sweeps, 2, "stopMailSync unregisters the hook with the supervisor");
+});
 
 test("post-listen starts mail sync after listening and the shutdown path stops it", () => {
   const postListen = readFileSync(join(REPO, "servers/gateway/boot/post-listen.js"), "utf8");

@@ -150,12 +150,23 @@ function defaultWithAdapter(accountId, fn) {
 }
 
 /**
- * Whether this process has an adapter to borrow: one the caller injected, or the boot supervisor. A
- * gateway whose supervisor is stopped (or not started yet) has nowhere to send from, so a tap is
- * refused rather than claimed and recorded as an unknown outcome.
+ * Whether this process has somewhere to send from: an adapter the caller injected, or the boot
+ * supervisor. A gateway whose supervisor is stopped (or not started yet) has nowhere to send from, so
+ * a tap is refused rather than claimed and recorded as an unknown outcome. Both taps ask this one
+ * question — `requestSend`, `deliver` and `scheduleDraft` — so a send and a schedule refuse a Crow with
+ * no connection in the same words (`not_sendable`, reason `supervisor_missing`).
+ *
+ * @param {{hasAdapter?: boolean}} [deps] a resolved `deps` (see `resolveDeps`)
+ * @returns {boolean}
  */
+export function sendRuntimeReady(deps) {
+  const given = deps == null ? {} : deps;
+  return given.hasAdapter === true || supervisor != null;
+}
+
+/** The refusal half of `sendRuntimeReady`: no injected adapter and no supervisor. */
 function adapterMissing(d) {
-  return d.hasAdapter !== true && supervisor == null;
+  return !sendRuntimeReady(d);
 }
 
 async function defaultRequestSync(accountId) {

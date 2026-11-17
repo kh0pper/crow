@@ -13,16 +13,17 @@ import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
+import { MailError } from "../servers/gateway/mail/errors.js";
 import { claimedElsewhereSentence } from "../servers/gateway/mail/claims.js";
 import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import { addRevision, createDraft, getDraft } from "../servers/gateway/mail/drafts/store.js";
 import {
-  GRACE_MS, SEND_FAIL_REASONS, _resetInFlightForTests, requestSend, deliver,
+  GRACE_MS, SEND_FAIL_REASONS, _resetInFlightForTests, deliver, requestSend, settle,
 } from "../servers/gateway/mail/send/send-service.js";
 import {
-  MISSED_TITLE, SCHEDULE_FAIL_REASONS, SCHEDULE_MAX_AHEAD_MS, SCHEDULE_MIN_LEAD_MS, _drainForTests,
-  _resetSweepForTests, cancelSchedule, localTimeToInstant, missedNoticeText, scheduleDraft,
-  schedulePresets, sweepMailSends,
+  MISSED_TITLE, SCHEDULE_MAX_AHEAD_MS, SCHEDULE_MIN_LEAD_MS, _drainForTests,
+  _resetSweepForTests, cancelSchedule, localTimeToInstant, missedNoticeText, parseRouteDueAt,
+  scheduleDraft, schedulePresets, sweepMailSends,
 } from "../servers/gateway/mail/send/schedule-service.js";
 import { registerMailSendHook } from "../servers/gateway/mail/send/hook.js";
 import { runSchedulerHooks, unregisterSchedulerHook } from "../servers/gateway/scheduler-hooks.js";
@@ -413,6 +414,50 @@ test("a dueAt whose offset does not match the instance zone is refused", async (
   assert.equal(row.dueAt, CHICAGO_0730);
 });
 
+test("a wall time a DST gap skips is refused bad_input at either offset", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  const now = Date.parse("2026-03-08T00:00:00Z");
+
+  // 02:30 does not exist on the spring-forward morning in Chicago: neither offset names an instant the
+  // zone shows at that wall clock, so both are refused rather than reinterpreted.
+  for (const dueAt of ["2026-03-08T02:30:00-06:00", "2026-03-08T02:30:00-05:00"]) {
+    const out = await scheduleDraft(db, deps, { draftId: draft.id, hash: draft.headHash, dueAt, now });
+    assert.equal(out.ok, false, dueAt);
+    assert.equal(out.code, "bad_input", dueAt);
+    const row = await getDraft(db, draft.id);
+    assert.equal(row.state, "draft", "nothing was frozen");
+    assert.equal(row.dueAt, null);
+  }
+
+  // The first minute of the skipped hour does exist at -05:00, so the refusal is the gap and not the day.
+  const firstMinute = await scheduleDraft(db, deps, {
+    draftId: draft.id, hash: draft.headHash, dueAt: "2026-03-08T03:00:00-05:00", now,
+  });
+  assert.equal(firstMinute.ok, true, JSON.stringify(firstMinute));
+  assert.equal(firstMinute.dueAt, Date.parse("2026-03-08T08:00:00Z"));
+  assert.deepEqual(wall(firstMinute.dueAt, CHICAGO), { date: "2026-03-08", time: "03:00", weekday: "Sun" });
+});
+
+test("the route parser takes zone-qualified text and refuses a number", () => {
+  assert.equal(parseRouteDueAt("2026-11-12T07:30:00-06:00", { zone: CHICAGO }), CHICAGO_0730);
+
+  // A numeric dueAt is the plan's internal form for trusted callers; a route body never supplies one.
+  const refused = [CHICAGO_0730, 0, null, undefined, true, {}, [], "", "   ", "2026-11-12T07:30:00"];
+  for (const value of refused) {
+    assert.throws(() => parseRouteDueAt(value, { zone: CHICAGO }), (err) => {
+      assert.ok(err instanceof MailError, String(value));
+      assert.equal(err.code, "BAD_INPUT", String(value));
+      return true;
+    }, String(value));
+  }
+  // The offset check is the tap's own: an offset the zone does not have at that instant is refused.
+  assert.throws(() => parseRouteDueAt("2026-11-12T07:30:00-05:00", { zone: CHICAGO }), MailError);
+});
+
 test("scheduling without a keychain key is refused not_sendable, and a doomed schedule is refused up front", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
@@ -439,6 +484,31 @@ test("scheduling without a keychain key is refused not_sendable, and a doomed sc
   assert.equal(claimed.sentence, claimedElsewhereSentence("Second Crow"));
   assert.equal((await getDraft(db, draft.id)).state, "draft");
   assert.equal(fake.sent.length, 0);
+});
+
+test("scheduling with no running mail connection is refused not_sendable/supervisor_missing, like a send", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { withAdapter, ...noConnection } = makeDeps(fake).deps;
+  assert.equal(typeof withAdapter, "function");
+
+  const draft = await makeDraft(db, account);
+  const out = await scheduleDraft(db, noConnection, {
+    draftId: draft.id, hash: draft.headHash, dueAt: T0 + 5 * MIN, now: T0,
+  });
+  assert.deepEqual(out, { ok: false, code: "not_sendable", reason: "supervisor_missing" });
+
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "draft", "nothing is frozen for a Crow that cannot send it");
+  assert.equal(row.tapSeal, null);
+  assert.equal(row.dueAt, null);
+  assert.equal(fake.sent.length, 0);
+
+  // The send tap answers in the same words, so one card shows one reason for one problem.
+  const sent = await requestSend(db, noConnection, { draftId: draft.id, hash: draft.headHash, now: T0 });
+  assert.deepEqual(sent, { ok: false, code: "not_sendable", reason: "supervisor_missing" });
+  assert.equal((await getDraft(db, draft.id)).state, "draft");
 });
 
 test("cancelSchedule returns the draft to draft and clears the seal", async () => {
@@ -660,6 +730,108 @@ test("editing a scheduled draft cancels the schedule", async () => {
   assert.equal(fake.sent.length, 0);
 });
 
+test("a zone change after scheduling does not move the stored instant", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  // No injected zone: the tap and the tick read `instanceZone(db)`, as the gateway does.
+  const { deps } = makeDeps(fake, { zone: undefined });
+  await setSetting(db, "instance_timezone", CHICAGO);
+
+  const draft = await makeDraft(db, account);
+  await schedule(db, deps, draft, "2026-11-12T07:30:00-06:00", CHICAGO_0730 - DAY);
+  assert.equal((await getDraft(db, draft.id)).dueAt, CHICAGO_0730);
+
+  // The instance is moved to another zone after the schedule was taken.
+  await setSetting(db, "instance_timezone", AUCKLAND);
+  assert.notDeepEqual(wall(CHICAGO_0730, AUCKLAND), wall(CHICAGO_0730, CHICAGO));
+
+  const tick = await sweepMailSends(db, deps, { now: CHICAGO_0730 });
+  assert.equal(tick.delivered, 1);
+  await _drainForTests();
+
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.dueAt, CHICAGO_0730, "the instant is what was stored, whatever the zone now says");
+  assert.equal(row.state, "sent");
+  assert.equal(fake.sent.length, 1);
+});
+
+/* ------------------------------------------------------------------- the hold */
+
+test("a restart during the ten-second hold delivers on the next tick", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+
+  const tapped = await requestSend(db, deps, { draftId: draft.id, hash: draft.headHash, now: T0 });
+  assert.equal(tapped.ok, true);
+  assert.equal((await getDraft(db, draft.id)).state, "holding");
+
+  // A new process: the hold's own timer never fires, the row is still there when it falls due.
+  _resetInFlightForTests();
+  _resetSweepForTests();
+  const restarted = makeDeps(fake);
+  const tick = await sweepMailSends(db, restarted.deps, { now: tapped.holdUntil });
+  assert.equal(tick.delivered, 1);
+  await _drainForTests();
+
+  assert.equal((await getDraft(db, draft.id)).state, "sent");
+  assert.equal(fake.sent.length, 1);
+});
+
+test("a hold older than the grace window becomes missed with one bell, and never sends", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps, notifications } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  const tapped = await requestSend(db, deps, { draftId: draft.id, hash: draft.headHash, now: T0 });
+  assert.equal(tapped.ok, true);
+
+  const tick = await sweepMailSends(db, deps, { now: tapped.holdUntil + GRACE_MS + MIN });
+  assert.equal(tick.missed, 1);
+  assert.equal(tick.delivered, 0);
+  await _drainForTests();
+
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "missed");
+  assert.equal(row.failReason, SEND_FAIL_REASONS.missed);
+  assert.equal(row.tapSeal, null);
+  assert.equal(fake.sent.length, 0, "a hold that ran out never goes out by itself");
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].source, "mail");
+
+  const again = await sweepMailSends(db, deps, { now: tapped.holdUntil + GRACE_MS + 2 * MIN });
+  assert.equal(again.missed, 0);
+  assert.equal(notifications.length, 1, "one bell per missed send");
+  assert.equal(fake.sent.length, 0);
+});
+
+test("an auth_failed account on a held row fails the send with no adapter call", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps, notifications } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  const tapped = await requestSend(db, deps, { draftId: draft.id, hash: draft.headHash, now: T0 });
+  assert.equal(tapped.ok, true);
+  await updateAccount(db, account.id, { status: "auth_failed" });
+
+  const tick = await sweepMailSends(db, deps, { now: tapped.holdUntil });
+  assert.equal(tick.delivered, 0);
+  assert.equal(tick.failed.length, 1);
+  assert.equal(tick.failed[0].reason, "auth_failed");
+
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "failed");
+  assert.equal(row.failReason, SEND_FAIL_REASONS.auth_failed);
+  assert.equal(row.tapSeal, null);
+  assert.equal(fake.sent.length, 0);
+  assert.equal(notifications.length, 1);
+});
+
 /* -------------------------------------------------- the account the schedule outlived */
 
 test("account removed after scheduling: row fails with the fixed sentence", async () => {
@@ -676,7 +848,7 @@ test("account removed after scheduling: row fails with the fixed sentence", asyn
 
   const row = await getDraft(db, draft.id);
   assert.equal(row.state, "failed", "never silently dropped, never sent");
-  assert.equal(row.failReason, SCHEDULE_FAIL_REASONS.account_removed);
+  assert.equal(row.failReason, SEND_FAIL_REASONS.account_removed);
   assert.equal(typeof row.failReason, "string");
   assert.ok(row.failReason.length > 0 && row.failReason.length <= 200);
   assert.equal(fake.sent.length, 0, "no adapter call for a mailbox that is gone");
@@ -762,33 +934,64 @@ test("the notification text contains no address, subject or body", async () => {
 
 /* --------------------------------------------------- the interrupted send and the reconcile */
 
-test("an interrupted sending row outside the in-flight map becomes unknown and resends nothing", async () => {
+test("a stale claim is left alone while this process still runs it, and settles by its token once swept", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
   const fake = makeFake();
-  const { deps } = makeDeps(fake);
+  const map = new Map();
+  const { deps } = makeDeps(fake, { inFlight: map });
   const draft = await makeDraft(db, account);
   const dueAt = T0 + 5 * MIN;
   await schedule(db, deps, draft, dueAt);
 
-  // The claim is written, then the process dies before the adapter call is recorded.
+  // The claim exactly as `deliver` writes it: a token, a claim time, an attempt, and the seal columns
+  // nulled. The process that wrote it then dies, which is what the in-flight map stops saying.
+  const attempt = dueAt - 30 * MIN;
   await db.execute({
-    sql: `UPDATE mail_drafts SET state = 'sending', claim_token = 'claim-1', claimed_at = ?, attempt_at = ?
+    sql: `UPDATE mail_drafts
+             SET state = 'sending', claim_token = 'claim-1', claimed_at = ?, attempt_at = ?,
+                 tap_seal = NULL, tap_id = NULL, tap_action = NULL, attach_digest = NULL
            WHERE id = ?`,
-    args: [dueAt - 30 * MIN, dueAt - 30 * MIN, draft.id],
+    args: [attempt, attempt, draft.id],
   });
 
-  const tick = await sweepMailSends(db, deps, { now: dueAt });
-  assert.equal(tick.unknown, 1);
-  const row = await getDraft(db, draft.id);
-  assert.equal(row.state, "unknown");
-  assert.equal(row.failReason, SEND_FAIL_REASONS.send_failed);
+  map.set(draft.id, { claimToken: "claim-1", at: attempt });
+  const running = await sweepMailSends(db, deps, { now: dueAt });
+  assert.equal(running.unknown, 0, "a row this process is sending is never stale");
+  assert.equal(running.delivered, 0);
+  assert.equal((await getDraft(db, draft.id)).state, "sending");
+
+  map.delete(draft.id);
+  const stale = await sweepMailSends(db, deps, { now: dueAt });
+  assert.equal(stale.unknown, 1);
+  const unknown = await getDraft(db, draft.id);
+  assert.equal(unknown.state, "unknown");
+  assert.equal(unknown.claimToken, "claim-1", "the token is kept, so a late success can still settle it");
+  assert.equal(unknown.failReason, SEND_FAIL_REASONS.send_failed);
+  assert.equal(unknown.tapSeal, null);
+  assert.equal(unknown.reconcileCount, 1, "the first Sent-folder check was already due, so this tick ran it");
+  assert.equal(unknown.nextReconcileAt, attempt + 5 * MIN, "and the next is five minutes after the attempt");
   assert.equal(fake.sent.length, 0, "the sweep never sends a row it did not claim");
+
+  // A later tick past next_reconcile_at reconciles again and still sends nothing.
+  const later = await sweepMailSends(db, deps, { now: dueAt + 20 * MIN });
+  assert.equal(later.delivered, 0);
+  assert.equal((await getDraft(db, draft.id)).reconcileCount, 2);
+  assert.equal(fake.sent.length, 0);
+
+  // The send that outlived the cutoff still settles its own row by the token it claimed with.
+  const now = dueAt + 25 * MIN;
+  assert.equal(await settle(db, draft.id, "claim-1", "sent", { now, sentAt: now }), true);
+  const settled = await getDraft(db, draft.id);
+  assert.equal(settled.state, "sent");
+  assert.equal(settled.sentAt, now);
+  assert.equal(settled.failReason, null);
+  assert.equal(fake.sent.length, 0);
 });
 
 /* --------------------------------------------------------------------- the hook */
 
-test("the mail-send hook registers under its id, ticks the sweep, and a throwing sweep is isolated by runSchedulerHooks and the next tick retries", async () => {
+test("a throwing sweep is caught inside the hook and logged as an event and a code, and the next tick retries", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
   const fake = makeFake();
@@ -803,7 +1006,7 @@ test("the mail-send hook registers under its id, ticks the sweep, and a throwing
       if (prop === "execute") {
         return (statement) => {
           const sql = typeof statement === "string" ? statement : (statement?.sql ?? "");
-          if (fail && sql.includes("mail_drafts")) return Promise.reject(new Error("hunter2 store"));
+          if (fail && sql.includes("mail_drafts")) return Promise.reject(new Error("hunter2 store pwd=a@example.com"));
           return target.execute(statement);
         };
       }
@@ -812,15 +1015,43 @@ test("the mail-send hook registers under its id, ticks the sweep, and a throwing
     },
   });
 
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (line) => { warnings.push(String(line)); };
   const hook = registerMailSendHook(flaky, { ...deps, now: () => dueAt });
-  // A hook that throws is logged inside runSchedulerHooks and never stops the scheduler.
-  await runSchedulerHooks("tick", flaky);
+  try {
+    // The hook answers the tick itself: the scheduler never sees a throw, and the text it carried never
+    // reaches the log.
+    await runSchedulerHooks("tick", flaky);
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.equal(warnings.length, 1, "one line for one failed sweep");
+  assert.equal(warnings[0], "[mail-schedule] sweep_failed unknown");
+  const logged = warnings.join("\n");
+  assert.equal(logged.includes("hunter2"), false, "an error's message never reaches the log");
+  assert.equal(logged.includes(ALEX), false);
+  assert.equal(logged.includes("[scheduler]"), false, "the scheduler was never handed the throw");
 
   fail = false;
   await runSchedulerHooks("tick", db);
   await _drainForTests();
   assert.equal(fake.sent.length, 1, "the next tick retries and delivers");
   assert.equal((await getDraft(db, draft.id)).state, "sent");
+
+  // A MailError's own code is what a thrown sweep is reported as.
+  const broken = registerMailSendHook(db, { ...deps, now: () => -1 });
+  warnings.length = 0;
+  const warn2 = console.warn;
+  console.warn = (line) => { warnings.push(String(line)); };
+  try {
+    await runSchedulerHooks("tick", db);
+  } finally {
+    console.warn = warn2;
+    broken.unregister();
+  }
+  assert.deepEqual(warnings, ["[mail-schedule] sweep_failed BAD_INPUT"]);
 
   hook.unregister();
   const before = fake.sent.length;
@@ -830,6 +1061,61 @@ test("the mail-send hook registers under its id, ticks the sweep, and a throwing
 
 /* ------------------------------------------------------------------ nothing else taps */
 
+/**
+ * One call's argument text, split at its own top-level commas: the scan starts just after the opening
+ * paren at `openIndex` and stops at the paren that closes it. Quoted strings and template literals are
+ * stepped over, so a comma or a paren inside one is not an argument boundary.
+ *
+ * @param {string} source
+ * @param {number} openIndex index of the `(`
+ * @returns {string[]} the argument texts, trimmed by the caller
+ */
+function callArguments(source, openIndex) {
+  const args = [];
+  let depth = 0;
+  let quote = null;
+  let start = openIndex + 1;
+  for (let i = openIndex + 1; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote != null) {
+      if (ch === "\\") i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "(" || ch === "[" || ch === "{") { depth += 1; continue; }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) { args.push(source.slice(start, i)); return args; }
+      depth -= 1;
+      continue;
+    }
+    if (ch === "," && depth === 0) { args.push(source.slice(start, i)); start = i + 1; }
+  }
+  return args;
+}
+
+/** A string literal, in either quote style. */
+const STRING_LITERAL = /^(?:"[^"\n]*"|'[^'\n]*')$/;
+
+/**
+ * Every `transition(...)` call in a source text, as its argument texts. A mention in prose
+ * (`transition()`) has no four arguments and is skipped: every real call names the row, the states it
+ * may take, the state it writes and what it writes.
+ */
+function transitionCalls(source) {
+  const calls = [];
+  for (const match of source.matchAll(/\btransition\s*\(/g)) {
+    const args = callArguments(source, match.index + match[0].length - 1).map((arg) => arg.trim());
+    if (args.length >= 4) calls.push(args);
+  }
+  return calls;
+}
+
+/** The calls whose target-state argument (`to`) is not a string literal, as the text it is instead. */
+function nonLiteralTargets(source) {
+  return transitionCalls(source).filter((args) => !STRING_LITERAL.test(args[3])).map((args) => args[3]);
+}
+
 test("no code path other than requestSend/scheduleDraft sets holding or scheduled", () => {
   const files = [
     ...jsFiles(join(REPO, "servers/gateway/mail")),
@@ -837,16 +1123,37 @@ test("no code path other than requestSend/scheduleDraft sets holding or schedule
   ];
   assert.ok(files.length > 10, "the mail tree was read");
   // The exported state list in the draft store names every state; it is not a write.
-  const STATE_LIST_LINE = /^\s*"draft", "holding", "scheduled",/;
+  const STATE_LIST_LINE = /^\s*["']draft["'], ["']holding["'], ["']scheduled["'],/;
+  // One entry per file that may hold either of the send service's two pinned spots, below.
+  const SEND_SERVICE = "servers/gateway/mail/send/send-service.js";
+  const storeFile = "servers/gateway/mail/drafts/store.js";
   for (const file of files) {
     const relative = file.slice(REPO.length + 1).split(sep).join("/");
+    if (relative === storeFile) continue;
     const source = readFileSync(file, "utf8");
-    assert.equal(/UPDATE\s+mail_drafts[\s\S]{0,500}?state\s*=\s*'(?:holding|scheduled)'/i.test(source), false,
-      `${relative} writes a tap state directly`);
+
+    // A literal tap state in an UPDATE on the draft table, in either quote style.
+    assert.equal(
+      /UPDATE\s+mail_drafts[\s\S]{0,500}?state\s*=\s*(['"])(?:holding|scheduled)\1/i.test(source),
+      false,
+      `${relative} writes a tap state directly`,
+    );
+
+    // A state written through a bind parameter could be any state, so only the draft store may do it.
+    const parameterised = (source.match(/state\s*=\s*\?/gi) ?? []).length;
+    assert.equal(parameterised, relative === SEND_SERVICE ? 1 : 0,
+      `${relative} binds the state it writes`);
+
+    // Every transition() call names the state it moves the row to as a string literal, so a target a
+    // caller chooses cannot be a tap state the store would then seal.
+    const targets = nonLiteralTargets(source);
+    assert.deepEqual(targets, relative === SEND_SERVICE ? ["to"] : [],
+      `${relative} passes a state name that is not a string literal`);
+
     let entrances = 0;
     for (const line of source.split("\n")) {
       if (STATE_LIST_LINE.test(line)) continue;
-      entrances += (line.match(/, "(?:holding|scheduled)",/g) ?? []).length;
+      entrances += (line.match(/, (["'])(?:holding|scheduled)\1,/g) ?? []).length;
     }
     if (relative.endsWith("mail/send/send-service.js") || relative.endsWith("mail/send/schedule-service.js")) {
       continue;
@@ -854,8 +1161,13 @@ test("no code path other than requestSend/scheduleDraft sets holding or schedule
     assert.equal(entrances, 0, `${relative} enters a tap state`);
   }
 
+  // The two pinned spots are the send service's own failure paths: `failPending` writes "failed" unless
+  // its caller names the one other word ("missed"), and `settle` refuses every target but sent/failed at
+  // the top of the function. They are named here so any new bound state or non-literal target fails.
+  assert.deepEqual(nonLiteralTargets(readFileSync(join(REPO, SEND_SERVICE), "utf8")), ["to"]);
+
   // The two owner taps, one each, and nothing else in the two services.
-  const send = readFileSync(join(REPO, "servers/gateway/mail/send/send-service.js"), "utf8");
+  const send = readFileSync(join(REPO, SEND_SERVICE), "utf8");
   assert.equal((send.match(/, "holding",/g) ?? []).length, 1);
   assert.equal((send.match(/, "scheduled",/g) ?? []).length, 0);
   assert.equal((SCHEDULE_SOURCE.match(/, "scheduled",/g) ?? []).length, 1);
