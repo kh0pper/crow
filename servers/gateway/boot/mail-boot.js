@@ -6,7 +6,9 @@
  * (the feature flag), a real dashboard gateway (`--no-auth` runs no owner's mail), and
  * `CROW_DISABLE_MAIL_SYNC !== "1"`. Behind a closed gate nothing is built at all — no adapter
  * factory, no credentials reader, no supervisor, no claim lookup — so an instance that never turned
- * mail on opens no connection and writes no row.
+ * mail on opens no connection and writes no row. The one thing that does not wait for all three is the
+ * account-removal guard below: it follows `mailEnabled()` alone, because a removal has to cancel an
+ * account's unsent mail on a box that has sync switched off too.
  *
  * When the gate is open this module:
  *
@@ -26,10 +28,11 @@
  *      running supervisor instead of building its own;
  *   6. publishes the same supervisor to the send service (`setMailSendSupervisor`) and, only when
  *      `mailEnabled()`, registers the `mail-send` scheduler hook that delivers held and scheduled
- *      sends and the account-removal guard (`onAccountDeleting`, which cancels an account's unsent
- *      mail before its rows go). `stop()` unregisters both, clears the supervisor and then closes what
- *      it opened, so no tick outlives the connection it would borrow and no removal runs against a
- *      stopped mail service.
+ *      sends. The account-removal guard (`onAccountDeleting`, which cancels an account's unsent mail
+ *      before its rows go) follows the flag alone and is registered ahead of the sync gate, so a box
+ *      that runs no supervisor still cancels a removed account's unsent mail. `stop()` unregisters
+ *      both, clears the supervisor and then closes what it opened, so no tick outlives the connection
+ *      it would borrow and no removal runs against a stopped mail service.
  *
  * `startMailSync` never throws: every failure is caught and reported through the log sink as an event
  * name and a MailError code, never as an error's text (a library's message can quote a server reply or
@@ -321,13 +324,18 @@ function stopAccountRemovalHook() {
   }
 }
 
-/** The gate is closed: a handle that says so and does nothing. */
+/**
+ * The gate is closed: a handle that says so and takes back the one thing a closed-gate start can have
+ * registered — the account-removal guard.
+ */
 function stoppedHandle(reason) {
   return {
     started: false,
     reason,
     supervisor: undefined,
-    async stop() {},
+    async stop() {
+      stopAccountRemovalHook();
+    },
   };
 }
 
@@ -393,6 +401,12 @@ async function beginStart(options) {
     }
   };
 
+  // The account-removal guard follows the feature flag alone, ahead of the sync gate: removing an
+  // account cancels its unsent mail on a box whose sync is switched off — or which runs no supervisor
+  // at all — as much as on one that syncs. With the flag off there are no draft tables to look at, so
+  // nothing registers.
+  if (mailEnabled(env)) startAccountRemovalHook();
+
   if (!shouldRunMailSync({ env, noAuth })) {
     const reason = gateReason({ env, noAuth });
     say({ event: "not_started", reason });
@@ -405,6 +419,8 @@ async function beginStart(options) {
 
   /** Undo what this start built: stop its supervisor and close a db client it opened itself. */
   async function unwind() {
+    // Before the supervisor goes: no removal may reach a service this start is abandoning.
+    stopAccountRemovalHook();
     if (supervisor != null && typeof supervisor.stop === "function") {
       try {
         await supervisor.stop();
@@ -506,9 +522,6 @@ async function beginStart(options) {
     // table. Its claim answer is the wrapper above, whose shape is `{claimed, instanceName}` — the
     // supervisor's own copy of it is the strict boolean underneath.
     if (mailEnabled(env)) {
-      // The account-removal guard rides the same gate as the tick: with mail off there are no drafts
-      // to cancel, and a removal must not go looking at tables a mail-free box never built.
-      startAccountRemovalHook();
       if (currentMailSendHook == null) {
         try {
           currentMailSendHook = registerMailSendHook(db, {

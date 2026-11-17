@@ -32,8 +32,10 @@
  * `DRAFT_RETENTION_MS` (ninety days) go with their revisions, voice notes and comments, at most once a
  * day behind one compare-and-set. A `failed`, `unknown` or `missed` draft is never pruned.
  *
- * Every sentence is fixed: a `fail_reason` is one of `SEND_FAIL_REASONS`' phrases and nothing else, a
- * log line carries an event name and a code, and the bell never carries mail content.
+ * Every sentence is fixed: a `fail_reason` holds one of `SEND_FAIL_REASONS`' phrases, or the short code
+ * `account_removed` on a row whose account went while its outcome was still unknown — the card maps that
+ * code to its own line and never prints it — a log line carries an event name and a code, and the bell
+ * never carries mail content.
  */
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
@@ -637,7 +639,9 @@ async function failDue(db, d, row, now, block) {
  *   (3) `sending` rows this process is not sending whose attempt is older than `STALE_SENDING_MS`:
  *       `unknown`, through the send service's `markStaleUnknown`, which is guarded by the claim token
  *       and points the first Sent-folder check a minute after the attempt;
- *   (4) `unknown` rows whose reconcile is due and whose account still exists: one Sent-folder check;
+ *   (4) `unknown` rows whose reconcile is due and whose account still exists: one Sent-folder check. A
+ *       row whose account is gone is settled in this step instead — the `account_removed` reason and no
+ *       further check due — because there is no Sent folder left to look in;
  *   (5) the daily prune of `sent` and `discarded` drafts older than `DRAFT_RETENTION_MS` (Task 13), at
  *       most once a day, behind its own compare-and-set.
  *
@@ -732,8 +736,17 @@ export async function sweepMailSends(db, deps, options = {}) {
     // no Sent folder to look in and no adapter to look with (Task 13).
     if (row.fail_reason === ACCOUNT_REMOVED_REASON) continue;
     const account = await getAccount(db, String(row.account_id));
-    // A removed account's row stays terminal: there is no Sent folder left to look in (Task 13).
-    if (!account) continue;
+    if (!account) {
+      // The guard's snapshot can miss a row (a send that goes `unknown` after it read the account's
+      // drafts). There is no Sent folder left to look in, so it is settled here, once: the reason and
+      // `next_reconcile_at` in one guarded UPDATE, so no later tick selects it again.
+      await db.execute({
+        sql: `UPDATE mail_drafts SET fail_reason = ?, next_reconcile_at = NULL, updated_at = ?
+               WHERE id = ? AND state = 'unknown'`,
+        args: [ACCOUNT_REMOVED_REASON, now, String(row.id)],
+      });
+      continue;
+    }
     const outcome = await reconcileUnknown(db, d, String(row.id), { now });
     if (outcome.outcome === "sent" || outcome.outcome === "unknown") counts.reconciled += 1;
   }
@@ -756,10 +769,12 @@ export async function sweepMailSends(db, deps, options = {}) {
  * records an outcome nobody could confirm, so it is kept until the person acts on it.
  *
  * The prune runs at most once a day, whatever the tick's interval is, and the guard is one
- * compare-and-set on `dashboard_settings.mail_drafts_prune_at`: `UPDATE … WHERE value < ?` (the cutoff
- * a day back) and the work happens only when that UPDATE changed exactly one row, so two ticks — or two
- * Crows on one file — cannot both prune for one day. The first run on a host with no such row inserts
- * it with a value old enough to win the next compare-and-set.
+ * compare-and-set on `dashboard_settings.mail_drafts_prune_at`: `UPDATE … WHERE value < ? OR value > ?`
+ * — older than the cutoff a day back, or stamped ahead of this clock by a clock that ran fast — and the
+ * work happens only when that UPDATE changed exactly one row, so two ticks, or two Crows on one file,
+ * cannot both prune for one day. The second arm is what keeps a future stamp from blocking every later
+ * prune until the clock catches up with it. The first run on a host with no such row inserts it with a
+ * value old enough to win the next compare-and-set.
  *
  * The whole step is one transaction: the guard, the candidate read, each guarded draft delete and its
  * children go together, so a crash leaves either the day's prune or nothing. A row that moved out of
@@ -782,8 +797,8 @@ export async function pruneMailDrafts(db, options = {}) {
       args: [PRUNE_SETTING_KEY, "0"],
     });
     const claimed = run({
-      sql: "UPDATE dashboard_settings SET value = ? WHERE key = ? AND value < ?",
-      args: [String(now), PRUNE_SETTING_KEY, String(now - PRUNE_INTERVAL_MS)],
+      sql: "UPDATE dashboard_settings SET value = ? WHERE key = ? AND (value < ? OR value > ?)",
+      args: [String(now), PRUNE_SETTING_KEY, String(now - PRUNE_INTERVAL_MS), String(now)],
     });
     // Lost the day's compare-and-set: another tick is pruning, or this one already did.
     if (claimed.rowsAffected !== 1) return { pruned: 0 };

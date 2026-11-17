@@ -28,7 +28,7 @@ const {
   pruneMailDrafts, readWorkingHours, schedulePresets, sweepMailSends,
 } = await import("../servers/gateway/mail/send/schedule-service.js");
 const {
-  ACCOUNT_REMOVED_BELL_BODY, MAIL_NOTIFICATION_TITLE, guardAccountRemoval,
+  ACCOUNT_REMOVED_BELL_BODY, MAIL_NOTIFICATION_TITLE, guardAccountRemoval, startMailSync, stopMailSync,
 } = await import("../servers/gateway/boot/mail-boot.js");
 const {
   MAIL_API_PREFIX, MAIL_CLOUD_DRAFTING_SETTING, MAIL_WORKING_HOURS_END_SETTING,
@@ -323,6 +323,28 @@ test("two sweeps on one day prune once, and a later day prunes again", async () 
   assert.equal(await getDraft(db, second.id), null);
 });
 
+test("the prune compare-and-set also wins when the stored day is ahead of the clock", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const old = await makeDraft(db, account);
+  await forceState(db, old.id, "discarded", { updated_at: NOW - 91 * DAY });
+
+  // A clock that ran fast once left its day stamped in the future. "Older than a day" alone would
+  // never come true for that stamp, so the prune would stop for good on this box.
+  await setSetting(db, PRUNE_SETTING_KEY, String(NOW + 5 * DAY));
+
+  const out = await pruneMailDrafts(db, { now: NOW });
+  assert.deepEqual(out, { pruned: 1 }, "the stamp ahead of the clock does not block the day's prune");
+  assert.equal(await getDraft(db, old.id), null);
+  assert.equal(await getSetting(db, PRUNE_SETTING_KEY), String(NOW), "the day is taken back to this clock");
+
+  // And once a day still holds afterwards: a second candidate the same day stays.
+  const again = await makeDraft(db, account);
+  await forceState(db, again.id, "discarded", { updated_at: NOW - 91 * DAY });
+  assert.deepEqual(await pruneMailDrafts(db, { now: NOW + 60_000 }), { pruned: 0 });
+  assert.ok(await getDraft(db, again.id), "one prune a day, whatever the tick interval is");
+});
+
 /* ------------------------------------------------------------ the account removal */
 
 test("removing an account discards its live drafts, deletes them and posts one bell", async () => {
@@ -490,6 +512,78 @@ test("the sweep skips an unknown row whose account is gone, and one whose reason
   assert.equal((await getDraft(db, orphan.id)).reconcileCount, 0);
   assert.equal((await getDraft(db, marked.id)).reconcileCount, 0, "the removal's own mark is terminal");
   assert.equal((await getDraft(db, due.id)).reconcileCount, 1);
+});
+
+test("the sweep settles an unknown row of a removed account once and never selects it again", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  // The guard's snapshot missed this row, so it still reads as due: the sweep is what settles it.
+  const missed = await makeDraft(db, account);
+  await forceState(db, missed.id, "unknown", {
+    fail_reason: "timeout", attempt_at: NOW - 5 * 60_000, next_reconcile_at: NOW - 1,
+  });
+  await db.execute({ sql: "DELETE FROM mail_accounts WHERE id = ?", args: [account.id] });
+
+  const syncs = [];
+  const deps = { requestSync: (id) => { syncs.push(id); } };
+  const first = await sweepMailSends(db, deps, { now: NOW });
+  assert.equal(first.reconciled, 0, "there is no Sent folder left to check");
+  assert.deepEqual(syncs, [], "and no sync is asked for");
+
+  const settled = await getDraft(db, missed.id);
+  assert.equal(settled.state, "unknown", "an outcome nobody confirmed is never called sent or not sent");
+  assert.equal(settled.failReason, ACCOUNT_REMOVED_REASON);
+  assert.equal(settled.nextReconcileAt, null, "no check will ever come due for it again");
+  assert.equal(settled.reconcileCount, 0);
+  assert.equal(settled.updatedAt, NOW, "the reason was written by this tick");
+
+  // The next tick does not select it: neither the reason nor the stamp moves again.
+  const second = await sweepMailSends(db, deps, { now: NOW + 60_000 });
+  assert.equal(second.reconciled, 0);
+  const after = await getDraft(db, missed.id);
+  assert.equal(after.failReason, ACCOUNT_REMOVED_REASON);
+  assert.equal(after.nextReconcileAt, null);
+  assert.equal(after.updatedAt, NOW, "settled once, not once a tick");
+  assert.equal(after.reconcileCount, 0);
+});
+
+test("boot registers the account-removal guard with mail on even when sync is off, and stop takes it back", async () => {
+  const db = await freshDb();
+
+  // Sync switched off for this process: the gate builds no supervisor, and the guard registers anyway.
+  const handle = await startMailSync({
+    db, env: { CROW_MAIL: "1", CROW_DISABLE_MAIL_SYNC: "1" }, noAuth: false, log: () => {},
+  });
+  assert.equal(handle.started, false);
+  assert.equal(handle.reason, "sync_disabled");
+
+  const cancelled = await makeAccount(db, { address: ALEX, label: "Alex" });
+  const cancelledDraft = await makeDraft(db, cancelled);
+  await deleteAccount(db, cancelled.id);
+  assert.equal(await getAccount(db, cancelled.id), null);
+  assert.equal(await getDraft(db, cancelledDraft.id), null, "the removal guard cancelled the unsent mail");
+
+  // stop() takes the guard back with it: a later removal cancels nothing.
+  await handle.stop();
+  const kept = await makeAccount(db, { address: SAM, label: "Sam" });
+  const keptDraft = await makeDraft(db, kept);
+  await deleteAccount(db, kept.id);
+  assert.equal(await getAccount(db, kept.id), null);
+  assert.ok(await getDraft(db, keptDraft.id), "with the boot stopped, the draft is left as it was");
+
+  // Flag unset: nothing registers at all.
+  const off = await startMailSync({
+    db, env: { CROW_DISABLE_MAIL_SYNC: "1" }, noAuth: false, log: () => {},
+  });
+  assert.equal(off.started, false);
+  assert.equal(off.reason, "disabled");
+  const untouched = await makeAccount(db, { address: SAM, label: "Sam" });
+  const untouchedDraft = await makeDraft(db, untouched);
+  await deleteAccount(db, untouched.id);
+  assert.ok(await getDraft(db, untouchedDraft.id), "the flag is off, so no guard is registered");
+
+  await off.stop();
+  await stopMailSync();
 });
 
 /* ------------------------------------------------------------------ the settings routes */
