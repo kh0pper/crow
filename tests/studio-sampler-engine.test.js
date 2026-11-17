@@ -2342,3 +2342,489 @@ test("the position post carries a frame", async () => {
     assert.equal(typeof position.sixteenth, "number", "the report still carries the position it used to");
   }
 });
+
+// --- playback modes, loops and clip ownership -------------------------------
+
+/** One voice at velocity 127 playing a constant 0.5 sample. */
+const ONE_VOICE = 0.5 * CENTRE;
+
+/**
+ * One song of one sampler track: its pads, its steps and its clips, over one
+ * sample of `frames` frames. A test that plays a pad by hand gives it no clips.
+ * @param {{pads: object[], steps?: object[], clips?: object[], frames?: number}} options
+ * @returns {object}
+ */
+function kitSong({ pads, steps = [], clips = [], frames = 48000 }) {
+  return samplerSong({
+    tracks: [track("track-1")],
+    clips,
+    pads,
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, frames) },
+    steps,
+  });
+}
+
+/**
+ * One sampler song of two scenes, each with a pattern clip of its own on the
+ * track: a scene launch is what turns the track over from one to the other, and
+ * neither clip has a step unless the test gives `clip-1` one.
+ * @param {object[]} [steps] the steps of the first clip, `clip-1`
+ * @returns {object}
+ */
+function twoSceneSong(steps = []) {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" })],
+    frames: 4800,
+    clips: [patternClip("clip-1", "track-1"), patternClip("clip-2", "track-1", { scene_id: "scene-2" })],
+    steps,
+  });
+  song.scenes = [
+    { id: "scene-1", name: "A" },
+    { id: "scene-2", name: "B" },
+  ];
+  return song;
+}
+
+/**
+ * Press or let go of one pad between blocks: it takes effect on the next block's
+ * first frame, exactly as the panel's live message does.
+ * @param {object} engine a processor from `createProcessor`
+ * @param {number} index
+ * @param {boolean} [on]
+ * @returns {void}
+ */
+function pressPad(engine, index, on = true) {
+  engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index, v: on ? 127 : 0, on });
+}
+
+test("M1 gate: plays while it is held and the release runs the envelope's release", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "gate", release_ms: 5 })] });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  const quiet = await engine.process(128, 512);
+  assert.equal(peakOf(quiet.left), 0, "a gate pad is silent until it is pressed");
+
+  pressPad(engine, 0);
+  const held = await engine.process(128, 512);
+  for (const at of [0, 1, 200, 511]) assertLevel(held.left[at], ONE_VOICE, `frame ${at} is inside the gate`);
+
+  // 5 ms of release is 240 frames: the level falls one frame at a time, and the
+  // voice is over when it reaches 0.
+  pressPad(engine, 0, false);
+  const released = await engine.process(128, 512);
+  for (const at of [0, 60, 120, 239]) {
+    assertLevel(released.left[at], (ONE_VOICE * (240 - at)) / 240, `frame ${at} is that far into the release`, 1e-7);
+  }
+  // The last step of a linear release lands a rounding error short of 0, so the
+  // frame it lands on is silence to the last bit and the ones after it are 0.
+  assert.ok(Math.abs(released.left[240]) < 1e-12, `frame 240 is the end of the release, got ${released.left[240]}`);
+  for (const at of [242, 300, 511]) {
+    assert.equal(released.left[at], 0, `frame ${at} is past the release and has to be silent`);
+  }
+});
+
+test("M2 normal without loop: a second press fades the first voice and starts a new one, and a step on a normal pad restarts the same way", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "normal" })] });
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+  const engine = await createProcessor(song, samples);
+
+  pressPad(engine, 0);
+  const first = await engine.process(128, 512);
+  for (const at of [0, 100, 511]) assertLevel(first.left[at], ONE_VOICE, `frame ${at} is the pad's one voice`);
+
+  // The second press starts a new voice and fades the earlier one over the
+  // crossfade length: on its own frame both still sound, 64 frames later only
+  // the new one does.
+  pressPad(engine, 0);
+  const second = await engine.process(128, 128);
+  assertLevel(second.left[0], 2 * ONE_VOICE, "the press's own frame still holds both voices");
+  assertLevel(second.left[63], ONE_VOICE * (1 + 1 / 64), "the earlier voice is on its way out at frame 63", 1e-7);
+  for (const at of [64, 65, 127]) {
+    assertLevel(second.left[at], ONE_VOICE, `frame ${512 + at} is the new voice alone`);
+  }
+
+  // A step on a normal pad restarts the very same way: two 16ths, one pad.
+  const stepped = await createProcessor(
+    kitSong({
+      pads: [pad("track-1", 0, { mode: "normal" })],
+      clips: [patternClip("clip-1", "track-1")],
+      steps: [step("clip-1", 0, 0, { v: 127 }), step("clip-1", 1, 0, { v: 127 })],
+    }),
+    samples,
+  );
+  const rendered = await stepped.process(128, FRAMES_PER_SIXTEENTH + 128);
+  assertLevel(
+    rendered.left[FRAMES_PER_SIXTEENTH - 1],
+    ONE_VOICE,
+    "the first step's voice sounds alone until the second step",
+  );
+  assertLevel(
+    rendered.left[FRAMES_PER_SIXTEENTH],
+    2 * ONE_VOICE,
+    "the second step's own frame still holds both voices",
+  );
+  assertLevel(
+    rendered.left[FRAMES_PER_SIXTEENTH + 64],
+    ONE_VOICE,
+    "and the first one has faded out 64 frames later",
+  );
+});
+
+test("M3 one-shot: a second press overlaps and the first keeps playing", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0)] });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  pressPad(engine, 0);
+  await engine.process(128, 512);
+  pressPad(engine, 0);
+  const both = await engine.process(128, 512);
+  for (const at of [0, 1, 63, 64, 100, 511]) {
+    assertLevel(both.left[at], 2 * ONE_VOICE, `frame ${512 + at} holds both one-shot voices`);
+  }
+});
+
+test("M4 gate+loop: loops while held and ends at release; a step's gate_frames ends it", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }];
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "gate", loop: "loop" })], frames: 4800 });
+  const engine = await createProcessor(song, samples);
+
+  pressPad(engine, 0);
+  const held = await engine.process(128, 20000);
+  for (const at of [0, 4799, 4800, 9600, 19999]) {
+    assertLevel(held.left[at], ONE_VOICE, `frame ${at} is the loop, past the sample's own end`);
+  }
+
+  pressPad(engine, 0, false);
+  const released = await engine.process(128, 1000);
+  assert.equal(peakOf(released.left), 0, "letting go ends the loop instead of toggling it");
+
+  // A step on the same pad loops for the step's own gate, then lets go.
+  const stepped = await createProcessor(
+    kitSong({
+      pads: [pad("track-1", 0, { mode: "gate", loop: "loop" })],
+      frames: 4800,
+      clips: [patternClip("clip-1", "track-1")],
+      steps: [step("clip-1", 0, 0, { v: 127 })],
+    }),
+    samples,
+  );
+  const gated = await stepped.process(128, 8000);
+  for (const at of [0, 4800, 5999]) {
+    assertLevel(gated.left[at], ONE_VOICE, `frame ${at} is inside the step's gate`);
+  }
+  for (const at of [6000, 6001, 7999]) {
+    assert.equal(gated.left[at], 0, `frame ${at} is past the step's gate and has to be silent`);
+  }
+});
+
+test("M5 one-shot+loop: a live press starts it, the next press releases it, no overlap", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { loop: "loop" })], frames: 4800 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+
+  pressPad(engine, 0);
+  const running = await engine.process(128, 12000);
+  for (const at of [0, 4799, 4800, 9000, 11999]) {
+    assertLevel(running.left[at], ONE_VOICE, `frame ${at} is one looping voice, past the sample's end`);
+  }
+
+  pressPad(engine, 0);
+  const stopped = await engine.process(128, 2000);
+  assert.equal(peakOf(stopped.left), 0, "the next press ends the loop and starts nothing");
+});
+
+test("M6 normal+loop: a press starts the loop, the next press stops it, and it does not restart on a press", async () => {
+  // A ramp makes a restart visible: it would put the read back on the sample's
+  // own first frame, which is a level a constant could not tell apart.
+  const frames = 4800;
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "normal", loop: "loop" })], frames });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [ramp(frames)] }]);
+
+  pressPad(engine, 0);
+  const running = await engine.process(128, 9600);
+  assertLevel(running.left[0], (1 / 100000) * CENTRE, "frame 0 reads the ramp's first sample");
+  assertLevel(running.left[4799], (4800 / 100000) * CENTRE, "the range's last sample, 4800 frames later");
+  assertLevel(running.left[4800], (1 / 100000) * CENTRE, "and the loop wrapped back to the start on its own");
+  assertLevel(running.left[5000], (201 / 100000) * CENTRE, "carrying on from there");
+
+  pressPad(engine, 0);
+  const stopped = await engine.process(128, 2000);
+  assert.equal(peakOf(stopped.left), 0, "the second press stops the loop instead of restarting it");
+});
+
+test("M7 a step on a looping pad starts it once and the next steps do not restart or stop it", async () => {
+  const frames = 4800;
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" })],
+    frames,
+    clips: [patternClip("clip-1", "track-1")],
+    steps: [step("clip-1", 0, 0, { v: 127 }), step("clip-1", 4, 0, { v: 127 })],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [ramp(frames)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  const out = await engine.process(128, 6200);
+  assertLevel(out.left[0], (1 / 100000) * CENTRE, "the first step starts the loop");
+  // 6000 frames later the read is 1200 frames into the loop, not back at its
+  // start: the second step neither restarted it nor stopped it.
+  assertLevel(out.left[FRAMES_PER_SIXTEENTH], (1201 / 100000) * CENTRE, "the next step leaves it running");
+  assert.equal(
+    allPadEvents(engine.messages).filter((event) => event.kind === "hit").length,
+    1,
+    "only the first step started a voice",
+  );
+});
+
+test("M7 a step-started loop stops when its clip stops, when a scene launch replaces the clip on its track, and on Stop, and a relaunch of the same clip leaves it playing", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }];
+  const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4;
+  const stepOf = [step("clip-1", 0, 0, { v: 127 })];
+
+  /** One song whose step has started its loop, after one bar of it. */
+  const afterOneBar = async () => {
+    const engine = await createProcessor(twoSceneSong(stepOf), samples);
+    const first = await engine.process(128, FRAMES_PER_BAR);
+    assertLevel(
+      first.left[FRAMES_PER_BAR - 1],
+      ONE_VOICE,
+      "the step has to have started a loop that outlives its own sample",
+    );
+    return engine;
+  };
+
+  // A relaunch of the very clip it plays is no change at all.
+  const same = await afterOneBar();
+  same.post({ type: "launchScene", id: "scene-1" });
+  const playingOn = await same.process(128, 2000);
+  assert.deepEqual(same.errors, [], "the processor must render without a fault");
+  assertLevel(playingOn.left[0], ONE_VOICE, "a relaunch of the same clip leaves the loop playing");
+  assertLevel(playingOn.left[1999], ONE_VOICE, "and it keeps looping");
+
+  // A scene launch that replaces the clip on its track ends it at that bar.
+  const replaced = await afterOneBar();
+  replaced.post({ type: "launchScene", id: "scene-2" });
+  const afterReplace = await replaced.process(128, 2000);
+  assert.deepEqual(replaced.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(afterReplace.left), 0, "the loop a replaced clip started ends at the boundary");
+
+  // So does the clip stopping.
+  const stoppedClip = await afterOneBar();
+  stoppedClip.post({ type: "stopTrack", id: "track-1" });
+  const afterStopTrack = await stoppedClip.process(128, 2000);
+  assert.deepEqual(stoppedClip.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(afterStopTrack.left), 0, "the loop ends with the clip that started it");
+
+  // And Stop, which releases the live state outright.
+  const stopped = await afterOneBar();
+  stopped.post({ type: "stop" });
+  const afterStop = await stopped.process(128, 2000);
+  assert.equal(peakOf(afterStop.left), 0, "Stop ends the loop");
+});
+
+test("M7 a live-pressed loop survives a scene launch", async () => {
+  const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4;
+  const engine = await createProcessor(twoSceneSong(), [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+
+  pressPad(engine, 0);
+  const running = await engine.process(128, FRAMES_PER_BAR);
+  assertLevel(running.left[FRAMES_PER_BAR - 1], ONE_VOICE, "the live press started a loop");
+
+  // The launch replaces the track's clip: a loop the operator started by hand
+  // belongs to no clip and is not the launch's to end.
+  engine.post({ type: "launchScene", id: "scene-2" });
+  const after = await engine.process(128, 2000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(after.left[0], ONE_VOICE, "a scene launch leaves a live-pressed loop alone");
+  assertLevel(after.left[1999], ONE_VOICE, "and it keeps looping");
+});
+
+test("M8 reverse+loop runs backwards and wraps at the range start", async () => {
+  const frames = 4800;
+  const song = kitSong({ pads: [pad("track-1", 0, { loop: "loop", reverse: true })], frames });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [ramp(frames)] }]);
+
+  pressPad(engine, 0);
+  const out = await engine.process(128, 10000);
+  assertLevel(out.left[0], (4800 / 100000) * CENTRE, "frame 0 reads the range's last sample");
+  assertLevel(out.left[100], (4700 / 100000) * CENTRE, "100 frames in, it has read 100 frames backwards");
+  assertLevel(out.left[4799], (1 / 100000) * CENTRE, "the range's first sample is the last one it reads");
+  assertLevel(out.left[4800], (4800 / 100000) * CENTRE, "and it wraps round to the range's end");
+  assertLevel(out.left[9999], (4401 / 100000) * CENTRE, "then carries on backwards from there");
+});
+
+test("M9 reverse+pingpong starts backwards and reflects at each end", async () => {
+  const frames = 4800;
+  const song = kitSong({ pads: [pad("track-1", 0, { loop: "pingpong", reverse: true })], frames });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [ramp(frames)] }]);
+
+  pressPad(engine, 0);
+  const out = await engine.process(128, 10000);
+  assertLevel(out.left[0], (4800 / 100000) * CENTRE, "frame 0 reads the range's last sample");
+  assertLevel(out.left[4799], (1 / 100000) * CENTRE, "and it reaches the range's first sample");
+  assertLevel(out.left[4800], (2 / 100000) * CENTRE, "the reflection reads the frame next to it");
+  assertLevel(out.left[9000], (4202 / 100000) * CENTRE, "coming back up the range");
+  assertLevel(out.left[9598], (4800 / 100000) * CENTRE, "and it reaches the range's end again");
+  assertLevel(out.left[9599], (4799 / 100000) * CENTRE, "reflecting there too");
+});
+
+test("M16 Stop and resetLive release every loop", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1, { loop: "pingpong" })],
+    frames: 4800,
+  });
+  const samples = [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }];
+  const engine = await createProcessor(song, samples);
+
+  pressPad(engine, 0);
+  pressPad(engine, 1);
+  const running = await engine.process(128, 9000);
+  assertLevel(running.left[8999], 2 * ONE_VOICE, "both loops sound, past their samples' ends");
+
+  engine.post({ type: "stop" });
+  const stopped = await engine.process(128, 1000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(stopped.left), 0, "Stop releases every loop");
+
+  pressPad(engine, 0);
+  pressPad(engine, 1);
+  const again = await engine.process(128, 9000);
+  assertLevel(again.left[8999], 2 * ONE_VOICE, "a press starts them again");
+
+  engine.post({ type: "reset_live" });
+  const reset = await engine.process(128, 1000);
+  assert.equal(peakOf(reset.left), 0, "resetLive releases every loop too");
+});
+
+test("resetLive releases the pads' loops through the engine client", async () => {
+  const frames = 4800;
+  const song = kitSong({ pads: [pad("track-1", 0, { loop: "loop" })], frames });
+  const samples = [constant(frames, 0.5)];
+
+  /**
+   * One render of that song: a live press starts its loop, and `reset` says
+   * whether the client releases it before the render starts.
+   * @param {boolean} reset
+   * @returns {Promise<Float32Array>} the render's left channel
+   */
+  const render = async (reset) => {
+    const context = new OfflineAudioContext({
+      numberOfChannels: 2,
+      length: Math.round(0.3 * SAMPLE_RATE),
+      sampleRate: SAMPLE_RATE,
+    });
+    let engine = null;
+    let rendered = false;
+    try {
+      engine = await studioEngine.create(context, { assetBytes: ASSETS });
+      await engine.loadSample(SAMPLE_ID, samples.map((channel) => Float32Array.from(channel)), SAMPLE_RATE);
+      engine.setSong(song);
+      engine.play();
+      engine.node.connect(context.destination);
+      // The track's slot is built by the song; the press waits for it.
+      await engine.flush();
+      engine.livePad("track-1", BANK, 0, 127);
+      await engine.flush();
+      if (reset) engine.resetLive();
+      await engine.flush();
+      const buffer = await context.startRendering();
+      rendered = true;
+      const left = new Float32Array(buffer.length);
+      buffer.copyFromChannel(left, 0);
+      return left;
+    } finally {
+      if (engine) engine.dispose();
+      if (!rendered) await releaseWorklet(context);
+    }
+  };
+
+  // The loop outlives the sample's own 4800 frames when the client leaves it
+  // alone, and is gone from the render's first frame when it does not.
+  const kept = await render(false);
+  assertLevel(kept[frames + 1000], ONE_VOICE, "the press started a loop that plays past the sample's end");
+  const released = await render(true);
+  assert.equal(peakOf(released), 0, "resetLive releases it");
+});
+
+test("M16 an ordinary setSong from an unrelated edit changes nothing: a running loop and its lights continue", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1)],
+    frames: 4800,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressPad(engine, 0);
+  const running = await engine.process(128, 9000);
+  assertLevel(running.left[8999], ONE_VOICE, "the live press started a loop");
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_LOOP]],
+    "and its light reads loop",
+  );
+
+  // An edit that touches ANOTHER pad is no business of the loop's: it plays on
+  // and its light never blinks.
+  const edited = JSON.parse(JSON.stringify(song));
+  edited.pads[padKeyOf(pad("track-1", 1))].gain_db = -6;
+  engine.post({ type: "song", snapshot: edited });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 2000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(after.left[1999], ONE_VOICE, "the loop plays on through an unrelated edit");
+  assert.equal(
+    stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF).length,
+    0,
+    "and its light never went off",
+  );
+});
+
+test("M16 setSong that removes the pad's sample ends only that pad's voices", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1, { gain_db: -6 })],
+    frames: 48000,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  const quiet = ONE_VOICE * Math.pow(10, -6 / 20);
+  pressPad(engine, 0);
+  pressPad(engine, 1);
+  const running = await engine.process(128, 512);
+  assertLevel(running.left[511], ONE_VOICE + quiet, "the loop and the one-shot both sound");
+
+  // The pad goes, and the sample only it played with it. The other pad of the
+  // bank keeps its own voice: a song change only ends what the new song no
+  // longer has.
+  const without = JSON.parse(JSON.stringify(song));
+  delete without.pads[padKeyOf(pad("track-1", 0))];
+  delete without.samples[SAMPLE_ID];
+  engine.post({ type: "song", snapshot: without });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 1000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(after.left[999], quiet, "only the pad that is still in the song sounds");
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF)),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
+    "and only the gone pad's light goes off",
+  );
+});
+
+test("M23 a looping voice with sustain 0 ends when the envelope reaches 0 and emits one off", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { loop: "loop", decay_ms: 10, sustain: 0 })] });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressPad(engine, 0);
+  const out = await engine.process(128, 1024);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // 10 ms of decay is 480 frames: the voice sounds while the decay runs and is
+  // gone once the envelope reaches 0, instead of looping on at level 0.
+  assert.ok(peakBetween(out.left, 0, 470) > 0.01, "the voice sounds while its decay runs");
+  assert.equal(peakOf(out.left.subarray(490)), 0, "and it is gone once the envelope reaches 0");
+
+  const offs = stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF);
+  assert.equal(offs.length, 1, `the looping voice's light goes off exactly once, got ${offs.length}`);
+  assert.deepEqual(statePairs(offs), [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]]);
+});

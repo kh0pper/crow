@@ -195,7 +195,9 @@
  *   itself adds, for the page to add to the round trip it shows.
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
- *   command or a history step, and never quantized.
+ *   command or a history step, and never quantized. `resetLive()` releases the
+ *   pads' live state (every loop now), and the page sends it when a DIFFERENT
+ *   song opens — never on an ordinary song update, which runs on every edit.
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
  *   own output (`track_id`) on, per block, as `{type:"tap_block", target, frame,
  *   channels}`: `frame` is the context frame the block's first sample sits on,
@@ -1031,6 +1033,7 @@
    *                    stopAll: function(): void,
    *                    play: function(): void,
    *                    stop: function(): void,
+   *                    resetLive: function(): void,
    *                    setMode: function(string): void,
    *                    seek: function(number): void,
    *                    setMetronome: function(boolean): void,
@@ -2136,6 +2139,18 @@
       /** @returns {void} */
       stop() {
         post({ type: "stop" });
+      },
+
+      /**
+       * Release the pads' live state: every loop the engine is holding ends
+       * through the normal release. The page sends this when a DIFFERENT song
+       * opens — the live state belongs to the one going away — and never on an
+       * ordinary song update, which runs on every edit and must leave what still
+       * exists playing.
+       * @returns {void}
+       */
+      resetLive() {
+        post({ type: "reset_live" });
       },
 
       /**

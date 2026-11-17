@@ -170,6 +170,16 @@ function arrangementOf(items) {
   };
 }
 
+/**
+ * The clip-change reports one block made, copied: the sequencer reuses the
+ * array, so a later block would otherwise overwrite what a test is holding.
+ * @param {object[]} events
+ * @returns {object[]}
+ */
+function clipChangesOf(events) {
+  return (events.clipChanges || []).map((change) => ({ ...change }));
+}
+
 /** A sequencer holding one song, stopped and ready to launch. */
 function sequencer(snapshot) {
   const seq = StudioSequencer.create({ sampleRate: SAMPLE_RATE });
@@ -1219,6 +1229,77 @@ test("steps land on their 16ths", () => {
     [FRAMES_PER_BAR + FRAMES_PER_SIXTEENTH * 3, 3],
     [FRAMES_PER_BAR + FRAMES_PER_SIXTEENTH * 15, 4],
   ]);
+});
+
+test("a pad trigger names its clip and a clip change is reported once, at its boundary", () => {
+  const oneSong = () =>
+    song({
+      tracks: [samplerTrack("t1")],
+      scenes: [scene("s1"), scene("s2")],
+      clips: [patternClip("c1", "t1", "s1"), patternClip("c2", "t1", "s2")],
+      patterns: [pattern("c1", "a", 0), pattern("c2", "a", 0)],
+      steps: [step("c1", "a", 0, 0), step("c2", "a", 0, 1)],
+    });
+
+  const seq = sequencer(oneSong());
+  seq.launchScene("s1");
+  seq.play();
+
+  // A step's trigger names the clip that played it: that is what a voice the
+  // step started belongs to.
+  const first = seq.block(0, FRAMES_PER_SIXTEENTH);
+  const hits = first.filter((event) => event.type === "pad");
+  assert.equal(hits.length, 1, "one step sounds in the first 16th");
+  assert.equal(hits[0].clip_id, "c1", "the trigger carries its own clip");
+
+  // A launch onto another clip waits for the bar, so the blocks before it report
+  // nothing at all.
+  seq.launchScene("s2");
+  assert.deepEqual(
+    clipChangesOf(seq.block(FRAMES_PER_SIXTEENTH, FRAMES_PER_BAR - FRAMES_PER_SIXTEENTH)),
+    [],
+    "nothing has changed while the launch waits for the bar",
+  );
+
+  const boundary = seq.block(FRAMES_PER_BAR, 128);
+  assert.deepEqual(clipChangesOf(boundary), [{ track_id: "t1", clip_id: "c2", frame: 0 }]);
+  assert.deepEqual(
+    boundary.filter((event) => event.type === "pad").map((event) => event.clip_id),
+    ["c2"],
+    "the new clip's own trigger carries the new clip",
+  );
+  assert.deepEqual(
+    clipChangesOf(seq.block(FRAMES_PER_BAR + 128, 128)),
+    [],
+    "a track that merely plays on is not reported",
+  );
+
+  // The clip stopping: the change is to no clip at all.
+  seq.stopTrack("t1");
+  assert.deepEqual(clipChangesOf(seq.block(FRAMES_PER_BAR * 2, 128)), [
+    { track_id: "t1", clip_id: null, frame: 0 },
+  ]);
+
+  // A boundary that falls inside a block is reported at its own offset.
+  const odd = sequencer(oneSong());
+  odd.launchScene("s1");
+  odd.play();
+  odd.block(0, 50000);
+  odd.launchScene("s2");
+  const offset = FRAMES_PER_BAR - 50000;
+  assert.deepEqual(clipChangesOf(odd.block(50000, 60000)), [
+    { track_id: "t1", clip_id: "c2", frame: offset },
+  ]);
+  assert.ok(offset > 0 && offset < 60000, "the boundary has to be inside the block, not at its edge");
+
+  // A relaunch of the very clip the track plays is no change at all.
+  const same = sequencer(oneSong());
+  same.launchScene("s1");
+  same.play();
+  same.block(0, 128);
+  same.launchScene("s1");
+  assert.deepEqual(clipChangesOf(same.block(128, FRAMES_PER_BAR)), [], "a relaunch reports nothing");
+  assert.deepEqual(clipChangesOf(same.block(FRAMES_PER_BAR, 128)), [], "and neither does the bar it lands on");
 });
 
 /** A one-bar pattern clip of four 16th steps on pads 0..3, over a swing. */

@@ -168,7 +168,22 @@
  *   voice of group *n* on that track out over 64 frames.
  * - **Modes:** a `oneshot` pad plays to the end of its range and stops there
  *   (with a 64-frame fade when it is still at level); a `gate` pad releases at
- *   `gate_frames`, the step's own length.
+ *   `gate_frames`, the step's own length; a `normal` pad restarts on every press
+ *   — the voices of that very pad fade out over the crossfade length as the new
+ *   one starts.
+ * - **Loop:** with `loop` `"loop"` or `"pingpong"`, a `gate` pad loops until it
+ *   is released, and a `oneshot` or `normal` pad's live press TOGGLES (a press
+ *   while it loops ends it, and a press never overlaps a loop). A step starts a
+ *   loop only when that pad is not looping already, and never ends one.
+ * - **Clip ownership:** a voice a step started remembers the clip that played
+ *   the step, and is released when its track stops playing that clip (the clip
+ *   ended, or a launch replaced it). A voice a live press started belongs to no
+ *   clip, so a scene launch never ends it. A song change (`setSong`), which runs
+ *   on every edit, releases nothing that still exists: only a voice whose pad is
+ *   gone from the new snapshot ends, through the normal release.
+ * - **Stop** releases the live state — every loop now — and so does
+ *   `{type:"reset_live"}`, which the page sends when a DIFFERENT song opens.
+ *   Neither touches the song, and an ordinary song update never sends one.
  * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
  *   start never goes through history and is never quantized. A release only
@@ -571,7 +586,9 @@
  *
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
- * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
+ * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}` (which also releases
+ * the pads' live state — every loop), `{type:"reset_live"}` (the same release,
+ * sent when a DIFFERENT song opens), `{type:"setMode", mode}`,
  * `{type:"seek", bar}` (a bar at beat resolution), `{type:"metronome", on}`,
  * `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
@@ -1276,6 +1293,30 @@
    */
   function padKey(trackId, bankId, index) {
     return `${asId(trackId)}/${asId(bankId)}/${Math.trunc(Number(index) || 0)}`;
+  }
+
+  /**
+   * One pad's playback mode, as the document spells it: `"oneshot"`, `"gate"`
+   * or `"normal"`. A pad written before the modes existed (or one carrying
+   * anything else) is a one-shot pad, which is exactly how it sounds today.
+   * @param {unknown} value
+   * @returns {string}
+   */
+  function padMode(value) {
+    if (value === "gate" || value === "normal") return value;
+    return "oneshot";
+  }
+
+  /**
+   * One pad's Loop setting, as the document spells it: `"off"`, `"loop"` or
+   * `"pingpong"`. A pad that stores nothing (every pad written before the
+   * setting existed) does not loop.
+   * @param {unknown} value
+   * @returns {string}
+   */
+  function padLoop(value) {
+    if (value === "loop" || value === "pingpong") return value;
+    return "off";
   }
 
   /**
@@ -2563,6 +2604,9 @@
           break;
         case "stop":
           this.sequencer.stop();
+          // Stop releases the pads' live state: every loop ends through the
+          // normal release (holds, rolls and pause join them as they land).
+          this.releaseLive();
           // Parsing a bank or a capture happens only while the transport is
           // stopped, so a load that arrived while the song played lands here.
           this.drainDeferredFonts();
@@ -2579,6 +2623,12 @@
           break;
         case "setMode":
           this.sequencer.setMode(message.mode);
+          break;
+        case "reset_live":
+          // A DIFFERENT song is being opened: the live state belongs to the one
+          // that is going away, so it goes as Stop's does. An ordinary song
+          // update never sends this — it runs on every edit (`setSong`).
+          this.releaseLive();
           break;
         case "metronome":
           // The metronome is live state, not a command: it is heard from the
@@ -4181,6 +4231,10 @@
       // them (one insert object per insert, outside `process()`), so the next
       // block runs the song's effects, sends, returns and master.
       this.applyMixer();
+      // A song change runs on every edit, so it ends only a voice whose pad (or
+      // whose whole track) the new snapshot no longer has, and through the
+      // normal release: everything that still exists plays on.
+      this.releaseVanishedPads();
     }
 
     /**
@@ -6917,6 +6971,7 @@
       const events = this.sequencer.block(this.frame, count);
       this.reportLaunches(events.launches);
       const motions = events.motions;
+      const clipChanges = events.clipChanges;
 
       if (!this.ready || this.failure) {
         this.frame += count;
@@ -6926,6 +6981,7 @@
       let cursor = 0;
       let next = 0;
       let nextMotion = 0;
+      let nextClip = 0;
       // Motion is read on a fixed absolute grid, so the runs are cut on it: a
       // run never crosses a sub-step boundary, which is what holds a swept voice
       // to the same value for the same frame at any block size. A block with no
@@ -6933,6 +6989,13 @@
       // did.
       const onGrid = motions.length > 0;
       while (cursor < count) {
+        // A clip that ended or turned over is paid before the events of its own
+        // frame: a loop it started is released there, and the new clip's first
+        // step starts its voice on the same frame.
+        while (nextClip < clipChanges.length && clipChanges[nextClip].frame <= cursor) {
+          this.applyClipChange(clipChanges[nextClip]);
+          nextClip += 1;
+        }
         while (next < events.length && events[next].frame <= cursor) {
           this.applyEvent(events[next]);
           next += 1;
@@ -6945,6 +7008,7 @@
         }
         let boundary = next < events.length ? Math.min(count, events[next].frame) : count;
         if (nextMotion < motions.length) boundary = Math.min(boundary, motions[nextMotion].frame);
+        if (nextClip < clipChanges.length) boundary = Math.min(boundary, clipChanges[nextClip].frame);
         if (onGrid) {
           // A DISTANCE to the next sub-step, added to the cursor before it is
           // compared with the block-relative event frames.
@@ -7975,13 +8039,21 @@
      * own, so a motion lane over its pad sweeps it exactly like a step's voice
      * (see "Motion" in the file header).
      *
+     * The pad's `mode` and `loop` decide how the voice ends: a `gate` pad plays
+     * while it is held, a `oneshot` pad plays to its range's end and presses
+     * overlap, and a `normal` pad restarts (its earlier voices of that pad fade
+     * out as the new one starts). With Loop on, a `gate` pad loops until it is
+     * released, and a `oneshot` or `normal` pad's live press toggles the loop
+     * (a press while it loops ends it), while a step only ever starts one that
+     * is not already playing.
+     *
      * Every one of the pad's own fields can be locked for this one voice, and
      * they all go through the same `field()` lookup: `attack_ms`, `decay_ms`,
      * `sustain`, `release_ms`, `pitch`, `gain_db`, `pan`, `reverse`,
      * `cutoff_hz`, `resonance`, and the filter's kind under `filter_type` (the
      * document spells the pad's own one `filter.type`).
      * @param {{track_id: string, bank_id: string, index: number, v: number,
-     *          locks?: object, gate_frames?: number}} event
+     *          locks?: object, gate_frames?: number, clip_id?: string}} event
      * @param {boolean} live whether this is a live press rather than a step
      * @returns {void}
      */
@@ -8011,7 +8083,20 @@
       if (!(range.end > range.start)) return;
 
       stored.lastUsed = this.sampleClock += 1;
-      const mode = typeof pad.mode === "string" ? pad.mode : "oneshot";
+      const mode = padMode(pad.mode);
+      const loop = padLoop(pad.loop);
+      const looping = loop !== "off";
+      // A looping pad that is not a Gate pad toggles instead of starting: a live
+      // press starts the loop and the next press ends it (One-shot and Normal
+      // alike), and a step starts one only while that pad is not looping
+      // already — it never restarts a loop and never stops one.
+      if (looping && mode !== "gate") {
+        const running = this.loopingVoice(record, bankId, index);
+        if (running !== null) {
+          if (live) StudioSamplerVoice.release(running);
+          return;
+        }
+      }
       const gateFrames = mode === "gate" && !live ? Number(event.gate_frames) : NaN;
       const filter = pad.filter && typeof pad.filter === "object" ? pad.filter : {};
       const filterType = field("filter_type", filter.type);
@@ -8037,6 +8122,7 @@
         gateFrames: Number.isFinite(gateFrames) ? gateFrames : -1,
         choke: pad.choke,
         mode: mode,
+        loop: loop,
         trackId: asId(event.track_id),
         bankId: bankId,
         index: index,
@@ -8062,6 +8148,10 @@
       // The pad the panel lights for this voice. C1c (chromatic pads) moves this
       // off the pad's own index; every pad event and every light reads it here.
       voice.light_index = index;
+      // The clip this voice belongs to: a step's voice is owned by the clip that
+      // played the step, so it ends when its track moves to another clip; a
+      // live press belongs to no clip and survives a scene launch.
+      voice.clip_id = live ? "" : asId(event.clip_id);
       voice.locked = locks ? Object.keys(locks) : null;
       voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
       voice.reverse_sign = field("reverse", pad.reverse === true) === true ? -1 : 1;
@@ -8094,6 +8184,18 @@
         for (const other of record.voices) {
           if (other === voice) continue;
           if (!other.sounding || other.choke !== choke) continue;
+          StudioSamplerVoice.beginFadeOut(other);
+        }
+      }
+
+      // Normal without Loop restarts: every other voice of this very pad fades
+      // out over the crossfade length while the new one starts, so a press never
+      // overlaps the one before it. With Loop on the press toggled instead (see
+      // above), so this never runs for a looping pad.
+      if (mode === "normal" && !looping) {
+        for (const other of record.voices) {
+          if (other === voice || !other.sounding) continue;
+          if (other.bankId !== bankId || other.index !== index) continue;
           StudioSamplerVoice.beginFadeOut(other);
         }
       }
@@ -8271,6 +8373,84 @@
         if (voice.mode !== "gate") continue;
         if (voice.bankId !== bankId || voice.index !== index) continue;
         StudioSamplerVoice.release(voice);
+      }
+    }
+
+    /**
+     * @param {object} record a sampler track's record
+     * @param {string} bankId
+     * @param {number} index
+     * @returns {object|null} the voice of that pad that is looping, or null
+     */
+    loopingVoice(record, bankId, index) {
+      for (const voice of record.voices) {
+        if (!voice.sounding || !voice.looping) continue;
+        if (voice.bankId !== bankId || voice.index !== index) continue;
+        return voice;
+      }
+      return null;
+    }
+
+    /**
+     * End the loops a track's steps started on a clip its track no longer plays.
+     *
+     * A loop a STEP started belongs to that clip: it is released through the
+     * normal release when the clip stops (a stop or a launch onto no clip), when
+     * the track turns over onto a different clip, at the frame the sequencer put
+     * on that boundary. A relaunch of the very clip it plays is no change and
+     * leaves the loop alone, and a loop a live press started belongs to no clip
+     * at all, so a scene launch never ends it.
+     * @param {{track_id: string, clip_id: string|null, frame: number}} change
+     * @returns {void}
+     */
+    applyClipChange(change) {
+      const record = this.samplerRecord(asId(change.track_id));
+      if (!record) return;
+      const clipId = change.clip_id === null || change.clip_id === undefined ? "" : asId(change.clip_id);
+      for (const voice of record.voices) {
+        if (!voice.sounding || !voice.looping) continue;
+        if (voice.clip_id === "") continue;
+        if (voice.clip_id === clipId) continue;
+        StudioSamplerVoice.release(voice);
+      }
+    }
+
+    /**
+     * Release the pads' live state: every loop now, through the normal release.
+     *
+     * This is what Stop and `reset_live` (a DIFFERENT song being opened) do, and
+     * it is the one place the later live state — HOLD latches, ROLL and
+     * Pause-all — is released from as well. An ordinary `setSong` never comes
+     * here: it runs on every document edit, so it must not touch what still
+     * exists (see `releaseVanishedPads`).
+     * @returns {void}
+     */
+    releaseLive() {
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding || !voice.looping) continue;
+          StudioSamplerVoice.release(voice);
+        }
+      }
+    }
+
+    /**
+     * End, through the normal release, the voices whose pad the new snapshot no
+     * longer has: a pad (with its bank) that was deleted, or a whole track that
+     * the rebuilt slots already tore down. A voice whose pad is still there is
+     * left alone — an edit that touches something else never cuts what the
+     * operator is hearing.
+     * @returns {void}
+     */
+    releaseVanishedPads() {
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding) continue;
+          if (this.pads.has(padKey(voice.trackId, voice.bankId, voice.index))) continue;
+          StudioSamplerVoice.release(voice);
+        }
       }
     }
 
