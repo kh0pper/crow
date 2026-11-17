@@ -38,7 +38,9 @@
  * drafting turn gets only its clock (`turnDeps`), because a turn never reaches an adapter. A drafting
  * turn is `startDraftingTurn` from `drafts/turn.js` if it was injected, otherwise that module is
  * imported on the first `/turn` request; while it does not exist the answer is 503
- * `{error:"unavailable"}`.
+ * `{error:"unavailable"}`. A turn the runtime could not start because this host delivers bot MCP
+ * configs as files instead of over the fd answers 503 `{error:"delivery_unsupported"}` — the code
+ * alone, because the card owns that copy.
  */
 import { MAIL_ERROR_TEXT } from "../mail/errors.js";
 import { getAccount } from "../mail/store/accounts.js";
@@ -514,6 +516,11 @@ export function registerDraftRoutes(router, ctx) {
       if (code === "cloud_drafting_off" || code === "local_models_only") {
         // No sentence exists for either yet: the card owns that copy, so the code goes alone.
         return res.status(403).json({ error: code });
+      }
+      if (code === "delivery_unsupported") {
+        // A drafting turn is fd-only (the bridge refuses the file mode before it spawns anything,
+        // because that mode would write the turn's token to disk). No copy here either: the code alone.
+        return res.status(503).json({ error: code });
       }
       if (code === "NOT_FOUND") return sendError(res, 404, "not_found");
       if (code === "BAD_INPUT") return sendError(res, 400, "bad_input");

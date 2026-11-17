@@ -14,7 +14,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -60,6 +60,7 @@ process.on("exit", () => {
 });
 
 const CROW_DB = join(process.env.CROW_DATA_DIR, "crow.db");
+const CROW_HOME = process.env.CROW_HOME;
 const DRAFTBOT_ROOT = join(ROOT, "bots", "draftbot");
 
 /** The bot the plan describes: a def that grants gmail, web, files and messaging. */
@@ -104,10 +105,16 @@ const {
   _draftingTurnsInFlightForTests,
 } = await import("../servers/gateway/mail/drafts/turn.js");
 const {
-  DRAFTING_TURN_TOOLS, MAIL_DRAFT_SERVER, isDraftingTurnTools, mailDraftBlock,
+  DRAFTING_TURN_TOOLS, MAIL_DRAFT_SERVER, isDraftingTurnTools, mailDraftBlock, mailDraftTurnDir,
 } = await import("../scripts/pi-bots/mcp_writer.mjs");
+const { getOrCreateLocalInstanceId } = await import("../servers/gateway/instance-registry.js");
 const { buildToolsCsv, toolAllowlist, handleInbound } = await import("../scripts/pi-bots/bridge.mjs");
 const { initGatewayActorKey, verifyMailDraftActorSig, _resetActorKeyForTest } = await import("../scripts/pi-bots/actor-sig.mjs");
+
+/** The one path a drafting turn's world root may be: `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`. */
+function turnDirFor(botId, draftId) {
+  return join(CROW_HOME, DRAFT_TURNS_DIRNAME, botId, draftId);
+}
 
 const RESOLVED = { provider: "stub", model: "m1", key: "stub/m1" };
 const THREE = [
@@ -144,13 +151,27 @@ async function waitFor(fn, tries = 100) {
   return false;
 }
 
-/** The `bot_sessions` row of a drafting thread, or null. */
-async function draftingSessionRow(draftId) {
-  const { rows } = await mailDb.execute({
-    sql: "SELECT id FROM bot_sessions WHERE gateway_thread_id = ?",
-    args: ["mail-draft:" + draftId],
-  });
+/** The `bot_sessions` row of a drafting thread, or null (scoped to one bot when `botId` is given). */
+async function draftingSessionRow(draftId, botId = null) {
+  const { rows } = botId
+    ? await mailDb.execute({
+      sql: "SELECT id FROM bot_sessions WHERE gateway_thread_id = ? AND bot_id = ?",
+      args: ["mail-draft:" + draftId, botId],
+    })
+    : await mailDb.execute({
+      sql: "SELECT id FROM bot_sessions WHERE gateway_thread_id = ?",
+      args: ["mail-draft:" + draftId],
+    });
   return rows[0] ?? null;
+}
+
+/** Is another bot's row for the same drafting thread still there? */
+async function otherBotDraftingSessionRow(draftId) {
+  const { rows } = await mailDb.execute({
+    sql: "SELECT id FROM bot_sessions WHERE gateway_thread_id = ? AND bot_id = ?",
+    args: ["mail-draft:" + draftId, "otherbot"],
+  });
+  return rows.length > 0;
 }
 
 async function makeAccount(overrides = {}) {
@@ -233,6 +254,10 @@ before(async () => {
   mailDb = createDbClient();
   seedBot("draftbot", botDef());
   seedBot("cloudbot", botDef({ models: { default: "cloudy/m1" } }));
+  // A bot with a cloud ESCALATION model that a drafting turn must never reach.
+  seedBot("escbot", botDef({ models: { default: "stub/m1", escalation: "cloudy/m1" } }));
+  // A bot whose def carries a spawn_env key: a drafting turn gets none of it.
+  seedBot("envbot", botDef({ spawn_env: { DRAFT_TEST_MARKER: "1" } }));
   initGatewayActorKey();
   account = await makeAccount();
 });
@@ -356,6 +381,27 @@ test("readDraftingSettings defaults cloud drafting off and reads it from dashboa
   }
 });
 
+test("readDraftingSettings reads through readSetting, so this instance's override wins", async () => {
+  // The per-instance override table is what readSetting adds over the plain dashboard_settings row:
+  // the global row says on, this instance's row says off.
+  const localId = getOrCreateLocalInstanceId();
+  await mailDb.execute({
+    sql: "INSERT OR REPLACE INTO dashboard_settings (key, value, updated_at) VALUES (?,?,datetime('now'))",
+    args: [CLOUD_DRAFTING_SETTING, "1"],
+  });
+  await mailDb.execute({
+    sql: "INSERT OR REPLACE INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES (?,?,?,datetime('now'))",
+    args: [CLOUD_DRAFTING_SETTING, localId, "0"],
+  });
+  try {
+    const settings = await readDraftingSettings(mailDb);
+    assert.equal(settings.cloudDrafting, false, "the override is read, not the global row");
+  } finally {
+    await mailDb.execute({ sql: "DELETE FROM dashboard_settings_overrides WHERE key = ?", args: [CLOUD_DRAFTING_SETTING] });
+    await mailDb.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [CLOUD_DRAFTING_SETTING] });
+  }
+});
+
 /* =========================================================== the prompt */
 
 test("the prompt labels the person's words, and thread text and comments as untrusted data", () => {
@@ -399,6 +445,32 @@ describe("startDraftingTurn", () => {
     assert.equal(opts.gateway_thread_id, "mail-draft:" + draft.id);
     assert.deepEqual(opts.draftingTurn.exactTools, [...DRAFTING_TURN_TOOLS]);
     assert.equal(opts.user_message, draftingTurnPrompt({ instruction: "Be brief." }));
+  });
+
+  test("a file-delivery host is refused before a bot is loaded, a token minted or a turn launched", async () => {
+    const { deps, calls, logs } = recordingDeps();
+    const loads = [];
+    deps.loadBot = async (id) => { loads.push(id); throw new Error("no bot is loaded when the host cannot run the turn"); };
+    const draft = await makeDraft({ account });
+    const draftDir = turnDirFor("draftbot", draft.id);
+    process.env.PIBOT_MCP_CONFIG_DELIVERY = "file";
+    try {
+      await assert.rejects(
+        startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." }),
+        (err) => err.name === "MailError" && err.code === "delivery_unsupported",
+      );
+    } finally {
+      process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+    }
+    assert.equal(loads.length, 0, "the refusal comes before the bot is loaded");
+    assert.equal(calls.length, 0, "nothing was launched, so no token ever reached a turn");
+    assert.equal(_draftingTurnsInFlightForTests().length, 0, "and no turn is in flight");
+    // The mint sits after the turn's own directory in the launch path: a directory that was never
+    // created is a token that was never minted.
+    assert.equal(existsSync(draftDir), false, "the turn's own dir is never created");
+    assert.equal(existsSync(join(draftDir, ".mcp.json")), false, "and no config path is touched in either mode");
+    assert.equal(await draftingSessionRow(draft.id), null, "no session row is stamped");
+    assert.ok(!logs.some((l) => l.startsWith("turn_error")), "nothing ran to fail: " + logs.join(","));
   });
 
   test("the token is live while the turn runs, revoked once it ends, and never given to the reply path", async () => {
@@ -481,31 +553,22 @@ describe("startDraftingTurn", () => {
     assert.ok(!logs.some((l) => l.includes("turn timed out")), "never the error's own message");
   });
 
-  test("the per-turn MCP config is gone after the turn, in file mode too", async () => {
+  test("a drafting turn writes no config of its own: its dir holds only pi's session dir", async () => {
     const { deps, calls, timers } = recordingDeps();
     const draft = await makeDraft({ account });
-    const wrote = [];
-    const inner = deps.handleInbound;
-    deps.handleInbound = async (opts) => {
-      // What the bridge does for a file-mode turn: the one-server config on the world's disk.
-      const path = join(opts.draftingTurn.sessionDir, ".mcp.json");
-      mkdirSync(opts.draftingTurn.sessionDir, { recursive: true });
-      writeFileSync(path, JSON.stringify({ mcpServers: { [MAIL_DRAFT_SERVER]: opts.draftingTurn.mcpBlock } }), { mode: 0o600 });
-      wrote.push({ path, text: readFileSync(path, "utf8") });
-      await inner(opts);
-    };
     await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
     await settle();
-    assert.equal(wrote.length, 1);
-    assert.ok(wrote[0].text.includes("mdt_"), "the token did reach the turn's own config while it ran");
-    assert.equal(existsSync(wrote[0].path), false, "and the file is removed when the turn ends");
-    // The scheduled deletion is a day out, and it removes the turn's whole session dir.
+    const dir = calls[0].draftingTurn.sessionDir;
+    // The config the turn runs with is the block handed to the bridge: it reaches pi on the fd and is
+    // never written, so the turn's own directory carries nothing but pi's session dir.
+    assert.deepEqual(readdirSync(dir), ["sessions"]);
+    assert.equal(existsSync(join(dir, ".mcp.json")), false);
+    // The dir is still scheduled for deletion a day after the turn, and the row that would resume it
+    // goes with it, so a later turn of the same draft starts fresh.
     assert.equal(timers.length, 1);
     assert.equal(timers[0].ms, DRAFT_SESSION_RETENTION_MS);
     assert.ok(DRAFT_SESSION_RETENTION_MS >= 24 * 60 * 60 * 1000);
-    const dir = calls[0].draftingTurn.sessionDir;
     assert.equal(existsSync(dir), true);
-    // A row into that dir is forgotten with it, so a later turn of the same draft starts fresh.
     await mailDb.execute({
       sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, control, pi_session_id) VALUES (?,?,?,?,?,?)",
       args: ["draftbot", "mail-draft", "mail-draft:" + draft.id, "waiting-user", "run", "pi-session-1"],
@@ -515,25 +578,34 @@ describe("startDraftingTurn", () => {
     assert.equal(await waitFor(async () => (await draftingSessionRow(draft.id)) === null), true, "the session row goes with the dir");
   });
 
-  test("the session dir is under mail-drafts/<draftId>, not the chat thread's dir", async () => {
+  test("the session dir is under <CROW_HOME>/mail-draft-turns/<botId>/<draftId>, outside every bot-writable root", async () => {
     const { deps, calls } = recordingDeps();
     const draft = await makeDraft({ account });
     await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
     await settle();
     const dir = calls[0].draftingTurn.sessionDir;
-    assert.equal(dir, join(DRAFTBOT_ROOT, DRAFT_TURNS_DIRNAME, draft.id));
+    assert.equal(dir, turnDirFor("draftbot", draft.id));
+    assert.equal(dir, mailDraftTurnDir(CROW_HOME, "draftbot", draft.id));
+    assert.equal(dir.startsWith(CROW_HOME + "/"), true, "under the instance's own home");
+    assert.equal(dir.startsWith(DRAFTBOT_ROOT + "/"), false, "never inside the bot's world root");
     assert.notEqual(dir, DRAFTBOT_ROOT, "never the world root a chat turn resumes from");
     assert.equal(existsSync(join(dir, "sessions")), true, "pi's --session-dir has a place to write");
+    assert.equal(statSync(dir).mode & 0o777, 0o700, "the turn's own directory is private");
   });
 
   test("a sweep on start removes turn dirs older than a day and leaves the new one", async () => {
     const { deps } = recordingDeps();
-    const turnsRoot = join(DRAFTBOT_ROOT, DRAFT_TURNS_DIRNAME);
+    const turnsRoot = join(CROW_HOME, DRAFT_TURNS_DIRNAME, "draftbot");
     const oldDir = join(turnsRoot, "md-00000000deadbeef");
     mkdirSync(join(oldDir, "sessions"), { recursive: true });
     await mailDb.execute({
       sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, control, pi_session_id) VALUES (?,?,?,?,?,?)",
       args: ["draftbot", "mail-draft", "mail-draft:md-00000000deadbeef", "waiting-user", "run", "pi-session-old"],
+    });
+    // A row of ANOTHER bot on the same draft id: the sweep forgets only its own bot's rows.
+    await mailDb.execute({
+      sql: "INSERT INTO bot_sessions (bot_id, gateway_type, gateway_thread_id, status, control, pi_session_id) VALUES (?,?,?,?,?,?)",
+      args: ["otherbot", "mail-draft", "mail-draft:md-00000000deadbeef", "waiting-user", "run", "pi-session-other"],
     });
     const twoDaysAgo = new Date(1_700_000_000_000 - 2 * DRAFT_SESSION_RETENTION_MS);
     utimesSync(oldDir, twoDaysAgo, twoDaysAgo);
@@ -543,9 +615,105 @@ describe("startDraftingTurn", () => {
     await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
     await settle();
     assert.equal(existsSync(oldDir), false, "the day-old turn dir is swept");
-    assert.equal(await draftingSessionRow("md-00000000deadbeef"), null, "and its session row with it");
+    assert.equal(await draftingSessionRow("md-00000000deadbeef", "draftbot"), null, "and its own session row with it");
+    assert.equal(await otherBotDraftingSessionRow("md-00000000deadbeef"), true, "another bot's row on the same draft id stays");
     assert.equal(existsSync(freshDir), true, "a recent one is left alone");
     rmSync(freshDir, { recursive: true, force: true });
+    await mailDb.execute({ sql: "DELETE FROM bot_sessions WHERE bot_id = ?", args: ["otherbot"] });
+  });
+
+  test("a symlinked turn root or bot folder is refused, and nothing outside it is touched", async () => {
+    const { deps, calls } = recordingDeps();
+    const base = join(CROW_HOME, DRAFT_TURNS_DIRNAME);
+    const outside = join(ROOT, "outside-turns");
+    mkdirSync(join(outside, "keep"), { recursive: true });
+    writeFileSync(join(outside, "keep", "file.txt"), "keep me");
+    mkdirSync(base, { recursive: true });
+
+    // 1. `<CROW_HOME>/mail-draft-turns` is a symlink to a directory outside it.
+    renameSync(base, base + ".real");
+    symlinkSync(outside, base);
+    try {
+      const draft = await makeDraft({ account });
+      await assert.rejects(
+        startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." }),
+        (err) => err.code === "turn_dir",
+      );
+      assert.equal(readFileSync(join(outside, "keep", "file.txt"), "utf8"), "keep me");
+    } finally {
+      rmSync(base, { force: true });
+      renameSync(base + ".real", base);
+    }
+
+    // 2. The bot's own folder is a symlink to the same place.
+    const botRoot = join(base, "draftbot");
+    renameSync(botRoot, botRoot + ".real");
+    symlinkSync(outside, botRoot);
+    try {
+      const draft = await makeDraft({ account });
+      await assert.rejects(
+        startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." }),
+        (err) => err.code === "turn_dir",
+      );
+      assert.equal(readFileSync(join(outside, "keep", "file.txt"), "utf8"), "keep me");
+    } finally {
+      rmSync(botRoot, { force: true });
+      renameSync(botRoot + ".real", botRoot);
+    }
+    assert.equal(calls.length, 0, "no turn was handed anything");
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  test("a sweep refuses a symlinked entry and deletes nothing outside the turn root", async () => {
+    const { deps } = recordingDeps();
+    const botRoot = join(CROW_HOME, DRAFT_TURNS_DIRNAME, "draftbot");
+    mkdirSync(botRoot, { recursive: true });
+    const outside = join(ROOT, "outside-entry");
+    mkdirSync(join(outside, "sessions"), { recursive: true });
+    writeFileSync(join(outside, "sessions", "file.txt"), "keep me");
+    const planted = join(botRoot, "md-00000000deadbeef");
+    symlinkSync(outside, planted);
+    try {
+      const draft = await makeDraft({ account });
+      await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
+      await settle();
+      assert.equal(readFileSync(join(outside, "sessions", "file.txt"), "utf8"), "keep me", "the link's target is untouched");
+      assert.equal(existsSync(join(outside, "sessions")), true, "and still there");
+    } finally {
+      rmSync(planted, { force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a bot id that cannot be one path segment is refused before anything is created", async () => {
+    const { deps, calls } = recordingDeps();
+    const draft = await makeDraft({ account });
+    for (const botId of ["../../escape", "a/b", "..", ".hidden"]) {
+      await assert.rejects(
+        startDraftingTurn(mailDb, deps, { draftId: draft.id, botId, instruction: "Be brief." }),
+        (err) => err.code === "BAD_INPUT" || err.code === "NOT_FOUND",
+        JSON.stringify(botId),
+      );
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  test("a turn carries the model check the bridge runs on the model it resolved", async () => {
+    const { deps, calls } = recordingDeps();
+    const draft = await makeDraft({ account });
+    await updateAccount(mailDb, account.id, { localModelsOnly: true });
+    try {
+      await startDraftingTurn(mailDb, deps, { draftId: draft.id, instruction: "Be brief." });
+      await settle();
+    } finally {
+      await updateAccount(mailDb, account.id, { localModelsOnly: false });
+    }
+    const check = calls[0].draftingTurn.checkModel;
+    assert.equal(typeof check, "function");
+    assert.equal(check(RESOLVED).ok, true, "the local model this turn resolves is allowed");
+    const verdict = check({ provider: "cloudy", model: "m1", key: "cloudy/m1" });
+    assert.equal(verdict.ok, false);
+    assert.equal(verdict.code, "local_models_only", "an escalated cloud model is refused for a local-only account");
   });
 
   test("a draft in a state that cannot take a turn is refused frozen, and nothing launches", async () => {
@@ -634,6 +802,15 @@ describe("the drafting turn at the bridge", () => {
       'import { readFileSync, writeFileSync } from "node:fs";',
       'const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");',
       'try { writeFileSync(process.env.PIBOT_TEST_ARGV, JSON.stringify(process.argv.slice(2))); } catch {}',
+      'try {',
+      '  if (process.env.PIBOT_TEST_ENVCAP) {',
+      '    const env = {};',
+      '    for (const k of ["DRAFT_TEST_MARKER", "PI_BOT_SECRET_VALUES_FD", "PI_BOT_SECRET_VALUES_FILE"]) {',
+      '      if (Object.hasOwn(process.env, k)) env[k] = process.env[k];',
+      '    }',
+      '    writeFileSync(process.env.PIBOT_TEST_ENVCAP, JSON.stringify(env));',
+      '  }',
+      '} catch {}',
       'let cfg = null;',
       'try {',
       '  if (process.env.PI_BOT_MCP_CONFIG_FD) cfg = readFileSync(Number(process.env.PI_BOT_MCP_CONFIG_FD), "utf8");',
@@ -669,7 +846,7 @@ describe("the drafting turn at the bridge", () => {
   after(() => { rmSync(DRAFT_DIR, { recursive: true, force: true }); });
 
   /** One draftingTurn option, built the way the gateway builds it. */
-  function draftingTurnFor(draftId, { botId = "draftbot", sessionDir = join(DRAFT_DIR, draftId) } = {}) {
+  function draftingTurnFor(draftId, { botId = "draftbot", sessionDir = turnDirFor(botId, draftId), checkModel } = {}) {
     const turnId = "mt-" + randomBytes(8).toString("hex");
     const token = mintTurnToken({ draftId, turnId, startHash: "a".repeat(64), botId });
     return {
@@ -678,6 +855,8 @@ describe("the drafting turn at the bridge", () => {
         exactTools: [...DRAFTING_TURN_TOOLS],
         mcpBlock: mailDraftBlock({ botId, draftId, turnId, token }),
         sessionDir,
+        // turn.js's own check (allowDraftModelKey); these cases pin the bridge's half of it.
+        checkModel: checkModel || (() => ({ ok: true, local: true, key: "stub/m1" })),
       },
     };
   }
@@ -686,9 +865,11 @@ describe("the drafting turn at the bridge", () => {
     const n = ++captureN;
     const argvPath = join(DRAFT_DIR, `argv-${n}.json`);
     const mcpPath = join(DRAFT_DIR, `mcp-${n}.json`);
+    const envPath = join(DRAFT_DIR, `env-${n}.json`);
     process.env.PIBOT_TEST_ARGV = argvPath;
     process.env.PIBOT_TEST_MCPCAP = mcpPath;
-    return { argvPath, mcpPath };
+    process.env.PIBOT_TEST_ENVCAP = envPath;
+    return { argvPath, mcpPath, envPath };
   }
 
   function toolsOf(argvPath) {
@@ -729,7 +910,7 @@ describe("the drafting turn at the bridge", () => {
     assert.ok(!argv.join(" ").includes("gmail"), "none of the bot's own tools are pinned");
   });
 
-  test("a drafting turn's delivered config has exactly one server", async () => {
+  test("a drafting turn's delivered config has exactly one enabled server", async () => {
     const paths = capturePaths();
     const { turnId, option } = draftingTurnFor("md-00000000000000cc");
     await handleInbound({
@@ -740,7 +921,8 @@ describe("the drafting turn at the bridge", () => {
     });
     const config = JSON.parse(readFileSync(paths.mcpPath, "utf8"));
     assert.ok(config && typeof config === "object", "the child was handed a config");
-    assert.deepEqual(Object.keys(config.mcpServers), [MAIL_DRAFT_SERVER]);
+    const enabled = Object.entries(config.mcpServers).filter(([, block]) => !(block && block.disabled === true)).map(([name]) => name);
+    assert.deepEqual(enabled, [MAIL_DRAFT_SERVER], "exactly one server is active");
     const block = config.mcpServers[MAIL_DRAFT_SERVER];
     assert.match(block.url, /^http:\/\/127\.0\.0\.1:\d+\/mail-draft\/mcp$/);
     assert.equal(block.headers.Authorization, "Bearer " + option.mcpBlock.headers.Authorization.split(" ")[1]);
@@ -774,9 +956,135 @@ describe("the drafting turn at the bridge", () => {
     assert.equal(Object.hasOwn(config.mcpServers, MAIL_DRAFT_SERVER), false);
   });
 
+  test("a drafting turn's config is closed-world: the operator's global servers are disabled", async () => {
+    // pi-lab's mcp-client loads the operator's global `~/.pi/agent/mcp.json` in BOTH delivery modes,
+    // so a config naming only `crow-mail-draft` would still start every global server as a child of
+    // a turn that must have exactly one. The drafting config disables them the way buildBotMcp does.
+    const canonical = join(HOME_DIR, ".pi", "agent", "mcp.json");
+    const before = readFileSync(canonical, "utf8");
+    writeFileSync(canonical, JSON.stringify({ mcpServers: { "team-wiki": { command: "node", args: ["/tmp/wiki.js"] } } }));
+    try {
+      const paths = capturePaths();
+      const { option } = draftingTurnFor("md-00000000000000f1");
+      await handleInbound({
+        bot_id: "draftbot", gateway_type: "mail-draft",
+        gateway_thread_id: "mail-draft:md-00000000000000f1",
+        user_message: "draft it", log: () => {}, sendReply: async () => {},
+        draftingTurn: option,
+      });
+      const config = JSON.parse(readFileSync(paths.mcpPath, "utf8"));
+      assert.deepEqual(config.mcpServers["team-wiki"], { disabled: true }, "a global server is disabled, not started");
+      assert.ok(config.mcpServers[MAIL_DRAFT_SERVER] && typeof config.mcpServers[MAIL_DRAFT_SERVER].url === "string",
+        "and the turn's own server is still enabled");
+    } finally {
+      writeFileSync(canonical, before);
+    }
+  });
+
+  test("a drafting turn is refused when the host delivers MCP configs as files, before anything is spawned or written", async () => {
+    const paths = capturePaths();
+    const draftId = "md-00000000000000f2";
+    const draftDir = turnDirFor("draftbot", draftId);
+    mkdirSync(draftDir, { recursive: true });
+    // A planted target where a file-mode config would go: nothing may be written through it, and the
+    // link itself may not be replaced or removed either, because nothing touches the path at all.
+    const outside = join(ROOT, "outside-mcp.json");
+    writeFileSync(outside, "DO NOT TOUCH\n");
+    const link = join(draftDir, ".mcp.json");
+    rmSync(link, { force: true });
+    symlinkSync(outside, link);
+    process.env.PIBOT_MCP_CONFIG_DELIVERY = "file";
+    try {
+      const { option } = draftingTurnFor(draftId);
+      await assert.rejects(
+        handleInbound({
+          bot_id: "draftbot", gateway_type: "mail-draft", gateway_thread_id: "mail-draft:" + draftId,
+          user_message: "draft it", log: () => {}, sendReply: async () => {}, draftingTurn: option,
+        }),
+        (err) => err.name === "MailError" && err.code === "delivery_unsupported",
+      );
+    } finally {
+      process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+    }
+    assert.equal(readFileSync(outside, "utf8"), "DO NOT TOUCH\n", "the file behind the link is untouched");
+    assert.equal(lstatSync(link).isSymbolicLink(), true, "and the planted link is neither replaced nor removed");
+    assert.equal(existsSync(paths.argvPath), false, "no pi was spawned");
+    rmSync(link, { force: true });
+    rmSync(outside, { force: true });
+
+    // The refusal is the drafting turn's alone: an ordinary turn of the same bot still runs from a
+    // file, which is what the file mode is for.
+    const normal = capturePaths();
+    process.env.PIBOT_MCP_CONFIG_DELIVERY = "file";
+    try {
+      await handleInbound({
+        bot_id: "draftbot", gateway_type: "gmail", gateway_thread_id: "file-mode-chat-thread",
+        user_message: "hello", log: () => {}, sendReply: async () => {},
+      });
+    } finally {
+      process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
+    }
+    assert.equal(existsSync(normal.argvPath), true, "an ordinary turn still spawns in file mode");
+    assert.equal(existsSync(join(DRAFTBOT_ROOT, ".mcp.json")), true, "and reads its config from the world file");
+    rmSync(join(DRAFTBOT_ROOT, ".mcp.json"), { force: true });
+  });
+
+  test("a drafting turn's spawn env carries neither the def's spawn_env nor the card values", async () => {
+    const drafting = capturePaths();
+    const { option } = draftingTurnFor("md-00000000000000f3", { botId: "envbot" });
+    await handleInbound({
+      bot_id: "envbot", gateway_type: "mail-draft", gateway_thread_id: "mail-draft:md-00000000000000f3",
+      user_message: "draft it", log: () => {}, sendReply: async () => {}, draftingTurn: option,
+    });
+    const draftingEnv = JSON.parse(readFileSync(drafting.envPath, "utf8"));
+    assert.deepEqual(Object.keys(draftingEnv), [], "the child got no spawn_env key and no card-values fd");
+
+    // A normal turn of the same bot still gets the def's own spawn_env: the skip is the drafting turn's.
+    const normal = capturePaths();
+    await handleInbound({
+      bot_id: "envbot", gateway_type: "gmail", gateway_thread_id: "envbot-chat-thread",
+      user_message: "hello", log: () => {}, sendReply: async () => {},
+    });
+    const normalEnv = JSON.parse(readFileSync(normal.envPath, "utf8"));
+    assert.equal(normalEnv.DRAFT_TEST_MARKER, "1", "a channel turn keeps its def's spawn_env");
+  });
+
+  test("a drafting turn never escalates: !escalate in the instruction cannot reach the cloud model", async () => {
+    const paths = capturePaths();
+    const promptPath = join(DRAFT_DIR, "prompt-escalate.json");
+    process.env.PIBOT_TEST_PROMPTCAP = promptPath;
+    const { option } = draftingTurnFor("md-00000000000000f4", { botId: "escbot" });
+    await handleInbound({
+      bot_id: "escbot", gateway_type: "mail-draft", gateway_thread_id: "mail-draft:md-00000000000000f4",
+      user_message: "!escalate Shorten the second paragraph.", log: () => {}, sendReply: async () => {},
+      draftingTurn: option,
+    });
+    const { argv } = toolsOf(paths.argvPath);
+    assert.equal(argv.join(" ").includes("cloudy"), false, "the cloud escalation model is never spawned: " + argv.join(" "));
+    assert.ok(argv.join(" ").includes("stub"), "the turn ran the local default");
+    const prompt = JSON.parse(readFileSync(promptPath, "utf8")).prompt;
+    assert.equal(prompt.includes("!escalate"), false, "the token is stripped before the prompt");
+    assert.ok(prompt.includes("Shorten the second paragraph."), "the person's own words are still there");
+  });
+
+  test("the bridge refuses the turn when the model it resolved is not allowed", async () => {
+    const paths = capturePaths();
+    let sawResolved = null;
+    const { option } = draftingTurnFor("md-00000000000000f5", {
+      checkModel: (resolvedModel) => { sawResolved = resolvedModel; return { ok: false, code: "local_models_only" }; },
+    });
+    const result = await handleInbound({
+      bot_id: "draftbot", gateway_type: "mail-draft", gateway_thread_id: "mail-draft:md-00000000000000f5",
+      user_message: "draft it", log: () => {}, sendReply: async () => {}, draftingTurn: option,
+    });
+    assert.equal(result.action, "error");
+    assert.equal(sawResolved.key, "stub/m1", "the check sees the model handleInbound resolved");
+    assert.equal(existsSync(paths.argvPath), false, "nothing was spawned");
+  });
+
   test("a chat turn never resumes the drafting turn's session", async () => {
     const draftId = "md-00000000000000dd";
-    const draftDir = join(DRAFT_DIR, draftId);
+    const draftDir = turnDirFor("draftbot", draftId);
     process.env.PIBOT_TEST_SESSION_ID = "drafting-session-1";
     const paths = capturePaths();
     const { option } = draftingTurnFor(draftId, { sessionDir: draftDir });
@@ -800,29 +1108,6 @@ describe("the drafting turn at the bridge", () => {
     assert.ok(!chatArgv.includes(join(draftDir, "sessions")), "never the drafting turn's dir");
   });
 
-  test("the per-turn MCP config is gone (file mode) and the token revoked after the turn ends", { timeout: 60_000 }, async () => {
-    _resetTurnTokensForTests();
-    const draft = await makeDraft({ account });
-    const draftDir = join(DRAFTBOT_ROOT, DRAFT_TURNS_DIRNAME, draft.id);
-    const configPath = join(draftDir, ".mcp.json");
-    const paths = capturePaths();
-    process.env.PIBOT_MCP_CONFIG_DELIVERY = "file";
-    try {
-      const out = await startDraftingTurn(mailDb, { log: () => {} }, { draftId: draft.id, instruction: "Be brief." });
-      assert.match(out.turnId, /^mt-/);
-      await settle();
-    } finally {
-      process.env.PIBOT_MCP_CONFIG_DELIVERY = "fd";
-    }
-    assert.equal(_draftingTurnsInFlightForTests().length, 0, "the turn really ended");
-    assert.equal(existsSync(configPath), false, "the file-mode config is removed in the turn's finally");
-    const config = JSON.parse(readFileSync(paths.mcpPath, "utf8"));
-    assert.deepEqual(Object.keys(config.mcpServers), [MAIL_DRAFT_SERVER], "file mode carried the one-server config");
-    const token = config.mcpServers[MAIL_DRAFT_SERVER].headers.Authorization.replace(/^Bearer /, "");
-    assert.match(token, /^mdt_[0-9a-f]{64}$/);
-    assert.equal(verifyTurnToken(token), null, "and the token is revoked once the turn ends");
-  });
-
   test("a malformed draftingTurn is refused before anything is spawned", async () => {
     const paths = capturePaths();
     const thread = "mail-draft:md-00000000000000ee";
@@ -834,15 +1119,25 @@ describe("the drafting turn at the bridge", () => {
     })();
     const good = draftingTurnFor("md-00000000000000ee").option;
     const bad = [
-      { mcpBlock: good.mcpBlock, sessionDir: good.sessionDir },                                   // no exactTools
+      { mcpBlock: good.mcpBlock, sessionDir: good.sessionDir, checkModel: good.checkModel },       // no exactTools
       { ...good, exactTools: ["read"] },                                                          // not the three
       { ...good, mcpBlock: null },                                                                 // no block
       { ...good, mcpBlock: { url: "http://127.0.0.1:3001/board/mcp", headers: good.mcpBlock.headers } },
       { ...good, mcpBlock: { ...good.mcpBlock, url: "http://example.test:3001/mail-draft/mcp" } },
       { ...good, mcpBlock: { ...good.mcpBlock, headers: { ...good.mcpBlock.headers, Authorization: "Bearer board-token" } } },
       { ...good, mcpBlock: { ...good.mcpBlock, headers: { ...good.mcpBlock.headers, "X-Crow-Actor-Kind": "bot" } } },
+      // The block's actor is another bot than the turn's own.
+      { ...good, mcpBlock: { ...good.mcpBlock, headers: { ...good.mcpBlock.headers, "X-Crow-Actor-Id": "otherbot" } } },
+      // No model check: the drafting gate cannot be left off.
+      { ...good, checkModel: null },
+      { ...good, checkModel: "yes" },
+      // The session dir is the ONE path under <CROW_HOME>/mail-draft-turns/<botId>/<draftId>.
       { ...good, sessionDir: "relative/dir" },
       { ...good, sessionDir: null },
+      { ...good, sessionDir: join(ROOT, "draftturn", "md-00000000000000ee") },
+      { ...good, sessionDir: join(CROW_HOME, DRAFT_TURNS_DIRNAME, "otherbot", "md-00000000000000ee") },
+      { ...good, sessionDir: good.sessionDir + "/../../escape" },
+      { ...good, sessionDir: good.sessionDir + "/" },
     ];
     for (const option of bad) {
       await assert.rejects(

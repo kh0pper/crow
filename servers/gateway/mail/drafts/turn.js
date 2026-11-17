@@ -11,33 +11,38 @@
  *   2. its MCP config holds exactly ONE server: this gateway's own `/mail-draft/mcp`, reached with a
  *      per-turn `mdt_` token (turn-token.js) and a `mail-draft` actor signature (actor-sig.mjs). No
  *      other server, implied or selected, reaches that child;
- *   3. it runs in its own world root, `<sessionDir>/mail-drafts/<draftId>`, so no chat thread of the
+ *   3. it runs in its own world root, `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>` — under the
+ *      instance's home, never under a world root the bot itself can write — so no chat thread of the
  *      same bot can resume it, and that dir is deleted a day after the turn.
  *
  * The turn is spawned HERE, in the gateway process, and that is the point: the token lives in this
  * process's memory (turn-token.js) and the actor signature needs the gateway's per-boot key
  * (`initGatewayActorKey`, called at gateway boot by boot/mcp-mounts.js). Nothing is written to disk
- * except what the child needs: in fd delivery (`mcp-delivery.mjs`) not even that, and in file mode the
- * one-server `<world>/.mcp.json` which is removed in the turn's `finally`.
+ * for it: the turn's MCP config reaches pi on the fd (mcp-delivery.mjs), and a host that resolves to
+ * the file mode is refused here, before a token exists, and again by the bridge before anything is
+ * spawned (`delivery_unsupported`), so the token never lands in a `.mcp.json`.
  *
  * The prompt carries the person's own words and nothing else from the mailbox: the thread and the
  * comments are read by the turn's own tools, as untrusted data, and the prompt says so.
  *
- * `deps` is the injection seam (`handleInbound`, `loadBot`, `loadProjectSpace`, `crowHome`, `now`,
- * `setTimeout`, `log`), so a test drives a whole turn without a pi process.
+ * `deps` is the injection seam (`handleInbound`, `loadBot`, `crowHome`, `now`, `setTimeout`, `log`), so
+ * a test drives a whole turn without a pi process.
  */
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
 import { getDraft } from "./store.js";
 import { mintTurnToken, revokeTurnToken, TURN_TOKEN_MARGIN_MS } from "./turn-token.js";
-import { DRAFTING_TURN_TOOLS, mailDraftBlock } from "../../../../scripts/pi-bots/mcp_writer.mjs";
-import { worldRootFor } from "../../../../scripts/pi-bots/world-root.mjs";
+import {
+  DRAFTING_TURN_TOOLS, MAIL_DRAFT_TURNS_DIRNAME, isMailDraftDirSegment, mailDraftBlock, mailDraftTurnDir,
+} from "../../../../scripts/pi-bots/mcp_writer.mjs";
 import { isCloudKey, isRoleRef } from "../../../shared/model-roles.js";
+import { mcpConfigDelivery } from "../../../../scripts/pi-bots/mcp-delivery.mjs";
 import { providerRowToObject } from "../../../shared/provider-row.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
+import { readSetting } from "../../dashboard/settings/registry.js";
 
 /** The `dashboard_settings` key the owner's cloud-drafting switch lives under (default off). */
 export const CLOUD_DRAFTING_SETTING = "mail.cloud_drafting";
@@ -48,8 +53,13 @@ const TURN_STATES = Object.freeze(["draft", "failed", "missed"]);
 /** The `gateway_thread_id` a drafting turn records its `bot_sessions` row under. */
 export const TURN_THREAD_PREFIX = "mail-draft:";
 
-/** The folder under a bot's world root that holds one directory per drafting turn. */
-export const DRAFT_TURNS_DIRNAME = "mail-drafts";
+/**
+ * The folder under `<CROW_HOME>` that holds one directory per bot, then one per drafting turn.
+ *
+ * NOT under a bot's world root: a bot can write its own world, so a directory there could be replaced
+ * by a symlink pointing anywhere and this module's mkdir/rm would then act outside it.
+ */
+export const DRAFT_TURNS_DIRNAME = MAIL_DRAFT_TURNS_DIRNAME;
 
 /** How long a drafting turn's session dir is kept after the turn ends (a day). */
 export const DRAFT_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -149,8 +159,12 @@ function providerForLocality(row) {
 
 /**
  * The two things `allowDraftModel` reads, from this instance: the owner's cloud-drafting switch and the
- * provider rows. Never throws: an unreadable setting is "off" and no rows prove nothing local, so the
- * gate fails closed.
+ * provider rows. The switch goes through `readSetting` (`dashboard/settings/registry.js`), so this
+ * instance's own override wins over the global row exactly as it does on the settings page. Never
+ * throws: an unreadable setting is "off" and no rows prove nothing local, so the gate fails closed.
+ *
+ * The key is local-only and deliberately absent from every sync allowlist: whether a box may send
+ * draft text to a cloud model is this box's decision, not a setting a paired peer may turn on.
  *
  * @param {object} db
  * @returns {Promise<{cloudDrafting: boolean, providers: object[]}>}
@@ -158,11 +172,7 @@ function providerForLocality(row) {
 export async function readDraftingSettings(db) {
   let cloudDrafting = false;
   try {
-    const { rows } = await db.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = ?",
-      args: [CLOUD_DRAFTING_SETTING],
-    });
-    cloudDrafting = truthySetting(rows[0]?.value);
+    cloudDrafting = truthySetting(await readSetting(db, CLOUD_DRAFTING_SETTING));
   } catch {
     cloudDrafting = false;
   }
@@ -177,7 +187,7 @@ export async function readDraftingSettings(db) {
 }
 
 /**
- * May this bot's model draft email? Plan 3's cloud gate (Q1: off until the owner switches it on), and
+ * May THIS model key draft email? Plan 3's cloud gate (Q1: off until the owner switches it on), and
  * the account's own `local_models_only` (which nothing overrides).
  *
  * "Local" is the codebase's one notion (`isCloudKey`, servers/shared/model-roles.js): the provider row's
@@ -185,62 +195,137 @@ export async function readDraftingSettings(db) {
  * cloud — a role ref, a provider with no row, a public or unresolvable host — because the cost of
  * being wrong is a person's mail leaving the machine.
  *
- * @param {object} botDef `pi_bot_defs.definition`, parsed
+ * @param {string|null|undefined} modelKey a resolved `provider/model` key
  * @param {{localModelsOnly?: boolean}|null} account the draft's account
  * @param {{cloudDrafting?: boolean, providers?: object[]}} settings `readDraftingSettings(db)`
  * @returns {{ok: true, local: boolean, key: string|null}|{ok: false, code: string, key: string|null}}
  *   `cloud_drafting_off` (the owner switch is off) or `local_models_only` (the account forbids it).
  */
+export function allowDraftModelKey(modelKey, account, settings = {}) {
+  const key = typeof modelKey === "string" ? modelKey.trim() : "";
+  const trimmed = key || null;
+  const local = !!trimmed
+    && !isRoleRef(trimmed)
+    && isCloudKey(trimmed, { providers: Array.isArray(settings.providers) ? settings.providers : [] }) === false;
+  if (local) return { ok: true, local: true, key: trimmed };
+  if (account && account.localModelsOnly === true) return { ok: false, code: "local_models_only", key: trimmed };
+  if (settings.cloudDrafting === true) return { ok: true, local: false, key: trimmed };
+  return { ok: false, code: "cloud_drafting_off", key: trimmed };
+}
+
+/**
+ * May this bot's model draft email? The check before a turn is launched, over the model the bot's
+ * def names; `allowDraftModelKey` is the rule, shared with the check the bridge runs on the model it
+ * actually resolved (so `!escalate`, or a role that resolves elsewhere, cannot slip past it).
+ *
+ * @param {object} botDef `pi_bot_defs.definition`, parsed
+ * @returns {{ok: true, local: boolean, key: string|null}|{ok: false, code: string, key: string|null}}
+ */
 export function allowDraftModel(botDef, account, settings = {}) {
-  const key = typeof botDef?.models?.default === "string" ? botDef.models.default.trim() : "";
-  const modelKey = key || null;
-  const local = !!modelKey
-    && !isRoleRef(modelKey)
-    && isCloudKey(modelKey, { providers: Array.isArray(settings.providers) ? settings.providers : [] }) === false;
-  if (local) return { ok: true, local: true, key: modelKey };
-  if (account && account.localModelsOnly === true) return { ok: false, code: "local_models_only", key: modelKey };
-  if (settings.cloudDrafting === true) return { ok: true, local: false, key: modelKey };
-  return { ok: false, code: "cloud_drafting_off", key: modelKey };
+  return allowDraftModelKey(botDef?.models?.default, account, settings);
 }
 
 /* ---------------------------------------------------------------------- session dirs */
+
+/**
+ * `<CROW_HOME>/mail-draft-turns` is NOT under a bot-writable root, but a planted link is still the one
+ * way this module's mkdir/rm/write could act outside it. Every step below therefore (a) refuses a
+ * symlink rather than reasoning about one, and (b) requires `realpath(dir)` to be the path this module
+ * built itself — which also catches a link planted on any ancestor between the home and the turn.
+ */
+function dirRefusal() {
+  return refusal("turn_dir");
+}
+
+function assertPlainDir(dir) {
+  let st;
+  try { st = lstatSync(dir); } catch { throw dirRefusal(); }
+  if (st.isSymbolicLink() || !st.isDirectory()) throw dirRefusal();
+  let real;
+  try { real = realpathSync(dir); } catch { throw dirRefusal(); }
+  if (real !== dir) throw dirRefusal();
+  return real;
+}
+
+function makeDir(dir) {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    // EEXIST: whatever is there is judged by assertPlainDir below, not by mkdir.
+    if (!err || err.code !== "EEXIST") throw dirRefusal();
+  }
+  return dir;
+}
+
+/**
+ * Create (mode 0700) and verify this turn's own world root: `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`.
+ * The home itself may be a symlink (a Crow home linked onto another disk is a supported layout), so it
+ * is realpath'd first; every directory below it must be exactly the path built here.
+ *
+ * @param {string} crowHome this instance's home
+ * @param {string} botId the bot the turn runs as
+ * @param {string} draftId the draft the turn is for
+ * @returns {{sessionDir: string, turnsRoot: string}} absolute, symlink-free paths
+ */
+export function prepareDraftTurnDir(crowHome, botId, draftId) {
+  const expected = mailDraftTurnDir(crowHome, botId, draftId);
+  if (!expected) throw new MailError("BAD_INPUT", "draft_turn_dir");
+  makeDir(String(crowHome));
+  let homeReal;
+  try { homeReal = realpathSync(String(crowHome)); } catch { throw dirRefusal(); }
+  const base = assertPlainDir(makeDir(join(homeReal, DRAFT_TURNS_DIRNAME)));
+  const turnsRoot = assertPlainDir(makeDir(join(base, botId)));
+  const sessionDir = join(turnsRoot, draftId);
+  makeDir(join(sessionDir, "sessions"));
+  assertPlainDir(sessionDir);
+  return { sessionDir, turnsRoot };
+}
 
 /** Forget the `bot_sessions` row of a drafting thread whose session dir just went away.
  *
  * The row is what makes the NEXT turn of the same draft resume this one (its `pi_session_id`), and it
  * names a transcript inside the dir being deleted. Left behind, a turn a day later would resume a
- * session whose files are gone; forgetting it starts that turn fresh, which is the honest state. Best
- * effort: a row that cannot be deleted never fails a turn.
+ * session whose files are gone; forgetting it starts that turn fresh, which is the honest state. The
+ * bot id is part of the key: a thread id is `mail-draft:<draftId>`, and one bot's sweep must not
+ * delete another bot's row for the same draft. Best effort: a row that cannot be deleted never fails
+ * a turn.
  */
-async function forgetTurnRows(db, draftId) {
+async function forgetTurnRows(db, draftId, botId) {
   try {
     await db.execute({
-      sql: "DELETE FROM bot_sessions WHERE gateway_thread_id = ?",
-      args: [TURN_THREAD_PREFIX + draftId],
+      sql: "DELETE FROM bot_sessions WHERE gateway_thread_id = ? AND bot_id = ?",
+      args: [TURN_THREAD_PREFIX + draftId, botId],
     });
   } catch { /* best effort */ }
 }
 
 /** Remove turn dirs under `turnsRoot` older than the retention window, with their session rows. */
-async function sweepTurnDirs(db, turnsRoot, now) {
+async function sweepTurnDirs(db, turnsRoot, botId, now) {
   let names;
   try { names = readdirSync(turnsRoot); } catch { return; }
   for (const name of names) {
     const dir = join(turnsRoot, name);
-    let stat;
-    try { stat = statSync(dir); } catch { continue; }
-    if (!stat.isDirectory()) continue;
-    if (Number(now) - stat.mtimeMs < DRAFT_SESSION_RETENTION_MS) continue;
+    // lstat, never stat: an entry that is a symlink is refused rather than followed out of the tree.
+    let st;
+    try { st = lstatSync(dir); } catch { continue; }
+    if (st.isSymbolicLink() || !st.isDirectory()) continue;
+    if (Number(now) - st.mtimeMs < DRAFT_SESSION_RETENTION_MS) continue;
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* the next sweep retries */ }
-    await forgetTurnRows(db, name);
+    await forgetTurnRows(db, name, botId);
   }
 }
 
 /** Delete one turn's session dir `ms` from now, on an unref'd timer so it never holds the process. */
-function scheduleTurnDirRemoval(db, dir, draftId, setTimeoutFn) {
+function scheduleTurnDirRemoval(db, dir, draftId, botId, setTimeoutFn) {
   const timer = setTimeoutFn(() => {
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
-    forgetTurnRows(db, draftId);
+    // The same rule as the sweep: a link planted where the dir was is never followed.
+    try {
+      const st = lstatSync(dir);
+      if (!st.isSymbolicLink() && st.isDirectory() && realpathSync(dir) === dir) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    } catch { /* already gone */ }
+    forgetTurnRows(db, draftId, botId);
   }, DRAFT_SESSION_RETENTION_MS);
   if (timer && typeof timer.unref === "function") timer.unref();
   return timer;
@@ -256,15 +341,13 @@ async function resolveDeps(deps = {}) {
   const out = {
     handleInbound: deps.handleInbound,
     loadBot: deps.loadBot,
-    loadProjectSpace: deps.loadProjectSpace,
     crowHome: deps.crowHome,
     setTimeout: typeof deps.setTimeout === "function" ? deps.setTimeout : setTimeout,
   };
-  if (typeof out.handleInbound !== "function" || typeof out.loadBot !== "function" || typeof out.loadProjectSpace !== "function") {
+  if (typeof out.handleInbound !== "function" || typeof out.loadBot !== "function") {
     const bridge = await import("../../../../scripts/pi-bots/bridge.mjs");
     if (typeof out.handleInbound !== "function") out.handleInbound = bridge.handleInbound;
     if (typeof out.loadBot !== "function") out.loadBot = bridge.loadBot;
-    if (typeof out.loadProjectSpace !== "function") out.loadProjectSpace = bridge.loadProjectSpace;
   }
   if (typeof out.crowHome !== "function") {
     if (typeof deps.crowHome === "string" && deps.crowHome) {
@@ -291,21 +374,29 @@ export function _draftingTurnsInFlightForTests() {
  * Start one drafting turn for `draftId`, and answer as soon as it is launched.
  *
  * The turn itself runs detached: its failures are caught and logged as a code (never a message, never
- * a recipient), and its `finally` revokes the token, removes the per-turn config file and schedules the
- * session dir for deletion. That `finally` is the whole credential story — success, error and timeout
- * all leave the same state: no live token, no config on disk, a dir that dies within a day.
+ * a recipient), and its `finally` revokes the token and schedules the session dir for deletion. That
+ * `finally` is the whole credential story — success, error and timeout all leave the same state: no
+ * live token, nothing of the turn's config on disk, a dir that dies within a day. A host whose MCP
+ * config delivery is the file mode never gets that far: this function refuses it before a token is
+ * minted (`delivery_unsupported`, resolved with the same helper the bridge uses for
+ * `world.mcpDelivery`), and the bridge's own check is the second fence.
  *
  * @param {object} db the libsql-style client (`db.execute({sql,args})`)
- * @param {{handleInbound?: Function, loadBot?: Function, loadProjectSpace?: Function,
+ * @param {{handleInbound?: Function, loadBot?: Function,
  *   crowHome?: string|Function, now?: Function, setTimeout?: Function, log?: Function}} [deps]
  * @param {{draftId: string, botId?: string, instruction: string, reviseFrom?: string|null}} args
  *   `botId` is the bot the person asked for; absent, the draft's own bot runs the turn
  * @returns {Promise<{turnId: string}>}
  * @throws {MailError} NOT_FOUND (no such draft or account), BAD_INPUT (no bot on the draft, no
- *   instruction), or a MailError-shaped refusal with code `frozen`, `cloud_drafting_off` or
- *   `local_models_only`.
+ *   instruction), or a MailError-shaped refusal with code `delivery_unsupported` (this host delivers
+ *   bot MCP configs as files), `frozen`, `cloud_drafting_off` or `local_models_only`.
  */
 export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, instruction, reviseFrom = null } = {}) {
+  // A drafting turn is fd-only: its one server block carries the turn's live `mdt_` token, and the
+  // file mode would write that token to `<world>/.mcp.json`. Refused here, on the same helper the
+  // bridge resolves `world.mcpDelivery` with, before a bot is loaded and before a token is minted —
+  // the bridge's own refusal stays as the second fence.
+  if (mcpConfigDelivery() === "file") throw refusal("delivery_unsupported");
   const clock = typeof deps.now === "function" ? deps.now : () => Number(deps.now ?? Date.now());
   const log = typeof deps.log === "function" ? deps.log : (code) => console.warn("[mail-draft] " + code);
 
@@ -323,9 +414,12 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
   if (!account) throw new MailError("NOT_FOUND", "account");
 
   const resolved = await resolveDeps(deps);
+  // Both halves of the turn's own directory are ONE path segment (mcp_writer.mjs's rule), so neither
+  // a `/` nor a `..` can point it anywhere else. Checked before a bot is loaded, a token is minted or
+  // a directory is created.
+  if (!isMailDraftDirSegment(turnBotId) || !isMailDraftDirSegment(draft.id)) throw new MailError("BAD_INPUT", "draft_turn_dir");
   // loadBot's own contract: an unknown or disabled bot throws rather than turning a turn.
   const bot = await resolved.loadBot(turnBotId);
-  const projectSpace = bot.project_id == null ? null : await resolved.loadProjectSpace(bot.project_id);
 
   // The cloud gate first, before a token exists or anything is written.
   const settings = await readDraftingSettings(db);
@@ -333,18 +427,12 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
   if (!verdict.ok) throw refusal(verdict.code);
 
   const turnId = TURN_ID_PREFIX + randomBytes(8).toString("hex");
-  const botRoot = worldRootFor({
-    workspaceDir: projectSpace?.workspace_dir ?? null,
-    def: bot.def || {},
-    crowHome: resolved.crowHome(),
-    botId: turnBotId,
-  });
-  const turnsRoot = join(botRoot, DRAFT_TURNS_DIRNAME);
-  const sessionDir = join(turnsRoot, draft.id);
-  mkdirSync(join(sessionDir, "sessions"), { recursive: true });
+  // The turn's own world root, under THIS instance's home and outside every bot-writable root.
+  // prepareDraftTurnDir creates it (mode 0700) and refuses a symlink on the way.
+  const { sessionDir, turnsRoot } = prepareDraftTurnDir(resolved.crowHome(), turnBotId, draft.id);
   // A sweep on every turn start: a turn that ended while this process was down, or whose scheduled
   // timer died with its process, still leaves nothing behind after a day.
-  await sweepTurnDirs(db, turnsRoot, Number(clock()));
+  await sweepTurnDirs(db, turnsRoot, turnBotId, Number(clock()));
 
   const token = mintTurnToken({
     draftId: draft.id,
@@ -365,7 +453,6 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
     throw err;
   }
 
-  const configPath = join(sessionDir, ".mcp.json");
   const prompt = draftingTurnPrompt({ instruction: words, reviseFrom: revised });
   const run = (async () => {
     try {
@@ -378,15 +465,22 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
         // The reply is discarded: only `mail_draft_propose` writes anything, and a sentence the model
         // wrote must never be mistaken for the person's own words (the relay contract in crow.md).
         sendReply: async () => { log("reply_discarded"); },
-        draftingTurn: { exactTools: [...DRAFTING_TURN_TOOLS], mcpBlock, sessionDir },
+        draftingTurn: {
+          exactTools: [...DRAFTING_TURN_TOOLS],
+          mcpBlock,
+          sessionDir,
+          // The bridge runs this on the model `handleInbound` actually resolved, after resolution and
+          // before warmModel/spawn: `!escalate` in the person's text (or a role that resolves
+          // elsewhere) must not reach a cloud model, and a local-only account is not negotiable.
+          checkModel: (resolvedModel) => allowDraftModelKey(resolvedModel?.key, account, settings),
+        },
         log,
       });
     } catch (err) {
       log("turn_error:" + codeOf(err));
     } finally {
       revokeTurnToken(token);
-      try { rmSync(configPath, { force: true }); } catch { /* never written, or already gone */ }
-      scheduleTurnDirRemoval(db, sessionDir, draft.id, resolved.setTimeout);
+      scheduleTurnDirRemoval(db, sessionDir, draft.id, turnBotId, resolved.setTimeout);
       turnsInFlight.delete(run);
     }
   })();

@@ -580,6 +580,25 @@ test("a drafting turn's refusals answer by their own code", async () => {
   }
 });
 
+test("a turn refused for a file-mode MCP config answers 503 with the code alone", async () => {
+  // A drafting turn is fd-only: on a host that delivers bot MCP configs as files, the bridge refuses
+  // the turn before it spawns anything. The route says so by code; the card owns the sentence.
+  const s = await setup({
+    turn: async () => {
+      const err = new Error("delivery_unsupported");
+      err.name = "MailError";
+      err.code = "delivery_unsupported";
+      throw err;
+    },
+  });
+  const draft = await newDraft(s);
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/turn`, {
+    body: { botId: "bot-1", instruction: "tighten the second line" },
+  });
+  assert.equal(res.status, 503, res.text);
+  assert.deepEqual(res.json, { error: "delivery_unsupported" }, "no message text rides along");
+});
+
 test("schedule takes zone-qualified text only, and a number is bad input", async () => {
   const s = await setup();
   const draft = await newDraft(s);

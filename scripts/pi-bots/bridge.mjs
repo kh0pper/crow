@@ -68,9 +68,9 @@ import { betterSqliteDb, isDraftTool, recordDrafts, redactMcpConfig } from "../.
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { createEgressRelay } from "./pi_egress.mjs";
 import { effectiveReadPaths } from "./bot-read-paths.mjs";
-import { MCP_CONFIG_FD } from "./mcp-delivery.mjs";
+import { MCP_CONFIG_FD, mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { botSessionEnv } from "./actor-env.mjs";
-import { impliedServers, DRAFTING_TURN_TOOLS, MAIL_DRAFT_SERVER, isDraftingTurnTools } from "./mcp_writer.mjs";
+import { impliedServers, DRAFTING_TURN_TOOLS, isDraftingTurnTools, draftingTurnMcpConfig, mailDraftTurnDir } from "./mcp_writer.mjs";
 import { SECRETS_SERVER } from "./crow-server-catalog.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -775,7 +775,14 @@ export class PiRpc {
     // policy above). Strip anything that looks like an engine-reserved key
     // before merging; every other spawn_env key still passes through
     // unchanged.
-    const { spawnEnv, stripped: strippedSpawnEnv } = filterSpawnEnvWithReport(def);
+    //
+    // A DRAFTING TURN GETS NO def.spawn_env AT ALL (Crow Mail plan 3, Task 8b): the def was written
+    // for a chat bot the owner talks to, and this child reads a person's mail and writes a revision.
+    // Nothing a def asks for is worth handing it, so the skip is total rather than a filtered subset.
+    const draftingSpawn = opts.draftingSpawn === true;
+    const { spawnEnv, stripped: strippedSpawnEnv } = draftingSpawn
+      ? { spawnEnv: {}, stripped: [] }
+      : filterSpawnEnvWithReport(def);
     if (strippedSpawnEnv.length) {
       console.error("[pi-bots] stripped engine-reserved spawn_env keys from bot def: " + strippedSpawnEnv.join(", "));
     }
@@ -1233,7 +1240,10 @@ export class PiRpc {
     // value here would hand the owner's connected-account secret, in plain
     // text, to pi processes running turns the owner did not start: that breaks
     // "only my own turns" (connections reach only the owner's own turns).
-    const valuesPayload = hidden && piLabSupportsSecretValuesFd() ? secretValuesPayload(getCardValues()) : null;
+    //
+    // A drafting turn gets NO card set: it has one credential (its own turn token, in its MCP block)
+    // and must not be able to spend an approval-card secret on a turn no person started.
+    const valuesPayload = !draftingSpawn && hidden && piLabSupportsSecretValuesFd() ? secretValuesPayload(getCardValues()) : null;
     if (valuesPayload != null) launch.env.PI_BOT_SECRET_VALUES_FD = String(SECRET_VALUES_FD);
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
@@ -1907,12 +1917,16 @@ async function recordStagedDrafts({ calls, mcpConfig, log, session, threadId, bo
  *   - `exactTools` is an array whose sorted contents are exactly DRAFTING_TURN_TOOLS (mcp_writer.mjs);
  *   - `mcpBlock` is this box's own `/mail-draft/mcp` with a `mdt_` bearer and a `mail-draft` actor
  *     signature — a url block with headers and nothing else;
- *   - `sessionDir` is the turn's own absolute world root (`<sessionDir>/mail-drafts/<draftId>`), so a
- *     chat thread of the same bot can never resume this turn.
+ *   - `checkModel` is the model gate, run below on the model the resolver actually produced;
+ *   - `sessionDir` is EXACTLY `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>` (mcp_writer.mjs's
+ *     `mailDraftTurnDir`), under this instance's home and outside every bot-writable world root, so a
+ *     chat thread of the same bot can never resume this turn and a bot cannot plant its config path.
+ *     An absolute path is not enough: the whole point is that this one path, and no other.
  * The caller builds the block (mcp_writer.mjs `mailDraftBlock`) in the process that minted the token
  * and holds the actor key; a key-less bot host must not start a drafting turn at all.
  *
- * @returns {{exactTools: string[], mcpBlock: {url: string, headers: Record<string, string>}, sessionDir: string}|null}
+ * @returns {{exactTools: string[], mcpBlock: {url: string, headers: Record<string, string>},
+ *   sessionDir: string, checkModel: Function}|null}
  */
 function draftingTurnOf(opts) {
   if (!Object.hasOwn(opts, "draftingTurn") || opts.draftingTurn == null) return null;
@@ -1920,6 +1934,7 @@ function draftingTurnOf(opts) {
   const value = opts.draftingTurn;
   if (typeof value !== "object" || Array.isArray(value)) refuse("not an object");
   if (!isDraftingTurnTools(value.exactTools)) refuse("exactTools is not the drafting tool set");
+  if (typeof value.checkModel !== "function") refuse("no model check");
   const block = value.mcpBlock;
   if (!block || typeof block !== "object" || Array.isArray(block)) refuse("no mcpBlock");
   for (const key of Object.keys(block)) if (key !== "url" && key !== "headers") refuse("the block carries " + key);
@@ -1936,13 +1951,58 @@ function draftingTurnOf(opts) {
   if (typeof headers["X-Crow-Actor-Sig"] !== "string" || !/^[0-9a-f]{64}$/.test(headers["X-Crow-Actor-Sig"])) {
     refuse("the block carries no actor signature");
   }
+  // The block's actor IS the bot this turn runs as: the dir below is keyed on it, so a mismatch would
+  // let one bot's turn run in another bot's folder.
+  if (opts.bot_id !== headers["X-Crow-Actor-Id"]) refuse("the block's actor is not the bot of this turn");
+  const thread = typeof opts.gateway_thread_id === "string" ? opts.gateway_thread_id : "";
+  const threadPrefix = "mail-draft:";
+  if (!thread.startsWith(threadPrefix)) refuse("the thread is not a drafting thread");
+  const expected = mailDraftTurnDir(resolveCrowHome(), headers["X-Crow-Actor-Id"], thread.slice(threadPrefix.length));
+  if (!expected) refuse("the thread names no draft");
   const sessionDir = value.sessionDir == null ? "" : String(value.sessionDir);
-  if (!sessionDir.startsWith("/")) refuse("it needs an absolute sessionDir");
+  // String equality, not resolve(): a path that only normalises to the expected one ("…/x/..")
+  // is not the expected one.
+  if (sessionDir !== expected) refuse("the session dir is not <CROW_HOME>/mail-draft-turns/<botId>/<draftId>");
   return {
     exactTools: [...DRAFTING_TURN_TOOLS],
     mcpBlock: { url: block.url, headers: { ...headers } },
     sessionDir,
+    checkModel: value.checkModel,
   };
+}
+
+/**
+ * A drafting turn's world root, verified before anything is created or written in it: a real
+ * directory whose real path is the path itself. `sessionDir` was already checked to be the expected
+ * `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`; this refuses a link planted AT it, or on any
+ * ancestor between the home and it.
+ */
+function ensureDraftingWorldDir(dir) {
+  const refuse = () => { throw new Error("draftingTurn refused: the session dir is a symlink or not its real path"); };
+  try { mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch (err) { if (!err || err.code !== "EEXIST") throw err; }
+  let st;
+  try { st = lstatSync(dir); } catch { refuse(); }
+  if (st.isSymbolicLink() || !st.isDirectory()) refuse();
+  if (realpathSync(dir) !== dir) refuse();
+  return dir;
+}
+
+/**
+ * Refuse a drafting turn on a host whose MCP config delivery is not the fd (mcp-delivery.mjs).
+ *
+ * A drafting turn's single server block carries the turn's live `mdt_` token. The `file` mode writes
+ * a config to `<world>/.mcp.json`, which would put that token on disk for the length of the turn;
+ * the fd mode is the only one a drafting turn may run in. Thrown before `buildBotWorld` writes
+ * anything and before anything is spawned, so a file-mode host cannot run a drafting turn at all.
+ *
+ * The error is MailError-shaped with the code `delivery_unsupported`, which is what the caller and the
+ * owner route switch on; the caller's `finally` revokes the token it minted for this attempt.
+ */
+function refuseFileModeDelivery() {
+  const err = new Error("delivery_unsupported");
+  err.name = "MailError";
+  err.code = "delivery_unsupported";
+  return err;
 }
 
 export async function handleInbound(opts) {
@@ -1972,6 +2032,10 @@ export async function handleInbound(opts) {
   // Crow Mail's drafting turn (plan 3, Task 8b): validated here, before buildBotWorld writes a config
   // or anything is spawned, so a malformed option can never reach a child half-applied.
   const drafting = draftingTurnOf(opts);
+  // A drafting turn is fd-only: its server block carries the turn's live token, and the file mode
+  // would write that token to `<world>/.mcp.json`. Refused here, ahead of buildBotWorld's own config
+  // write and of the spawn.
+  if (drafting !== null && mcpConfigDelivery() === "file") throw refuseFileModeDelivery();
   let evalMcp = null;
   if (mcpOverridesOpt !== undefined && mcpOverridesOpt !== null) {
     const guard = await import("../lib/eval-guard.mjs");
@@ -1986,7 +2050,13 @@ export async function handleInbound(opts) {
   // Phase 3.0 (R4): operator-driven escalation via a bounded, inbound-only
   // `!escalate` token. Detect on the RAW inbound, then strip it so it never
   // reaches the model prompt or persists in the pi session transcript.
-  const escalate = escalateRequested(user_message);
+  //
+  // A DRAFTING TURN NEVER ESCALATES (Crow Mail plan 3, Task 8b): its prompt carries a person's own
+  // instruction, so a `!escalate` in their words (or injected into a comment they paste) would move
+  // mail text onto a cloud model the account may forbid. Escalation is forced off here, and the
+  // model that IS resolved is checked against the drafting gate further below. The token is still
+  // stripped, so it cannot reach the prompt either way.
+  const escalate = drafting === null ? escalateRequested(user_message) : false;
   const cleanMsg = stripEscalateToken(user_message);
   // C-11 Phase A — identity. This is the code that used to be inline here,
   // moved verbatim into bot-world.mjs: loadBot → crowHome → project space +
@@ -2005,12 +2075,14 @@ export async function handleInbound(opts) {
     jobId: opts.job_id || null,
   });
   // A drafting turn runs in its OWN world root, handed in by the caller
-  // (`<sessionDir>/mail-drafts/<draftId>`): pi's --session-dir, the world root and the per-turn
-  // .mcp.json all move with it, so a chat thread of the same bot neither resumes this turn nor shares
-  // its config. Set before the destructuring below, which every later use follows.
+  // (`<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`, checked against that one path in
+  // draftingTurnOf): pi's --session-dir, the world root and the per-turn .mcp.json all move with it, so
+  // a chat thread of the same bot neither resumes this turn nor shares its config. Set before the
+  // destructuring below, which every later use follows. The dir is verified (a real directory, not a
+  // symlink, and its own real path) before anything is created in it.
   if (drafting !== null) {
-    world.sessionDir = drafting.sessionDir;
-    mkdirSync(join(world.sessionDir, "sessions"), { recursive: true });
+    world.sessionDir = ensureDraftingWorldDir(drafting.sessionDir);
+    mkdirSync(join(world.sessionDir, "sessions"), { recursive: true, mode: 0o700 });
   }
   const def = world.def;
   const crowHome = world.crowHome;
@@ -2079,10 +2151,32 @@ export async function handleInbound(opts) {
   }
   const resolved = spawnPrep.resolved;
 
+  // A DRAFTING TURN'S MODEL GATE (Crow Mail plan 3, Task 8b): the model `prepareSpawn` actually
+  // produced — not the bot def's default, which escalation or a role could have moved — must pass the
+  // same rule turn.js used to admit the turn. Run here, after resolution and BEFORE warmModel, the
+  // tool-budget refusal and the spawn, so a refused model costs nothing and starts nothing. The
+  // refusal names a code only: never the prompt, never a person's words.
+  if (drafting !== null) {
+    let verdict = null;
+    try { verdict = drafting.checkModel(resolved); } catch { verdict = null; }
+    if (!verdict || verdict.ok !== true) {
+      const code = verdict && typeof verdict.code === "string" && /^[a-z_]{1,40}$/.test(verdict.code)
+        ? verdict.code : "model_refused";
+      log("drafting turn refused: model not allowed (" + code + ")");
+      appendAuditBridge(projectId, {
+        actor_type: "bot", actor_id: bot_id, action: "bot.error",
+        target: "thread:" + gateway_thread_id,
+        payload: { error: "drafting model refused", code, model: resolved.key },
+      });
+      return { action: "error", error: "drafting model not allowed: " + code };
+    }
+  }
+
   // The same csv reaches the tool-budget preflight below AND the spawn (PiRpc reads opts.exactTools),
   // so the count and the child can never disagree about what a drafting turn may call.
   if (drafting !== null) {
-    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { exactTools: drafting.exactTools });
+    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts,
+      { exactTools: drafting.exactTools, draftingSpawn: true });
   }
 
   // Project services (Task 18): the owner's connected accounts, as labelled blocks, BEFORE the
@@ -2267,20 +2361,17 @@ export async function handleInbound(opts) {
     mcpOverridden = changed;
   }
 
-  // A drafting turn's config is exactly ONE server (Crow Mail plan 3, Task 8b): this box's
-  // `/mail-draft/mcp` with the turn's token and actor signature, and none of the bot's own servers,
-  // implied service blocks, satellites, extensions or remote blocks. Placed where the eval seam replaces
-  // the config (after bindWorldSession, before warmModel), so BOTH delivery modes carry it: fd mode
-  // pipes piRpcOpts.mcpConfig, and file mode reads the world .mcp.json written here — which the caller
-  // removes when the turn ends.
+  // A drafting turn's config is exactly ONE enabled server (Crow Mail plan 3, Task 8b): this box's
+  // `/mail-draft/mcp` with the turn's token and actor signature, and every name in the operator's
+  // global mcp.json disabled (pi-lab's mcp-client loads that file in both delivery modes). No bot
+  // server, implied service block, satellite, extension or remote block is enabled. Placed where the
+  // eval seam replaces the config (after bindWorldSession, before warmModel). A drafting turn only
+  // ever runs in fd mode (refused above), so this config reaches pi on MCP_CONFIG_FD and nothing of it
+  // is written anywhere.
   if (drafting !== null) {
-    const config = { mcpServers: { [MAIL_DRAFT_SERVER]: drafting.mcpBlock } };
+    const config = draftingTurnMcpConfig(drafting.mcpBlock);
     spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { mcpConfig: config });
     world.mcpConfig = config;
-    if (world.mcpDelivery === "file") {
-      mkdirSync(world.sessionDir, { recursive: true });
-      writeFileSync(join(world.sessionDir, ".mcp.json"), JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
-    }
   }
 
   // Warm the resolved model bundle before spawning pi (same as runJob). The

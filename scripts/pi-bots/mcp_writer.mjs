@@ -158,6 +158,36 @@ const MAIL_DRAFT_TURN_TOKEN_RE = /^mdt_[0-9a-f]{64}$/;
 const MAIL_DRAFT_ID_RE = /^[^\s:]+$/;
 
 /**
+ * The folder under `<CROW_HOME>` that holds a drafting turn's world roots: one directory per bot,
+ * then one per draft. It is NOT under a bot's world root, because a bot can write there.
+ */
+export const MAIL_DRAFT_TURNS_DIRNAME = "mail-draft-turns";
+
+/**
+ * One path segment of a drafting turn's own directory: a leading letter or digit (so `..` and a
+ * hidden name are refused) and then only characters that cannot be a separator. `/` and `\` are
+ * outside it by construction, so neither id can move the turn's world root anywhere else.
+ */
+export const MAIL_DRAFT_DIR_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** Is `value` usable as one half of `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`? */
+export function isMailDraftDirSegment(value) {
+  return typeof value === "string" && MAIL_DRAFT_DIR_SEGMENT_RE.test(value);
+}
+
+/**
+ * The ONE path a drafting turn's world root may be: `<CROW_HOME>/mail-draft-turns/<botId>/<draftId>`.
+ * `null` when either id cannot be one path segment or no home was resolved — the caller refuses.
+ * turn.js builds its dir with this and bridge.mjs checks the sessionDir it is handed against it, so
+ * the two cannot drift into two different paths.
+ */
+export function mailDraftTurnDir(crowHome, botId, draftId) {
+  if (typeof crowHome !== "string" || crowHome === "") return null;
+  if (!isMailDraftDirSegment(botId) || !isMailDraftDirSegment(draftId)) return null;
+  return join(crowHome, MAIL_DRAFT_TURNS_DIRNAME, botId, draftId);
+}
+
+/**
  * The `crow-mail-draft` block for one drafting turn: this instance's gateway, the turn's own bearer,
  * and the actor headers the mount verifies. The signature is made HERE, in this process — the same
  * way the board entry gets its own (crow-server-catalog.mjs) — so the caller must be a process that
@@ -192,6 +222,30 @@ export function mailDraftBlock({ botId, draftId, turnId, token, port } = {}) {
       "X-Crow-Actor-Sig": sig,
     },
   };
+}
+
+/**
+ * The WHOLE config a drafting turn hands pi: this box's `/mail-draft/mcp` and nothing else ACTIVE.
+ *
+ * pi-lab's mcp-client loads the operator's global `~/.pi/agent/mcp.json` in BOTH delivery modes, so a
+ * config that merely omits the operator's servers would still start every one of them as a child of
+ * a turn that must have exactly one server. A normal bot config answers that by disabling every
+ * unselected canonical name (buildBotMcp's closed-world pass); this one runs the same pass with an
+ * empty selection, so the only enabled block is the turn's own.
+ *
+ * @param {{url: string, headers: Record<string, string>}} block mailDraftBlock's result
+ * @returns {{mcpServers: Record<string, object>}}
+ */
+export function draftingTurnMcpConfig(block, { canonical, canonicalPath } = {}) {
+  if (!block || typeof block !== "object" || Array.isArray(block)) {
+    throw new TypeError("draftingTurnMcpConfig needs the turn's server block");
+  }
+  const canon = canonical || canonicalOrEmpty(canonicalPath);
+  const out = { mcpServers: {} };
+  forEachUnselectedServer(canon, new Set([MAIL_DRAFT_SERVER]), (name) => { out.mcpServers[name] = { disabled: true }; });
+  // Set last, so the turn's own server is enabled even if the global file happens to name it.
+  out.mcpServers[MAIL_DRAFT_SERVER] = { ...block };
+  return out;
 }
 
 // The gateway mounts that serve the project tools with a gateway token's authority: routes/mcp.js
@@ -384,6 +438,28 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
 }
 
 /**
+ * The closed-world pass both configs below make: every name in the canonical (global) file that this
+ * one does not select is offered to `fn`. pi-lab's mcp-client loads `~/.pi/agent/mcp.json` itself, in
+ * BOTH delivery modes, so a per-turn file that simply omits a server does not stop it from starting.
+ * Sorted, so a written config is diffable.
+ */
+function forEachUnselectedServer(canonical, selected, fn) {
+  for (const name of Object.keys((canonical && canonical.mcpServers) || {}).sort()) {
+    if (selected.has(name)) continue;
+    fn(name);
+  }
+}
+
+/** The canonical file's names, or none when there is no readable file (a fresh install has none). */
+function canonicalOrEmpty(canonicalPath) {
+  try {
+    return readCanonicalMcp(canonicalPath);
+  } catch {
+    return { mcpServers: {} };
+  }
+}
+
+/**
  * Build the per-bot `.mcp.json` object. CLOSED-WORLD — see the file header.
  *
  * Resolution order for a selected name:
@@ -490,11 +566,7 @@ export function buildBotMcp(def, canonical, opts = {}) {
   }
 
   // Closed-world. Sorted so the written file is diffable.
-  const selected = new Set(want);
-  for (const name of Object.keys(canonical.mcpServers).sort()) {
-    if (selected.has(name)) continue;
-    disable(name, null);
-  }
+  forEachUnselectedServer(canonical, new Set(want), (name) => disable(name, null));
 
   // A bot must never reach the project tools through a gateway mount (a gateway token is the owner).
   for (const name of [...active]) {

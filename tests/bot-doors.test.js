@@ -30,6 +30,8 @@ test("path spellings", () => {
     "/artifacts/upload/" + "0".repeat(64) + "?x=1",
     "/secrets/mcp",
     "/secrets/mcp?x=1",
+    "/mail-draft/mcp",
+    "/mail-draft/mcp?x=1",
     "/peer-relay/i/m/mcp",
     "/peer-relay/",
   ]) assert.equal(isDoorPath(p), true, p);
@@ -56,6 +58,8 @@ test("path spellings", () => {
     "/artifacts/upload-x/",
     "/artifacts/view/x",
     "/secrets/mcpx",
+    "/mail-draft/mcpx",
+    "/mail-draft",
     "/memory/mcp",
     "/dashboard",
     // any percent-escape at all, not only the traversal ones
@@ -71,7 +75,7 @@ test("path spellings", () => {
 
 test("the door list is exactly the doors the operator's ruling fixed, frozen", () => {
   assert.deepEqual([...BOT_DOOR_PREFIXES],
-    ["/llm/v1/", "/llm/p/", "/llm/c/", "/board/mcp", "/phone/mcp", "/artifacts/mcp", "/artifacts/upload/", "/secrets/mcp", "/peer-relay/"]);
+    ["/llm/v1/", "/llm/p/", "/llm/c/", "/board/mcp", "/phone/mcp", "/artifacts/mcp", "/artifacts/upload/", "/secrets/mcp", "/mail-draft/mcp", "/peer-relay/"]);
   assert.equal(Object.isFrozen(BOT_DOOR_PREFIXES), true);
   assert.equal(RELAY_SOURCE_V4, "127.0.77.1");
 });
