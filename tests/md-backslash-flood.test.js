@@ -48,6 +48,15 @@
 //     path and at 64 KB on the bot path, in a worker that is KILLED after 5 s
 //     (the failure mode is a hang, and a terminated worker fails the test
 //     instead of stalling the suite);
+//   - the same for the bypass the (1 + d) weight exists for: an escaped-
+//     punctuation body WRAPPED IN EMPHASIS renders well under a second at both
+//     caps — `"*a " × depth + body + " a*" × depth` at depths 50, 200 and 300,
+//     and a `> ` blockquote of 200–500 `*` around the same body. Measured on
+//     main before the weight: 1,043 ms (owner depth 50), 2–4.4 s (depth 200),
+//     2.8 s (depth 300), 1,163 ms (bot depth 200), 2,031 / 1,349 ms (the quoted
+//     star run), because marked re-runs its mask pass on the inner text of
+//     every emphasis level. A `\€` body is in there too: non-Latin-1 copies are
+//     UTF-16 and charged 4x (see punctMaskCost);
 //   - a flattened block shows its backslashes as text and drops nothing;
 //   - ordinary content with backslashes — Windows paths, UNC shares, escaped
 //     markdown, LaTeX-ish math, regexes in code spans — renders BYTE-IDENTICAL
@@ -171,6 +180,36 @@ const VARIANTS = [
   "a\\", // `\`+letter: no pair
 ];
 
+/** An escaped-punctuation body: one `\`+punctuation pair per 20 characters.
+ *  `unit` is `\`+`.`+18 letters by default; the `\€` spelling exercises the
+ *  non-Latin-1 weight (the same length — `€` is one UTF-16 code unit — but a
+ *  copy marked rebuilds as UTF-16). */
+const ESC_BODY_UNIT = "\\." + "a".repeat(18);
+const ESC_BODY_UNIT_EURO = "\\€" + "a".repeat(18);
+function escapeBody(len, unit = ESC_BODY_UNIT) {
+  return rep(unit, len);
+}
+
+/** `"*a " × depth + body + " a*" × depth` — `depth` levels of nested emphasis
+ *  around ONE escaped-punctuation body of `total` characters, i.e. one inline
+ *  block. marked's inlineTokens recurses into each level's inner text and re-runs
+ *  the punctuation mask pass there, which is the cost punctMaskCost's (1 + d)
+ *  weight prices. */
+function nestedEmphasis(depth, total) {
+  const prefix = "*a ".repeat(depth);
+  const suffix = " a*".repeat(depth);
+  return prefix + escapeBody(total - prefix.length - suffix.length) + suffix;
+}
+
+/** `> ***…x body x***…` — the same bypass inside ONE blockquote paragraph, whose
+ *  inline block is `stars` opening and `stars` closing asterisks around the
+ *  body. */
+function quotedStarFlood(stars, total) {
+  const prefix = "> " + "*".repeat(stars) + "x ";
+  const suffix = "x" + "*".repeat(stars);
+  return prefix + escapeBody(total - prefix.length - suffix.length) + suffix;
+}
+
 test("every backslash variant renders in < 500 ms at the owner cap and at the bot cap", async (t) => {
   const cases = [];
   for (const unit of VARIANTS) {
@@ -195,6 +234,68 @@ test("every backslash variant renders in < 500 ms at the owner cap and at the bo
       "and the cost is pairs x block length: see punctMaskCost in servers/blog/renderer.js.");
   }
   t.diagnostic(`worst render: ${worst.ms.toFixed(0)} ms — ${worst.what}`);
+});
+
+test("an escaped-punctuation body wrapped in nested emphasis is < 500 ms at both caps", async (t) => {
+  // The bypass punctMaskCost's (1 + d) weight closes: marked re-runs the mask
+  // pass on the inner text of EVERY emphasis level, and the body alone is under
+  // both the per-block cap and the document budget, so one price per pair let
+  // this family through (1,043 ms at depth 50, 2–4.4 s at depth 200, 2.8 s at
+  // depth 300 on the owner path; the 64 KB bot cap at depth 200: 1,163 ms;
+  // 2,031 / 1,349 ms for the quoted star run — measured on main). With the
+  // weight every case here measures 1–8 ms on the owner path and 1–3 ms on the
+  // bot path, plus 94 ms for the bot-cap `\€` body (under the cap even with the
+  // 4x weight, so still lexed): the 500 ms bound is 5x the worst of them.
+  const cases = [];
+  for (const depth of [50, 200, 300]) {
+    cases.push({ name: `nested emphasis, depth ${depth} @ owner 128 KB`, renderer: "owner", input: nestedEmphasis(depth, OWNER_MD_MAX_INPUT) });
+    cases.push({ name: `nested emphasis, depth ${depth} @ bot 64 KB`, renderer: "bot", input: nestedEmphasis(depth, BOT_MD_MAX_INPUT) });
+  }
+  for (const stars of [200, 500]) {
+    cases.push({ name: `blockquote of ${stars} \`*\` @ owner 128 KB`, renderer: "owner", input: quotedStarFlood(stars, OWNER_MD_MAX_INPUT) });
+    cases.push({ name: `blockquote of ${stars} \`*\` @ bot 64 KB`, renderer: "bot", input: quotedStarFlood(stars, BOT_MD_MAX_INPUT) });
+  }
+  // The non-Latin-1 weight (4x): the same body spelling its pairs `\€`, whose
+  // copies marked rebuilds as UTF-16.
+  cases.push({ name: "`\\€` body @ owner 128 KB", renderer: "owner", input: escapeBody(OWNER_MD_MAX_INPUT, ESC_BODY_UNIT_EURO) });
+  cases.push({ name: "`\\€` body @ bot 64 KB", renderer: "bot", input: escapeBody(BOT_MD_MAX_INPUT, ESC_BODY_UNIT_EURO) });
+  for (const c of cases) {
+    assert.equal(c.input.length, c.renderer === "bot" ? BOT_MD_MAX_INPUT : OWNER_MD_MAX_INPUT,
+      `${c.name}: fixture size`);
+  }
+  const timings = await renderInWorker(cases);
+  assert.equal(timings.length, cases.length, "the worker answered for every case");
+  let worst = { ms: 0, what: "nothing yet" };
+  for (const timing of timings) {
+    assert.ok(timing.length > 0, `${timing.name}: still rendered (never "")`);
+    if (timing.ms > worst.ms) worst = { ms: timing.ms, what: timing.name };
+    assert.ok(timing.ms < RENDER_CPU_BUDGET_MS,
+      `${timing.name} took ${timing.ms.toFixed(0)} ms of CPU (budget ${RENDER_CPU_BUDGET_MS} ms). ` +
+      "One price per pair was not enough: marked re-runs the punctuation mask pass on the " +
+      "inner text of every emphasis level, so the charge carries a (1 + d) weight (see " +
+      "punctMaskCost in servers/blog/renderer.js).");
+  }
+  t.diagnostic(`worst nested-emphasis render: ${worst.ms.toFixed(0)} ms — ${worst.what}`);
+});
+
+test("the nested-emphasis bypass is charged as the repeated mask pass it is, and shown as text", () => {
+  const src = nestedEmphasis(50, OWNER_MD_MAX_INPUT);
+  const html = renderMarkdown(src);
+  assert.ok(mdPunctMaskStats.maskFlattened > 0,
+    "the mask charge (with its (1 + d) weight) decided this block; without it the body was " +
+    "under both the per-block cap and the document budget, and marked copied it once per level");
+  assert.ok(mdPunctMaskStats.charged >= BOT_MD_SQ_BUDGET,
+    `the charge alone is a whole document budget (${mdPunctMaskStats.charged} attempts)`);
+  // Nothing dropped: the body's backslashes are on the page as text.
+  const text = html.replace(/<[^>]+>/g, "");
+  assert.ok(html.startsWith("<p>"), `the block is still a paragraph: ${html.slice(0, 80)}`);
+  assert.ok(text.includes("\\.aaaa"), "the escaped punctuation is still on screen");
+  assert.ok(text.length >= src.length, `every character is on the page (${text.length} of ${src.length})`);
+  // …and the same for the quoted star run, whose inline block is the quote's
+  // paragraph.
+  const quoted = quotedStarFlood(500, OWNER_MD_MAX_INPUT);
+  renderMarkdown(quoted);
+  assert.ok(mdPunctMaskStats.maskFlattened > 0, "the quoted star run was flattened by the mask charge");
 });
 
 test("the mask guard is what makes the run cheap, and it flattens that block", () => {
@@ -364,8 +465,11 @@ test("ordinary content with backslashes renders byte-identical to before the gua
     assert.equal(mdPunctMaskStats.flattened, 0, `${name}: nothing was flattened`);
     assert.equal(sha256(owner), ownerSha, `${name} (owner) must not change: ${owner.slice(0, 300)}`);
     // The guard saw this document and priced it as negligible: no escaped
-    // punctuation here is anywhere near MD_PUNCT_MASK_MAX.
-    assert.ok(ownerCharged < 1000,
+    // punctuation here is anywhere near MD_PUNCT_MASK_MAX. The bound is 1% of
+    // the document budget because the charge carries punctMaskCost's (1 + d)
+    // weight — a paragraph of paths and escapes pays up to ~11x its pair count
+    // — and this document measures ~5e3 attempts, 0.13% of the whole budget.
+    assert.ok(ownerCharged < BOT_MD_SQ_BUDGET / 100,
       `${name}: the mask charge is negligible (${ownerCharged} attempts of the whole budget)`);
 
     const bot = renderBotMarkdown(doc);

@@ -3150,20 +3150,51 @@ export const mdBrScanStats = { flattened: 0, brFlattened: 0, charged: 0 };
 // happens to be counted. At the owner cap that is 2.1 s of blocked event loop on
 // a PUBLIC page, so it is charged like the other four.
 //
+// ONE PRICE PER PAIR WAS NOT ENOUGH: marked does not run that pass once per
+// paragraph. inlineTokens RECURSES for the inner text of every emphasis,
+// strong and strikethrough level it opens, and each of those calls runs the
+// mask pass again on its own slice — which is the whole block minus a few
+// characters, for every level. So the real cost is pairs × length × the number
+// of levels a block's delimiters buy, and a block whose body sits just UNDER
+// both the per-block cap and the document budget was admitted and then copied
+// once per level. `"*a " × depth + body + " a*" × depth` with a `\.`+18-letters
+// body (one pair per 20 characters) is 131 KB with 100 delimiters at depth 50:
+// the body alone is 8.6e8 characters copied, under MD_PUNCT_MASK_MAX and 0.85
+// of the document budget, so it used to be lexed — 1,043 ms on the owner path
+// (depth 200: 2–4.4 s, depth 300: 2.8 s; the 64 KB bot cap at depth 200:
+// 1,163 ms). A `> ` blockquote of `***…x body x***…` with 200–500 `*` is the
+// same bypass against one blockquote paragraph: 2,031 ms owner, 1,349 ms bot.
+// Same on main. The charge is therefore multiplied by (1 + d), d being the
+// delimiter count this pre-pass already computes for its d² charge — real
+// prose has d of 0–10, so ordinary content pays 1–11x a number that is itself
+// orders of magnitude below the cap, while an escape flood wrapped in a hundred
+// delimiters is priced at the copies marked really makes and flattened.
+//
+// A block holding ANY non-Latin-1 character is charged 4x more on top: marked's
+// rebuilds are UTF-16 slices, and a `\€` flood measured ~10x slower per
+// character than `\.` — the copy, not the match, dominates. 4x is the
+// conservative side of that calibration: it prices the family without
+// flattening a non-ASCII escape in ordinary prose (a 128 KB prose block costs
+// a few dozen attempts of the 4e6 budget before the weight).
+//
 // The estimate is exact in shape — pairs × block length, which is what marked
-// copies — and computed in ONE linear pass (an `indexOf` walk over the block's
-// backslashes, an ASCII range test for the character after each one; the
-// Unicode fallback only runs outside ASCII). A block over MD_PUNCT_MASK_MAX, or
-// one the document budget cannot pay for, is flattened to escaped text exactly
-// like the others — its backslashes stay on screen, inert.
+// copies, times those two weights — and computed in ONE linear pass (an
+// `indexOf` walk over the block's backslashes, an ASCII range test for the
+// character after each one, plus one `\u00ff` test for a block that has a pair
+// at all; the Unicode fallback only runs outside ASCII). A block over
+// MD_PUNCT_MASK_MAX, or one the document budget cannot pay for, is flattened to
+// escaped text exactly like the others — its backslashes stay on screen, inert.
 //
 // Ordinary content is nowhere near it: the escape-sparse markdown in this
 // repository tops out at 355,608 (a 19.7 KB document with ~6 pairs), and the
 // pinned backslash documents in tests/md-backslash-flood.test.js (Windows
 // paths, escaped markdown, LaTeX-ish math, regexes in code spans) cost
-// 3,834–5,945,520 for 0.6–14 KB documents, two to five orders of magnitude below
-// the cap. (The block a document is split into matters: the cap is per INLINE
-// BLOCK, so a 128 KB chunk of escaped prose is priced at its own length.)
+// 3,834–5,945,520 unweighted for 0.6–14 KB documents, and the densest of them
+// charges 5,150 of the 4e6 budget attempts with both weights (0.13%) — real
+// prose has d of 0–10 and no non-Latin-1 weight, so the multiplier cannot move
+// it anywhere near the cap. (The block a document is split into matters: the
+// cap is per INLINE BLOCK, so a 128 KB chunk of escaped prose is priced at its
+// own length.)
 // ---------------------------------------------------------------------------
 
 /** `[\p{P}\p{S}]` — the Unicode category class marked's mask regex accepts
@@ -3171,6 +3202,11 @@ export const mdBrScanStats = { flattened: 0, brFlattened: 0, charged: 0 };
  *  consulted outside ASCII: the ASCII members are exactly the ranges
  *  isPunctOrSymbolAt tests. */
 const PUNCT_OR_SYMBOL = /[\p{P}\p{S}]/u;
+
+/** True for any character outside Latin-1. A block holding one is charged more
+ *  by punctMaskCost: marked's masked-string rebuilds are UTF-16 slices, so a
+ *  copy of `\€` moves twice the bytes of a copy of `\.`. */
+const NON_LATIN1 = /[^\u0000-\u00ff]/;
 
 /** True when `s[i]` is punctuation or a symbol, i.e. a character
  *  `/\\([\p{P}\p{S}])/gu` accepts after a backslash (see PUNCT_OR_SYMBOL).
@@ -3189,7 +3225,8 @@ function isPunctOrSymbolAt(s, i) {
 
 /**
  * What marked's punctuation MASK PASS will copy in `s` (see "THE PUNCTUATION
- * MASK PASS" above): `pairs × s.length`, in characters copied.
+ * MASK PASS" above), weighted the way marked really spends it:
+ * `pairs × s.length × (1 + delims) × (non-Latin-1 ? 4 : 1)`.
  *
  * `pairs` is counted the way the regex counts them — non-overlapping, left to
  * right, a backslash followed by a punctuation or symbol character — so a run of
@@ -3197,10 +3234,20 @@ function isPunctOrSymbolAt(s, i) {
  * rebuilds marked makes. One pass (`indexOf` per backslash), so it is linear in
  * the block whatever its shape, and 0 for a block with no backslash at all —
  * which is every ordinary document.
+ *
+ * `delims` is the block's delimiter count (countDelims, the same `d` the d²
+ * charge uses): marked RE-RUNS this pass for the inner text of every emphasis,
+ * strong and strikethrough level it opens, so a block's pair count is paid once
+ * per level its delimiters can nest — hence the (1 + d) multiplier, which is 1
+ * for prose with no delimiter and 11 for the busiest ordinary paragraph. A
+ * block with non-Latin-1 text costs 4x more per copy (UTF-16 slices; a `\€`
+ * flood measured ~10x per character, so 4x is the conservative side — see the
+ * calibration note in the header above).
  * @param {string} s one inline block's source
- * @returns {number} characters marked's mask pass would copy in it
+ * @param {number} delims the block's delimiter count (countDelims)
+ * @returns {number} characters marked's mask pass would copy in it, weighted
  */
-function punctMaskCost(s) {
+function punctMaskCost(s, delims) {
   const n = s.length;
   let pairs = 0;
   for (let i = s.indexOf("\\"); i !== -1 && i + 1 < n;) {
@@ -3211,16 +3258,21 @@ function punctMaskCost(s) {
       i = s.indexOf("\\", i + 1);
     }
   }
-  return pairs * n;
+  if (pairs === 0) return 0;
+  return pairs * n * (1 + delims) * (NON_LATIN1.test(s) ? 4 : 1);
 }
 
 /** The most the punctuation mask pass may copy for ONE inline block before that
- *  block is flattened instead of inline-lexed (see punctMaskCost). 1e9 characters
- *  is ~245 ms at the measured 0.25 ns per copied byte — in line with the ~200 ms
- *  worst chunk the other guards leave — and it is reached only by a block that is
- *  ~6% `\`+punctuation pairs (7,630 of them in a full 128 KB block): the
- *  pathological shapes above are 2.1e9 (64 KB) to 8.6e9 (128 KB), 2–9x over,
- *  while the densest legitimate document measured here is at 5.9e6, 170x under.
+ *  block is flattened instead of inline-lexed (see punctMaskCost). 1e9 WEIGHTED
+ *  characters is ~245 ms at the measured 0.25 ns per copied byte — in line with
+ *  the ~200 ms worst chunk the other guards leave — and it is reached only by a
+ *  block that is ~6% `\`+punctuation pairs (7,630 of them in a full 128 KB
+ *  block): the pathological shapes above are 2.1e9 (64 KB) to 8.6e9 (128 KB),
+ *  2–9x over, while the densest legitimate document measured here is at 5.9e6,
+ *  170x under. The weight is 1 for a Latin-1 block with no delimiter and only
+ *  ever RAISES a cost, so this cap can only bite earlier than the raw pair count
+ *  would — on a block that also nests delimiters (1 + d) or holds non-Latin-1
+ *  text (4x), i.e. on exactly the shapes the weight is for.
  *  Exported so the tests can pin the bound they exercise. */
 export const MD_PUNCT_MASK_MAX = 1_000_000_000;
 
@@ -3243,9 +3295,10 @@ export function setMdPunctMaskGuardEnabled(enabled) {
 
 /**
  * What the punctuation-mask guard did in the LAST guarded parse: how many inline
- * blocks were flattened (`flattened`, for any reason) and how many of those the
- * mask charge or cap decided (`maskFlattened`), plus the cost the parse charged
- * (`charged`, in budget attempts).
+ * blocks were flattened (`flattened`, for any reason — a delimiter flood as much
+ * as a mask flood) and how many of those the mask charge or cap decided
+ * (`maskFlattened`), plus the cost the parse charged (`charged`, in budget
+ * attempts).
  *
  * Reset at the start of every guardAndParse call. Read by
  * tests/md-backslash-flood.test.js, which can only claim a document rendered
@@ -3477,10 +3530,12 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
     const before = d * d + scan + email.cost;
     const br = mdBrScanGuard ? brScanCost(entry.src) : 0;
     // …and the punctuation mask pass (see "THE PUNCTUATION MASK PASS" above),
-    // charged in attempts: characters marked would copy masking this block, at
+    // charged in attempts: characters marked would copy masking this block —
+    // times (1 + d), since marked re-runs that pass on the inner text of every
+    // emphasis/strong level, and 4x for non-Latin-1 text — at
     // PUNCT_MASK_BYTES_PER_ATTEMPT bytes per attempt, so a block at the
     // per-block cap is worth exactly one document budget.
-    const mask = mdPunctMaskGuard ? punctMaskCost(entry.src) : 0;
+    const mask = mdPunctMaskGuard ? punctMaskCost(entry.src, d) : 0;
     const maskCharge = mask > 0 ? Math.ceil(mask / PUNCT_MASK_BYTES_PER_ATTEMPT) : 0;
     const cost = before + br + maskCharge;
     if (mdBrScanGuard) mdBrScanStats.charged += br;
