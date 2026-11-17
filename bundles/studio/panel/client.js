@@ -470,6 +470,7 @@ export const COMMANDS = Object.freeze([
   "bank.add",
   "bank.rename",
   "pad.set",
+  "pad.set_bank",
   "pad.assign",
   "pad.clear",
   "sample.rename",

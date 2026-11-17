@@ -46,6 +46,7 @@ import {
   StudioError,
   getCommand,
   listCommands,
+  prepareCommand,
   runCommand,
 } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
@@ -1062,6 +1063,241 @@ test("mute groups I and J (9 and 10) and the normal pad mode are accepted", (t) 
   s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 2, fields: { mode: "normal" } });
   assert.equal(snapshot(s.doc).pads[pad].mode, "normal");
   assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank changes all 16 pads in one step, and one undo and redo carry the whole bank", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const fields = { mode: "gate", reverse: true, speed_pct: 80 };
+  const set = s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields });
+
+  // The whole bank is one step, but each pad's field is its own history key.
+  assert.equal(Object.keys(set.result.after).length, LIMITS.padsPerBank * 3);
+  assert.ok(set.result.touched.includes(`track:${trackId}`), "the step names the track, as pad.set does");
+  assert.equal(
+    set.result.touched.filter((ref) => ref.startsWith(`pad:${trackId}/${bankId}/`)).length,
+    LIMITS.padsPerBank,
+    "the step names all sixteen pads",
+  );
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    const pad = snapshot(s.doc).pads[padKey(trackId, bankId, index)];
+    assert.equal(pad.mode, "gate", `pad ${index + 1} took the mode`);
+    assert.equal(pad.reverse, true, `pad ${index + 1} took reverse`);
+    assert.equal(pad.speed_pct, 80, `pad ${index + 1} took the speed`);
+  }
+
+  // One undo puts every pad back, and one redo applies the set again.
+  const undone = s.undo(set.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.equal(undone.plan.apply.size, LIMITS.padsPerBank * 3);
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    assert.deepEqual(
+      snapshot(s.doc).pads[padKey(trackId, bankId, index)],
+      defaultPad(trackId, bankId, index),
+      `pad ${index + 1} reads as a new pad again`,
+    );
+  }
+
+  const redone = s.redo(undone.entry);
+  assert.deepEqual(redone.plan.conflicts, []);
+  assert.deepEqual(redone.plan.blocked, []);
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    const pad = snapshot(s.doc).pads[padKey(trackId, bankId, index)];
+    assert.equal(pad.mode, "gate", `pad ${index + 1} took the mode back`);
+    assert.equal(pad.reverse, true);
+    assert.equal(pad.speed_pct, 80);
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank records only the fields a pad does not already hold", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  // Pad 1 already holds the mode the whole-bank step asks for.
+  s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 0, fields: { mode: "gate" } });
+
+  const set = s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", sustain: 0.5 },
+  });
+  const first = `pad:${trackId}/${bankId}/0`;
+  assert.equal(set.result.before[`${first}|mode`], undefined, "pad 1's mode already held the value");
+  assert.equal(set.result.after[`${first}|mode`], undefined);
+  assert.equal(set.result.after[`${first}|sustain`], 0.5, "its sustain did not");
+  for (let index = 1; index < LIMITS.padsPerBank; index += 1) {
+    assert.equal(set.result.after[`pad:${trackId}/${bankId}/${index}|mode`], "gate");
+  }
+  assert.equal(
+    Object.keys(set.result.after).length,
+    LIMITS.padsPerBank - 1 + LIMITS.padsPerBank,
+    "fifteen modes and sixteen sustains, and nothing for the field pad 1 held",
+  );
+
+  // The same field set again writes nothing at all.
+  const again = s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", sustain: 0.5 },
+  });
+  assert.deepEqual(again.result.before, {});
+  assert.deepEqual(again.result.after, {});
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("undo of a whole-bank step restores the other pads and leaves a pad's field another writer changed", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const set = s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", hold_ms: 250 },
+  });
+
+  // Another writer changes pad 5's mode after the whole-bank step.
+  s.run("pad.set", { track_id: trackId, bank_id: bankId, index: 4, fields: { mode: "normal" } });
+
+  const undone = s.undo(set.entry);
+  assert.deepEqual(undone.plan.blocked, [], "a partial undo is not refused");
+  assert.equal(undone.plan.conflicts.length, 1);
+  assert.equal(undone.plan.conflicts[0].ref, `pad:${trackId}/${bankId}/4`);
+  assert.equal(undone.plan.conflicts[0].field, "mode");
+  assert.equal(undone.plan.apply.size, LIMITS.padsPerBank * 2 - 1, "every key but the newer writer's went back");
+
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    const pad = snapshot(s.doc).pads[padKey(trackId, bankId, index)];
+    assert.equal(pad.hold_ms, 0, `pad ${index + 1}'s hold went back`);
+    assert.equal(
+      pad.mode,
+      index === 4 ? "normal" : "oneshot",
+      `pad ${index + 1}'s mode is its own again`,
+    );
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank refuses a missing bank, a non-sampler track, an empty field set and a field outside the whitelist", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const pad = padKey(trackId, bankId, 0);
+  const before = snapshot(s.doc).pads[pad];
+
+  const missing = refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: "nope", fields: { mode: "gate" } }),
+    "not_found",
+  );
+  assert.match(missing.message, /nope/);
+
+  const bass = runCommand(s.doc, "track.add", { name: "Bass", kind: "sunvox" }).args.id;
+  const notSampler = refuses(
+    () => s.run("pad.set_bank", { track_id: bass, bank_id: bankId, fields: { mode: "gate" } }),
+    "invalid",
+  );
+  assert.match(notSampler.message, /not a sampler track/);
+
+  const empty = refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields: {} }),
+    "invalid",
+  );
+  assert.match(empty.message, /at least one field/);
+
+  // The fields a bank-wide change must not carry: a name, a filter, the sample's
+  // tempo, the mix, the mute group and the reserved keep_pitch.
+  for (const fields of [
+    { choke: 2 },
+    { name: "Kick" },
+    { filter: { type: "lp", cutoff_hz: 1000, resonance: 0.2 } },
+    { keep_pitch: true },
+    { source_bpm_x10: 1200 },
+    { gain_db: -3 },
+    { pan: 0.5 },
+  ]) {
+    const refused = refuses(
+      () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields }),
+      "invalid",
+    );
+    assert.match(refused.message, new RegExp(Object.keys(fields)[0]), "the refusal names the field");
+  }
+  // The whitelisted fields keep pad.set's own ranges.
+  refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields: { speed_pct: 151 } }),
+    "invalid",
+  );
+  refuses(
+    () => s.run("pad.set_bank", { track_id: trackId, bank_id: bankId, fields: { mode: "wat" } }),
+    "invalid",
+  );
+
+  // Every refusal came before the first write.
+  assert.deepEqual(snapshot(s.doc).pads[pad], before);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("pad.set_bank names the track a locked track's refusal is decided on", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  s.run("track.lock", { track_id: trackId });
+  assert.equal(
+    snapshot(s.doc).tracks.find((track) => track.id === trackId).locked,
+    true,
+    "the track is locked",
+  );
+
+  // The refusal itself is the hub's: it reads the track of every ref a command
+  // names (hub.js checkAgentRules), before anything is applied. This file runs
+  // commands without a hub, so what it holds here is that mapping — the track
+  // ref this command names — and that naming it writes nothing by itself.
+  const prepared = prepareCommand(s.doc, "pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate" },
+  });
+  assert.ok(prepared.touched.includes(`track:${trackId}`), "the track ref is what the lock check reads");
+  assert.equal(
+    prepared.touched.filter((ref) => ref.startsWith(`pad:${trackId}/${bankId}/`)).length,
+    LIMITS.padsPerBank,
+    "and every pad of the bank is named with it",
+  );
+  assert.equal(
+    snapshot(s.doc).pads[padKey(trackId, bankId, 0)].mode,
+    "oneshot",
+    "preparing the command wrote nothing",
+  );
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a whole-bank write on one bank and a single-pad write on another merge with no loss", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const second = runCommand(s.doc, "bank.add", { id: "bank-b", track_id: trackId, name: "B" }).args.id;
+  const { other, sync } = pair(t, s);
+
+  s.run("pad.set_bank", {
+    track_id: trackId,
+    bank_id: bankId,
+    fields: { mode: "gate", loop: "loop" },
+  });
+  runCommand(other, "pad.set", {
+    track_id: trackId,
+    bank_id: second,
+    index: 3,
+    fields: { mode: "normal", pitch: 5 },
+  });
+  sync();
+
+  for (const doc of [s.doc, other]) {
+    const pads = snapshot(doc).pads;
+    for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+      assert.equal(pads[padKey(trackId, bankId, index)].mode, "gate", `bank A pad ${index + 1}'s mode`);
+      assert.equal(pads[padKey(trackId, bankId, index)].loop, "loop", `bank A pad ${index + 1}'s loop`);
+    }
+    assert.equal(pads[padKey(trackId, second, 3)].mode, "normal", "the other writer's pad kept its mode");
+    assert.equal(pads[padKey(trackId, second, 3)].pitch, 5, "and its pitch");
+    assert.equal(pads[padKey(trackId, second, 0)].mode, "oneshot", "the rest of bank B is untouched");
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+  assert.deepEqual(checkInvariants(other), []);
 });
 
 test("motion over 4096 points refused", (t) => {

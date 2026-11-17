@@ -131,6 +131,44 @@ test("the pad tool's schema names the mute groups A to J and leaves keep_pitch o
   assert.deepEqual(fields.properties.loop.enum, ["off", "loop", "pingpong"]);
 });
 
+test("the whole-bank pad tool takes the playback fields a bank shares and no others", async () => {
+  const setBank = (await listedTools()).find((tool) => tool.name === "studio_pad_set_bank");
+  assert.ok(setBank, "studio_pad_set_bank is a tool");
+  const fields = setBank.inputSchema.properties.fields;
+  assert.ok(fields && fields.properties, "the tool describes the bank fields it takes");
+
+  assert.deepEqual(Object.keys(fields.properties).sort(), [
+    "attack_ms",
+    "bpm_sync",
+    "decay_ms",
+    "fixed_velocity",
+    "hold_ms",
+    "loop",
+    "mode",
+    "pitch",
+    "release_ms",
+    "reverse",
+    "speed_pct",
+    "sustain",
+  ]);
+  assert.deepEqual(fields.properties.mode.enum, ["oneshot", "gate", "normal"]);
+  assert.deepEqual(fields.properties.loop.enum, ["off", "loop", "pingpong"]);
+
+  // What a bank-wide step must not carry: a name, a filter or sample tempo per
+  // pad, the mix, and the mute group that would cut every pad in the bank.
+  for (const field of ["name", "filter", "choke", "keep_pitch", "source_bpm_x10", "gain_db", "pan"]) {
+    assert.equal(field in fields.properties, false, `${field} is not a whole-bank field`);
+  }
+});
+
+test("the whole-bank command is in both the registry and the panel's command list", () => {
+  assert.ok(
+    listCommands({ public: true }).some((command) => command.id === "pad.set_bank"),
+    "the registry holds pad.set_bank",
+  );
+  assert.ok(panelCommandIds().includes("pad.set_bank"), "the panel's command list holds pad.set_bank");
+});
+
 test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
   const names = await toolNames();
   const commands = listCommands();

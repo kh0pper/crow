@@ -2808,6 +2808,56 @@ test("an agent re-chop of a sample used by a locked track is refused", async (t)
   );
 });
 
+test("an agent cannot set a whole bank's pad fields on a locked track", async (t) => {
+  const { hub, db } = await setup(t);
+  const { song_id, track_id, bank_id } = await seedSampleSong(hub);
+  await applies(hub, song_id, "bank-lock", "track.lock", { track_id }, HUMAN);
+  const before = await updateSeqs(db, song_id);
+
+  // Every pad of a locked track's bank is off-limits the same way one pad is:
+  // the track ref the command names for the lock check is what refuses it.
+  const refused = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-set-bank-locked",
+      command: "pad.set_bank",
+      args: { track_id, bank_id, fields: { mode: "gate" } },
+      author: AGENT,
+    }),
+    "locked",
+  );
+  assert.equal(refused.error, 'Track "Drums" is locked by the operator.');
+  assert.deepEqual(await updateSeqs(db, song_id), before, "a refused whole-bank write writes nothing");
+
+  const pads = (await hub.openSong(song_id)).snapshot.pads;
+  for (let index = 0; index < 16; index += 1) {
+    assert.equal(
+      pads[padPath(track_id, bank_id, index)].mode,
+      "oneshot",
+      `pad ${index + 1} kept the mode it had`,
+    );
+  }
+
+  // A lock is a lock on agents, not on the operator: their own whole-bank
+  // write lands on every pad, locked track and all.
+  await applies(
+    hub,
+    song_id,
+    "operator-set-bank",
+    "pad.set_bank",
+    { track_id, bank_id, fields: { mode: "gate" } },
+    HUMAN,
+  );
+  const after = (await hub.openSong(song_id)).snapshot.pads;
+  for (let index = 0; index < 16; index += 1) {
+    assert.equal(
+      after[padPath(track_id, bank_id, index)].mode,
+      "gate",
+      `pad ${index + 1} took the bank's mode`,
+    );
+  }
+});
+
 test("agent undo of sample.add is refused", async (t) => {
   const { hub } = await setup(t);
   const created = await hub.createSong({ project_id: PROJECT, title: "Samples", author: HUMAN });

@@ -8,7 +8,7 @@
  * MCP tools and the shared history:
  *
  *   bank.add  bank.rename
- *   pad.set  pad.assign  pad.assign_if_empty (internal)  pad.clear (people only)
+ *   pad.set  pad.set_bank  pad.assign  pad.assign_if_empty (internal)  pad.clear (people only)
  *   sample.add (internal)  sample.rename  slice.set
  *   pattern.add  pattern.rename  pattern.remove  pattern.set_length
  *   pattern.set_steps_beat  pattern.set_swing
@@ -509,6 +509,52 @@ const padFieldsSchema = z
   .refine((fields) => Object.keys(fields).length > 0, "pad.set needs at least one field to change")
   .describe("the pad fields to change, each one its own history field; keep_pitch is reserved and read-only, so it is not one of them");
 
+/**
+ * The pad fields `pad.set_bank` may write to a whole bank, and nothing else.
+ *
+ * A bank-wide change is for the playback settings: the fields that make a kit
+ * play the same way from pad to pad. What names or routes a sound is left out —
+ * `name`, `filter` and `source_bpm_x10` differ per pad, a whole-bank mute group
+ * (`choke`) would cut every pad in the bank, `gain_db` and `pan` are a mix, and
+ * `keep_pitch` is reserved and read-only for now.
+ */
+const bankPadFieldsSchema = z
+  .object({
+    mode: z
+      .enum(PAD_MODES)
+      .optional()
+      .describe('"oneshot" plays to the end and presses overlap, "normal" restarts on each press, "gate" plays while held'),
+    loop: z
+      .enum(PAD_LOOPS)
+      .optional()
+      .describe('"off" plays once, "loop" repeats, "pingpong" reflects at each end'),
+    reverse: z.boolean().optional().describe("play the sound backwards"),
+    bpm_sync: z
+      .boolean()
+      .optional()
+      .describe("play in time with the song tempo; the speed, and with it the pitch, follows"),
+    fixed_velocity: z
+      .boolean()
+      .optional()
+      .describe("play at the pad's own level instead of following how hard it was hit"),
+    pitch: lockFields.pitch.optional(),
+    speed_pct: z
+      .number()
+      .int()
+      .min(50)
+      .max(150)
+      .optional()
+      .describe("playback speed in percent, 50-150; it moves the pitch with it"),
+    attack_ms: z.number().finite().min(0).max(10000).optional().describe("attack in ms, 0-10000"),
+    hold_ms: z.number().int().min(0).max(10000).optional().describe("hold length in ms, 0-10000"),
+    decay_ms: lockFields.decay_ms.optional(),
+    sustain: z.number().finite().min(0).max(1).optional().describe("sustain level, 0-1"),
+    release_ms: lockFields.release_ms.optional(),
+  })
+  .strict()
+  .refine((fields) => Object.keys(fields).length > 0, "pad.set_bank needs at least one field to change")
+  .describe("the pad fields to set on every pad of the bank; name, filter, source_bpm_x10, gain_db, pan, choke and keep_pitch are not whole-bank fields");
+
 /** The sample the gateway's upload finish route hands `sample.add`. */
 const sampleSchema = z
   .object({
@@ -671,6 +717,61 @@ defineCommand({
       before[fieldKey(ref, field)] = current;
       after[fieldKey(ref, field)] = cloneJson(value);
       pad.set(field, cloneJson(value));
+    }
+    return { before, after };
+  },
+});
+
+defineCommand({
+  id: "pad.set_bank",
+  title: "Change every pad's settings in one bank",
+  schema: z
+    .object({
+      track_id: idSchema.describe("the sampler track"),
+      bank_id: idSchema.describe("the bank whose pads all change"),
+      fields: bankPadFieldsSchema,
+    })
+    .strict(),
+  summary(args, snap) {
+    return `Set ${Object.keys(args.fields).join(", ")} on all ${LIMITS.padsPerBank} pads of bank "${labelOfBank(snap, args.track_id, args.bank_id)}"`;
+  },
+  touches(args) {
+    // The track ref is what a lock check reads: a locked track refuses the
+    // whole-bank write the way it refuses a single pad's.
+    const refs = [trackRef(args.track_id)];
+    for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+      refs.push(padRef(args.track_id, args.bank_id, index));
+    }
+    return refs;
+  },
+  /**
+   * One step over the whole bank, but every pad keeps its own history fields:
+   * each value is recorded under that pad's ref and field name, exactly as
+   * `pad.set` records it. Taking the step back therefore restores each pad per
+   * field — a field another writer changed since is left as they set it, the
+   * rest are restored, and the step still goes through. A field the bank
+   * already holds is not recorded at all.
+   */
+  apply(doc, args) {
+    requireSamplerTrack(doc, args.track_id);
+    requireBank(doc, args.track_id, args.bank_id);
+    // Every pad is looked up before anything is written, so a bank that is
+    // somehow short of its pads refuses without a partial write.
+    const pads = [];
+    for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+      pads.push({ index, pad: requirePad(doc, args.track_id, args.bank_id, index) });
+    }
+    const before = {};
+    const after = {};
+    for (const { index, pad } of pads) {
+      const ref = padRef(args.track_id, args.bank_id, index);
+      for (const [field, value] of Object.entries(args.fields)) {
+        const current = fieldValue(pad, field);
+        if (JSON.stringify(current) === JSON.stringify(value)) continue;
+        before[fieldKey(ref, field)] = current;
+        after[fieldKey(ref, field)] = cloneJson(value);
+        pad.set(field, cloneJson(value));
+      }
     }
     return { before, after };
   },
