@@ -520,6 +520,43 @@
   /* The running session, or null. Only the server's answer ever sets it. */
   var outdoor = null;
   var outdoorTick = null;
+  /* The start request in flight, or null. A walk's Start is a POST, so a
+   * second press while the first is still on the wire joins that request
+   * instead of opening a second session. */
+  var outdoorStarting = null;
+
+  /* The one line the walk says: a running time, a refused start, the result.
+   * It is remembered so the cards can draw it under their own buttons (and so a
+   * page that asks later still hears it), and handed to every listener
+   * registered through api.onStatus. The entry it belongs to rides along, so a
+   * day with more than one walk says it under the card that was pressed and
+   * nowhere else; a line with no entry belongs to no card at all. */
+  var lastStatus = "";
+  var lastStatusEntry = null;
+  var statusListeners = [];
+
+  function say(text, entryId) {
+    lastStatus = text === null || text === undefined ? "" : String(text);
+    lastStatusEntry = lastStatus !== "" && typeof entryId === "string" && entryId !== ""
+      ? entryId
+      : null;
+    setText($("rb-today-status"), lastStatus);
+    statusListeners.slice().forEach(function (fn) {
+      try { fn(lastStatus, lastStatusEntry); } catch (e) { /* a listener's own trouble is not the page's */ }
+    });
+  }
+
+  /* The copy lines as one sentence: a line that does not end itself gets a full
+   * stop, so "5 min so far" and "Each full 10 minutes ..." never run together. */
+  function joinLines(lines) {
+    var kept = [];
+    (Array.isArray(lines) ? lines : []).forEach(function (raw) {
+      var line = raw === null || raw === undefined ? "" : String(raw);
+      if (line === "") return;
+      kept.push(/[.!?]$/.test(line) ? line : line + ".");
+    });
+    return kept.join(" ");
+  }
 
   function outdoorMinutes() {
     if (!outdoor) return 0;
@@ -550,7 +587,7 @@
       var cap = copyText("outdoor.cap");
       if (cap !== "") lines.push(cap);
     }
-    setText($("rb-today-status"), lines.join(" "));
+    say(joinLines(lines), outdoor.entryId);
   }
 
   function clearOutdoor() {
@@ -568,9 +605,10 @@
   }
 
   function startOutdoorSession(id) {
+    if (outdoorStarting) return outdoorStarting;
     var btn = $("rb-challenge-start");
     if (btn) btn.disabled = true;
-    return jsonFetch("/api/ramble/moves/outdoor/start", { method: "POST", body: { entryId: id } })
+    outdoorStarting = jsonFetch("/api/ramble/moves/outdoor/start", { method: "POST", body: { entryId: id } })
       .then(function (out) {
         if (btn) btn.disabled = false;
         if (!out) return null;
@@ -580,14 +618,25 @@
       })
       .catch(function (err) {
         if (btn) btn.disabled = false;
-        setText($("rb-today-status"), err.message);
+        /* A failure the wire did not describe says the moves were not
+         * reachable, rather than saying nothing at all. */
+        say(err && typeof err.message === "string" && err.message !== "" ? err.message : t("offline"), id);
+      })
+      .then(function (result) {
+        /* Done with, either way: the next press is a request of its own. */
+        outdoorStarting = null;
+        return result;
       });
+    return outdoorStarting;
   }
 
   function postOutdoorDone() {
     var btn = $("rb-challenge-done");
     if (btn) btn.disabled = true;
-    setText($("rb-today-status"), t("saving"));
+    /* The walk this finishes: its lines belong to that card even once the
+     * session is gone. */
+    var entryId = outdoor ? outdoor.entryId : null;
+    say(t("saving"), entryId);
     return jsonFetch("/api/ramble/moves/outdoor/done", { method: "POST", body: {} })
       .then(function (out) {
         clearOutdoor();
@@ -600,12 +649,12 @@
           var balancing = copyText("today.balancing");
           if (balancing !== "") lines.push(balancing);
         }
-        setText($("rb-today-status"), lines.join(" "));
+        say(joinLines(lines), entryId);
         refreshToday();
         refreshDay();
       })
       .catch(function (err) {
-        setText($("rb-today-status"), err.message);
+        say(err && typeof err.message === "string" && err.message !== "" ? err.message : t("offline"), entryId);
         if (btn) btn.disabled = false;
       });
   }
@@ -1470,6 +1519,16 @@
   api.text = function (key) { return typeof key === "string" ? t(key) : ""; };
   api.whenCopy = function () { return whenCopy(); };
   api.outdoorRunning = function () { return outdoor !== null; };
+  /* The walk's own line, for the cards that carry it under their buttons, and
+   * for a page that asks what it was. A listener is handed the entry the line
+   * belongs to as its second argument, so a day with more than one walk draws
+   * it on one card only. */
+  api.onStatus = function (fn) {
+    if (typeof fn !== "function") return;
+    statusListeners.push(fn);
+  };
+  api.status = function () { return lastStatus; };
+  api.statusEntry = function () { return lastStatusEntry; };
   api.finishWalk = function () { return postOutdoorDone(); };
   api.startSlot = function (item, day) {
     if (!item || item.empty === true || item.done === true || !item.entry) return Promise.resolve();
