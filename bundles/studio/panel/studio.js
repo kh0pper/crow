@@ -253,7 +253,9 @@ const RECORD_VIEW_SCRIPT = await loadPanelScript("record-view.js", "RECORD_VIEW_
  * that fits a clip, and the frames one pass's gate opens and closes on. It is
  * the SAME text `panel/punch.js` evaluates in Node, so a page and a test can
  * never disagree about a punch. It comes before the client, which asks
- * `window.StudioPunch` for those rules (see panel/punch.js).
+ * `window.StudioPunch` for those rules twice: a comp drag splices with them,
+ * and a punch that lands writes its take into the comp with the same splice
+ * over the range that pass recorded (see panel/punch.js).
  */
 const PUNCH_SCRIPT = await loadPanelScript("punch.js", "PUNCH_SCRIPT");
 

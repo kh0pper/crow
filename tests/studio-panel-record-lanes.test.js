@@ -436,6 +436,16 @@ function fakeEngine() {
         splitAt(list) {
           recorder.splits = list;
         },
+        // The punch: the range the recorder keeps open on every pass, and the
+        // frame a range set mid-take takes over from (see engine-client.js).
+        gates: [],
+        gatePeriodic(spec) {
+          recorder.gates.push(spec);
+        },
+        gatedOff: 0,
+        gateOff() {
+          recorder.gatedOff += 1;
+        },
         dispose() {},
       };
       engine.recorders.push(recorder);
@@ -1737,7 +1747,26 @@ test("the key is per song and per clip: a second clip keeps its own range", asyn
 });
 
 test("a range set while a take runs is stored and applies from the next pass", async () => {
-  const ui = await bootLanes({ latency: TAP_LATENCY, clock: 5, outputLatency: OUTPUT_LATENCY });
+  // The clip already holds a take, so its comp is something a punch can replace.
+  const doc = await lanesDoc();
+  const runCommand = await commands();
+  runCommand(doc, "take.add", {
+    clip_id: AUDIO_CLIP,
+    take: {
+      id: "6f1c1f7a-0000-4000-8000-00000000000a",
+      storage_key: "projects/61/studio/song-1/takes/6f1c1f7a-0000-4000-8000-00000000000a.wav",
+      rate: 48000,
+      channels: 2,
+      frames: 96000,
+      offset_frames: 0,
+      compensated: false,
+      bpm: 120,
+      recorded_at: "2026-01-01T10:00:00.000Z",
+      author_label: "You",
+      discarded: false,
+    },
+  });
+  const ui = await bootLanes({ doc, latency: TAP_LATENCY, clock: 5, outputLatency: OUTPUT_LATENCY });
   await ui.arm(AUDIO_TRACK);
   ui.click("[data-act=record]");
   await ui.settle(24);
@@ -1747,6 +1776,8 @@ test("a range set while a take runs is stored and applies from the next pass", a
   await ui.settle();
   assert.equal(ui.view().rec.active, true, "the take is running");
   assert.equal(ui.view().punchNext, false, "nothing is waiting for a later pass yet");
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.deepEqual(recorder.gates, [], "a take with no range has no gate");
 
   await dragPunch(ui, 1, 5);
 
@@ -1759,6 +1790,22 @@ test("a range set while a take runs is stored and applies from the next pass", a
   assert.match(noticeText(ui), /next pass/);
   const band = ui.document.querySelector("[data-role=rec-punch]");
   assert.equal(band.getAttribute("data-to"), "5", "the lane draws it where it will be recorded");
+
+  // The recorder is handed the new range for the pass after this one: the pass
+  // already armed keeps the gate it started with.
+  const rec = ui.view().rec;
+  assert.equal(recorder.gates.length, 1, "the new range reaches the recorder once");
+  const gate = recorder.gates[0];
+  assert.equal(gate.anchorFrame, rec.anchor, "on the take's own anchor");
+  assert.equal(gate.loopFrames, rec.loop_frames, "and its own pass length");
+  assert.equal(gate.fromFrames, 1 * rec.fpb, "opening on the range's first beat");
+  assert.equal(gate.toFrames, 5 * rec.fpb, "and closing on its end");
+  assert.equal(gate.offsetFrames, rec.offset_frames, "moved by the input delay the take is cut by");
+  assert.equal(
+    gate.activeFrom,
+    rec.anchor + Math.round(rec.loop_frames) + rec.offset_frames,
+    "it takes over at the first frame of the next pass",
+  );
 });
 
 test("view.punch survives a render, and another song starts with none of it", async () => {
