@@ -239,6 +239,14 @@
       loop: "off",
       /** Whether the voice is turning at its range ends (cleared by a release or a fade). */
       looping: false,
+      /**
+       * The operator's live state on this voice: `held` (a HOLD latch) and
+       * `paused` (Pause-all). The processor raises them; a voice that is on its
+       * way out (a fade, a steal, a reused slot) drops them here, so a dead
+       * voice never keeps a pad held or paused.
+       */
+      held: false,
+      paused: false,
       /** dB gain × (velocity/127)², and the constant-power pan pair. */
       gain: 0,
       panLeft: 1,
@@ -284,6 +292,16 @@
       trackId: "",
       bankId: "",
       index: 0,
+      /**
+       * The sound this voice started with: the sample's id and, when its pad
+       * named one, the slice's. The processor sets them at the start (they are
+       * references to ids already in hand, so a start allocates nothing) and
+       * compares them with the pad's own on every song, so a cleared or
+       * repointed pad ends the voice instead of leaving it playing a sound the
+       * song no longer has.
+       */
+      sample_id: "",
+      slice_id: "",
       /** Its choke group (0 = none), so a new voice can cut it. */
       choke: 0,
     };
@@ -475,6 +493,10 @@
     refreshStep(voice);
     voice.loop = loop;
     voice.looping = loop !== "off";
+    // A start is a clean slot: whatever live state the voice it reuses carried
+    // (a HOLD latch, Pause-all) belongs to the trigger that has just ended.
+    voice.held = false;
+    voice.paused = false;
     voice.gain = dbToLinear(settings.gainDb) * velocityGain;
     voice.panLeft = pan.left;
     voice.panRight = pan.right;
@@ -585,12 +607,18 @@
   /**
    * Fade a voice out over 64 frames (a choke group cutting it, or its range
    * running out at level). A voice already on its way out keeps its ramp.
+   *
+   * A voice on its way out holds nothing: the fade ends the loop, the HOLD latch
+   * and Pause-all alike, so its ramp runs to its end instead of being kept alive
+   * by a state the operator can no longer reach.
    * @param {object} voice
    * @returns {void}
    */
   function beginFadeOut(voice) {
     if (!voice.sounding) return;
     voice.looping = false;
+    voice.held = false;
+    voice.paused = false;
     if (voice.fadeRemaining > 0) return;
     voice.fadeRemaining = FADE_FRAMES;
   }
@@ -784,8 +812,12 @@
         fade = voice.fadeRemaining / FADE_FRAMES;
         voice.fadeRemaining -= 1;
         if (voice.fadeRemaining === 0) {
+          // The last frame of the fade: a voice that has faded all the way out
+          // is dead, so it holds nothing and is not paused or looping either.
           voice.sounding = false;
           voice.looping = false;
+          voice.held = false;
+          voice.paused = false;
         }
       }
 

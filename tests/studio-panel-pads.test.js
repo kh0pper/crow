@@ -20,7 +20,8 @@
  *     sentence about locking a step is the visible hint while no lock is on;
  *   - the selected pad's settings, in the SP-404's groups: one pad.set per
  *     control, a whole-bank button that sends one pad.set_bank, the mute group's
- *     eleven options, and a pad written before those fields existed;
+ *     eleven options, the sample tempo that reads in BPM, and a pad written
+ *     before those fields existed;
  *   - the live state is released (engine.resetLive) only when a DIFFERENT song
  *     opens, never on the snapshot an ordinary edit sends;
  *   - a controller's effect hold outlives a tap on the page, and a rebuilt host
@@ -1416,6 +1417,44 @@ test("a slider held between two steps sends the whole number the field takes", a
   // And the hub takes it: the song holds the whole number.
   await ui.apply("pad.set", sent[0].args);
   assert.equal((await storedPad(ui.doc)).speed_pct, 100);
+});
+
+test("the sample tempo reads in BPM and is sent as a tempo the field takes", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc });
+  await ui.openSampler();
+
+  // The control is the sample's own tempo in BPM, and 0 is the pad having none.
+  const label = padControl(ui, "source_bpm_x10").parentNode.querySelector(".st-pad-range-label");
+  assert.ok(label, "the sample tempo control has its label");
+  assert.equal(String(label.textContent), "Sample tempo (BPM)", "which says the unit in words");
+  assert.equal(padControl(ui, "source_bpm_x10").min, "0", "0 is not set");
+  assert.equal(padControl(ui, "source_bpm_x10").max, "3000", "300.0 BPM is the top, times ten");
+
+  const readout = () => String(
+    padControl(ui, "source_bpm_x10").parentNode.querySelector("[data-pad-readout]").textContent,
+  );
+  assert.equal(readout(), "Not set", "a pad with no tempo of its own says so");
+
+  // The stored field reads 0 (not set) or 20.0-300.0 BPM times ten and refuses
+  // the band between. The slider still passes through that band, so a value in
+  // it is sent as the reading it is nearest: none below 10.0 BPM, 20.0 from
+  // there up. The readout follows the value the field receives.
+  const cases = [
+    [50, 0, "Not set"],
+    [150, 200, "20.0 BPM"],
+    [1200, 1200, "120.0 BPM"],
+  ];
+  let sent = 0;
+  for (const [value, field, shown] of cases) {
+    await changeControl(ui, padControl(ui, "source_bpm_x10"), value);
+    const commands = ui.commands("pad.set");
+    assert.equal(commands.length, sent + 1, `${value}: one release, one pad.set`);
+    assert.deepEqual(commands[sent].args.fields, { source_bpm_x10: field },
+      `${value} is sent as ${field}`);
+    assert.equal(readout(), shown, `${value} reads as ${shown}`);
+    sent += 1;
+  }
 });
 
 test("whole bank sends one pad.set_bank with only that field", async () => {

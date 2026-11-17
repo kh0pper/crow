@@ -451,42 +451,63 @@ const sourceBpmSchema = z
   })
   .describe("the sample's own tempo times ten, 200-3000, or 0 for not set");
 
+/**
+ * The playback and envelope fields a pad and a whole bank share, one shape
+ * each.
+ *
+ * Both schemas below are built from this table, so `pad.set` and `pad.set_bank`
+ * can never describe one field two ways: `pad.set` takes them all, and
+ * `pad.set_bank` picks its whitelist out of the same shapes. The fields that are
+ * one pad's own (`name`, `filter`, `source_bpm_x10`, `gain_db`, `pan`), the one
+ * that would mean something else across a bank (`choke`), and the reserved
+ * read-only `keep_pitch` stay outside it.
+ */
+const sharedPadFieldShapes = {
+  mode: z
+    .enum(PAD_MODES)
+    .describe('"oneshot" plays to the end and presses overlap, "normal" restarts on each press, "gate" plays while held'),
+  loop: z
+    .enum(PAD_LOOPS)
+    .describe('"off" plays once, "loop" repeats, "pingpong" reflects at each end'),
+  reverse: z.boolean().describe("play the sound backwards"),
+  bpm_sync: z
+    .boolean()
+    .describe("play in time with the song tempo; the speed, and with it the pitch, follows"),
+  fixed_velocity: z
+    .boolean()
+    .describe("play at the pad's own level instead of following how hard it was hit"),
+  pitch: lockFields.pitch,
+  speed_pct: z
+    .number()
+    .int()
+    .min(50)
+    .max(150)
+    .describe("playback speed in percent, 50-150; it moves the pitch with it"),
+  attack_ms: z.number().finite().min(0).max(10000).describe("attack in ms, 0-10000"),
+  hold_ms: z.number().int().min(0).max(10000).describe("hold length in ms, 0-10000"),
+  decay_ms: lockFields.decay_ms,
+  sustain: z.number().finite().min(0).max(1).describe("sustain level, 0-1"),
+  release_ms: lockFields.release_ms,
+};
+
 /** The pad's own settings, the ones `pad.set` may change. */
 const padFieldsSchema = z
   .object({
     name: nameSchema.optional().describe("what the pad is called"),
-    mode: z
-      .enum(PAD_MODES)
-      .optional()
-      .describe('"oneshot" plays to the end and presses overlap, "normal" restarts on each press, "gate" plays while held'),
-    loop: z
-      .enum(PAD_LOOPS)
-      .optional()
-      .describe('"off" plays once, "loop" repeats, "pingpong" reflects at each end'),
-    bpm_sync: z
-      .boolean()
-      .optional()
-      .describe("play in time with the song tempo; the speed, and with it the pitch, follows"),
+    mode: sharedPadFieldShapes.mode.optional(),
+    loop: sharedPadFieldShapes.loop.optional(),
+    bpm_sync: sharedPadFieldShapes.bpm_sync.optional(),
     source_bpm_x10: sourceBpmSchema.optional(),
-    speed_pct: z
-      .number()
-      .int()
-      .min(50)
-      .max(150)
-      .optional()
-      .describe("playback speed in percent, 50-150; it moves the pitch with it"),
-    fixed_velocity: z
-      .boolean()
-      .optional()
-      .describe("play at the pad's own level instead of following how hard it was hit"),
-    hold_ms: z.number().int().min(0).max(10000).optional().describe("hold length in ms, 0-10000"),
-    pitch: lockFields.pitch.optional(),
+    speed_pct: sharedPadFieldShapes.speed_pct.optional(),
+    fixed_velocity: sharedPadFieldShapes.fixed_velocity.optional(),
+    hold_ms: sharedPadFieldShapes.hold_ms.optional(),
+    pitch: sharedPadFieldShapes.pitch.optional(),
     gain_db: lockFields.gain_db.optional(),
     pan: lockFields.pan.optional(),
-    attack_ms: z.number().finite().min(0).max(10000).optional().describe("attack in ms, 0-10000"),
-    decay_ms: lockFields.decay_ms.optional(),
-    sustain: z.number().finite().min(0).max(1).optional().describe("sustain level, 0-1"),
-    release_ms: lockFields.release_ms.optional(),
+    attack_ms: sharedPadFieldShapes.attack_ms.optional(),
+    decay_ms: sharedPadFieldShapes.decay_ms.optional(),
+    sustain: sharedPadFieldShapes.sustain.optional(),
+    release_ms: sharedPadFieldShapes.release_ms.optional(),
     filter: z
       .object({
         type: z.enum(PAD_FILTER_TYPES).describe('"off", "lp", "hp" or "bp"'),
@@ -503,11 +524,31 @@ const padFieldsSchema = z
       .max(10)
       .optional()
       .describe("mute group, 0 none, 1-10 = A-J"),
-    reverse: z.boolean().optional(),
+    reverse: sharedPadFieldShapes.reverse.optional(),
   })
   .strict()
   .refine((fields) => Object.keys(fields).length > 0, "pad.set needs at least one field to change")
   .describe("the pad fields to change, each one its own history field; keep_pitch is reserved and read-only, so it is not one of them");
+
+/**
+ * The pad fields `pad.set_bank` may write to a whole bank, in the order the tool
+ * lists them. The shapes themselves come from `sharedPadFieldShapes`, so each
+ * one is exactly the field `pad.set` takes.
+ */
+const BANK_PAD_FIELDS = [
+  "mode",
+  "loop",
+  "reverse",
+  "bpm_sync",
+  "fixed_velocity",
+  "pitch",
+  "speed_pct",
+  "attack_ms",
+  "hold_ms",
+  "decay_ms",
+  "sustain",
+  "release_ms",
+];
 
 /**
  * The pad fields `pad.set_bank` may write to a whole bank, and nothing else.
@@ -516,41 +557,15 @@ const padFieldsSchema = z
  * play the same way from pad to pad. What names or routes a sound is left out —
  * `name`, `filter` and `source_bpm_x10` differ per pad, a whole-bank mute group
  * (`choke`) would cut every pad in the bank, `gain_db` and `pan` are a mix, and
- * `keep_pitch` is reserved and read-only for now.
+ * `keep_pitch` is reserved and read-only for now. The object is still strict, so
+ * a field outside the whitelist is refused by name rather than dropped.
  */
 const bankPadFieldsSchema = z
-  .object({
-    mode: z
-      .enum(PAD_MODES)
-      .optional()
-      .describe('"oneshot" plays to the end and presses overlap, "normal" restarts on each press, "gate" plays while held'),
-    loop: z
-      .enum(PAD_LOOPS)
-      .optional()
-      .describe('"off" plays once, "loop" repeats, "pingpong" reflects at each end'),
-    reverse: z.boolean().optional().describe("play the sound backwards"),
-    bpm_sync: z
-      .boolean()
-      .optional()
-      .describe("play in time with the song tempo; the speed, and with it the pitch, follows"),
-    fixed_velocity: z
-      .boolean()
-      .optional()
-      .describe("play at the pad's own level instead of following how hard it was hit"),
-    pitch: lockFields.pitch.optional(),
-    speed_pct: z
-      .number()
-      .int()
-      .min(50)
-      .max(150)
-      .optional()
-      .describe("playback speed in percent, 50-150; it moves the pitch with it"),
-    attack_ms: z.number().finite().min(0).max(10000).optional().describe("attack in ms, 0-10000"),
-    hold_ms: z.number().int().min(0).max(10000).optional().describe("hold length in ms, 0-10000"),
-    decay_ms: lockFields.decay_ms.optional(),
-    sustain: z.number().finite().min(0).max(1).optional().describe("sustain level, 0-1"),
-    release_ms: lockFields.release_ms.optional(),
-  })
+  .object(
+    Object.fromEntries(
+      BANK_PAD_FIELDS.map((field) => [field, sharedPadFieldShapes[field].optional()]),
+    ),
+  )
   .strict()
   .refine((fields) => Object.keys(fields).length > 0, "pad.set_bank needs at least one field to change")
   .describe("the pad fields to set on every pad of the bank; name, filter, source_bpm_x10, gain_db, pan, choke and keep_pitch are not whole-bank fields");

@@ -2181,15 +2181,15 @@ test("setSong removing the sample emits exactly one off", async () => {
   assert.equal(offs[0].frame, 384, "and it goes off in the first block after the song changed");
 });
 
-test("a pad that loses only its sample keeps playing to its natural end", async () => {
-  // 400 frames of constant: the voice reads 0..399, holds its last sample for its
-  // 64-frame fade and is over at frame 464 — inside the block that starts at 384.
-  const samples = [{ id: SAMPLE_ID, channels: [constant(400, 0.5)] }];
+test("a pad that loses only its sample has its voice released, with one off", async () => {
+  // A long sample, so a voice the song lets go of is silent where one that plays
+  // on would not be: 48000 frames is a whole second.
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
   const song = samplerSong({
     tracks: [track("track-1")],
     clips: [],
     pads: [pad("track-1", 0)],
-    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 400) },
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 48000) },
     steps: [],
   });
   const engine = await createProcessor(song, samples);
@@ -2205,8 +2205,8 @@ test("a pad that loses only its sample keeps playing to its natural end", async 
   assert.ok(peakOf(first.left) > 0.01, "and the voice is sounding");
 
   // The sample is taken off the pad while the voice is still sounding. The track
-  // and its bank stay, only the sound goes: the pad names no sample any more,
-  // the song holds none, and the page unloads the PCM it was holding.
+  // and its bank stay, only the sound goes: the pad names no sample any more
+  // (`pad.clear`), the song holds none, and the page unloads the PCM.
   const lost = samplerSong({
     tracks: [track("track-1")],
     clips: [],
@@ -2220,10 +2220,9 @@ test("a pad that loses only its sample keeps playing to its natural end", async 
   const second = await engine.process(128, 256);
 
   assert.deepEqual(engine.errors, [], "the processor must render without a fault");
-  // The block that holds the voice's natural end: still sounding at its first
-  // frame, and silent from the frame its fade ended on.
-  assert.ok(peakBetween(second.left, 0, 16) > 0.01, "the voice plays on to its natural end");
-  assert.equal(peakOf(second.left.subarray(80)), 0, "and nothing sounds after its last fade frame");
+  // The voice is released, so the block that holds its release is silent: the
+  // sound it was playing is not in the song any more.
+  assert.equal(peakOf(second.left), 0, "the voice whose sample went is gone, not left playing it");
 
   const states = stateEvents(engine.messages);
   const offs = states.filter((event) => event.state === StudioPadEvents.STATE_OFF);
@@ -2233,7 +2232,7 @@ test("a pad that loses only its sample keeps playing to its natural end", async 
     [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
     "and it is the pad whose sample went, not the track's whole bank",
   );
-  assert.equal(offs[0].frame, 384, "off in the block its voice ended in: never early, never twice");
+  assert.equal(offs[0].frame, 384, "off in the block after the song changed: never early, never twice");
 });
 
 test("two voices of one pad ending in different blocks emit one off, at the second", async () => {
@@ -2812,6 +2811,106 @@ test("M16 setSong that removes the pad's sample ends only that pad's voices", as
     [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
     "and only the gone pad's light goes off",
   );
+});
+
+test("clearing a pad's sound releases its running loop, with one off", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1)], frames: 4800 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressPad(engine, 0);
+  const running = await engine.process(128, 9000);
+  assertLevel(running.left[8999], ONE_VOICE, "the press started a loop that plays past the sample's end");
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_LOOP]],
+    "and its light reads loop",
+  );
+
+  // An edit that leaves the loop's own sound alone is no business of it: the loop
+  // plays on and its light never blinks.
+  const other = JSON.parse(JSON.stringify(song));
+  other.pads[padKeyOf(pad("track-1", 1))].gain_db = -6;
+  engine.post({ type: "song", snapshot: other });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const kept = await engine.process(128, 512);
+  assertLevel(kept.left[511], ONE_VOICE, "an unrelated edit leaves the loop playing");
+  assert.equal(
+    stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF).length,
+    0,
+    "and its light never went off",
+  );
+
+  // The operator's Clear pad: the pad stays and keeps its mode, envelope and
+  // level, and only its sample and slice go — the very edit `pad.clear` writes.
+  const cleared = JSON.parse(JSON.stringify(other));
+  const clearedPad = cleared.pads[padKeyOf(pad("track-1", 0))];
+  delete clearedPad.sample_id;
+  delete clearedPad.slice_id;
+  engine.post({ type: "song", snapshot: cleared });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 1000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(after.left), 0, "the loop ends instead of playing a sound its pad no longer has");
+  assert.equal(
+    soundingOf(recordOf(engine, "track-1")).length,
+    0,
+    "and no voice of the cleared pad is left behind in its slot",
+  );
+  const offs = stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF);
+  assert.equal(offs.length, 1, `the cleared pad's light goes off exactly once, got ${offs.length}`);
+  assert.deepEqual(
+    statePairs(offs),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
+    "and the light ends",
+  );
+
+  // A cleared pad has nothing to start, so the loop really is over: pressing it
+  // again cannot leave a voice running.
+  pressPad(engine, 0);
+  const again = await engine.process(128, 256);
+  assert.equal(peakOf(again.left), 0, "a cleared pad has no sound to start");
+});
+
+test("a pad repointed at another sample releases the voice playing the old one", async () => {
+  const SECOND = "sample-2";
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [],
+    pads: [pad("track-1", 0, { loop: "loop" })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 4800), [SECOND]: sampleDoc(SECOND, 4800) },
+    steps: [],
+  });
+  const samples = [
+    { id: SAMPLE_ID, channels: [constant(4800, 0.5)] },
+    { id: SECOND, channels: [constant(4800, 0.25)] },
+  ];
+  const engine = await createProcessor(song, samples);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressPad(engine, 0);
+  const running = await engine.process(128, 9000);
+  assertLevel(running.left[8999], ONE_VOICE, "the press loops the sample the pad names first");
+
+  // The pad is pointed at the other sample while its loop plays: the voice is
+  // playing a sound its pad no longer names.
+  const swapped = JSON.parse(JSON.stringify(song));
+  swapped.pads[padKeyOf(pad("track-1", 0))].sample_id = SECOND;
+  engine.post({ type: "song", snapshot: swapped });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 1000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(after.left), 0, "the voice playing the old sample is released");
+  const offs = stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF);
+  assert.equal(offs.length, 1, `the swapped pad's light goes off exactly once, got ${offs.length}`);
+  assert.deepEqual(statePairs(offs), [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]]);
+
+  // The pad itself still plays: a press now starts the sample it names.
+  pressPad(engine, 0);
+  const fresh = await engine.process(128, 512);
+  assertLevel(fresh.left[511], 0.25 * CENTRE, "a fresh press plays the sample the pad now names");
 });
 
 test("M23 a looping voice with sustain 0 ends when the envelope reaches 0 and emits one off", async () => {
@@ -3441,6 +3540,85 @@ test("a stolen voice that carried held and paused (flags set by the test) leaves
     [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
     "pad 0's light goes off exactly once as its last voice goes",
   );
+});
+
+test("a reused slot starts with looping, held and paused cleared", async () => {
+  // 400 frames of constant: the first press's voice has run out inside the first
+  // render, so the second press finds that slot free instead of stealing one.
+  const song = kitSong({ pads: [pad("track-1", 0)], frames: 400 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(400, 0.5)] }]);
+  pressPad(engine, 0);
+  await engine.process(128, 512);
+
+  const record = recordOf(engine, "track-1");
+  const voice = record.voices[0];
+  assert.equal(voice.sounding, false, "the first voice is over and its slot is free");
+  // The live state a loop, a HOLD latch and Pause-all leave on a voice, set here
+  // the way the steal test above sets it.
+  voice.looping = true;
+  voice.held = true;
+  voice.paused = true;
+
+  pressPad(engine, 0);
+  await engine.process(128, 128);
+  assert.equal(voice.sounding, true, "the second press took that very slot");
+  assert.equal(voice.index, 0, "and it is pad 0's voice");
+  assert.equal(voice.held, false, "a start holds nothing");
+  assert.equal(voice.paused, false, "it is not paused");
+  assert.equal(voice.looping, false, "and it does not loop, because its pad does not");
+});
+
+test("the song-wide cut clears looping, held and paused on the voice it takes", async () => {
+  // Five tracks of 16 pads over one long sample: four whole tracks fill the
+  // song's 64 voices, so the 65th press is the one that trips the cap.
+  const tracks = [];
+  const pads = [];
+  for (let index = 0; index < 5; index += 1) {
+    const trackId = `track-${index + 1}`;
+    tracks.push(track(trackId));
+    for (let padIndex = 0; padIndex < 16; padIndex += 1) pads.push(pad(trackId, padIndex));
+  }
+  const song = samplerSong({
+    tracks,
+    clips: [],
+    pads,
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 48000) },
+    steps: [],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  const flagged = [];
+  for (let index = 0; index < 4; index += 1) {
+    const trackId = `track-${index + 1}`;
+    for (let padIndex = 0; padIndex < 16; padIndex += 1) {
+      engine.post({ type: "live", track_id: trackId, bank_id: BANK, index: padIndex, v: 127, on: true });
+    }
+  }
+  // Every sounding voice carries the live state a loop, a HOLD latch and
+  // Pause-all raise (set by hand, as the steal test above sets it), so whichever
+  // voice the cap takes is a protected one and there is nothing to spare.
+  for (const record of engine.processor.slots) {
+    if (!record || !record.sampler) continue;
+    for (const voice of record.voices) {
+      if (!voice.sounding) continue;
+      voice.looping = true;
+      voice.held = true;
+      voice.paused = true;
+      flagged.push(voice);
+    }
+  }
+  assert.equal(flagged.length, 64, "the four full tracks hold the song's 64 voices");
+
+  // A voice on the fifth track has a free slot of its own, so this press reaches
+  // the song-wide cap and cuts the oldest voice anywhere.
+  engine.post({ type: "live", track_id: "track-5", bank_id: BANK, index: 0, v: 127, on: true });
+
+  const dead = flagged.filter((voice) => !voice.sounding);
+  assert.equal(dead.length, 1, "the cap cut exactly one of the song's voices");
+  assert.equal(dead[0].trackId, "track-1", "and it is the oldest one, on the first track");
+  assert.equal(dead[0].looping, false, "a cut voice does not loop");
+  assert.equal(dead[0].held, false, "it holds nothing");
+  assert.equal(dead[0].paused, false, "and it is not left paused");
 });
 
 // --- a sounding voice follows its pad: tempo and Reverse (B4c) ---------------

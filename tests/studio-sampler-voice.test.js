@@ -260,6 +260,46 @@ test("beginFadeOut clears looping and fades the voice out", () => {
   assert.equal(left[99], atCentre(samples[99]), "the frames before the fade are untouched");
 });
 
+test("beginFadeOut clears looping, held and paused", () => {
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], loop: "loop" });
+  render(voice, 100);
+
+  // HOLD and Pause-all are live flags the processor raises on the voice (the
+  // retireVoice test in the engine suite sets them the same way by hand).
+  assert.equal(voice.held, false, "a start holds nothing");
+  assert.equal(voice.paused, false, "and it is not paused");
+  voice.held = true;
+  voice.paused = true;
+
+  StudioSamplerVoice.beginFadeOut(voice);
+  assert.equal(voice.looping, false, "a fade ends the loop");
+  assert.equal(voice.held, false, "and the HOLD latch with it");
+  assert.equal(voice.paused, false, "and Pause-all, so its ramp runs to its end");
+  assert.equal(voice.sounding, true, "it is on its way out, not gone yet");
+  assert.equal(voice.fadeRemaining, StudioSamplerVoice.FADE_FRAMES, "the fade is the 64-frame one");
+});
+
+test("the frame a fade ends on leaves a dead voice with no live state", () => {
+  // A one-frame range: the voice reads it and its range is spent, which is the
+  // fade the render loop starts on its own (no beginFadeOut involved).
+  const samples = constant(4, 0.5);
+  const voice = startVoice({ channels: [samples], start: 0, end: 1 });
+  render(voice, 1);
+  assert.equal(voice.sounding, true, "the voice played its one frame and is fading");
+
+  // The live state an operator's loop, HOLD and Pause-all put on the voice.
+  voice.looping = true;
+  voice.held = true;
+  voice.paused = true;
+
+  render(voice, StudioSamplerVoice.FADE_FRAMES);
+  assert.equal(voice.sounding, false, "the fade has ended the voice");
+  assert.equal(voice.looping, false, "a dead voice does not loop");
+  assert.equal(voice.held, false, "it holds nothing");
+  assert.equal(voice.paused, false, "and it is not left paused");
+});
+
 test("a looping voice whose sustain is 0 ends when its decay reaches level 0", () => {
   // 10 ms of decay at 48 kHz is 480 frames: the decay is all the voice has.
   const DECAY = 480;

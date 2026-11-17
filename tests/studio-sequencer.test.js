@@ -1302,6 +1302,41 @@ test("a pad trigger names its clip and a clip change is reported once, at its bo
   assert.deepEqual(clipChangesOf(same.block(FRAMES_PER_BAR, 128)), [], "and neither does the bar it lands on");
 });
 
+test("the clip walk reports every track in song order and reuses its array", () => {
+  const seq = sequencer(
+    song({
+      tracks: [samplerTrack("t1"), samplerTrack("t2")],
+      scenes: [scene("s1")],
+      clips: [patternClip("c1", "t1", "s1"), patternClip("c2", "t2", "s1")],
+      patterns: [pattern("c1", "a", 0), pattern("c2", "a", 0)],
+      steps: [step("c1", "a", 0, 0)],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+
+  const first = seq.block(0, 128);
+  const reports = first.clipChanges;
+  assert.deepEqual(
+    Array.from(reports, (change) => change.track_id),
+    ["t1", "t2"],
+    "every track the launch started is reported, in the song's own track order",
+  );
+
+  // The walk reads the song's segments in place, so a block that changes nothing
+  // still reports into the very array the last block handed over.
+  const second = seq.block(128, 128);
+  assert.equal(second.clipChanges, reports, "the report array is the one the last block made");
+  assert.equal(second.clipChanges.length, 0, "and a track that merely plays on is not reported");
+
+  // A track that stops is still found, so the walk really covers every track of
+  // the song and not only the ones a launch touched.
+  seq.stopTrack("t1");
+  assert.deepEqual(clipChangesOf(seq.block(FRAMES_PER_BAR, 128)), [
+    { track_id: "t1", clip_id: null, frame: 0 },
+  ]);
+});
+
 /** A one-bar pattern clip of four 16th steps on pads 0..3, over a swing. */
 function swungSong(swing, bpm = BPM) {
   return song({

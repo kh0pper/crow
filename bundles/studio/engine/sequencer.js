@@ -1622,6 +1622,60 @@
     }
 
     /**
+     * The block `reportTrackClip` is reading, set once per block by
+     * `reportClipChanges`: the walk hands the map's own iteration a function
+     * made once, instead of building a closure (and an entry array per track)
+     * in the block path.
+     */
+    let clipWalkStart = 0;
+    let clipWalkEnd = 0;
+
+    /**
+     * Report one track's clip turning over, as `reportClipChanges` walks the
+     * song's segments. `segs` and `trackId` are the very pair the map's
+     * `forEach` hands over, so this runs for one track of one block.
+     * @param {object[]} segs that track's segments, in beat order
+     * @param {string} trackId
+     * @returns {void}
+     */
+    function reportTrackClip(segs, trackId) {
+      let clipId = null;
+      let frame = -1;
+      for (let at = 0; at < segs.length; at += 1) {
+        const seg = segs[at];
+        if (seg.clipId === null) continue;
+        const startFrame = beatToFrame(seg.startBeat);
+        const endFrame = seg.endBeat === null ? Infinity : beatToFrame(seg.endBeat);
+        if (startFrame >= clipWalkEnd) break;
+        if (endFrame <= clipWalkStart) continue;
+        clipId = seg.clipId;
+        frame = startFrame > clipWalkStart ? startFrame - clipWalkStart : 0;
+        // A segment that also ends inside this block leaves nothing playing (a
+        // launch onto no clip, a stop): the change is to no clip at all.
+        if (endFrame < clipWalkEnd) {
+          clipId = null;
+          frame = endFrame > clipWalkStart ? endFrame - clipWalkStart : 0;
+        }
+      }
+      const before = playingClips.has(trackId) ? playingClips.get(trackId) : null;
+      if (frame < 0) {
+        // Nothing of this track covers the block. That is only news when the
+        // last block said it played something: a segment that stopped has
+        // already been reported at its own boundary.
+        if (before === null) return;
+        playingClips.delete(trackId);
+        clipChanges.push({ track_id: trackId, clip_id: null, frame: 0 });
+        return;
+      }
+      if (before === clipId) return;
+      // The map is only written when the track really moved on, so a block that
+      // merely plays on touches nothing.
+      if (clipId === null) playingClips.delete(trackId);
+      else playingClips.set(trackId, clipId);
+      clipChanges.push({ track_id: trackId, clip_id: clipId, frame: frame });
+    }
+
+    /**
      * Report the tracks whose playing segment ended or turned over onto a
      * different clip inside this block (see "Clip changes" in the header).
      *
@@ -1634,42 +1688,9 @@
      * @returns {void}
      */
     function reportClipChanges(frameStart, frameEnd) {
-      for (const [trackId, segs] of segments) {
-        let clipId = null;
-        let frame = -1;
-        for (let at = 0; at < segs.length; at += 1) {
-          const seg = segs[at];
-          if (seg.clipId === null) continue;
-          const startFrame = beatToFrame(seg.startBeat);
-          const endFrame = seg.endBeat === null ? Infinity : beatToFrame(seg.endBeat);
-          if (startFrame >= frameEnd) break;
-          if (endFrame <= frameStart) continue;
-          clipId = seg.clipId;
-          frame = startFrame > frameStart ? startFrame - frameStart : 0;
-          // A segment that also ends inside this block leaves nothing playing
-          // (a launch onto no clip, a stop): the change is to no clip at all.
-          if (endFrame < frameEnd) {
-            clipId = null;
-            frame = endFrame > frameStart ? endFrame - frameStart : 0;
-          }
-        }
-        const before = playingClips.has(trackId) ? playingClips.get(trackId) : null;
-        if (frame < 0) {
-          // Nothing of this track covers the block. That is only news when the
-          // last block said it played something: a segment that stopped has
-          // already been reported at its own boundary.
-          if (before === null) continue;
-          playingClips.delete(trackId);
-          clipChanges.push({ track_id: trackId, clip_id: null, frame: 0 });
-          continue;
-        }
-        if (before === clipId) continue;
-        // The map is only written when the track really moved on, so a block
-        // that merely plays on touches nothing.
-        if (clipId === null) playingClips.delete(trackId);
-        else playingClips.set(trackId, clipId);
-        clipChanges.push({ track_id: trackId, clip_id: clipId, frame: frame });
-      }
+      clipWalkStart = frameStart;
+      clipWalkEnd = frameEnd;
+      segments.forEach(reportTrackClip);
     }
 
     /**

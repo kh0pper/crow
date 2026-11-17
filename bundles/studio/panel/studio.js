@@ -1105,6 +1105,9 @@ const STYLES = `
   .studio .st-pad-bank:hover { color: var(--st-text); border-color: var(--st-edge); }
   .studio .st-pad-range { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
   .studio .st-pad-range-input { width: 100%; min-height: 44px; accent-color: var(--st-human); }
+  /* The sample tempo slider's readout: the tempo in BPM, or that the pad has none
+     yet, under the control it follows. */
+  .studio .st-pad-readout { font-size: 11px; color: var(--st-text); }
   .studio .st-pad-select { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
   .studio .st-pad-check {
     display: flex; align-items: center; gap: 6px; min-height: 44px;

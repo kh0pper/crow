@@ -159,6 +159,14 @@ test("the whole-bank pad tool takes the playback fields a bank shares and no oth
   for (const field of ["name", "filter", "choke", "keep_pitch", "source_bpm_x10", "gain_db", "pan"]) {
     assert.equal(field in fields.properties, false, `${field} is not a whole-bank field`);
   }
+
+  // Each bank field is the very shape pad.set takes, so the two schemas cannot
+  // describe one field two different ways: they are built from one table.
+  const padSet = (await listedTools()).find((tool) => tool.name === "studio_pad_set");
+  const padFields = padSet.inputSchema.properties.fields.properties;
+  for (const field of Object.keys(fields.properties)) {
+    assert.deepEqual(fields.properties[field], padFields[field], `${field} is pad.set's own shape`);
+  }
 });
 
 test("the whole-bank command is in both the registry and the panel's command list", () => {

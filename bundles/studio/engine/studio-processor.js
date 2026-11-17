@@ -186,7 +186,8 @@
  *   ended, or a launch replaced it). A voice a live press started belongs to no
  *   clip, so a scene launch never ends it. A song change (`setSong`), which runs
  *   on every edit, releases nothing that still exists: only a voice whose pad is
- *   gone from the new snapshot ends, through the normal release.
+ *   gone from the new snapshot, or whose pad no longer names the sample (or
+ *   slice) that voice is playing, ends, through the normal release.
  * - **Stop** releases the live state — every loop now — and so does
  *   `{type:"reset_live"}`, which the page sends when a DIFFERENT song opens.
  *   Neither touches the song, and an ordinary song update never sends one.
@@ -4284,8 +4285,9 @@
       // block runs the song's effects, sends, returns and master.
       this.applyMixer();
       // A song change runs on every edit, so it ends only a voice whose pad (or
-      // whose whole track) the new snapshot no longer has, and through the
-      // normal release: everything that still exists plays on.
+      // whose whole track) the new snapshot no longer has, or whose pad no
+      // longer names the sound that voice is playing, and through the normal
+      // release: everything that still exists, sounding as it did, plays on.
       this.releaseVanishedPads();
     }
 
@@ -8240,6 +8242,13 @@
       const cutoff = Number(field("cutoff_hz", filter.cutoff_hz));
       const resonance = Number(field("resonance", filter.resonance));
       voice.pad_key = bankId + "." + index;
+      // The sound this voice started with (the sample and, when the pad named
+      // one, the slice). `releaseVanishedPads` compares it with the pad's own on
+      // every song, so a cleared or repointed pad ends the voice instead of
+      // leaving a loop playing a sound the song no longer has. Two string
+      // references, so a start still allocates nothing.
+      voice.sample_id = sampleId;
+      voice.slice_id = asId(pad.slice_id);
       // The pad the panel lights for this voice. C1c (chromatic pads) moves this
       // off the pad's own index; every pad event and every light reads it here.
       voice.light_index = index;
@@ -8472,8 +8481,13 @@
           }
         }
         if (!victim) return;
+        // The cut voice is dead: it is not the operator's any more, so it stops
+        // looping, stops holding and stays unpaused.
         victim.sounding = false;
         victim.channels = null;
+        victim.looping = false;
+        victim.held = false;
+        victim.paused = false;
         sounding -= 1;
       }
     }
@@ -8564,10 +8578,19 @@
 
     /**
      * End, through the normal release, the voices whose pad the new snapshot no
-     * longer has: a pad (with its bank) that was deleted, or a whole track that
-     * the rebuilt slots already tore down. A voice whose pad is still there is
-     * left alone — an edit that touches something else never cuts what the
-     * operator is hearing.
+     * longer has or whose pad no longer names the sound they are playing: a pad
+     * (with its bank) that was deleted, a whole track that the rebuilt slots
+     * already tore down, a pad the operator cleared (**Clear pad** keeps the pad
+     * and drops only its `sample_id` and `slice_id`), and a pad pointed at
+     * another sample or slice.
+     *
+     * The comparison is against the sound the voice started with (`sample_id`,
+     * `slice_id`), never against what the pad holds now: a voice left sounding on
+     * a pad with no sample could never be pressed off (`startPad` refuses a pad
+     * that names none), so a loop there would play until the song was closed. A
+     * voice whose pad still names the very sound it started with is left alone —
+     * an edit that touches something else never cuts what the operator is
+     * hearing.
      * @returns {void}
      */
     releaseVanishedPads() {
@@ -8575,8 +8598,16 @@
         if (!record || !record.sampler) continue;
         for (const voice of record.voices) {
           if (!voice.sounding) continue;
-          if (this.pads.has(padKey(voice.trackId, voice.bankId, voice.index))) continue;
-          StudioSamplerVoice.release(voice);
+          const pad = this.pads.get(padKey(voice.trackId, voice.bankId, voice.index));
+          if (!pad) {
+            StudioSamplerVoice.release(voice);
+            continue;
+          }
+          if (asId(pad.sample_id) !== voice.sample_id) {
+            StudioSamplerVoice.release(voice);
+            continue;
+          }
+          if (asId(pad.slice_id) !== voice.slice_id) StudioSamplerVoice.release(voice);
         }
       }
     }
