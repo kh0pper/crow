@@ -229,7 +229,8 @@ const isBot = (actor) => !!(actor && actor.kind === "bot");
  * in-process voice executor may use it as its construction-time base actor; nothing a caller can
  * send (a `_meta` actor, an `x-crow-actor-*` header, a process env) carries the marker, and
  * `resolveCallActor` rebuilds a bot actor from kind and id alone. A bot turn on the pi engine gets
- * the same id without the marker, so it is bound by the bot rules like any other bot.
+ * the same id without the marker, so it is bound by the bot rules like any other bot — and so does a
+ * RELAY voice turn, whose executor is built as the plain bound bot and never with this actor.
  */
 const OPERATOR_VOICE_ACTOR = Object.freeze({ kind: "bot", id: CROW_VOICE_BOT_ID, operatorVoice: true });
 
