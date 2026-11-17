@@ -38,16 +38,18 @@
 //   - ordinary deeply-nested content (8 levels of lists in quotes in lists, code
 //     in lists) renders EXACTLY as it did before any guard — pinned below, the
 //     digests were captured from the renderer before the change;
-//   - the owner path caps its markdown-parsed input (OWNER_MD_MAX_INPUT, 128 KB)
-//     and a LONGER document is not dropped: the head is rendered, a notice
-//     follows, and the WHOLE remainder comes out as escaped plain text under a
-//     <pre> — the head's source plus the tail's text is the whole document, the
-//     cut is never PAST the cap, it never lands inside a fenced code block while
-//     a blank line in the cap's second half is available (a fence that was not a
-//     fence — "```inline```" is inline code — may cost the head at most half the
-//     cap, then a line break is the cut), and a cut that falls AT the cap never
-//     splits a UTF-16 surrogate pair (one emoji in half is not a character, and
-//     both halves would render as U+FFFD);
+//   - the owner path splits a document longer than OWNER_MD_MAX_INPUT (128 KB)
+//     into CONSECUTIVE chunks and renders EVERY one of them, so a long document
+//     comes out fully formatted; each cut is a safe block boundary — a cut never
+//     lands inside a fenced code block while a blank line in the cap's second
+//     half is available (a fence that was not a fence — "```inline```" is inline
+//     code — may cost a chunk at most half the cap, then a line break is the
+//     cut), and a cut that falls AT the cap never splits a UTF-16 surrogate pair
+//     (one emoji in half is not a character, and both halves would render as
+//     U+FFFD); only the total-time budget (OWNER_MD_RENDER_BUDGET_MS of CPU for
+//     the whole document) or the hard 8 MiB ceiling turns a remainder into the
+//     plain-text tail, and then the WHOLE remainder follows under the notice
+//     (the chunked path itself is pinned by tests/md-chunked-render.test.js);
 //   - the owner path's parse-failure fallback (escaped text, HTML comments
 //     stripped) is still what a < cap document gets when marked throws;
 //   - the file viewer reads a file up to 8 MiB and refuses only past that (it
@@ -63,7 +65,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import express from "express";
-import { renderMarkdown, renderBotMarkdown, MD_MAX_NEST, OWNER_MD_MAX_INPUT, ownerMarkdownCut } from "../servers/blog/renderer.js";
+import { renderMarkdown, renderBotMarkdown, MD_MAX_NEST, OWNER_MD_MAX_INPUT, OWNER_MD_MAX_TOTAL_INPUT, ownerMarkdownCut, ownerMarkdownChunks } from "../servers/blog/renderer.js";
 
 const CAP = 64 * 1024 - 1;
 const rep = (u, n) => u.repeat(Math.ceil(n / u.length)).slice(0, n);
@@ -261,8 +263,9 @@ test("a lazy continuation line cannot walk past the bound (both paths)", (t) => 
 
   // 256 KB is over BOT_MD_MAX_INPUT (the bot path answers "" by design), so
   // only the owner path parses it — and this is the input that used to take 26 s
-  // there. It is also over the owner cap now, so the owner path renders its head
-  // and shows the rest as plain text. Its own bound: 1 s.
+  // there. It is also over the chunk size, so the owner path renders it in
+  // chunks (each with the depth bound); the whole document is on the page. Its
+  // own bound: 1 s.
   const huge = "> ".repeat(131072) + "x\nlazy";
   assert.ok(huge.length > OWNER_MD_MAX_INPUT && huge.length < 4 * OWNER_MD_MAX_INPUT,
     `the fixture is over the owner cap (${huge.length} > ${OWNER_MD_MAX_INPUT})`);
@@ -398,22 +401,24 @@ test("code, fences, raw HTML and math keep every character (no inserted backslas
   assert.ok(!renderMarkdown(math).includes("\\"), "owner: no backslash either");
 });
 
-// --- the owner cap and the long-document split ----------------------------
+// --- the owner cap: a long document is CHUNKED, not cut -------------------
 // marked's block lexer is still quadratic on a few shapes the depth/byte guard
-// does not cover ("    x\n>     y\n" repeated: 11 s at 256 KB, ~200 s at 1 MiB),
-// and the owner path is reachable from public /blog, the file viewer and
-// federated memories. So the cap is 128 KB — well above real data (every stored
-// blog post, KB article and memory is under 60 KB) — and an over-cap document
-// DEGRADES instead of being refused: the head is rendered as markdown through
-// the same guarded owner path, a notice follows, and the WHOLE remainder is
-// shown as escaped plain text in one <pre>. Nothing is dropped, and an HTML
-// comment in that tail is NOT eaten: it is plain text, so what the author wrote
-// is what the reader sees.
+// does not cover ("    x\n>     y\n" repeated used to cost 11 s at 256 KB and
+// ~200 s at 1 MiB), and the owner path is reachable from public /blog, the file
+// viewer and federated memories. So NO chunk handed to marked is larger than
+// 128 KB — but a longer document is no longer degraded: it is split into
+// consecutive chunks at safe block boundaries and every chunk is rendered, so
+// the whole document comes out formatted (the chunked path itself is pinned by
+// tests/md-chunked-render.test.js). What this section pins is the CUT: where a
+// chunk ends, that it never lands inside a fence while a blank line is
+// available, that it never splits a UTF-16 surrogate pair, and that the one
+// path that still produces plain text — past the hard 8 MiB ceiling — keeps
+// every character of the remainder.
 const TAIL_NOTICE = '<p class="md-tail-notice">Long document: the rest is shown as plain text.</p>';
 const TAIL_OPEN = '<pre class="md-tail">';
 /** sha256 of a < cap document's render — see "a document under the cap". Captured
- *  from this tree; the > cap split cannot reach it (a <= cap document takes the
- *  single render path renderMarkdown used before the split existed). */
+ *  from this tree; a > cap document takes the chunked path, which a <= cap
+ *  document never reaches (it is one chunk). */
 const NEAR_CAP_PIN = "7b1a34447b802619710e25c22dc3d9c5714c2d8929bb32646ab19fc1d33ea38f";
 
 /** The inverse of the renderer's escapeText (five characters), so a tail can be
@@ -461,8 +466,8 @@ function realisticSection(i) {
 }
 
 /** A realistic document of about `size` characters: headings, paragraphs,
- *  lists, a table and fenced code — with ONE fence opened just before the cap
- *  and closed just after it, so the cut has to skip it. */
+ *  lists, a table and fenced code — with ONE fence opened just before the first
+ *  chunk's cap and closed just after it, so the first cut has to skip it. */
 function realisticDoc(size = 300 * 1024) {
   const parts = [];
   let length = 0;
@@ -504,7 +509,7 @@ function nearCapDoc() {
   return parts.join("");
 }
 
-test("the owner cap is 128 KB, and a 300 KB document keeps every character", (t) => {
+test("the owner cap is 128 KB, and a 300 KB document is rendered in full", (t) => {
   assert.equal(OWNER_MD_MAX_INPUT, 128 * 1024);
   const doc = realisticDoc();
   assert.ok(doc.length > 300 * 1024, `the fixture is a long document (${doc.length})`);
@@ -512,35 +517,34 @@ test("the owner cap is 128 KB, and a 300 KB document keeps every character", (t)
   const cut = ownerMarkdownCut(doc);
   assert.ok(cut > 0 && cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
   assert.equal(doc[cut - 1], "\n", "the cut is at a line boundary");
-  // NOT inside the straddling fence: the head's fence markers balance, and the
-  // fence itself (with the whole 40-line body) is in the tail.
-  const fencesInHead = doc.slice(0, cut).split("\n").filter((l) => /^ {0,3}```/.test(l)).length;
-  assert.equal(fencesInHead % 2, 0, "the cut does not land inside a fenced code block");
+  // NOT inside the straddling fence: the first chunk's fence markers balance,
+  // so the fence (with the whole 40-line body) is in a later chunk.
+  const fencesInFirst = doc.slice(0, cut).split("\n").filter((l) => /^ {0,3}```/.test(l)).length;
+  assert.equal(fencesInFirst % 2, 0, "the cut does not land inside a fenced code block");
 
   const t0 = cpuMs();
   const html = renderMarkdown(doc);
   const ms = cpuMs() - t0;
-  t.diagnostic(`300 KB document (head ${cut} chars): ${ms.toFixed(0)} ms`);
+  t.diagnostic(`300 KB document (first cut ${cut} chars): ${ms.toFixed(0)} ms`);
   assert.ok(ms < BOUND_MS, `a 300 KB realistic document took ${ms.toFixed(0)} ms`);
 
-  const { head, text } = tailOf(html);
-  // The head IS markdown: headings, lists and a table, from the head's source.
-  assert.match(head, /<h2[^>]*>Section 0<\/h2>/, head.slice(0, 300));
-  assert.match(head, /<li>first bullet<\/li>/);
-  assert.match(head, /<div class="table-scroll"><table>/, "a table survived the split");
-  assert.equal((head.match(/<h2/g) || []).length, (doc.slice(0, cut).match(/^## /gm) || []).length,
-    "every heading in the head was rendered");
-  assert.match(head, /<pre><code class="language-js">/, "the head's own closed fences are real code blocks");
-  // The tail is the WHOLE remainder, verbatim, and the two halves meet at `cut`.
-  assert.equal(text, doc.slice(cut), "the tail is exactly the rest of the document");
-  assert.equal(cut + text.length, doc.length, "every character is accounted for");
-  assert.ok(text.startsWith("```text\n"), "the straddling fence came out as text: " + text.slice(0, 40));
-  assert.ok(text.includes("straddling code line 39"), "all 40 of its lines are in the tail");
-  assert.ok(!head.includes("straddling code line 0"), "and none of them is in the head");
-  assert.ok(text.includes("PLAIN-TAIL-END"), "the end of the document is on screen");
+  // Fully formatted: no notice, no plain-text tail.
+  assert.ok(!html.includes("md-tail"), "the whole document is formatted: " + html.slice(-300));
+  assert.match(html, /<h2[^>]*>Section 0<\/h2>/, html.slice(0, 300));
+  assert.match(html, /<li>first bullet<\/li>/);
+  assert.match(html, /<div class="table-scroll"><table>/, "tables are formatted");
+  assert.equal((html.match(/<h2/g) || []).length, (doc.match(/^## /gm) || []).length,
+    "every heading in the document was rendered");
+  assert.match(html, /<pre><code class="language-js">/, "fences on both sides of the cut are real code blocks");
+  // The straddling fence is a CODE BLOCK, not text: its 40 lines are inside a
+  // <pre> and none of them leaked into a paragraph.
+  assert.ok(html.includes("straddling code line 0"), "the fence body is on the page");
+  assert.ok(html.includes("straddling code line 39"), "all 40 of its lines are");
+  assert.ok(!/<p>\s*straddling code line/.test(html), "and not as paragraph text");
+  assert.match(html, /PLAIN-TAIL-END/, "the end of the document is on screen");
 });
 
-test("nothing is dropped: random 200-600 KB documents account for every character", (t) => {
+test("no chunk is dropped: random 200-600 KB documents render every character", (t) => {
   const rnd = mulberry32(0x0ddba11);
   const POOL = [
     "alpha beta gamma delta\n", "**bold** and *em* and `code`\n", "- bullet\n", "1. ordered\n",
@@ -556,36 +560,31 @@ test("nothing is dropped: random 200-600 KB documents account for every characte
       parts.push(unit);
       size += unit.length;
     }
-    const src = parts.join("");
-    const cut = ownerMarkdownCut(src);
-    assert.ok(cut > 0 && cut <= OWNER_MD_MAX_INPUT, `doc #${n}: cut ${cut} is inside the cap`);
+    const src = parts.join("") + `END-OF-DOC-${n}`;
+    // The chunk boundaries cover the document exactly (see
+    // tests/md-chunked-render.test.js for the full property).
+    const chunks = ownerMarkdownChunks(src);
+    assert.equal(chunks.map(([start, end]) => src.slice(start, end)).join(""), src,
+      `doc #${n}: joined chunks reproduce the source`);
+    assert.ok(chunks.every(([start, end]) => end - start <= OWNER_MD_MAX_INPUT),
+      `doc #${n}: every chunk is inside the cap`);
     const t0 = cpuMs();
     const html = renderMarkdown(src);
     t.diagnostic(`random doc #${n} (${src.length} chars): ${(cpuMs() - t0).toFixed(0)} ms`);
-    const { text } = tailOf(html);
-    assert.equal(text, src.slice(cut), `doc #${n}: the tail is exactly the rest of the source`);
-    assert.equal(cut + text.length, src.length,
-      `doc #${n}: ${cut} + ${text.length} of ${src.length} characters accounted for`);
+    assert.ok(html.length > 0, `doc #${n}: still rendered`);
+    // These documents are nowhere near the render budget, so nothing is plain
+    // text — and the last line of the document is on the page.
+    assert.ok(!html.includes("md-tail"), `doc #${n}: fully formatted`);
+    assert.ok(html.includes(`END-OF-DOC-${n}`), `doc #${n}: the end of the document is on screen`);
   }
 });
 
-test("the pathological 1 MiB shape renders in < 30 s on the owner path", (t) => {
-  // measured on this tree before the cap came down: 11 s at 256 KB, ~200 s at
-  // 1 MiB. Only the first 128 KB is ever markdown-parsed now; the rest is a
-  // linear escape.
-  // The 30 s CPU bound (not 3 s) because this shape is still QUADRATIC inside
-  // marked's block lexer for the 128 KB head: ~2.8 s on the dev box, ~9.8 s on
-  // CI's runner. That is why the bound is 30 s and not 8 s — 8 s was a coin flip
-  // on CI. The follow-up PR's block-level guard for this shape tightens it.
-  //
-  // The TAIL is linear, and the bound above is what asserts it: the head's cost
-  // is fixed by the cap (renderOwnerHead never sees past 128 KB), so everything
-  // this document costs beyond the head is the tail's escape. A QUADRATIC tail
-  // over ~900 KB would be ~40x the head's per-KB cost — minutes on any runner —
-  // and could not come in under the bound. The escape is not timed separately
-  // because renderer.js does not export it (tailHtml/escapeText are module-
-  // private); what makes the head's cost independent of the tail is the cut
-  // never being past the cap, asserted below.
+test("the pathological 1 MiB shape is bounded by the chunk guards (well under the old 30 s)", (t) => {
+  // Measured before the block-level guard: 11 s at 256 KB, ~200 s at 1 MiB. It is
+  // now parsed as eight 128 KB chunks, each through the guarded pipeline, so the
+  // whole render is fast. The bound is 5 s rather than the 30 s the old head+tail
+  // split needed: the CHUNKS must be bounded, and a return to the quadratic block
+  // lexer would blow past this on any runner (~1 s measured at 5x slower).
   const src = rep("    x\n>     y\n", 1024 * 1024);
   assert.equal(src.length, 1024 * 1024);
   const cpu0 = cpuMs();
@@ -594,13 +593,16 @@ test("the pathological 1 MiB shape renders in < 30 s on the owner path", (t) => 
   const ms = cpuMs() - cpu0;
   const wall = Date.now() - wall0;
   t.diagnostic(`1 MiB "    x\\n>     y\\n": ${ms.toFixed(0)} ms CPU, ${wall} ms wall`);
-  assert.ok(ms < 30000, `1 MiB of the pathological shape took ${ms.toFixed(0)} ms (bound 30000 ms)`);
-  const cut = ownerMarkdownCut(src);
-  assert.ok(cut <= OWNER_MD_MAX_INPUT, `the cut ${cut} is inside the cap, so the head's cost is the cap's`);
-  const { text } = tailOf(html);
-  assert.equal(text, src.slice(cut), "the tail is the whole rest of the document");
-  assert.equal(cut + text.length, src.length);
+  assert.ok(ms < 5000, `1 MiB of the pathological shape took ${ms.toFixed(0)} ms (bound 5000 ms)`);
   assert.ok(html.length > 0);
+  const chunks = ownerMarkdownChunks(src);
+  assert.ok(chunks.length >= 8, `the document is split into chunks (${chunks.length})`);
+  for (const [start, end] of chunks) assert.ok(end - start <= OWNER_MD_MAX_INPUT,
+    `chunk ${start}-${end} is inside the cap, so no parse is ever over it`);
+  assert.ok(!html.includes("md-tail"), "the whole document is formatted (under the budget)");
+  // Every character is still there: each line of `x` appears as text.
+  assert.ok(html.includes("x"), "the text is on the page");
+  assert.ok(html.replace(/<[^>]+>/g, "").includes("x"), "and it is text, not just markup");
 });
 
 test("a cut at the cap never splits a UTF-16 surrogate pair", (t) => {
@@ -608,7 +610,7 @@ test("a cut at the cap never splits a UTF-16 surrogate pair", (t) => {
   // pair) and not a single newline, so ownerMarkdownCut finds no blank line and
   // no line break and the cut falls AT the cap — the one branch where the index
   // is not already a line boundary. A cut between a high surrogate and its low
-  // half would leave the head ending with half a character and the tail
+  // half would leave one chunk ending with half a character and the next
   // starting with the other half (both render as U+FFFD, and the halves are no
   // longer the characters the author wrote).
   const src = "😀".repeat(70000);
@@ -624,14 +626,22 @@ test("a cut at the cap never splits a UTF-16 surrogate pair", (t) => {
 
   const cut = ownerMarkdownCut(src);
   assert.ok(cut > 0 && cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
-  assert.ok(!isHigh(src.charCodeAt(cut - 1)), `the head does not end with a lone high surrogate at ${cut - 1}`);
-  assert.ok(!isLow(src.charCodeAt(cut)), `the tail does not start with a lone low surrogate at ${cut}`);
-  const { text } = tailOf(html);
-  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
-  assert.equal(cut + text.length, src.length,
-    `head + tail is the whole input (${cut} + ${text.length} of ${src.length} units)`);
-  assert.ok(!isLow(text.charCodeAt(0)),
-    `the rendered tail starts with a lone low surrogate (U+${text.charCodeAt(0).toString(16)})`);
+  assert.ok(!isHigh(src.charCodeAt(cut - 1)), `the first chunk does not end with a lone high surrogate at ${cut - 1}`);
+  assert.ok(!isLow(src.charCodeAt(cut)), `the next chunk does not start with a lone low surrogate at ${cut}`);
+  // Every chunk boundary of the rendered document is on a character boundary.
+  const chunks = ownerMarkdownChunks(src);
+  assert.ok(chunks.length >= 2, `the document is split (${chunks.length} chunks)`);
+  for (const [start, end] of chunks) {
+    assert.ok(!isHigh(src.charCodeAt(end - 1)), `chunk ending at ${end} does not split a pair`);
+    assert.ok(!isLow(src.charCodeAt(end)), `chunk starting at ${end} does not split a pair`);
+    assert.ok(end - start > 0);
+  }
+  assert.equal(chunks.map(([start, end]) => src.slice(start, end)).join(""), src,
+    "the chunks are the whole document");
+  // Nothing was lost: all 70,000 emoji are on the page, and no replacement
+  // character stands in for half of one.
+  assert.equal((html.match(/😀/g) || []).length, 70000, "every emoji is rendered");
+  assert.ok(!html.includes("\uFFFD"), "and none of them became U+FFFD");
 
   // The cap (131,072) is EVEN, so on this document it happens to land on a pair
   // boundary and the guard has nothing to do. One leading ASCII character moves
@@ -642,44 +652,45 @@ test("a cut at the cap never splits a UTF-16 surrogate pair", (t) => {
   assert.equal(shifted.charCodeAt(OWNER_MD_MAX_INPUT - 1) & 0xfc00, 0xd800,
     "the fixture puts a high surrogate just before the cap");
   assert.equal(shiftedCut, OWNER_MD_MAX_INPUT - 1, "so the cut steps back one unit");
-  assert.ok(!isHigh(shifted.charCodeAt(shiftedCut - 1)), "and the head ends on a character boundary");
-  assert.ok(!isLow(shifted.charCodeAt(shiftedCut)), "as does the tail");
+  assert.ok(!isHigh(shifted.charCodeAt(shiftedCut - 1)), "and the chunk ends on a character boundary");
+  assert.ok(!isLow(shifted.charCodeAt(shiftedCut)), "as does the next one");
   assert.ok(isHigh(shifted.charCodeAt(shiftedCut)) && isLow(shifted.charCodeAt(shiftedCut + 1)),
-    "the tail begins with a whole pair: " + shifted.charCodeAt(shiftedCut).toString(16));
+    "the next chunk begins with a whole pair: " + shifted.charCodeAt(shiftedCut).toString(16));
+  assert.equal((renderMarkdown(shifted).match(/😀/g) || []).length, 70000,
+    "and the shifted document renders every emoji too");
 });
 
-test("inline backticks do not open a fence, so the head is not collapsed", () => {
+test("inline backticks do not open a fence, so a chunk is not collapsed", () => {
   // A backtick fence's info string may not itself contain a backtick
   // (CommonMark), so this line is a paragraph with inline code in it, not an
   // opener. Read as one — the bug — the "fence" never closes, every later blank
-  // line is skipped, and the cut lands 7 characters into a 200 KB document: the
-  // whole thing becomes plain text.
+  // line is skipped, and the cut lands 7 characters into a 200 KB document.
   const paragraphs = rep("A paragraph of ordinary prose, long enough to be worth wrapping.\n\n", 200 * 1024);
   const src = "intro\n\n```inline``` is how you write it\n\n" + paragraphs;
   assert.ok(src.length > 200 * 1024, `the fixture is a long document (${src.length})`);
 
   const cut = ownerMarkdownCut(src);
-  assert.ok(cut > 100_000, `the head keeps most of the cap (${cut} of ${OWNER_MD_MAX_INPUT})`);
+  assert.ok(cut > 100_000, `the first chunk keeps most of the cap (${cut} of ${OWNER_MD_MAX_INPUT})`);
   assert.ok(cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
   assert.equal(src[cut - 1], "\n", "the cut is at a line boundary");
-
-  const { text } = tailOf(renderMarkdown(src));
-  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
-  assert.equal(cut + text.length, src.length, "head + tail is the whole input");
+  const html = renderMarkdown(src);
+  assert.ok(!html.includes("md-tail"), "the whole document is formatted");
+  assert.ok(html.replace(/<[^>]+>/g, "").includes("worth wrapping"), "the text is on the page");
 
   // The fence state machine can still be wrong about something marked knows
-  // better, so a misjudged fence may cost the head at most HALF the cap: with
+  // better, so a misjudged fence may cost a chunk at most HALF the cap: with
   // only one blank line — right at the top — and none after it, the cut falls on
   // the last line break before the cap instead of at character 7.
   const noBlanks = "intro\n\n```inline``` is how you write it\n" + rep("a line of prose\n", 200 * 1024);
   assert.ok(!noBlanks.slice(7).includes("\n\n"), "the only blank line is the one at the top");
   const fallbackCut = ownerMarkdownCut(noBlanks);
-  assert.ok(fallbackCut > 100_000, `the line-break fallback keeps the head (${fallbackCut})`);
+  assert.ok(fallbackCut > 100_000, `the line-break fallback keeps the chunk (${fallbackCut})`);
   assert.ok(fallbackCut <= OWNER_MD_MAX_INPUT, `and stays inside the cap (${fallbackCut})`);
   assert.equal(noBlanks[fallbackCut - 1], "\n", "the fallback cut is still a line boundary");
-  const fallback = tailOf(renderMarkdown(noBlanks));
-  assert.equal(fallback.text, noBlanks.slice(fallbackCut), "the fallback tail is the whole remainder");
-  assert.equal(fallbackCut + fallback.text.length, noBlanks.length, "head + tail is the whole input");
+  const fallbackHtml = renderMarkdown(noBlanks);
+  assert.ok(!fallbackHtml.includes("md-tail"), "the fallback document is formatted too");
+  assert.ok(fallbackHtml.replace(/<[^>]+>/g, "").includes("a line of prose"),
+    "and its text is on the page");
 });
 
 test("a whitespace line that ends past the cap is not a cut point", () => {
@@ -699,9 +710,13 @@ test("a whitespace line that ends past the cap is not a cut point", () => {
   assert.ok(cut > 0 && cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
   assert.equal(cut, lead.length, "the cut is the last blank line that ends before the cap");
 
-  const { text } = tailOf(renderMarkdown(src));
-  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
-  assert.equal(cut + text.length, src.length, "head + tail is the whole input");
+  // The chunks never reach past the hard ceiling with a window that ends 7 MB
+  // later: the run of spaces is covered as its own chunks, and the text is on
+  // the page.
+  const html = renderMarkdown(src);
+  assert.ok(html.length > 0, "still rendered");
+  assert.ok(!html.includes("md-tail"), "the run of spaces is under the 8 MiB ceiling");
+  assert.ok(html.replace(/<[^>]+>/g, "").includes("Filler paragraph"), "and the prose is on the page");
 });
 
 test("a real fence opened just under the cap is still never split", () => {
@@ -716,12 +731,24 @@ test("a real fence opened just under the cap is still never split", () => {
   assert.equal(cut, openAt, "the cut lands on the blank line before the fence");
   assert.ok(cut <= OWNER_MD_MAX_INPUT, `cut ${cut} is inside the cap`);
 
-  const { head, text } = tailOf(renderMarkdown(src));
-  assert.ok(!head.includes("straddling code line"), "no fence body in the head");
-  assert.ok(!head.includes("```"), "and no unbalanced fence marker either: " + head.slice(-200));
-  assert.ok(text.startsWith("```text\n"), "the whole fence came out as text: " + text.slice(0, 40));
-  assert.equal(text, src.slice(cut), "the tail is exactly the rest of the document");
-  assert.equal(cut + text.length, src.length, "head + tail is the whole input");
+  // No chunk boundary falls inside the fence: every cut either precedes its
+  // opening line or follows its closing one, so the whole fence is code in ONE
+  // chunk and nothing of it becomes text.
+  const fenceStart = openAt;
+  const fenceEnd = openAt + "```text\n".length + rep("straddling code line\n", 40 * 1024).length + 4;
+  const chunks = ownerMarkdownChunks(src);
+  assert.equal(chunks.map(([start, end]) => src.slice(start, end)).join(""), src,
+    "the chunks are the whole document");
+  for (const [start, end] of chunks.slice(1, -1)) {
+    assert.ok(end <= fenceStart || start >= fenceEnd,
+      `chunk boundary ${start}-${end} does not fall inside the fence (${fenceStart}-${fenceEnd})`);
+  }
+  const html = renderMarkdown(src);
+  assert.ok(!html.includes("md-tail"), "the whole document is formatted");
+  assert.match(html, /<pre><code class="language-text">/, "the fence is one real code block");
+  assert.ok(html.includes("straddling code line"), "with its body");
+  assert.ok(!/<p>\s*straddling code line/.test(html), "and none of it as paragraph text");
+  assert.match(html, /after the fence/);
 });
 
 test("a document under the cap is rendered exactly as before (no notice, no tail)", () => {
@@ -737,19 +764,35 @@ test("a document under the cap is rendered exactly as before (no notice, no tail
   assert.equal(sha256(html), NEAR_CAP_PIN, "a < cap document must not change: " + sha256(html));
 });
 
-test("the tail is plain text: a comment there stays visible, the head's is not shown", () => {
-  // The < cap fallback still hides what the author hid (it SHOWS its escaped
-  // text, so an escaped comment would be on screen): that is escapedTextHtml's
-  // job, unchanged.
-  const body = "x ".repeat(Math.ceil((OWNER_MD_MAX_INPUT + 1) / 2));
+test("the plain-text tail is only reached at the hard ceiling, and keeps every character", (t) => {
+  // A document of at most OWNER_MD_MAX_INPUT is rendered (not shown as text):
+  // the sanitizer drops a comment, as it always did, and nothing is escaped.
   const hidden = "<!-- internal: do not publish -->";
-  const html = renderMarkdown(hidden + "\n\n" + body + "\n<!-- tail note -->\nEND");
-  // The head is markdown through the sanitizer, which drops comments.
-  assert.ok(!html.includes("internal: do not publish"), "the head's comment is not shown");
-  // The TAIL is plain text: nothing is stripped, everything is visible.
+  const body = "x ".repeat(Math.ceil((OWNER_MD_MAX_INPUT + 1) / 2));
+  const small = renderMarkdown(hidden + "\n\n" + body + "\n<!-- small-doc note -->\nEND");
+  assert.ok(!small.includes("md-tail"), "an over-cap document is still fully formatted");
+  assert.ok(!small.includes("internal: do not publish"), "the comment is dropped by the sanitizer");
+  assert.ok(!small.includes("small-doc note"), "and so is the other one");
+  assert.match(small, /END/);
+
+  // Past OWNER_MD_MAX_TOTAL_INPUT (8 MiB, the file viewer's own read cap)
+  // nothing more is parsed: the remainder is plain text under the notice, and
+  // there NOTHING is stripped — an HTML comment is shown, escaped, exactly as
+  // the author wrote it (that is tailHtml's job, not escapedTextHtml's).
+  // Indented code is used as filler because it is cheap to render.
+  const filler = rep("    code line\n", OWNER_MD_MAX_TOTAL_INPUT + 1);
+  const src = hidden + "\n\n" + filler + "\n<!-- tail note -->\nEND\n";
+  assert.ok(src.length > OWNER_MD_MAX_TOTAL_INPUT, `over the hard ceiling (${src.length})`);
+  const t0 = cpuMs();
+  const html = renderMarkdown(src);
+  t.diagnostic(`8 MiB + tail document: ${(cpuMs() - t0).toFixed(0)} ms`);
+  const { text } = tailOf(html);
+  assert.equal(text, src.slice(OWNER_MD_MAX_TOTAL_INPUT),
+    "the tail is exactly the remainder past the ceiling");
   assert.ok(html.includes("&lt;!-- tail note --&gt;"), "the tail's comment is shown, escaped: " + html.slice(-200));
   assert.ok(!html.includes("<!-- tail note -->"), "and never as live markup");
-  assert.ok(html.includes("END"));
+  assert.ok(!html.includes("internal: do not publish"), "the parsed head's comment is not shown");
+  assert.ok(text.endsWith("END\n"));
 });
 
 // --- normal content is untouched -------------------------------------------
@@ -931,9 +974,9 @@ test("lazy continuation lines on ordinary content render exactly as main (both p
 // --- the file viewer: a long file is a document, not a refusal ------------
 // The page used to refuse any .md over 1 MiB before reading it, which hid
 // content. It has one hard cap now — FILEVIEW_MAX_BYTES, 8 MiB of bytes, stat'd
-// before the read — and everything under it is read and rendered;
-// renderMarkdown degrades a long document by itself (head + notice + plain-text
-// tail), so a 600 KB or 1.5 MiB document is shown.
+// before the read — and everything under it is read and rendered in FULL:
+// renderMarkdown renders a long document in 128 KB chunks, so a 600 KB or
+// 1.5 MiB document comes out formatted end to end.
 let srv, base, root, smallMd, midDoc, midMd, overDoc, overMd, hugeMd, hugeBytes, fileviewMaxBytes;
 before(async () => {
   root = mkdtempSync(join(tmpdir(), "md-nest-fileview-"));
@@ -943,8 +986,8 @@ before(async () => {
   hugeMd = join(root, "huge.md");
   writeFileSync(smallMd, "# Small\n\nsome *text*\n");
 
-  // 600 KB, with a formatted head and a sentinel at the very end so "the whole
-  // tail is on the page" is a real assertion.
+  // 600 KB, with a formatted body and a sentinel at the very end so "the whole
+  // file is on the page" is a real assertion.
   midDoc = realisticDoc(600 * 1024);
   assert.ok(midDoc.length > 600 * 1024 && midDoc.length > 4 * OWNER_MD_MAX_INPUT);
   writeFileSync(midMd, midDoc);
@@ -980,7 +1023,7 @@ after(() => { srv?.close(); rmSync(root, { recursive: true, force: true }); });
 
 const get = (path) => fetch(base + path, { headers: { cookie: "crow_session=good" } });
 
-test("fileview: a 600 KB file shows a formatted head, the notice and its WHOLE tail", async (t) => {
+test("fileview: a 600 KB file is rendered in FULL (no notice, no plain-text tail)", async (t) => {
   const ok = await get("/dashboard/fileview?path=" + encodeURIComponent(smallMd));
   assert.equal(ok.status, 200);
   assert.match(await ok.text(), /<h1[^>]*>Small<\/h1>/, "the harness renders a normal file");
@@ -992,24 +1035,25 @@ test("fileview: a 600 KB file shows a formatted head, the notice and its WHOLE t
   assert.equal(r.status, 200);
   const html = await r.text();
   assert.doesNotMatch(html, /too large to view here/, "a 600 KB file is not refused");
-  const { head, text } = tailOf(html, html.indexOf("</article>"));
-  assert.match(head, /<h2[^>]*>Section 0<\/h2>/, "the head is rendered markdown");
-  assert.match(head, /<div class="table-scroll"><table>/, "tables in the head are formatted");
-  assert.equal(text, midDoc.slice(ownerMarkdownCut(midDoc)),
-    "the tail is the whole remainder of the file, verbatim");
-  assert.ok(text.includes("PLAIN-TAIL-END"), "right to the last line");
+  const article = html.slice(html.indexOf("<article>"), html.indexOf("</article>"));
+  assert.ok(!article.includes("md-tail"), "the whole file is formatted");
+  assert.match(article, /<h2[^>]*>Section 0<\/h2>/, "the first section is rendered markdown");
+  assert.equal((article.match(/<h2[^>]*>/g) || []).length, (midDoc.match(/^## /gm) || []).length,
+    "every section heading of the file is an <h2> on the page");
+  assert.match(article, /<div class="table-scroll"><table>/, "tables are formatted");
+  assert.ok(article.includes("PLAIN-TAIL-END"), "right to the last line");
 });
 
-test("fileview: a file over the old 1 MiB refusal is rendered now", async () => {
+test("fileview: a file over the old 1 MiB refusal is rendered in full now", async () => {
   assert.ok(overDoc.length > 1024 * 1024, `fixture is over the old cap (${overDoc.length})`);
   const r = await get("/dashboard/fileview?path=" + encodeURIComponent(overMd));
   assert.equal(r.status, 200);
   const html = await r.text();
   assert.doesNotMatch(html, /too large to view here/, "nothing over the old 1 MiB is refused");
-  assert.match(html, /<h1[^>]*>Over One MiB<\/h1>/, "its head is rendered");
-  const { text } = tailOf(html, html.indexOf("</article>"));
-  assert.equal(text, overDoc.slice(ownerMarkdownCut(overDoc)), "and its whole tail is shown as text");
-  assert.ok(text.includes("OVER-1MIB-TAIL-SENTINEL"));
+  assert.match(html, /<h1[^>]*>Over One MiB<\/h1>/, "its title is rendered");
+  const article = html.slice(html.indexOf("<article>"), html.indexOf("</article>"));
+  assert.ok(!article.includes("md-tail"), "the whole file is formatted, not head + text");
+  assert.ok(article.includes("OVER-1MIB-TAIL-SENTINEL"), "down to its last line");
 });
 
 test("fileview: a file over the 8 MiB read cap shows its size and is not read", async () => {
