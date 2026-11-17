@@ -15,14 +15,22 @@
  * lands one sample as `sample × centre`, where centre is the constant-power
  * coefficient `√2 · cos(π/4)`; the helper below spells that out so an exact
  * comparison is readable.
+ *
+ * The one test at the end that asks about the PROCESSOR — an attack, decay or
+ * sustain motion lane landing on a voice that is in its hold — builds the
+ * worklet module itself from the engine's own sources (the way
+ * `engine-client.js` joins them) and instantiates the processor in a stand-in
+ * `AudioWorkletGlobalScope`, so it needs the vendored SunVox wasm file.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
+const VENDOR_DIR = fileURLToPath(new URL("../bundles/studio/vendor/sunvox/", import.meta.url));
 const bundleRequire = createRequire(join(ENGINE_DIR, "x.js"));
 const StudioSamplerVoice = bundleRequire(join(ENGINE_DIR, "sampler-voice.js"));
 
@@ -379,6 +387,224 @@ test("refreshStep works the step out from dir, speed and pitch", () => {
   assert.equal(plain.step, 1, "so the step is exactly one frame per frame");
 });
 
+// --- the hold stage ---------------------------------------------------------
+
+test("holdMs 10 at 48 kHz holds level 1 for 480 frames after the attack", () => {
+  const ATTACK = 240; // 5 ms at 48 kHz
+  const HOLD = 480; // 10 ms at 48 kHz
+  const DECAY = 480; // 10 ms at 48 kHz
+  const HELD = atCentre(0.5);
+  const samples = constant(48000, 0.5);
+  const voice = startVoice({
+    channels: [samples],
+    attackMs: 5,
+    holdMs: 10,
+    decayMs: 10,
+    sustain: 0.5,
+  });
+  assert.equal(voice.holdFrames, HOLD, "a 10 ms hold is 480 frames at 48 kHz");
+
+  // Walk the attack frame by frame: 5 ms at 48 kHz is 240 frames, and the level
+  // is summed one frame at a time, so it can arrive on the frame after that.
+  const attack = [];
+  while (voice.stage !== StudioSamplerVoice.STAGE_HOLD) {
+    attack.push(render(voice, 1).left[0]);
+    assert.ok(attack.length <= ATTACK + 2, "a 5 ms attack has to arrive at level 1 in its own time");
+  }
+  assert.equal(attack[0], 0, "the attack comes first, as it always did: it starts from silence");
+  assert.ok(attack[1] > 0 && attack[1] < HELD, "and it climbs from there");
+  assert.equal(voice.stage, StudioSamplerVoice.STAGE_HOLD, "the attack ends in the hold, not in the decay");
+  assert.equal(voice.holdFrames, HOLD, "the whole hold is still to run");
+
+  const hold = render(voice, HOLD);
+  for (let at = 0; at < HOLD; at += 1) {
+    assert.equal(hold.left[at], HELD, `frame ${at} of the hold has to sit at level 1`);
+  }
+  assert.notEqual(voice.stage, StudioSamplerVoice.STAGE_HOLD, "the hold is over");
+  assert.equal(voice.holdFrames, 0, "with no hold left to run");
+  // The frame the hold ends on is the decay's own first frame, so it is already
+  // one step down: the level was 1 for exactly the hold's 480 frames.
+  const after = render(voice, 1);
+  assert.equal(
+    after.left[0],
+    Math.fround(0.5 * (1 - (1 - voice.sustain) / DECAY) * CENTRE),
+    "the frame after the hold is the decay's first step down",
+  );
+
+  render(voice, DECAY);
+  assert.equal(voice.level, 0.5, "the decay settles at the pad's own sustain after the hold");
+  assert.notEqual(voice.stage, StudioSamplerVoice.STAGE_HOLD, "and the hold is behind it");
+});
+
+test("holdMs 0 output is identical to a voice started without the setting", () => {
+  const samples = ramp(4000);
+  const settings = {
+    channels: [samples],
+    pitch: 3,
+    gainDb: -3,
+    velocity: 100,
+    pan: 0.2,
+    attackMs: 2,
+    decayMs: 4,
+    sustain: 0.7,
+    releaseMs: 10,
+  };
+  const absent = startVoice({ ...settings });
+  const zero = startVoice({ ...settings, holdMs: 0 });
+  assert.equal(absent.holdFrames, 0, "a voice started without the setting has no hold");
+  assert.equal(zero.holdFrames, 0, "a hold of 0 frames is no hold at all");
+  assert.equal(zero.stage, absent.stage, "so the two of them start in the same stage");
+
+  const first = render(absent, 2000);
+  const second = render(zero, 2000);
+  assert.deepEqual(Array.from(second.left), Array.from(first.left), "the left channel, frame for frame");
+  assert.deepEqual(Array.from(second.right), Array.from(first.right), "the right channel, frame for frame");
+  assert.equal(zero.stage, absent.stage, "and they end the render in the same stage");
+  assert.equal(zero.level, absent.level, "at the same level");
+});
+
+test("a gate countdown that ends during HOLD goes straight to release", () => {
+  const GATE = 720; // 15 ms: 240 frames into a hold that starts after a 10 ms attack
+  const RELEASE = 480; // 10 ms at 48 kHz
+  const samples = constant(48000, 0.5);
+  const voice = startVoice({
+    channels: [samples],
+    mode: "gate",
+    attackMs: 10,
+    holdMs: 10,
+    decayMs: 10,
+    sustain: 0,
+    releaseMs: 10,
+    gateFrames: GATE,
+  });
+
+  render(voice, GATE);
+  assert.equal(voice.stage, StudioSamplerVoice.STAGE_HOLD, "the gate is still open while the voice holds");
+  assert.equal(voice.gateRemaining, 0, "and it is on its last frame");
+
+  render(voice, 1);
+  assert.equal(
+    voice.stage,
+    StudioSamplerVoice.STAGE_RELEASE,
+    "a gate that ends in a hold releases from it instead of running its decay",
+  );
+  assertNear(voice.level, 1 - 1 / RELEASE, "the release starts from the hold's own level, one frame in");
+
+  const tail = render(voice, RELEASE + 1);
+  assert.equal(voice.sounding, false, "the release ends the voice, a hold's length before a decay would have");
+  assert.ok(
+    Math.abs(tail.left[RELEASE - 1]) < 1e-12,
+    `the release's last frame is all but silent, got ${tail.left[RELEASE - 1]}`,
+  );
+  assert.equal(tail.left[RELEASE], 0, "and nothing is left sounding after it");
+});
+
+test("STAGE_HOLD is 5 and differs from the processor's stage numbers", () => {
+  assert.equal(StudioSamplerVoice.STAGE_HOLD, 5, "the hold is a stage of its own, after the four the voice had");
+  assert.equal(StudioSamplerVoice.STAGE_RELEASE, 3, "so the release stage stays where it was");
+  assert.notEqual(StudioSamplerVoice.STAGE_HOLD, StudioSamplerVoice.STAGE_RELEASE);
+
+  // The processor keeps its own copy of the three numbers it reads: motion
+  // applies an envelope time to the stage a voice is in. Those numbers must not
+  // move with this one, or a voice in a hold would look like one in an attack,
+  // a decay or a sustain to that code.
+  const source = readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8");
+  for (const [name, value] of [
+    ["STAGE_ATTACK", 0],
+    ["STAGE_DECAY", 1],
+    ["STAGE_SUSTAIN", 2],
+  ]) {
+    assert.ok(source.includes(`const ${name} = ${value};`), `the processor's ${name} has to stay ${value}`);
+  }
+
+  const held = startVoice({ channels: [ramp(1000)], attackMs: 0, holdMs: 10, decayMs: 10 });
+  assert.equal(held.stage, StudioSamplerVoice.STAGE_HOLD, "a voice with a hold and no attack starts in it");
+  for (const number of [0, 1, 2]) {
+    assert.notEqual(held.stage, number, `a voice in a hold is in none of the processor's stages (${number})`);
+  }
+});
+
+// --- a live reverse flip ----------------------------------------------------
+
+test("flipReverse mid-play continues from the same position in the other direction with no jump larger than one step", () => {
+  const samples = ramp(4000);
+  const voice = startVoice({ channels: [samples] });
+  const forward = render(voice, 100);
+  assert.equal(voice.position, 100, "the voice stands on the frame it will read next");
+  const step = voice.step;
+
+  StudioSamplerVoice.flipReverse(voice);
+  assert.equal(voice.dir, -1, "the flip turns the voice round");
+  assert.equal(voice.position, 100, "and leaves the position where it was");
+  assert.equal(voice.step, -step, "the step is worked out again from the new direction");
+
+  const backward = render(voice, 3);
+  assert.equal(backward.left[0], atCentre(samples[100]), "the first frame after the flip is the one it was about to read");
+  assert.equal(backward.left[1], atCentre(samples[99]), "then the one before it");
+  assert.equal(backward.left[2], atCentre(samples[98]), "and on backwards");
+
+  // No jump: the frame the flip lands on is one sample further along the ramp
+  // than the frame before it was — the ramp's own step, not a cut elsewhere.
+  assert.ok(
+    Math.abs(backward.left[0] - forward.left[99]) <= 1e-5 * CENTRE * 1.0001,
+    `the flip may move the read by one sample and no more: ${forward.left[99]} then ${backward.left[0]}`,
+  );
+
+  // A voice that is not looping ends at the edge it now heads for: the range's
+  // first frame is its last read, and the held sample fades over 64 frames.
+  const rest = render(voice, 400);
+  assert.equal(rest.left[0], atCentre(samples[97]), "it keeps walking back down the range");
+  assert.equal(rest.left[97], atCentre(samples[0]), "and reads the range's first frame last");
+  for (let at = 200; at < 400; at += 1) {
+    assert.equal(rest.left[at], 0, `frame ${at} is past the edge and has to be silent`);
+  }
+  assert.equal(voice.sounding, false, "a flipped one-shot ends at the edge it now runs toward");
+});
+
+test("a flipped looping voice wraps at the start", () => {
+  const samples = ramp(100);
+  const voice = startVoice({ channels: [samples], loop: "loop" });
+  render(voice, 10);
+  assert.equal(voice.position, 10, "the voice stands on the frame it will read next");
+
+  StudioSamplerVoice.flipReverse(voice);
+  const { left } = render(voice, 250);
+  for (let at = 0; at < 250; at += 1) {
+    const read = (((10 - at) % 100) + 100) % 100;
+    assert.equal(left[at], atCentre(samples[read]), `frame ${at} has to read sample ${read}`);
+  }
+  assert.equal(left[11], atCentre(samples[99]), "the frame past the range's start wraps to its last frame");
+  assert.equal(voice.dir, -1, "the voice is still running backwards");
+  assert.equal(voice.looping, true, "and it is still a loop");
+  assert.equal(voice.sounding, true, "so it never runs out of its range");
+});
+
+test("flipping twice restores the original direction", () => {
+  const samples = ramp(4000);
+  const settings = { channels: [samples], loop: "pingpong", speed: 1.5, pitch: 7 };
+  const plain = startVoice({ ...settings });
+  const flipped = startVoice({ ...settings });
+  const first = render(plain, 50);
+  const second = render(flipped, 50);
+  assert.deepEqual(Array.from(second.left), Array.from(first.left), "the two voices start out reading the same frames");
+
+  const step = flipped.step;
+  StudioSamplerVoice.flipReverse(flipped);
+  assert.equal(flipped.step, -step, "one flip turns the step round");
+  StudioSamplerVoice.flipReverse(flipped);
+  assert.equal(flipped.dir, plain.dir, "and the second turns it back");
+  assert.equal(flipped.step, step, "so the step is the product it started with");
+
+  const plainTail = render(plain, 400);
+  const flippedTail = render(flipped, 400);
+  assert.deepEqual(Array.from(flippedTail.left), Array.from(plainTail.left), "and the frames after them are the same");
+
+  const reversed = startVoice({ channels: [samples], reverse: true });
+  StudioSamplerVoice.flipReverse(reversed);
+  StudioSamplerVoice.flipReverse(reversed);
+  assert.equal(reversed.dir, -1, "a voice that started reversed is backwards again after two flips");
+});
+
 // --- the same output as before ----------------------------------------------
 
 test("a start with none of the new settings renders exactly as it did", () => {
@@ -442,4 +668,95 @@ test("a start with none of the new settings renders exactly as it did", () => {
   assert.equal(sumLeft, 1.2314224223151697, "the whole left channel, frame for frame");
   assert.equal(sumRight, 1.2711806677155124, "the whole right channel, frame for frame");
   assert.equal(voice.sounding, true, "a voice whose range has not run out is still sounding");
+});
+
+// --- a motion lane on a voice in its hold ------------------------------------
+
+/**
+ * The worklet module a host composes: the sources a processor needs to exist at
+ * all, joined the way `engine-client.js` joins its `SOURCE_FILES`. The modules
+ * this test does not go near — the SoundFont, Faust, NAM and cabinet hosts —
+ * are optional, and the processor guards every use of one.
+ */
+const PROCESSOR_MODULE = ["sequencer.js", "sampler-voice.js", "perf-fx.js", "studio-processor.js"]
+  .map((name) => readFileSync(join(ENGINE_DIR, name), "utf8"))
+  .join("\n;\n");
+
+/**
+ * One Studio processor in a stand-in AudioWorkletGlobalScope: a `sampleRate`, a
+ * `port`, and the wasm binary it compiles on start. The scope comes back with
+ * it, so a test can start a voice with the very `StudioSamplerVoice` the
+ * processor calls.
+ * @returns {Promise<{processor: object, scope: object}>}
+ */
+async function createProcessor() {
+  const vm = await import("node:vm");
+  let Processor = null;
+  let announce = null;
+  const ready = new Promise((resolve) => {
+    announce = resolve;
+  });
+  const scope = {
+    sampleRate: SAMPLE_RATE,
+    currentFrame: 0,
+    WebAssembly,
+    console: { log() {}, warn() {}, error() {} },
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = {
+          postMessage: (message) => {
+            if (message && message.type === "ready") announce();
+          },
+          onmessage: null,
+        };
+      }
+    },
+    registerProcessor: (name, registered) => {
+      Processor = registered;
+    },
+  };
+  vm.createContext(scope);
+  vm.runInContext(PROCESSOR_MODULE, scope, { filename: "studio-engine.js" });
+  const processor = new Processor({
+    processorOptions: { wasmBinary: new Uint8Array(readFileSync(join(VENDOR_DIR, "sunvox.wasm"))) },
+  });
+  await ready;
+  return { processor, scope };
+}
+
+test("an attack, decay or sustain motion lane applied while a voice is in HOLD does not throw and does not change the stage", async () => {
+  const { processor, scope } = await createProcessor();
+  const voice = scope.StudioSamplerVoice.create();
+  scope.StudioSamplerVoice.start(voice, {
+    channels: [constant(48000, 0.5)],
+    sampleRate: SAMPLE_RATE,
+    attackMs: 0,
+    holdMs: 50,
+    decayMs: 10,
+    sustain: 0.5,
+  });
+  assert.equal(voice.stage, scope.StudioSamplerVoice.STAGE_HOLD, "the voice sits in its hold");
+
+  for (const [param, value] of [
+    ["attack_ms", 40],
+    ["decay_ms", 40],
+    ["sustain", 0.25],
+  ]) {
+    assert.doesNotThrow(
+      () => processor.applyMotionValue(voice, param, value),
+      `${param} has to apply to a voice in a hold without a fault`,
+    );
+    assert.equal(voice.stage, scope.StudioSamplerVoice.STAGE_HOLD, `${param} must not move a voice out of its hold`);
+    assert.doesNotThrow(
+      () => processor.restoreMotionParam(voice, param),
+      `${param} has to be given back without a fault`,
+    );
+    assert.equal(
+      voice.stage,
+      scope.StudioSamplerVoice.STAGE_HOLD,
+      `giving ${param} back must not move the stage either`,
+    );
+  }
+  assert.equal(voice.holdFrames, 2400, "the hold still has its 50 ms of frames to run");
+  assert.equal(voice.level, 1, "and it still holds the level at 1");
 });

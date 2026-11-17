@@ -48,6 +48,26 @@
  * silent at level 0). A start therefore sounds from its own first frame, even
  * while an attack is still climbing from 0.
  *
+ * ## The hold stage
+ *
+ * A pad with a `hold_ms` asks its voice to sit at level 1 for that long between
+ * the attack and the decay (the SP-404's HOLD-style sustain). It is a stage of
+ * its own, `STAGE_HOLD`, numbered AFTER the four the voice already had so the
+ * numbers a processor reads (its own attack/decay/sustain) never move: a voice
+ * in a hold is in none of the stages motion applies an envelope time to. A
+ * countdown that ends during the hold (a gate's) releases the voice from where
+ * it stands, exactly as it would in any other stage. A hold of 0 frames is no
+ * stage at all, and such a voice renders exactly as it did before the stage
+ * existed.
+ *
+ * ## A live reverse flip
+ *
+ * `flipReverse` turns a sounding voice round where it stands: it negates `dir`
+ * and works the step out again, and it does not touch the read position, so the
+ * voice carries on from the frame it was about to read (there is no jump). A
+ * voice that is not looping then runs to the end it now heads for and ends
+ * there; a looping voice turns at that end as it always does.
+ *
  * ## Why it is bit-identical in Chromium and Node
  *
  * Only IEEE double `+ - * /`, `Math.pow`, `Math.cos`, `Math.sin`, `Math.floor`
@@ -103,6 +123,12 @@
   const STAGE_SUSTAIN = 2;
   const STAGE_RELEASE = 3;
   const STAGE_DONE = 4;
+  /**
+   * The hold stage: level 1, held for the pad's `hold_ms`, between the attack
+   * and the decay. A NEW number, after the four above, so the numbers a caller
+   * already reads stay where they are: a voice in a hold is in none of them.
+   */
+  const STAGE_HOLD = 5;
 
   /** The pad filter kinds, as `doc.js` spells them; "off" filters nothing. */
   const FILTER_OFF = 0;
@@ -243,6 +269,8 @@
       y2b: 0,
       /** Frames left before a gate-mode voice releases; -1 means "no gate". */
       gateRemaining: -1,
+      /** Frames of the hold stage still to run; 0 when the voice has no hold. */
+      holdFrames: 0,
       /** "oneshot" plays to its range end; "gate" releases on a live release. */
       mode: "oneshot",
       /** Frames left in a choke (or end-of-range) fade; 0 means "not fading". */
@@ -409,7 +437,7 @@
    *          end?: number, reverse?: boolean, pitch?: number,
    *          gainDb?: number, velocity?: number, pan?: number,
    *          attackMs?: number, decayMs?: number, sustain?: number,
-   *          releaseMs?: number, filterType?: string, cutoffHz?: number,
+   *          releaseMs?: number, holdMs?: number, filterType?: string, cutoffHz?: number,
    *          resonance?: number, gateFrames?: number, choke?: number,
    *          mode?: string, loop?: string, speed?: number,
    *          trackId?: string, bankId?: string, index?: number,
@@ -455,6 +483,9 @@
     voice.decayFrames = msToFrames(settings.decayMs, rate);
     voice.releaseFrames = msToFrames(settings.releaseMs, rate);
     voice.sustain = clamp(finiteOr(settings.sustain, 1), 0, 1);
+    // A hold of 0 frames is no stage at all: such a voice never enters it, and
+    // renders exactly as it did before the stage existed.
+    voice.holdFrames = msToFrames(settings.holdMs, rate);
 
     // Attack 0 starts at full level; a decay of 0 jumps straight to sustain.
     // A started voice sounds from its very first frame, even at level 0 while
@@ -466,12 +497,7 @@
     voice.sounding = true;
     if (voice.attackFrames === 0) {
       voice.level = 1;
-      if (voice.decayFrames === 0) {
-        settleAtSustain(voice);
-      } else {
-        voice.stage = STAGE_DECAY;
-        voice.increment = (1 - voice.sustain) / voice.decayFrames;
-      }
+      beginAfterAttack(voice);
     }
 
     setFilter(
@@ -498,6 +524,41 @@
   }
 
   /**
+   * Leave the attack for what comes next: the hold, if the pad asked for one,
+   * or the decay (settling at the sustain when the decay is 0 frames).
+   * @param {object} voice
+   * @returns {void}
+   */
+  function beginAfterAttack(voice) {
+    if (voice.holdFrames > 0) {
+      voice.stage = STAGE_HOLD;
+      voice.level = 1;
+      voice.increment = 0;
+      return;
+    }
+    if (voice.decayFrames === 0) {
+      settleAtSustain(voice);
+      return;
+    }
+    voice.stage = STAGE_DECAY;
+    voice.increment = (1 - voice.sustain) / voice.decayFrames;
+  }
+
+  /**
+   * Turn a sounding voice round where it stands (a Reverse flipped while the pad
+   * plays). The position is NOT touched: the voice carries on from the frame it
+   * was about to read, so nothing jumps, and only the step's sign changes. A
+   * voice that is not looping then runs to the end it now heads for and ends
+   * there; a looping or ping-pong voice turns at that end as it always does.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function flipReverse(voice) {
+    voice.dir = voice.dir < 0 ? 1 : -1;
+    refreshStep(voice);
+  }
+
+  /**
    * Begin the envelope's release. A release of 0 frames stops the voice at once
    * (the very frame the gate ends), which is what `gate` mode's step end means.
    * @param {object} voice
@@ -506,6 +567,10 @@
   function releaseVoice(voice) {
     if (!voice.sounding) return;
     voice.looping = false;
+    // A release ends the hold: whether it comes from a gate's countdown or from
+    // the player letting go, the voice goes to its release from here, never on
+    // through the decay, so there is no hold left to run.
+    voice.holdFrames = 0;
     if (voice.stage === STAGE_RELEASE || voice.stage === STAGE_DONE) return;
     if (voice.releaseFrames <= 0) {
       voice.level = 0;
@@ -540,14 +605,23 @@
       voice.level += voice.increment;
       if (voice.level >= 1) {
         voice.level = 1;
-        if (voice.decayFrames === 0) {
-          settleAtSustain(voice);
-        } else {
-          voice.stage = STAGE_DECAY;
-          voice.increment = (1 - voice.sustain) / voice.decayFrames;
-        }
+        beginAfterAttack(voice);
       }
       return;
+    }
+    if (voice.stage === STAGE_HOLD) {
+      voice.holdFrames -= 1;
+      if (voice.holdFrames > 0) return;
+      voice.holdFrames = 0;
+      if (voice.decayFrames === 0) {
+        settleAtSustain(voice);
+        return;
+      }
+      voice.stage = STAGE_DECAY;
+      voice.increment = (1 - voice.sustain) / voice.decayFrames;
+      // Fall through: the frame the hold ends on is the decay's own first frame,
+      // so its first step down lands here and the level stayed at 1 for exactly
+      // the hold's frames.
     }
     if (voice.stage === STAGE_DECAY) {
       voice.level -= voice.increment;
@@ -731,6 +805,7 @@
     render: renderVoice,
     release: releaseVoice,
     beginFadeOut: beginFadeOut,
+    flipReverse: flipReverse,
     refreshStep: refreshStep,
     setFilter: setFilter,
     dbToLinear: dbToLinear,
@@ -742,6 +817,11 @@
     SHORTEST_LOOP_FRAMES: SHORTEST_LOOP_FRAMES,
     /** The envelope's release stage, for a caller that asks "is it going away?". */
     STAGE_RELEASE: STAGE_RELEASE,
+    /**
+     * The hold stage (level 1 between the attack and the decay), for a caller
+     * that asks "is it holding?" — and so that no caller has to hard-code 5.
+     */
+    STAGE_HOLD: STAGE_HOLD,
   };
 
   if (typeof globalThis !== "undefined") globalThis.StudioSamplerVoice = api;
