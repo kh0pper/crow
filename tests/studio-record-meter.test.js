@@ -282,6 +282,49 @@ test("setActive false stops the posts and setActive true resumes them", async ()
   );
 });
 
+test("clearClip names its sequence, and every reading after it carries it", async () => {
+  // Suspends land on whole render blocks, as they do above.
+  const firstClearAt = 375 * 128;
+  const secondClearAt = 750 * 128;
+  const frames = Math.round(3 * SAMPLE_RATE);
+
+  const { levels } = await renderInput({
+    frames: frames,
+    // Full scale for the first two windows, which latches CLIP once; the rest of
+    // the render is far too quiet to latch it again.
+    sampleOf: (frame) => (frame < 2 * POST_FRAMES ? 1 : 0.25),
+    during: ({ meter }) => meter.setActive(true),
+    between: async ({ context, meter }) => {
+      const first = context.suspend(firstClearAt / SAMPLE_RATE);
+      const second = context.suspend(secondClearAt / SAMPLE_RATE);
+      await first;
+      meter.clearClip(3);
+      await context.resume();
+      await second;
+      meter.clearClip();
+      await context.resume();
+    },
+  });
+
+  const latched = levels.filter((level) => level.frame < firstClearAt);
+  assert.ok(latched.some((level) => level.clipped), "the full-scale start latched CLIP");
+  assert.deepEqual(latched.map((level) => level.clearSeq), latched.map(() => 0), "no clear had been named yet");
+  for (const level of levels) assert.equal(typeof level.clearSeq, "number", "the sequence is a plain number on the level");
+
+  // The clear crosses the port as a message, so a post or two around the
+  // suspend may still have been stamped before it: read a few posts past it.
+  const afterFirst = levels.filter(
+    (level) => level.frame > firstClearAt + 8 * POST_FRAMES && level.frame < secondClearAt,
+  );
+  assert.ok(afterFirst.length > 0, "the meter keeps posting after the clear");
+  assert.deepEqual(afterFirst.map((level) => level.clearSeq), afterFirst.map(() => 3), "and every reading carries the sequence it was given");
+  assert.deepEqual(afterFirst.map((level) => level.clipped), afterFirst.map(() => false), "with the latch let go");
+
+  const afterSecond = levels.filter((level) => level.frame > secondClearAt + 8 * POST_FRAMES);
+  assert.ok(afterSecond.length > 0, "and after a clear that names no sequence");
+  assert.deepEqual(afterSecond.map((level) => level.clearSeq), afterSecond.map(() => 0), "a clear with no sequence is 0");
+});
+
 test("createInputMeter with no input is refused the way createRecorder is", async () => {
   const { context, engine } = await openEngine(128);
   try {

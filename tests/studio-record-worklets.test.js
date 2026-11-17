@@ -606,6 +606,24 @@ function bareMeter(channels) {
         processor.process([[input]], [output]);
       }
     },
+    /**
+     * The same, as a stereo arm's input arrives: one block per channel.
+     * @param {number} fromFrame @param {number} frames
+     * @param {(frame: number) => number} leftOf
+     * @param {(frame: number) => number} rightOf
+     */
+    runStereo(fromFrame, frames, leftOf, rightOf) {
+      for (let at = 0; at + 128 <= frames; at += 128) {
+        scope.currentFrame = fromFrame + at;
+        const left = new Float32Array(128);
+        const right = new Float32Array(128);
+        for (let index = 0; index < 128; index += 1) {
+          left[index] = leftOf(fromFrame + at + index);
+          right[index] = rightOf(fromFrame + at + index);
+        }
+        processor.process([[left, right]], [output]);
+      }
+    },
   };
 }
 
@@ -675,7 +693,7 @@ test("a level post carries exactly one payload object", () => {
     const payload = args[0];
     assert.deepEqual(
       Object.keys(payload).sort(),
-      ["clipped", "cols", "frame", "peak", "rms", "type"],
+      ["clearSeq", "clipped", "cols", "frame", "peak", "rms", "type"],
       "the payload is the drained reading, under one type",
     );
     assert.equal(payload.type, "level");
@@ -683,6 +701,7 @@ test("a level post carries exactly one payload object", () => {
     assert.equal(typeof payload.peak, "number");
     assert.equal(typeof payload.rms, "number");
     assert.equal(typeof payload.clipped, "boolean");
+    assert.equal(typeof payload.clearSeq, "number", "the clear sequence rides on the payload as a plain number");
     assert.ok(payload.cols instanceof Float32Array, "the columns travel as one typed array");
   }
 });
@@ -699,4 +718,103 @@ test("a clear message lets the CLIP latch go", () => {
   const after = meter.levels().slice(before);
   assert.ok(after.length > 0, "it keeps posting after a clear");
   assert.deepEqual(after.map((level) => level.clipped), after.map(() => false), "and nothing quiet latches it again");
+  assert.deepEqual(
+    after.map((level) => level.clearSeq),
+    after.map(() => 0),
+    "a clear that named no sequence is sequence 0",
+  );
+});
+
+test("a clear names its sequence, and every reading after it carries it", () => {
+  const meter = bareMeter(1);
+  meter.send({ type: "on" });
+  meter.run(0, 16 * 128, () => 1);
+  const latched = meter.levels();
+  assert.equal(latched.some((level) => level.clipped), true, "a full-scale sample latches CLIP");
+  assert.deepEqual(
+    latched.map((level) => level.clearSeq),
+    latched.map(() => 0),
+    "and nothing has named a clear yet",
+  );
+
+  meter.send({ type: "clear", seq: 3 });
+  let before = meter.levels().length;
+  meter.run(16 * 128, 32 * 128, () => 0.25);
+  const after = meter.levels().slice(before);
+  assert.ok(after.length > 0, "it keeps posting after the clear");
+  assert.deepEqual(after.map((level) => level.clearSeq), after.map(() => 3), "every reading carries sequence 3");
+  assert.deepEqual(after.map((level) => level.clipped), after.map(() => false), "and the latch is let go");
+
+  // The latch can be set again by a later sample, and the sequence stays where
+  // the last clear put it: a reading this page takes now is never mistaken for
+  // one taken before its clear.
+  before = meter.levels().length;
+  meter.run(32 * 128, 16 * 128, () => 1);
+  const relatched = meter.levels().slice(before);
+  assert.equal(relatched.some((level) => level.clipped), true, "a full-scale sample latches it again");
+  assert.deepEqual(relatched.map((level) => level.clearSeq), relatched.map(() => 3), "under the same sequence");
+
+  // A clear that names no sequence is sequence 0, not the sequence before it.
+  meter.send({ type: "clear" });
+  before = meter.levels().length;
+  meter.run(48 * 128, 16 * 128, () => 0.25);
+  const unnamed = meter.levels().slice(before);
+  assert.ok(unnamed.length > 0, "it keeps posting after the clear");
+  assert.deepEqual(unnamed.map((level) => level.clearSeq), unnamed.map(() => 0), "a clear with no sequence is 0");
+  assert.deepEqual(unnamed.map((level) => level.clipped), unnamed.map(() => false), "and it still lets the latch go");
+});
+
+test("a stereo arm meters a signal that only reaches the right channel", () => {
+  const meter = bareMeter(2);
+  meter.send({ type: "on" });
+  // Silence on the left, a constant negative reading on the right.
+  meter.runStereo(0, 32 * 128, () => 0, () => -0.5);
+
+  const levels = meter.levels();
+  assert.ok(levels.length > 0, "the meter posted");
+  for (const level of levels) {
+    assert.ok(Math.abs(level.peak - 0.5) <= 1e-6, `the right channel is the peak, was ${level.peak}`);
+    // Two channels of squares, one of them silent: the whole reading's RMS.
+    assert.ok(Math.abs(level.rms - 0.5 / Math.SQRT2) <= 1e-6, `the rms covers both channels, was ${level.rms}`);
+    assert.equal(level.clipped, false, "half scale does not latch CLIP");
+    for (let at = 0; at + 2 < level.cols.length; at += 3) {
+      assert.equal(level.cols[at + 1], -0.5, `column ${at / 3} takes the right channel's minimum`);
+      assert.equal(level.cols[at + 2], 0, `column ${at / 3} and the left channel's maximum`);
+    }
+  }
+
+  // A mono arm is unchanged: one channel, its own reading.
+  const mono = bareMeter(1);
+  mono.send({ type: "on" });
+  mono.run(0, 32 * 128, () => -0.5);
+  for (const level of mono.levels()) {
+    assert.ok(Math.abs(level.peak - 0.5) <= 1e-6, "a mono reading is its one channel");
+    assert.ok(Math.abs(level.rms - 0.5) <= 1e-6, "with no second channel folded in");
+  }
+});
+
+test("showing a lane again starts from an empty ring, so no stale column is posted", () => {
+  const meter = bareMeter(1);
+  const half = () => 0.5;
+  meter.send({ type: "on" });
+  // Nine blocks are 1152 frames: two 480-frame columns have closed and no post
+  // is due yet (a post is 1600 frames), so both are still in the ring.
+  meter.run(0, 9 * 128, half);
+  assert.equal(meter.levels().length, 0, "no post was due yet");
+  assert.equal(meter.processor.core.count, 2, "two columns are waiting in the ring");
+
+  meter.send({ type: "off" });
+  meter.send({ type: "on" });
+  assert.equal(meter.processor.core.count, 0, "showing the lane again empties the ring");
+  assert.equal(meter.processor.core.head, 0, "and starts at its first slot");
+
+  meter.run(9 * 128, 13 * 128, half);
+  const levels = meter.levels();
+  assert.equal(levels.length, 1, "one post came due");
+  const cols = levels[0].cols;
+  assert.equal(cols.length, 3 * 3, "three columns closed after the lane was shown again");
+  assert.equal(cols[0], 9 * 128, "the first one starts on the block the lane was shown on");
+  for (let at = 0; at + 2 < cols.length; at += 3) {
+    assert.ok(cols[at] >= 9 * 128, `column ${at / 3} is not one from before the lane was hidden`);
+  }
 });

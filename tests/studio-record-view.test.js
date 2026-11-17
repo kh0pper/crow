@@ -202,6 +202,51 @@ test("WaveRing draws a pass: its start is column 0 and a gap is silence", () => 
   assert.equal(ring.count, 0, "with nothing in it");
 });
 
+test("WaveRing merges the columns that land in one lane column of a pass", () => {
+  const page = pageApi();
+  const ring = new WaveRing(8);
+  ring.setPass(1000, 800);
+
+  // A pass of 800 frames over 8 columns is a hundred frames a column, so these
+  // two level columns are the same lane column and it holds both of them.
+  assert.equal(ring.pushColumn(1000, -0.5, 0.25), true, "the first column of the stretch lands");
+  assert.equal(ring.pushColumn(1050, -0.25, 0.75), true, "the second lands in the same column");
+  assert.equal(ring.read(0).min, -0.5, "the column keeps the lowest minimum of the two");
+  assert.equal(ring.read(0).max, 0.75, "and the highest maximum");
+  assert.equal(ring.frames[0], 1000, "the column still starts at its first sample");
+  assert.equal(ring.count, 1, "and it is still one column, not two");
+
+  // A third one inside it widens the column again, by either end.
+  ring.pushColumn(1099, -0.75, -0.25);
+  assert.equal(ring.read(0).min, -0.75, "a lower minimum lowers the column");
+  assert.equal(ring.read(0).max, 0.75, "a lower maximum leaves the top where it was");
+  assert.equal(ring.frames[0], 1000, "and the column's frame is still its first sample");
+  assert.equal(ring.count, 1, "with no column added");
+
+  // The lane column beside it is its own, and merging never reaches into it.
+  assert.equal(ring.read(1).min, 0, "the next column is still empty");
+  ring.pushColumn(1100, -0.125, 0.125);
+  assert.equal(ring.read(1).min, -0.125, "a column of the next slot is not merged into the last");
+  assert.equal(ring.read(1).max, 0.125, "and holds what was pushed into it");
+  assert.equal(ring.read(0).min, -0.75, "while the column before it is untouched");
+
+  // A new pass starts from an empty picture, so nothing of the old one merges in.
+  ring.setPass(2000, 1600);
+  assert.equal(ring.pushColumn(2000, -0.25, 0.25), true, "the new pass draws its own column 0");
+  assert.equal(ring.read(0).min, -0.25, "with its own minimum");
+  assert.equal(ring.read(0).max, 0.25, "and its own maximum");
+
+  // With no pass declared the ring rolls, and the slot it wraps onto holds the
+  // oldest column: that one is replaced by the newest, never merged with it.
+  const rolling = new page.WaveRing(4);
+  for (const frame of [0, 100, 200, 300]) rolling.pushColumn(frame, -0.5, 0.5);
+  assert.equal(rolling.count, 4, "four columns fill a ring of four");
+  rolling.pushColumn(400, -0.125, 0.125);
+  assert.equal(rolling.read(0).min, -0.125, "the oldest column is replaced, not merged");
+  assert.equal(rolling.read(0).max, 0.125, "by the newest one");
+  assert.equal(rolling.count, 4, "and the ring still holds four");
+});
+
 test("columnX maps the pass onto the lane and nothing outside it", () => {
   const page = pageApi();
   assert.equal(columnX(1000, 1000, 800, 8), 0, "the pass start is column 0");

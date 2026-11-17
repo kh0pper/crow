@@ -20,18 +20,20 @@
  * - `{type:"on"}` — start measuring. Nothing is posted before this.
  * - `{type:"off"}` — stop measuring; a window already in progress is dropped, so
  *   no post ever spans the silence while the lane was hidden.
- * - `{type:"clear"}` — let the CLIP latch go (the page's own clear button).
+ * - `{type:"clear", seq}` — let the CLIP latch go, naming the page's own clear
+ *   counter. Every level payload after it carries that number as `clearSeq`, so
+ *   the page can drop a `clipped` flag that was read before the clear it sent.
  *
  * meter → client:
  *
- * - `{type:"level", frame, peak, rms, clipped, cols}` — one payload, about
- *   thirty times a second of rendered audio, never once per block. `frame` is
- *   the CONTEXT frame of the window's first sample (the worklet scope's
+ * - `{type:"level", frame, peak, rms, clipped, clearSeq, cols}` — one payload,
+ *   about thirty times a second of rendered audio, never once per block. `frame`
+ *   is the CONTEXT frame of the window's first sample (the worklet scope's
  *   `currentFrame` plus the offset `recorder-processor.js` measures the same
  *   way), and `cols` is a `Float32Array` of `3 * n` values `frame, min, max`
  *   per finished column, oldest first. The page maps a column to song time as
  *   `frame - rec.offset_frames`, so the drawn waveform lands where the take
- *   will sit.
+ *   will sit. `clearSeq` is a plain number beside them, never an object.
  * - `{type:"error", error}` — a fault, reported once; the meter then stops
  *   posting rather than filling the page's queue.
  *
@@ -72,7 +74,7 @@
       super();
       const processorOptions = (options && options.processorOptions) || {};
 
-      /** How many channels the input has: 1 or 2 (the first one is the reading). */
+      /** How many channels the input has: 1 or 2 (both are read when there are two). */
       this.channels = Number(processorOptions.channels) === 2 ? 2 : 1;
 
       /** The reading itself: preallocated rings, one square root per post. */
@@ -114,19 +116,23 @@
         this.active = false;
         return;
       }
-      if (message.type === "clear") this.core.clearClip();
+      if (message.type === "clear") this.core.clearClip(message.seq);
     }
 
     /**
-     * Start measuring: the window and the column in progress begin again, so a
-     * post never mixes frames from before the lane was shown into a reading
-     * after it. Nothing is allocated and the CLIP latch is left alone (the page
-     * owns that). A repeated `on` (a redraw, a lane moved) is not a restart.
+     * Start measuring: the window and the column in progress begin again, and so
+     * does the ring, so a post never mixes frames from before the lane was shown
+     * into a reading after it — a column that closed while the lane was hidden is
+     * dropped rather than posted late. Nothing is allocated and the CLIP latch is
+     * left alone (the page owns that). A repeated `on` (a redraw, a lane moved) is
+     * not a restart.
      * @returns {void}
      */
     resume() {
       if (this.active) return;
       this.active = true;
+      this.core.head = 0;
+      this.core.count = 0;
       this.core.columnFrames = 0;
       this.core.postCount = 0;
       this.core.postPeak = 0;
@@ -167,8 +173,12 @@
     block(input, count) {
       if (!this.active) return;
       const first = input && input[0] ? input[0] : null;
+      // A stereo arm meters BOTH channels: the second one rides beside the
+      // first, so a signal that only reaches the right channel still moves the
+      // meter, the peak hold and the lane's columns.
+      const second = this.channels === 2 && input && input[1] ? input[1] : null;
       const base = this.contextOffset() + this.frame;
-      if (!this.core.process(base, first, count)) return;
+      if (!this.core.process(base, first, count, second)) return;
       // The drained payload is the one object a post carries; the type it
       // travels under is all this file adds to it.
       const payload = this.core.drain();

@@ -33,7 +33,9 @@
  *   one column per lane column (min and max), keeps the song frame of the first
  *   sample of each column — the CONTEXT frame the engine reported, never a wall
  *   clock — and fills a gap between two posts with digital silence rather than
- *   leaving the previous pass's column under it. `columnX` is the mapping from a
+ *   leaving the previous pass's column under it. A second column that lands in
+ *   a lane column this pass already filled is merged into it, so a lane never
+ *   loses a peak it was drawn with. `columnX` is the mapping from a
  *   song frame to a lane column: the pass start is column 0, the pass's last
  *   frame is the last column, and a frame outside the pass is column −1.
  * - `chainLabel(snap, trackId, monitorOn)` is what the lane says its chain is:
@@ -315,6 +317,15 @@ export const RECORD_VIEW_SCRIPT = [
   "",
   "  /**",
   "   * Put one level column in the ring.",
+  "   *",
+  "   * A pass draws its frames onto fewer lane columns than it has level columns,",
+  "   * so one lane column can be handed several: each one is MERGED into the",
+  "   * column already there, the smallest minimum and the largest maximum of the",
+  "   * stretch, never a replacement, so the lane keeps every peak it was drawn",
+  "   * with. A new pass empties the ring (setPass, reset), so a filled slot here is",
+  "   * always this pass's own. With no pass declared the ring rolls instead, and",
+  "   * the slot it wraps onto holds the oldest column, which a new one replaces.",
+  "   *",
   "   * @param {number} songFrame - the context frame of this column's first sample",
   "   * @param {number} min - the column's smallest sample",
   "   * @param {number} max - the column's largest sample",
@@ -323,8 +334,9 @@ export const RECORD_VIEW_SCRIPT = [
   "  WaveRing.prototype.pushColumn = function pushColumn(songFrame, min, max) {",
   "    var frame = readingOf(songFrame);",
   "    if (frame === null) return false;",
+  "    var inPass = this.passFrames > 0;",
   "    var slot = 0;",
-  "    if (this.passFrames > 0) {",
+  "    if (inPass) {",
   "      slot = columnX(frame, this.passStartFrame, this.passFrames, this.width);",
   "      if (slot < 0) return false;",
   "    } else {",
@@ -339,6 +351,14 @@ export const RECORD_VIEW_SCRIPT = [
   "      var swap = low;",
   "      low = high;",
   "      high = swap;",
+  "    }",
+  "    if (inPass && this.filled[slot] === 1) {",
+  "      // The slot already holds this pass's column: widen it, and leave the",
+  "      // frame of its first sample alone.",
+  "      if (low < this.mins[slot]) this.mins[slot] = low;",
+  "      if (high > this.maxs[slot]) this.maxs[slot] = high;",
+  "      if (frame > this.newestFrame) this.newestFrame = frame;",
+  "      return true;",
   "    }",
   "    this.frames[slot] = frame;",
   "    this.mins[slot] = low;",

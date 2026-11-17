@@ -1563,7 +1563,7 @@
    * @returns {Promise<{node: AudioWorkletNode,
    *                    onLevel: function(function): function,
    *                    setActive: function(boolean): void,
-   *                    clearClip: function(): void,
+   *                    clearClip: function(number): void,
    *                    dispose: function(): void}>}
    */
   async function runInputMeter(context, engineOptions, options, notifyError) {
@@ -1613,6 +1613,7 @@
           peak: message.peak,
           rms: message.rms,
           clipped: message.clipped,
+          clearSeq: message.clearSeq,
           cols: message.cols,
         };
         for (const listener of levelListeners) {
@@ -1634,12 +1635,14 @@
       node: node,
 
       /**
-       * Follow the level: `listener({frame, peak, rms, clipped, cols})`, once
-       * per post, about thirty times a second of rendered audio. `frame` and
+       * Follow the level: `listener({frame, peak, rms, clipped, clearSeq, cols})`,
+       * once per post, about thirty times a second of rendered audio. `frame` and
        * every column's frame are CONTEXT frames; `cols` is a `Float32Array` of
-       * `3 * n` values `frame, min, max`.
+       * `3 * n` values `frame, min, max`; `clearSeq` is the number the last
+       * `clearClip(seq)` carried.
        * @param {(level: {frame: number, peak: number, rms: number,
-       *                 clipped: boolean, cols: Float32Array}) => void} listener
+       *                 clipped: boolean, clearSeq: number,
+       *                 cols: Float32Array}) => void} listener
        * @returns {() => void} unsubscribe
        */
       onLevel(listener) {
@@ -1661,9 +1664,18 @@
         post({ type: on ? "on" : "off" });
       },
 
-      /** Let the CLIP latch go: the meter can latch it again on a later sample. */
-      clearClip() {
-        post({ type: "clear" });
+      /**
+       * Let the CLIP latch go, naming the clear: every reading from then on
+       * carries this number as `clearSeq`, so a caller can drop the `clipped`
+       * flag of a reading that was taken before the clear it sent. A clear with
+       * no sequence is sequence 0 — one a caller sends before it has begun
+       * counting still lets the latch go.
+       * @param {number} [seq] the caller's own clear counter
+       * @returns {void}
+       */
+      clearClip(seq) {
+        const value = Number(seq);
+        post({ type: "clear", seq: Number.isFinite(value) ? value : 0 });
       },
 
       /**

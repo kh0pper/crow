@@ -4,8 +4,9 @@
  *
  *     const core = new InputLevelCore({ sampleRate: rate });
  *     core.process(frameStart, samples, count)   // the armed input, block by block
+ *     core.process(frameStart, left, count, right)  // a stereo arm: both channels
  *     core.drain()                               // one payload, when it says so
- *     core.clearClip()                           // the CLIP latch let go
+ *     core.clearClip(seq)                        // the CLIP latch let go, named
  *     core.reset()                               // a new take: the ring starts empty
  *
  * The reading is the DRY input: the take is what the input plays, and the meter,
@@ -18,7 +19,7 @@
  * `process()` returns true about every `postFrames` (a thirtieth of a second by
  * default) and `drain()` then hands back one payload:
  *
- *     { frame, peak, rms, clipped, cols }
+ *     { frame, peak, rms, clipped, clearSeq, cols }
  *
  * - `frame` — the CONTEXT frame of the first sample of the post window, carried
  *   the way `recorder-processor.js` carries it, never a wall clock. The page maps
@@ -29,6 +30,11 @@
  *   window, one square root per drain: never one per sample.
  * - `clipped` — true once any sample has reached 0.999 in magnitude, and true
  *   until `clearClip()`. A latch, not a window reading.
+ * - `clearSeq` — the sequence number the last `clearClip(seq)` carried, a plain
+ *   number, 0 before any clear was named. Every payload carries it so the page
+ *   can tell a reading taken before its own clear from one taken after it: the
+ *   `clipped` flag of a payload whose `clearSeq` is older than the clear the page
+ *   sent is stale. It is a scalar on the payload, never an object of its own.
  * - `cols` — the finished columns since the last drain, as `3 * n` values of
  *   `frame, min, max`: each column's first-sample frame and the smallest and
  *   largest sample in it, oldest first. A new `Float32Array` per payload,
@@ -46,7 +52,10 @@
  *
  * A `null`, short or missing `samples` reads as silence (zeros), and a sample
  * that is not a finite number reads as 0 — so one NaN from an unplugged device
- * can never live in the state or reach the meter.
+ * can never live in the state or reach the meter. A stereo arm hands its second
+ * channel to `process()` as well: peak, RMS and every column's extremes then
+ * cover both channels, so a signal that only reaches the right one is still
+ * metered. Mono, which passes one channel, reads exactly as it always did.
  *
  * ## It is a classic script
  *
@@ -139,6 +148,13 @@
 
     /** The CLIP latch: set by a full-scale sample, let go only by `clearClip()`. */
     this.clipped = false;
+
+    /**
+     * The sequence number of the last clear the page named. It rides on every
+     * payload as a plain number (0 before any clear) so the page can drop the
+     * `clipped` flag of a reading that was taken before its own clear.
+     */
+    this.clearSeq = 0;
   }
 
   /**
@@ -166,28 +182,45 @@
    * Feed one block of the armed input through the core. Nothing is written back
    * and nothing is allocated: the block only moves the scalars and, when a
    * column or a post window closes, the ring.
+   *
+   * `other` is the second channel of a stereo arm. When it is there, a column's
+   * minimum is the smallest sample of either channel, its maximum the largest of
+   * either, and peak and RMS cover both, so an input that only reaches the right
+   * channel still moves the meter. A mono block passes nothing and reads exactly
+   * as it did before.
+   *
    * @param {number} frameStart the context frame of `samples[0]`
    * @param {Float32Array|null} samples the input, or null for silence
    * @param {number} count frames in the block
+   * @param {Float32Array|null} [other] the second channel of a stereo arm
    * @returns {boolean} true when a post is due (and until it is drained)
    */
-  InputLevelCore.prototype.process = function (frameStart, samples, count) {
+  InputLevelCore.prototype.process = function (frameStart, samples, count, other) {
     const total = Math.trunc(Number(count));
     const start = Number(frameStart);
     if (!(total > 0)) return this.postDue;
     const length = samples && typeof samples.length === "number" ? samples.length : 0;
+    const otherLength = other && typeof other.length === "number" ? other.length : 0;
+    const stereo = otherLength > 0;
     const colFrames = this.colFrames;
 
     for (let index = 0; index < total; index += 1) {
       const sample = index < length ? finiteSample(samples[index]) : 0;
+      const second = index < otherLength ? finiteSample(other[index]) : 0;
       const frame = start + index;
       const magnitude = sample < 0 ? -sample : sample;
 
       if (magnitude >= CLIP_LEVEL) this.clipped = true;
       if (magnitude > this.postPeak) this.postPeak = magnitude;
       this.postSumSq += sample * sample;
+      if (stereo) {
+        const otherMagnitude = second < 0 ? -second : second;
+        if (otherMagnitude >= CLIP_LEVEL) this.clipped = true;
+        if (otherMagnitude > this.postPeak) this.postPeak = otherMagnitude;
+        this.postSumSq += second * second;
+      }
       if (this.postCount === 0) this.postStart = frame;
-      this.postCount += 1;
+      this.postCount += stereo ? 2 : 1;
 
       if (this.columnFrames === 0) {
         this.columnStart = frame;
@@ -195,6 +228,10 @@
         this.columnMax = sample;
       } else if (sample < this.columnMin) this.columnMin = sample;
       else if (sample > this.columnMax) this.columnMax = sample;
+      if (stereo) {
+        if (second < this.columnMin) this.columnMin = second;
+        else if (second > this.columnMax) this.columnMax = second;
+      }
       this.columnFrames += 1;
       if (this.columnFrames >= colFrames) this.closeColumn();
     }
@@ -208,12 +245,12 @@
   };
 
   /**
-   * Take one payload: the post window's frame, peak, RMS and CLIP latch, and a
-   * new `Float32Array` of the columns finished since the last drain. The window
-   * accumulators start again; the CLIP latch does not (only `clearClip()` lets it
-   * go).
+   * Take one payload: the post window's frame, peak, RMS and CLIP latch, the
+   * sequence number of the last clear, and a new `Float32Array` of the columns
+   * finished since the last drain. The window accumulators start again; the CLIP
+   * latch does not (only `clearClip()` lets it go).
    * @returns {{frame: number, peak: number, rms: number, clipped: boolean,
-   *            cols: Float32Array}}
+   *            clearSeq: number, cols: Float32Array}}
    */
   InputLevelCore.prototype.drain = function () {
     const finished = this.count;
@@ -236,6 +273,7 @@
       peak: this.postPeak,
       rms: windowFrames > 0 ? Math.sqrt(this.postSumSq / windowFrames) : 0,
       clipped: this.clipped,
+      clearSeq: this.clearSeq,
       cols: cols,
     };
 
@@ -246,12 +284,25 @@
     return payload;
   };
 
-  /** Let the CLIP latch go: the next reading can latch it again. */
-  InputLevelCore.prototype.clearClip = function () {
+  /**
+   * Let the CLIP latch go, naming the clear: every payload from here on carries
+   * `seq` as its `clearSeq`, so the page can drop a `clipped` flag that was read
+   * before the clear it sent. A clear with no sequence is sequence 0 — an older
+   * page that never names one still clears the latch.
+   * @param {number} [seq] the page's own clear counter
+   * @returns {void}
+   */
+  InputLevelCore.prototype.clearClip = function (seq) {
     this.clipped = false;
+    const value = Number(seq);
+    this.clearSeq = Number.isFinite(value) ? value : 0;
   };
 
-  /** Put the core back to how it was built: an empty ring, silence, no latch. */
+  /**
+   * Put the core back to how it was built: an empty ring, silence, no latch. The
+   * clear sequence is left alone: it belongs to the page's clear history, not to
+   * a take, and it stays the newest number the page has named.
+   */
   InputLevelCore.prototype.reset = function () {
     this.minRing.fill(0);
     this.maxRing.fill(0);
