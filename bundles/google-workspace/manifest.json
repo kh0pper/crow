@@ -1,0 +1,70 @@
+{
+  "id": "google-workspace",
+  "name": "Google Workspace",
+  "version": "1.0.0",
+  "type": "bundle",
+  "description": "Google Workspace tools for the assistant — Drive, Docs, Sheets, Slides, Gmail, Calendar, Apps Script, Forms, BigQuery and Looker Studio — using your own Google sign-in.",
+  "author": "Crow",
+  "license": "MIT",
+  "category": "productivity",
+  "tags": ["google", "drive", "docs", "sheets", "slides", "gmail", "calendar", "mcp"],
+  "icon": "file-text",
+  "server": {
+    "command": "uv",
+    "args": ["run", "--quiet", "--frozen", "google-workspace-mcp"],
+    "envKeys": [
+      "GOOGLE_CREDENTIALS_FILE",
+      "GOOGLE_TOKEN_FILE",
+      "GMAIL_SEND_TO_SELF_ALLOWLIST",
+      "GOOGLE_BIGQUERY_PROJECT",
+      "GDOCS_DEFAULT_FONT",
+      "GWS_FORMS_SHIM_SCRIPT_ID"
+    ]
+  },
+  "requires": { "env": ["GOOGLE_CREDENTIALS_FILE", "GOOGLE_TOKEN_FILE"], "bins": ["uv"] },
+  "env_vars": [
+    {
+      "name": "GOOGLE_CREDENTIALS_FILE",
+      "description": "Path to the OAuth client JSON you downloaded from Google Cloud (client type: Desktop app). Keep it in the same folder as the token file.",
+      "required": true,
+      "path": true
+    },
+    {
+      "name": "GOOGLE_TOKEN_FILE",
+      "description": "Path where the sign-in token is stored, e.g. ~/.config/google-workspace-mcp/token.json. The folder you choose is the one folder this add-on may write, so the token can be refreshed; run the authorize step once first (see the bundle README).",
+      "required": true,
+      "path": true
+    },
+    {
+      "name": "GMAIL_SEND_TO_SELF_ALLOWLIST",
+      "description": "Optional: comma-separated addresses the one sending tool (gmail_send_to_self) may write to. Empty (the default) disables sending — every other Gmail tool only creates drafts.",
+      "required": false,
+      "advanced": true
+    },
+    {
+      "name": "GOOGLE_BIGQUERY_PROJECT",
+      "description": "Optional: the Google Cloud project id the BigQuery tools use when a call names none.",
+      "required": false,
+      "advanced": true
+    },
+    {
+      "name": "GDOCS_DEFAULT_FONT",
+      "description": "Optional: font applied to text the Docs writing tools insert (e.g. \"Arial\"). Empty inherits the document's own default.",
+      "required": false,
+      "advanced": true
+    },
+    {
+      "name": "GWS_FORMS_SHIM_SCRIPT_ID",
+      "description": "Optional: the Apps Script project id for forms_set_destination's shim (deployment steps in apps-script-shim/). Unset: the tool returns those steps instead of failing.",
+      "required": false,
+      "advanced": true
+    }
+  ],
+  "sandbox": {
+    "network": "internet",
+    "files": { "oauthDir": "env:GOOGLE_TOKEN_FILE" }
+  },
+  "ports": [],
+  "webUI": null,
+  "notes": "No ports and no container: a stdio MCP server on this computer, run with uv from the installed copy. Inside the add-on wall it gets the internet (Google's APIs) and exactly one folder of yours, read-write — the folder holding the token file, because the OAuth token is rewritten there when it refreshes. Point both GOOGLE_CREDENTIALS_FILE and GOOGLE_TOKEN_FILE at ~/.config/google-workspace-mcp/ and it finds both. Sending mail is off until GMAIL_SEND_TO_SELF_ALLOWLIST names your own address; everything else drafts."
+}

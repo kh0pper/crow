@@ -1026,6 +1026,47 @@
         ]
       }
     },
+    "google-workspace": {
+      "id": "google-workspace",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "file:GOOGLE_TOKEN_FILE",
+          "reason": "the field GOOGLE_TOKEN_FILE is not set"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
     "gotosocial": {
       "id": "gotosocial",
       "source": "repo",

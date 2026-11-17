@@ -91,8 +91,11 @@ test("pin-addon-command --check: read-only, one line per add-on, honours CROW_HO
 
 // The requires-bins gate (servers/shared/trusted-bins.js) refuses an install
 // whose bare bin is not trusted-resolvable on this host. Only these bundles
-// may be skipped for that reason; anything else must resolve.
-const BINS_GATE_ALLOWED = new Set(["arxiv", "zotero"]);
+// may be skipped for that reason; anything else must resolve. arxiv and zotero
+// launch `uvx`, google-workspace launches `uv`: the uv toolchain is not
+// installed system-wide on a CI runner or in a sandbox, so those three are gated
+// off there (the gate lifts by itself on a host that has it).
+const BINS_GATE_ALLOWED = new Set(["arxiv", "google-workspace", "zotero"]);
 
 // The names that make a loader or interpreter run other code before the program starts.
 // Written out here rather than imported, so dropping one from the contract fails this test.

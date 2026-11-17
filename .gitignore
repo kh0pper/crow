@@ -66,6 +66,9 @@ bundles/.env.cuda
 bundles/*/.env
 bundles/*/.venv/
 bundles/*/uv.lock
+# google-workspace ships its lock file: `uv run --frozen` installs exactly what
+# it pins, so the file is part of that bundle (the one exception above).
+!bundles/google-workspace/uv.lock
 bundles/*/docker-compose.override.yml
 .claude/scheduled_tasks.lock
 # Manual backup snapshots (PRE-*.bak, *.bak-DATE, etc.)

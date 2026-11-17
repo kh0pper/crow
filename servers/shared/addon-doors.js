@@ -56,10 +56,17 @@ export const ADDON_STATE_DIRS = deepFreeze({
 });
 
 export const ADDON_TOKEN_DIRS = deepFreeze({
-  // Empty on purpose: an entry here is a folder under a hidden home entry (a
-  // PATH dir, a dot-config dir) that the add-on may write. Add one only with a
-  // reviewed first-party need, as a home-relative path such as
-  // ".local/share/<app>".
+  // An entry here is a folder under a hidden home entry (a PATH dir, a dot-config
+  // dir) that the add-on may write. Add one only with a reviewed first-party
+  // need, as a home-relative path such as ".local/share/<app>".
+  //
+  // google-workspace: ~/.config/google-workspace-mcp is the server's own
+  // documented default for its OAuth client and token. A token REFRESH writes
+  // token.json atomically — a temp file in that folder, then a rename — so the
+  // folder itself (not just the file) has to be writable, and the wall refuses
+  // any hidden entry of the owner's home that core does not list. First-party,
+  // reviewed 2026-11-17.
+  "google-workspace": [".config/google-workspace-mcp"],
 });
 
 // --- door tokens -----------------------------------------------------------
