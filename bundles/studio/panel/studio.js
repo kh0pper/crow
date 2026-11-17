@@ -1158,12 +1158,16 @@ const STYLES = `
   .studio .st-swing { min-width: 160px; }
   .studio .st-steps-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
   .studio .st-step-pages { display: flex; gap: 4px; }
-  .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; font-size: 11px; }
+  .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; min-height: 44px; font-size: 11px; }
   .studio .st-step-locks { font-size: 11px; color: var(--st-muted); }
   .studio .st-step-strip {
     display: grid; grid-template-columns: repeat(16, minmax(44px, 1fr));
     gap: 4px; overflow-x: auto;
   }
+  /* A page of eight positions — a phone, or the steps widget at size m — is
+     eight columns, because sixteen columns stay 760 px wide however few cells
+     are in them. The strip carries the page size it was drawn for. */
+  .studio .st-step-strip[data-page-size="8"] { grid-template-columns: repeat(8, minmax(44px, 1fr)); }
   .studio .st-step {
     position: relative; height: 48px; min-height: 48px; padding: 4px 3px;
     border-radius: 6px; border: 1px solid #2F343A; background: #1B1E22;
@@ -1331,8 +1335,9 @@ const STYLES = `
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
     /* A phone's lane holds eight positions a page (the client pages it by the
-       same width class), so eight 44 px targets are the row. A screen too
-       narrow for that scrolls the row rather than shrinking a target. */
+       width class and the widget's size), so eight 44 px targets are the row. A
+       screen too narrow for that scrolls the row rather than shrinking a
+       target. */
     .studio .st-step-strip { grid-template-columns: repeat(8, minmax(44px, 1fr)); overflow-x: auto; }
     .studio .st-mix-strips { overflow-x: auto; overflow-y: hidden; }
     .studio .st-strip { flex: 0 0 152px; }

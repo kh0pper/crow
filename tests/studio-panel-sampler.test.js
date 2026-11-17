@@ -3948,3 +3948,73 @@ test("a widget moved into a separate frame still resolves its pad, step and fx n
   ui.release();
   await ui.settle();
 });
+
+test("the steps widget at size m pages eight positions, and sixteen need a laptop's size l", async () => {
+  const ui = await bootFramed();
+  await ui.openSampler();
+
+  // Compose opens with the steps at size l on a laptop: the whole row, so the
+  // sixteen positions the lane has always drawn, and no pager for one page.
+  assert.equal(ui.widgetFrame("steps").getAttribute("data-size"), "l", "the laptop's steps widget is at size l");
+  assert.equal(ui.steps().length, 16, "sixteen positions fit the whole row");
+  assert.equal(
+    ui.host("sampler-steps").querySelector(".st-step-strip").getAttribute("data-page-size"),
+    "16",
+    "and the strip says which page it holds",
+  );
+  assert.equal(ui.host("sampler-steps").querySelectorAll("[data-act=step-page]").length, 0, "nothing to turn");
+
+  // The layout the operator saved puts the same widget at size m. The shell
+  // reports the size it applied, and the page draws the lane again for the room
+  // the widget now has: sixteen 44 px targets would need 760 px, so a page of the
+  // lane holds eight and the pager reaches the rest.
+  const api = ui.layoutApi();
+  ui.storage.setItem(
+    api.layoutKey("song-1", "compose", "laptop"),
+    api.serializeLayout({
+      v: 1,
+      shown: [
+        { id: "scene-grid", size: "l" },
+        { id: "editor", size: "m" },
+        { id: "pads", size: "m" },
+        { id: "steps", size: "m" },
+        { id: "fx", size: "s" },
+        { id: "history", size: "s" },
+      ],
+    }),
+  );
+  ui.page.__studioShell.refresh();
+  await ui.settle();
+
+  assert.equal(ui.widgetFrame("steps").getAttribute("data-size"), "m", "the widget is at size m");
+  assert.deepEqual(
+    ui.steps().map((node) => node.getAttribute("data-at")),
+    ["0", "1", "2", "3", "4", "5", "6", "7"],
+    "a page of the lane at size m is the first eight positions",
+  );
+  assert.equal(
+    ui.host("sampler-steps").querySelector(".st-step-strip").getAttribute("data-page-size"),
+    "8",
+    "and the strip is laid out in eight columns, not sixteen",
+  );
+  assert.deepEqual(
+    [...ui.host("sampler-steps").querySelectorAll("[data-act=step-page]")].map((node) => String(node.textContent)),
+    ["1-8", "9-16"],
+    "a sixteen-position pattern is two pages at size m",
+  );
+});
+
+test("a tablet draws eight positions a page even with the steps widget at size l", async () => {
+  const ui = await bootFramed({ width: 800 });
+  await ui.openSampler();
+
+  // A tablet's whole row is six of six columns, which is not a laptop's twelve:
+  // sixteen 44 px targets are only drawn where the widget has a laptop's row.
+  assert.equal(ui.widgetFrame("steps").getAttribute("data-size"), "l", "the tablet's default steps widget is at size l");
+  assert.equal(ui.steps().length, 8, "a tablet holds eight positions a page");
+  assert.equal(
+    ui.host("sampler-steps").querySelectorAll("[data-act=step-page]").length,
+    2,
+    "with a pager for the pattern's other eight",
+  );
+});

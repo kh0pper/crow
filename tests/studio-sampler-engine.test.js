@@ -2181,6 +2181,61 @@ test("setSong removing the sample emits exactly one off", async () => {
   assert.equal(offs[0].frame, 384, "and it goes off in the first block after the song changed");
 });
 
+test("a pad that loses only its sample keeps playing to its natural end", async () => {
+  // 400 frames of constant: the voice reads 0..399, holds its last sample for its
+  // 64-frame fade and is over at frame 464 — inside the block that starts at 384.
+  const samples = [{ id: SAMPLE_ID, channels: [constant(400, 0.5)] }];
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [],
+    pads: [pad("track-1", 0)],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 400) },
+    steps: [],
+  });
+  const engine = await createProcessor(song, samples);
+  engine.post({ type: "pad_events_on", on: true });
+  engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index: 0, v: 127, on: true });
+  const first = await engine.process(128, 384);
+
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_ON]],
+    "the pad lights on its hit's block and stays lit",
+  );
+  assert.ok(peakOf(first.left) > 0.01, "and the voice is sounding");
+
+  // The sample is taken off the pad while the voice is still sounding. The track
+  // and its bank stay, only the sound goes: the pad names no sample any more,
+  // the song holds none, and the page unloads the PCM it was holding.
+  const lost = samplerSong({
+    tracks: [track("track-1")],
+    clips: [],
+    pads: [pad("track-1", 0, { sample_id: null })],
+    samples: {},
+    steps: [],
+  });
+  engine.post({ type: "song", snapshot: lost });
+  engine.post({ type: "sample_unload", sample_id: SAMPLE_ID });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const second = await engine.process(128, 256);
+
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // The block that holds the voice's natural end: still sounding at its first
+  // frame, and silent from the frame its fade ended on.
+  assert.ok(peakBetween(second.left, 0, 16) > 0.01, "the voice plays on to its natural end");
+  assert.equal(peakOf(second.left.subarray(80)), 0, "and nothing sounds after its last fade frame");
+
+  const states = stateEvents(engine.messages);
+  const offs = states.filter((event) => event.state === StudioPadEvents.STATE_OFF);
+  assert.equal(offs.length, 1, `the pad that lost its sample goes off exactly once, got ${offs.length}`);
+  assert.deepEqual(
+    statePairs(offs),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
+    "and it is the pad whose sample went, not the track's whole bank",
+  );
+  assert.equal(offs[0].frame, 384, "off in the block its voice ended in: never early, never twice");
+});
+
 test("two voices of one pad ending in different blocks emit one off, at the second", async () => {
   // The first voice is over at 464 and the second (started on frame 128) at 592:
   // the pad is dark only from the block that starts at 512.

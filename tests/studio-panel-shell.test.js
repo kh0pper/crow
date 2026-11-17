@@ -449,7 +449,7 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(widgetName("midi"), "MIDI");
   assert.equal(widgetName("history"), "History");
   assert.equal(widgetName("agent"), "Agent");
-  assert.equal(emptyNote("editor"), "Pick a clip in the grid to edit it.");
+  assert.equal(emptyNote("editor"), "Open a note clip on a track to edit it.");
   assert.equal(emptyNote("pads"), "Open a pattern clip on a sampler track to play its pads.");
   assert.equal(emptyNote("steps"), "Open a pattern clip on a sampler track to sequence its pads.");
   assert.equal(emptyNote("chop"), "Open a pattern clip and pick a pad to chop its sound.");
@@ -634,7 +634,7 @@ test("a hidden host shows its empty note and unhiding removes it", async () => {
 
   b.shell.setMode("compose");
   const editorNote = noteOf(b.page, "editor");
-  assert.equal(editorNote.textContent, "Pick a clip in the grid to edit it.");
+  assert.equal(editorNote.textContent, "Open a note clip on a track to edit it.");
   assert.equal(editorNote.hasAttribute("hidden"), false, "the editor host is hidden");
 
   b.refs.editor.removeAttribute("hidden");
@@ -652,6 +652,29 @@ test("a hidden host shows its empty note and unhiding removes it", async () => {
   b.refs.pads.removeAttribute("hidden");
   await tick();
   assert.equal(padsNote.hasAttribute("hidden"), true, "and the note goes when the pads host is drawn");
+});
+
+test("a widget's note names the clip kind that opens it", async () => {
+  const b = await bootShell();
+  b.shell.setMode("compose");
+
+  // The editor is the NOTE clip's widget: a pattern clip opens the pads and the
+  // steps instead, so its frame never points the operator back at the grid.
+  const editorNote = String(noteOf(b.page, "editor").textContent);
+  assert.equal(editorNote, "Open a note clip on a track to edit it.");
+  assert.equal(/grid/i.test(editorNote), false, "the editor's note never names the grid");
+
+  // The other two notes still name the pattern clip, so a page with nothing open
+  // says which clip opens which widget rather than one sentence for both.
+  assert.match(String(noteOf(b.page, "pads").textContent), /pattern clip/);
+  assert.match(String(noteOf(b.page, "steps").textContent), /pattern clip/);
+
+  // A hidden editor host is what shows the note, and a drawn one takes it away.
+  assert.equal(noteOf(b.page, "editor").hasAttribute("hidden"), false);
+  b.refs.editor.removeAttribute("hidden");
+  await tick();
+  assert.equal(noteOf(b.page, "editor").hasAttribute("hidden"), true);
+  assert.equal(String(noteOf(b.page, "editor").textContent), editorNote, "the same sentence waits under a drawn editor");
 });
 
 test("each sampler widget has a frame of its own with its host inside it", async () => {
@@ -684,6 +707,30 @@ test("a widget in the tray is still in the page and shows its body without a son
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=studio-widgets]"));
   assert.equal(b.page.querySelector("#st-ask"), b.refs.askInput);
   assert.equal(b.renderCount(), before + 1, "showing a tray widget asks the page to draw its body");
+});
+
+test("a widget whose size moved asks the page to draw its body again", async () => {
+  const b = await bootShell();
+  assert.equal(sizeOf(b.page, "steps"), "l", "compose opens with the steps at size l");
+
+  const layout = b.layout.resizeWidget(
+    b.layout.loadLayout(b.storage, SONG, "compose", "laptop"),
+    "steps",
+  );
+  assert.equal(b.layout.saveLayout(b.storage, SONG, "compose", "laptop", layout), true);
+  const before = b.renderCount();
+  b.shell.refresh();
+
+  // How much room a widget has is what its body draws for (the steps hold eight
+  // positions at size m and sixteen at size l), so the page is asked to draw it
+  // again rather than left showing the contents of the old size.
+  assert.equal(sizeOf(b.page, "steps"), "m", "the layout's new size is applied to the frame");
+  assert.equal(b.renderCount(), before + 1, "and the page is asked to draw the widget again");
+
+  // A refresh that finds the layout it already applied asks for nothing.
+  const settled = b.renderCount();
+  b.shell.refresh();
+  assert.equal(b.renderCount(), settled, "a refresh that moves nothing asks for no draw");
 });
 
 test("an agent frame in the tray grows an unread dot while it is hidden", async () => {

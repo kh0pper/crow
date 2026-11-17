@@ -684,6 +684,31 @@ test("a pad, a step, a bank tab and an effect button are 44 px targets", async (
   );
 });
 
+test("the step lane's page buttons are 44 px targets and its grid follows the page it holds", async () => {
+  const rules = cssRules(String(styleText(await render({ song: "song-1" }))));
+
+  // A page button is a control a thumb turns, so it is a 44 px tall target on a
+  // row of 11 px labels.
+  const pager = rules.filter((rule) => rule.selectors.includes(".studio .st-step-pages .st-toggle"));
+  assert.ok(pager.length > 0, "the pager's buttons have a rule of their own");
+  assert.ok(
+    pager.some((rule) => /(?:^|;|\s)min-height\s*:\s*44px/.test(rule.body)),
+    "a page button is a 44 px tall target",
+  );
+
+  // Sixteen columns of 44 px are 760 px wide however few cells they hold, so the
+  // lane is laid out for the page it was drawn for: eight columns for a page of
+  // eight positions (a phone, or the steps widget at size m).
+  const eight = rules.filter((rule) =>
+    rule.selectors.some((selector) => selector.includes('[data-page-size="8"]')),
+  );
+  assert.ok(eight.length > 0, "a page of eight positions has a rule of its own");
+  assert.ok(
+    eight.some((rule) => /repeat\(8, minmax\(44px, 1fr\)\)/.test(rule.body)),
+    "and that rule is eight columns of at least 44 px",
+  );
+});
+
 test("pads, steps and effects never select their label or call out a menu", async () => {
   const rules = cssRules(String(styleText(await render({ song: "song-1" }))));
 
