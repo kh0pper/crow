@@ -17,7 +17,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { identifyListener } from "../scripts/addon-sandbox/listener-owner.mjs";
+import { containerIdFromCgroup, identifyListener } from "../scripts/addon-sandbox/listener-owner.mjs";
 import { createDockerView } from "../scripts/addon-sandbox/docker-view.mjs";
 import { startEgressRelay } from "../scripts/pi-bots/pi_egress.mjs";
 import { parseIPv6 } from "../servers/shared/ip-classify.js";
@@ -68,6 +68,8 @@ function fakeProc({ tcp = table(), tcp6 = table(), procs = [] } = {}) {
     inodes.forEach((inode, i) => links.set(fdDir + "/" + (i + 3), "socket:[" + inode + "]"));
     // `argv: undefined` leaves the cmdline unreadable; `argv: []` is an empty one.
     if (Array.isArray(p.argv)) files.set("/proc/" + p.pid + "/cmdline", p.argv.join("\0") + "\0");
+    // `cgroup: undefined` leaves /proc/<pid>/cgroup unreadable (a plain host process).
+    if (p.cgroup !== undefined) files.set("/proc/" + p.pid + "/cgroup", p.cgroup);
     if (p.cwd) links.set("/proc/" + p.pid + "/cwd", p.cwd);
     // `<pid>/exe` is a link too; `exe: null` leaves it unreadable.
     const exe = p.exe === undefined ? "/usr/bin/node" : p.exe;
@@ -160,6 +162,141 @@ test("any other process of the same uid, outside this Crow, is the add-on's own 
   assert.equal(r.kind, "own-uid");
   assert.equal(r.pid, 700);
   assert.equal(r.inode, String(SOCK));
+});
+
+test("the browser's own CDP relay, run as the gateway's uid, is own-uid", async () => {
+  // The relay is re-exec'd through setpriv as the gateway's uid, from the bundle image:
+  // argv names /app/cdp-relay.mjs absolutely, cwd is /app, exe is the image's node. All
+  // three /proc entries are readable because nothing changed uid after the exec.
+  const relay = (over = {}) => fakeProc({
+    tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+    procs: [{
+      pid: 750,
+      inodes: [SOCK],
+      cwd: "/app",
+      argv: ["/usr/bin/node", "/app/cdp-relay.mjs", "--attach"],
+      exe: "/usr/bin/node",
+      ...over,
+    }],
+  });
+  const ask = (p) => identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, selfPids: [1], crowRoots: ROOTS, ...p });
+  const denyRead = (paths, errCode) => {
+    const base = relay();
+    const fail = () => { throw Object.assign(new Error(errCode), { code: errCode }); };
+    return {
+      ...base,
+      readFile: (path) => (paths.includes(path) ? fail() : base.readFile(path)),
+      readdir: (path) => (paths.includes(path) ? fail() : base.readdir(path)),
+      readlink: (path) => (paths.includes(path) ? fail() : base.readlink(path)),
+    };
+  };
+
+  const ok = await ask(relay());
+  assert.equal(ok.kind, "own-uid");
+  assert.equal(ok.pid, 750);
+  assert.equal(ok.reason, undefined);
+  assert.equal(ok.inode, String(SOCK));
+
+  // An fd directory that cannot be read maps the socket to no process: refused.
+  const blindFds = await ask(denyRead(["/proc/750/fd"], "EACCES"));
+  assert.deepEqual([blindFds.kind, blindFds.reason], ["denied", "unmapped"]);
+
+  // A cwd (or exe) that cannot be read is a refusal too: a process whose uid changed after
+  // it started is non-dumpable, its /proc entries are unreadable, and what it is cannot be
+  // judged — the reason the relay re-execs itself through setpriv instead of calling setuid.
+  for (const path of ["/proc/750/cwd", "/proc/750/exe", "/proc/750/cmdline"]) {
+    const blind = await ask(denyRead([path], "EACCES"));
+    assert.deepEqual([blind.kind, blind.reason], ["denied", "owner check failed"], path);
+  }
+});
+
+// ---- a same-uid listener that runs inside a container ---------------------
+
+/** A full 64-hex container id, as docker reports it and as the cgroup carries it. */
+const CID = "3f".repeat(32);
+/** How docker writes a container's cgroup: systemd driver, cgroupfs driver, cgroup v1 lines. */
+const CGROUP_SYSTEMD = `0::/system.slice/docker-${CID}.scope\n`;
+const CGROUP_CGROUPFS = `0::/docker/${CID}\n`;
+const CGROUP_V1 = `11:memory:/docker/${CID}\n1:name=systemd:/docker/${CID}\n`;
+
+/** The browser add-on's CDP relay: the gateway's uid, inside the browser's own container. */
+const inContainer = (cgroup, over = {}) => fakeProc({
+  tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+  procs: [{
+    pid: 780, inodes: [SOCK], cwd: "/app",
+    argv: ["/usr/bin/node", "/app/cdp-relay.mjs", "--attach"], exe: "/usr/bin/node", cgroup,
+    ...over,
+  }],
+});
+
+/** Compose project -> add-on id, with the browser's own project in it. */
+const PROJECTS = new Map([["browser", "browser"], ["home-paperless", "paperless"]]);
+
+/** Ask about that holder, with a docker lookup that knows the container. */
+const askInContainer = (over = {}, proc = inContainer(CGROUP_SYSTEMD)) => identifyListener("127.0.0.1", PORT, {
+  gatewayUid: GW_UID, selfPids: [1], crowRoots: ROOTS,
+  addonId: "browser", addonProjects: PROJECTS,
+  containerProject: (id) => (id === CID ? "browser" : ""),
+  ...proc, ...over,
+});
+
+test("a same-uid relay inside THIS add-on's own container is own-uid", async () => {
+  const r = await askInContainer();
+  assert.deepEqual([r.kind, r.pid, r.project, r.projectOwner, r.container], ["own-uid", 780, "browser", "browser", CID]);
+  assert.equal(r.reason, undefined);
+});
+
+test("the same relay is refused to every other add-on, even with 9222 on its allow list", async () => {
+  // Before this rule the uid alone was enough: the browser's relay runs as the gateway's
+  // uid, so every walled add-on that listed 9222 reached the browser add-on's browser.
+  for (const addonId of ["paperless", "media"]) {
+    const r = await askInContainer({ addonId });
+    assert.deepEqual([r.kind, r.reason, r.project], ["denied", "foreign project", "browser"], addonId);
+  }
+});
+
+test("an unlabelled container, an unknown one, and no docker lookup at all are refusals", async () => {
+  // A container docker knows but with no compose project label (a plain `docker run`).
+  const unlabelled = await askInContainer({ containerProject: () => "" });
+  assert.deepEqual([unlabelled.kind, unlabelled.reason], ["denied", "unlabelled project"]);
+  // A container id the docker view does not know (it exited between the read and the check).
+  const unknown = await askInContainer({ containerProject: (id) => (id === "ff".repeat(32) ? "browser" : "") });
+  assert.deepEqual([unknown.kind, unknown.reason], ["denied", "unlabelled project"]);
+  // Nothing injected to name the container: no way to tell, so no pass.
+  const blind = await askInContainer({ containerProject: null });
+  assert.deepEqual([blind.kind, blind.reason], ["denied", "no docker view"]);
+  // A docker read that throws, and a project no installed add-on owns.
+  const boom = await askInContainer({ containerProject: () => { throw new Error("docker socket gone"); } });
+  assert.deepEqual([boom.kind, boom.reason], ["denied", "owner check failed"]);
+  const nobody = await askInContainer({ containerProject: () => "some-other-project" });
+  assert.deepEqual([nobody.kind, nobody.reason], ["denied", "project of no installed add-on"]);
+});
+
+test("the cgroup's docker shapes name the container; a host process keeps today's rule", async () => {
+  for (const [what, cgroup] of [["systemd", CGROUP_SYSTEMD], ["cgroupfs", CGROUP_CGROUPFS], ["v1", CGROUP_V1]]) {
+    assert.equal(containerIdFromCgroup(cgroup), CID, what + " path shape");
+    const r = await askInContainer({}, inContainer(cgroup));
+    assert.deepEqual([r.kind, r.container], ["own-uid", CID], what);
+  }
+  // None of these carries a docker container id: podman's scope, a user slice, the root.
+  for (const cgroup of [`0::/system.slice/libpod-${CID}.scope\n`, "0::/user.slice/user-1000.slice/session-2.scope\n", "0::/\n"]) {
+    assert.equal(containerIdFromCgroup(cgroup), null, cgroup.trim());
+  }
+  // A same-uid holder that is NOT containerised: unchanged (none of Crow's, so the
+  // add-on's own service), and no container is reported.
+  const host = await askInContainer({}, inContainer("0::/user.slice/user-1000.slice/session-2.scope\n"));
+  assert.deepEqual([host.kind, host.container], ["own-uid", undefined]);
+  // An unreadable /proc/<pid>/cgroup reads as "not containerised" too: the file is
+  // world-readable, so this is the same narrow answer as a host process.
+  const base = inContainer(CGROUP_SYSTEMD);
+  const noCgroup = {
+    ...base,
+    readFile: (path) => {
+      if (path.endsWith("/cgroup")) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return base.readFile(path);
+    },
+  };
+  assert.equal((await askInContainer({}, noCgroup)).kind, "own-uid");
 });
 
 test("an inode that maps to no process is refused", async () => {

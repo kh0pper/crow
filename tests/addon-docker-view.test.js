@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createDockerView } from "../scripts/addon-sandbox/docker-view.mjs";
+import { containerProject, createDockerView } from "../scripts/addon-sandbox/docker-view.mjs";
 
 const HOME = "/home/alex/.crow";
 const APP = "/home/alex/crow";
@@ -196,6 +196,24 @@ test("a project that mixes an add-on's container with one from elsewhere is left
   const view = createDockerView({ run, ownHome: "/home/alex/.crow", appRoot: "/home/alex/crow" });
   const snap = await view.snapshot();
   assert.equal(snap.addonProjects.has("mixed"), false, "a project of two owners belongs to no add-on");
+});
+
+test("a container's compose project is looked up by the full id a cgroup carries", async () => {
+  const id = "ab".repeat(32);
+  const inspected = [containerEntry({ id, name: "relay", project: "home-media", workingDir: HOME + "/bundles/media", v4: "172.18.0.5" })];
+  const run = async (args) => {
+    if (args[0] === "ps") return id + "\n";
+    if (args[0] === "inspect") return JSON.stringify(inspected);
+    if (args[0] === "network" && args[1] === "ls") return "";
+    throw new Error("unexpected " + args.join(" "));
+  };
+  const snap = await createDockerView({ run, ownHome: HOME, appRoot: APP }).snapshot();
+  assert.equal(containerProject(snap, id), "home-media", "the same-uid holder's container names its project");
+  assert.equal(containerProject(snap, id.toUpperCase()), "home-media", "case is folded");
+  assert.equal(containerProject(snap, "cd".repeat(32)), "", "a container docker no longer has names no project");
+  assert.equal(containerProject(snap, "c1"), "", "a short id is not a container id");
+  assert.equal(containerProject(snap, null), "");
+  assert.equal(containerProject(null, id), "", "no snapshot, no answer");
 });
 
 test("concurrent snapshot calls share one docker read sequence", async () => {

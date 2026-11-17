@@ -21,7 +21,15 @@
  *      element, its cwd, its executable — lies under this Crow's checkout or
  *      home (`crowRoots`): with no root to compare against, every same-uid
  *      listener is refused. A process whose argv or cwd cannot be read is
- *      refused before anything else: what it is cannot be judged;
+ *      refused before anything else: what it is cannot be judged. A holder
+ *      that runs INSIDE a docker container is judged by its container, never by
+ *      that rule: docker writes the container id into `/proc/<pid>/cgroup`, and
+ *      the container's compose project must be THIS add-on's own — an unknown
+ *      container, an unlabelled one and another add-on's are all refused. Before
+ *      that rule every walled add-on that listed the browser's 9222 got the
+ *      browser, because the CDP relay runs as the gateway's uid inside the
+ *      browser's own container and so looked like an own-uid service to all of
+ *      them; a same-uid process that is NOT containerised keeps the rule above;
  *   3. a root-owned socket must be a port a running container publishes, and
  *      that container must carry a compose project label naming an installed
  *      add-on. The docker view is passed in (the gateway already reads it); a
@@ -199,6 +207,40 @@ function exeOf(pid, opts) {
   } catch { return null; }
 }
 
+/**
+ * The docker container id in a `/proc/<pid>/cgroup` text, or null. Docker writes it in
+ * both of its cgroup drivers' shapes, on cgroup v2 as `0::<path>` and on v1 per
+ * controller, with the id carrying a systemd scope name or a cgroupfs directory:
+ *
+ *   systemd   `/system.slice/docker-<64 hex>.scope`
+ *   cgroupfs  `/docker/<64 hex>`
+ *
+ * Anything else in the path (a host process, podman's `libpod-*` scopes, a Crow-owned
+ * unit) names no docker container. Pure.
+ *
+ * @param {string} text  one `/proc/<pid>/cgroup` file's contents
+ * @returns {string|null}
+ */
+export function containerIdFromCgroup(text) {
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = /(?:^|\/)docker[-/]([0-9a-f]{64})(?:\.scope)?(?=\/|$)/.exec(line);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
+ * The process's cgroup lines, or null when unreadable. `/proc/<pid>/cgroup` is
+ * world-readable (unlike cwd/exe, which need ptrace access), so in practice it is there
+ * whenever argv was; a null here is read as "not containerised", never as a pass of its
+ * own.
+ */
+function cgroupOf(pid, opts) {
+  try { return String(opts.readFile("/proc/" + pid + "/cgroup") ?? ""); } catch { return null; }
+}
+
 /** An absolute path as the comparisons want it: no trailing slashes, "/" kept; null otherwise. */
 function cleanPath(p) {
   const s = typeof p === "string" ? p.trim() : "";
@@ -236,7 +278,7 @@ function isGatewayArg(p) {
  * The verdict for ONE same-uid process holding the socket. Every problem is a
  * `denied` result, never a pass.
  */
-function sameUidVerdict(pid, opts, base) {
+async function sameUidVerdict(pid, opts, base) {
   const denied = (reason) => ({ kind: "denied", reason, ...base, pid });
   const argv = argvOf(pid, opts);
   // No argv at all (unreadable, or an empty cmdline) says nothing about what
@@ -263,6 +305,29 @@ function sameUidVerdict(pid, opts, base) {
   const paths = [...resolved, cwd, exe];
   if (paths.some((p) => opts.crowRoots.some((root) => underRoot(p, root)))) return denied("Crow's own code");
   if (cwd === null || exe === null) return denied("owner check failed");
+  // A containerised holder is not "some other program of this uid": it is another
+  // container's process, and the wall must know WHICH add-on's container. The id is in
+  // the cgroup; the docker view names that container's compose project, and only THIS
+  // add-on's own project may hold the port. An unknown container, an unlabelled one and
+  // another add-on's project are refusals, and with no lookup injected there is no way to
+  // tell, so it is refused too.
+  const containerId = containerIdFromCgroup(cgroupOf(pid, opts) || "");
+  if (containerId !== null) {
+    const extra = { ...base, pid, container: containerId };
+    if (typeof opts.containerProject !== "function") return { kind: "denied", reason: "no docker view", ...extra };
+    let project;
+    try { project = await opts.containerProject(containerId); } catch { return { kind: "denied", reason: "owner check failed", ...extra }; }
+    const named = project == null ? "" : String(project).trim();
+    if (!named) return { kind: "denied", reason: "unlabelled project", ...extra };
+    if (!opts.addonProjects.has(named)) {
+      return { kind: "denied", reason: "project of no installed add-on", ...extra, project: named };
+    }
+    const owner = String(opts.addonProjects.get(named) ?? "");
+    if (ownerIsAddon(owner, opts.addonId)) {
+      return { kind: "own-uid", ...extra, project: named, projectOwner: owner };
+    }
+    return { kind: "denied", reason: "foreign project", ...extra, project: named };
+  }
   return { kind: "own-uid", ...base, pid };
 }
 
@@ -272,7 +337,8 @@ async function verdictFor(listener, opts) {
   if (listener.uid === opts.gatewayUid) {
     const pids = pidsForInode(listener.inode, opts);
     if (!pids.length) return { kind: "denied", reason: "unmapped", ...base };
-    const verdicts = pids.map((pid) => sameUidVerdict(pid, opts, base));
+    const verdicts = [];
+    for (const pid of pids) verdicts.push(await sameUidVerdict(pid, opts, base));
     // A socket shared by several processes is only as safe as the least safe
     // holder: any refusal is the listener's answer.
     return verdicts.find((v) => v.kind === "denied") || verdicts[0];
@@ -314,12 +380,16 @@ async function verdictFor(listener, opts) {
  *   `addonId`        the add-on being walled
  *   `addonProjects`  Map of compose project -> add-on id, across instances
  *   `docker`         async () => [{ hostIp, hostPort, project }]
+ *   `containerProject` the docker view's lookup for a same-uid holder that is a
+ *                    containerised process: (containerId) => its compose project
+ *                    label ("" when docker has no such container). Without it a
+ *                    containerised holder is refused (fail closed)
  *   `crowRoots`      absolute paths of this Crow's checkout and home (both
  *                    spellings); default: `CROW_APP_ROOT` and `CROW_HOME`.
  *                    Empty: no same-uid listener passes at all
  *   `selfPids`       pids of the wall's own processes (default `[process.pid]`)
  *   `readFile`, `readdir`, `readlink`  injected /proc readers (tests)
- * @returns {Promise<{kind: "own-uid"|"docker-publish"|"denied", reason?: string, uid?: number, pid?: number, project?: string, projectOwner?: string, inode?: string}>}
+ * @returns {Promise<{kind: "own-uid"|"docker-publish"|"denied", reason?: string, uid?: number, pid?: number, project?: string, projectOwner?: string, container?: string, inode?: string}>}
  */
 export async function identifyListener(addr, port, o = {}) {
   const roots = (v) => {
@@ -336,6 +406,7 @@ export async function identifyListener(addr, port, o = {}) {
     addonId: o.addonId ?? null,
     addonProjects: o.addonProjects instanceof Map ? o.addonProjects : new Map(),
     docker: typeof o.docker === "function" ? o.docker : null,
+    containerProject: typeof o.containerProject === "function" ? o.containerProject : null,
     crowRoots: roots(o.crowRoots),
     selfPids: pids(o.selfPids),
     readFile: o.readFile || ((p) => readFileSync(p, "utf8")),

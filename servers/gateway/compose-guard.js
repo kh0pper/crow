@@ -847,11 +847,14 @@ export function usesHostNetwork(model) {
  * The environment every gateway-driven `docker compose` run gets: an ALLOWLIST of the
  * gateway's variables (Compose interpolates `${ANY_VAR}` from it, so passing all of it
  * would let a compose file copy any gateway secret into its container), plus CROW_HOME
- * named explicitly. A bundle's own settings come from its .env, which Compose reads itself.
- * COMPOSE_* never passes (COMPOSE_FILE / _PROJECT_NAME / _PROFILES would change the model).
+ * named explicitly, plus the two ids that name the GATEWAY's uid/gid (CROW_GATEWAY_UID /
+ * CROW_GATEWAY_GID) taken from THIS process — never from `base`, which may be an
+ * operator's inherited environment and could name another uid. A bundle's own settings
+ * come from its .env, which Compose reads itself. COMPOSE_* never passes (COMPOSE_FILE /
+ * _PROJECT_NAME / _PROFILES would change the model).
  */
 const COMPOSE_ENV_KEYS = new Set(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "CROW_GATEWAY_PORT", "CROW_GATEWAY_URL", "CROW_DB_PATH", "CROW_DATA_DIR"]);
-export function composeEnv(base, crowHome) {
+export function composeEnv(base, crowHome, ids = {}) {
   const env = {};
   for (const [k, v] of Object.entries(base || {})) {
     if (COMPOSE_ENV_KEYS.has(k) || /^LC_[A-Z]+$/.test(k) || (/^DOCKER_[A-Z_]+$/.test(k) && k !== "DOCKER_DEFAULT_PLATFORM")) env[k] = v;
@@ -862,6 +865,29 @@ export function composeEnv(base, crowHome) {
   let home = crowHome;
   try { home = realpathSync(crowHome); } catch { if (typeof crowHome === "string" && crowHome) home = resolvePath(crowHome); }
   env.CROW_HOME = home;
+  return Object.assign(env, composeIdsEnv(ids));
+}
+
+/**
+ * The two variables that name the uid/gid a bundle's compose is told to run its own relay
+ * as (the browser's CDP relay listens as the gateway's uid, so a walled add-on's relay —
+ * which runs as that same uid — can reach it). Taken from THIS process unless the caller
+ * names ids, and never from an inherited environment.
+ *
+ * BOTH keys are always present. Compose falls back to the bundle's own .env for a variable
+ * the environment does not set, so a key left out here could be supplied by that file —
+ * another uid than the gateway's, which is exactly what the wall refuses. An id that is not
+ * a non-negative integer therefore becomes an empty string: Compose sets the variable to
+ * "", and the browser's entrypoint fails closed on it (its require_id says which variables
+ * to fix).
+ */
+export function composeIdsEnv(ids = {}) {
+  const env = {};
+  const uid = ids.uid ?? (typeof process.getuid === "function" ? process.getuid() : null);
+  const gid = ids.gid ?? (typeof process.getgid === "function" ? process.getgid() : null);
+  const canonical = (v) => (Number.isInteger(v) && v >= 0 ? String(v) : "");
+  env.CROW_GATEWAY_UID = canonical(uid);
+  env.CROW_GATEWAY_GID = canonical(gid);
   return env;
 }
 

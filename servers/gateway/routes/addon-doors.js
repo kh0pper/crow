@@ -37,6 +37,7 @@ import { isAddonRelayAddr } from "../../shared/bot-doors.js";
 import { validateAddonDoorToken } from "../../shared/addon-doors.js";
 import { parseEnvText } from "../bundle-env-codec.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
+import { composeIdsEnv } from "../compose-guard.js";
 
 export const BROWSER_CONTAINER_PATH = "/api/addon-doors/browser/container";
 
@@ -117,8 +118,10 @@ function canonicalHome(crowHome) {
 
 /**
  * The environment a compose recreate runs with: the gateway's own PATH, HOME and
- * LANG, this instance's canonical home, and the validated proxy. Nothing else of
- * the gateway's environment is inherited by the docker call.
+ * LANG, this instance's canonical home, the validated proxy, and the two ids that name
+ * the GATEWAY's uid/gid — the browser's compose runs its CDP relay as that uid, and an
+ * empty value there stops the container. Nothing else of the gateway's environment is
+ * inherited by the docker call.
  * @param {string} crowHome
  * @param {string|undefined} proxy - undefined when the request named none
  */
@@ -128,6 +131,7 @@ function composeEnv(crowHome, proxy) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   env.CROW_HOME = canonicalHome(crowHome);
+  Object.assign(env, composeIdsEnv()); // CROW_GATEWAY_UID / CROW_GATEWAY_GID, from this process
   if (proxy !== undefined) env.CROW_BROWSER_PROXY = proxy;
   return env;
 }

@@ -154,8 +154,32 @@ test("listenerOwnerFor identifies the listener with this context's Crow roots an
   assert.equal(seen[0].opts.addonId, "kiosk");
   assert.deepEqual(seen[0].opts.selfPids, [process.pid]);
   assert.equal(seen[0].opts.docker, null, "a failed snapshot is no docker view");
+  assert.equal(seen[0].opts.containerProject, null, "…and names no container either (a containerised holder is then refused)");
   assert.ok(seen[0].opts.addonProjects instanceof Map);
   assert.equal(seen[0].opts.addonProjects.size, 0);
+});
+
+test("listenerOwnerFor hands the container lookup to the owner check, from the same snapshot", async () => {
+  const cid = "ab".repeat(32);
+  const seen = [];
+  const view = {
+    snapshot: async () => ({
+      publishes: [],
+      containers: [{ id: cid, name: "/relay", project: "browser", ips: [] }],
+      subnets: [],
+      addonProjects: new Map([["browser", "browser"]]),
+    }),
+  };
+  const ctx = context({
+    deps: quietDeps({
+      dockerView: () => view,
+      identifyListener: async (addr, port, opts) => { seen.push(opts); return { kind: "own-uid" }; },
+    }),
+  });
+  await ctx.listenerOwnerFor("browser")("127.0.0.1", 9222);
+  assert.equal(typeof seen[0].containerProject, "function", "a same-uid holder's container can be named");
+  assert.equal(await seen[0].containerProject(cid), "browser");
+  assert.equal(await seen[0].containerProject("ff".repeat(32)), "", "an unknown container names no project");
 });
 
 test("containerOwnerFor: this add-on's own project passes; a bridge address with no docker view is denied", async () => {

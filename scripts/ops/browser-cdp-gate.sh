@@ -9,7 +9,14 @@
 # is a prod restart of the browser (the profile volume survives; the open page does not).
 #
 #   scripts/ops/browser-cdp-gate.sh <crow-home> <compose-project> \
-#     --from-sha <git sha before this change> [--dry-run] [--no-tty-guard]
+#     --from-sha <git sha before this change> [--dry-run] [--no-tty-guard] \
+#     [--allow-root-gateway]
+#
+# Since bundle 1.7.0 the container's CDP relay listens as the GATEWAY's uid (Chromium stays
+# root). This script takes CROW_GATEWAY_UID / CROW_GATEWAY_GID from the owner of <crow-home>
+# — the uid Crow itself runs as — and passes both on every compose command it runs or
+# prints. An owner of 0 (a root gateway) is refused unless --allow-root-gateway is given:
+# a relay listening as root is exactly what the add-on wall will not accept.
 #
 # Steps (all checks first; nothing changes before the backup exists):
 #   1. checks: <crow-home>/bundles/browser exists with a .env; four source files present;
@@ -41,16 +48,17 @@ FILES=(docker-compose.yml Dockerfile entrypoint.sh cdp-relay.mjs)
 say() { echo "[crow-cdp-gate] $*"; }
 fail() { echo "[crow-cdp-gate] REFUSED: $*" >&2; exit 1; }
 usage() {
-  sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
-INSTANCE_HOME="" PROJECT="" FROM_SHA="" DRY_RUN=0 TTY_GUARD=1
+INSTANCE_HOME="" PROJECT="" FROM_SHA="" DRY_RUN=0 TTY_GUARD=1 ALLOW_ROOT_GATEWAY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-sha) FROM_SHA="${2:-}"; [ -n "$FROM_SHA" ] || usage; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-tty-guard) TTY_GUARD=0; shift ;;
+    --allow-root-gateway) ALLOW_ROOT_GATEWAY=1; shift ;;
     -h|--help) usage ;;
     --*) echo "unknown argument: $1" >&2; usage ;;
     *)
@@ -64,6 +72,15 @@ done
 
 [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || fail "<compose-project> '$PROJECT' is not a compose project name"
 INSTANCE_HOME="$(cd "$INSTANCE_HOME" 2>/dev/null && pwd -P)" || fail "<crow-home> is not a directory"
+# The uid/gid the relay listens as: whoever owns <crow-home> — that is the gateway's uid,
+# and the container's compose interpolates both from these. Never assumed, never defaulted.
+RELAY_UID="$(stat -c %u "$INSTANCE_HOME" 2>/dev/null)"
+RELAY_GID="$(stat -c %g "$INSTANCE_HOME" 2>/dev/null)"
+[[ "$RELAY_UID" =~ ^[0-9]+$ ]] || fail "cannot read the owner uid of $INSTANCE_HOME (stat -c %u)"
+[[ "$RELAY_GID" =~ ^[0-9]+$ ]] || fail "cannot read the owner gid of $INSTANCE_HOME (stat -c %g)"
+if [ "$RELAY_UID" = 0 ] && [ "$ALLOW_ROOT_GATEWAY" != 1 ]; then
+  fail "$INSTANCE_HOME is owned by root (uid 0), so the CDP relay would listen as root and a walled browser add-on would be refused its own browser. Run Crow as a non-root user, or pass --allow-root-gateway if this instance really is a root gateway."
+fi
 BUNDLE_DIR="$INSTANCE_HOME/bundles/browser"
 ENV_FILE="$BUNDLE_DIR/.env"
 REPO="$(cd "$(dirname "$0")/../.." && pwd -P)" || fail "cannot resolve this checkout"
@@ -99,12 +116,13 @@ if [ "$DRY_RUN" = 1 ]; then
   say "  instance:      $INSTANCE_HOME"
   say "  bundle dir:    $BUNDLE_DIR"
   say "  compose -p:    $PROJECT (service $SERVICE)"
+  say "  relay uid:gid: $RELAY_UID:$RELAY_GID (the owner of $INSTANCE_HOME; the CDP relay listens as it)"
   say "  source:        $SOURCE"
   say "  pre-PR-2 sha:  ${FROM_SHA:-<none given: a real run needs --from-sha>}"
   say "  backup dir:    $BACKUP (mode 700)"
   say "  would copy:    ${FILES[*]}"
   say "  would mint:    $KEY into $ENV_FILE when absent (atomic, mode 600, never printed)"
-  say "  would run:     ( cd $BUNDLE_DIR && docker compose -p $PROJECT up -d --build --force-recreate )"
+  say "  would run:     ( cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME CROW_GATEWAY_UID=$RELAY_UID CROW_GATEWAY_GID=$RELAY_GID docker compose -p $PROJECT up -d --build --force-recreate )"
   say "  would verify:  GET http://127.0.0.1:$CDP_PORT/json/version -> 401 without a token;"
   say "                 with the token (curl -H @<0600 file>) -> 200;"
   say "                 no token in /proc/<pid>/cmdline or in docker inspect (found/not found only)"
@@ -156,7 +174,7 @@ fi
 
 say "instance:   $INSTANCE_HOME"
 say "bundle dir: $BUNDLE_DIR"
-say "project:    $PROJECT (CDP relay on 127.0.0.1:$CDP_PORT)"
+say "project:    $PROJECT (CDP relay on 127.0.0.1:$CDP_PORT, as uid $RELAY_UID)"
 say "backup:     $BACKUP (pre-PR-2 files from $FROM_SHA, plus what is installed now)"
 say "then:       copy the four files, mint $KEY if absent, recreate the container, verify."
 
@@ -182,7 +200,7 @@ on_exit() {
     recreate|recreated|verify)
       echo "[crow-cdp-gate] the container may have been recreated already: bring it back from the restored files," >&2
       echo "[crow-cdp-gate] or leave the new image running and fix the cause first. Either way, inspect: $DOCKER logs $SERVICE" >&2
-      echo "[crow-cdp-gate]   cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME $DOCKER compose -p $PROJECT up -d --build --force-recreate" >&2 ;;
+      echo "[crow-cdp-gate]   cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME CROW_GATEWAY_UID=$RELAY_UID CROW_GATEWAY_GID=$RELAY_GID $DOCKER compose -p $PROJECT up -d --build --force-recreate" >&2 ;;
     *)
       echo "[crow-cdp-gate] the container was not recreated; nothing to restart." >&2 ;;
   esac
@@ -237,7 +255,8 @@ grep -qE "^${KEY}=[A-Za-z0-9_-]{32,256}$" "$ENV_FILE" \
 # ---- 5. recreate -----------------------------------------------------------
 STAGE=recreate
 say "recreating $SERVICE with the new compose (this restarts the browser)..."
-( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" "$DOCKER" compose -p "$PROJECT" up -d --build --force-recreate )
+# The relay's uid/gid travel with the compose run, from this instance's own home.
+( cd "$BUNDLE_DIR" && CROW_HOME="$INSTANCE_HOME" CROW_GATEWAY_UID="$RELAY_UID" CROW_GATEWAY_GID="$RELAY_GID" "$DOCKER" compose -p "$PROJECT" up -d --build --force-recreate )
 STAGE=recreated
 
 # ---- 6. verify -------------------------------------------------------------
@@ -302,7 +321,7 @@ say "  cp -p $BACKUP/pre/docker-compose.yml $BUNDLE_DIR/docker-compose.yml"
 say "  cp -p $BACKUP/pre/Dockerfile         $BUNDLE_DIR/Dockerfile"
 say "  install -m 755 $BACKUP/pre/entrypoint.sh $BUNDLE_DIR/entrypoint.sh"
 say "  rm -f $BUNDLE_DIR/cdp-relay.mjs"
-say "  cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME docker compose -p $PROJECT up -d --build --force-recreate"
+say "  cd $BUNDLE_DIR && CROW_HOME=$INSTANCE_HOME CROW_GATEWAY_UID=$RELAY_UID CROW_GATEWAY_GID=$RELAY_GID docker compose -p $PROJECT up -d --build --force-recreate"
 say "A public install rolls FORWARD instead: a later bundle version that reverts these files, because"
 say "the installed manifest already says 1.5.0; a hand-restored compose stays until the next bundle"
 say "version's refresh of manifest.refreshFiles replaces it."

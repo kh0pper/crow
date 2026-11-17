@@ -15,6 +15,13 @@ set -euo pipefail
 CROW_HOME="${CROW_DATA_DIR:-$HOME/.crow}"
 CROW_APP="${CROW_HOME}/app"
 BUNDLES_DIR="${CROW_HOME}/bundles"
+# The uid/gid Crow itself runs as: the owner of CROW_HOME. A bundle's compose can name them
+# (the browser's does: its CDP relay listens as CROW_GATEWAY_UID so a walled add-on's relay,
+# running as the same uid, can reach it), and an empty value there is a container that
+# refuses to start — so every compose run below inherits both.
+CROW_GATEWAY_UID="$(stat -c %u "$CROW_HOME" 2>/dev/null || id -u)"
+CROW_GATEWAY_GID="$(stat -c %g "$CROW_HOME" 2>/dev/null || id -g)"
+export CROW_GATEWAY_UID CROW_GATEWAY_GID
 
 # Fall back to repo directory if not installed to ~/.crow/app
 if [ ! -d "$CROW_APP" ]; then

@@ -19,6 +19,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# The CDP relay starts itself as the gateway's uid through setpriv (util-linux, part of
+# the base image — no package is added for this). It is what makes the relay's
+# /proc/<pid>/fd, cwd and exe readable by the gateway: a process that calls setuid()
+# itself turns non-dumpable, and the add-on wall then refuses the listener.
+RUN test -x /usr/bin/setpriv
+
 WORKDIR /app
 
 # Install deps
