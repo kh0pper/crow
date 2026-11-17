@@ -74,12 +74,21 @@
 // between the two spaces of `x  \nnext` leaves a stray space before the <br>
 // (the old fixed 4,096 cut did all three; 3 of 200 offsets in a realistic long
 // paragraph with a link near the boundary already differed). Both paths now cut
-// ONLY between two characters of one run of spaces/tabs, never inside a run that
-// ends in a line break, and not at all in a stretch with no such run (which is
+// ONLY between two characters of one run of spaces/tabs, and in a run that ends
+// in a line break only before its final all-space stretch — the stretch a
+// breaks-mode `br` takes — and not at all in a stretch with no such run (which is
 // linear anyway — see textRunCut in servers/blog/renderer.js). That is the
 // invariant the straddle sweep below checks token by token, at offsets -3..+5
 // around the old cut, on both paths (the bot path's window has its own seam,
 // setBotTextWindowEnabled, so the comparison is possible there too).
+//
+// The end of this file pins the two regressions the window introduced, in the
+// order they were found: THE MATH HINT MUST NOT DEPEND ON THE CUT (the bot
+// path's start() reports the nearer of the next math opener and the cut, scans
+// the whole source for the opener, and memoizes the two separately), and A RUN
+// THAT ENDS IN A LINE BREAK IS USABLE UP TO ITS LAST TAB (only the final
+// all-space stretch before the break is excluded), plus the memo being PER
+// INLINE FRAME rather than per parse behind a 32-character fingerprint.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -864,4 +873,316 @@ test("differential: 3,000 seeded owner documents render byte-identically with th
   assert.ok(stats.withRuns > 1500, `the corpus contains plain-space runs (${stats.withRuns} documents)`);
   assert.ok(stats.docsWithCuts > 500,
     `the window really cut text runs (${stats.docsWithCuts} documents, ${stats.cuts} cuts, worst ${stats.maxCuts})`);
+});
+
+// --- the two regressions the window introduced, pinned ---------------------
+//
+// (1) THE MATH HINT MUST NOT DEPEND ON THE CUT. The bot path's start() is the
+// only thing that makes marked's text rule (which does not stop at `$`) stop
+// where math starts, and it used to report the text-run cut ALONE whenever the
+// first START_WINDOW characters held no `$`/`\(` — and to remember "no cut"
+// for the whole source, so every shorter suffix was answered without a scan.
+// Math past the window was then swallowed as raw text: `prose(5000) + " $x^2$"
+// came out with the dollars on the page, and a `$` that later fell INSIDE a
+// window was lost too. The hint is now the MINIMUM of "the next opener, scanned
+// over the whole source" and "the text-run cut, or none", with the two memoized
+// separately, and the window-off seam keeps math detection whole — which is the
+// reference the sweep below measures against.
+
+/** The four reported repros. `fill(n)` is single-spaced prose (the shape with no
+ *  usable cut at all), and each document is also required to RENDER its math,
+ *  not merely to match the reference. */
+const MATH_PAST_WINDOW = [
+  ["math past a 5,000-character prose paragraph", () => proseFiller(5000) + " $x^2$ end", ["<code>x^2</code>"]],
+  ["$$y^2$$ past 4 KB", () => proseFiller(5000) + " $$y^2$$ end", ["<code>y^2</code>"]],
+  ["math after an emphasis span at 4.5 KB", () => proseFiller(4500) + " *a* " + proseFiller(300) + " $x^2$",
+    ["<code>x^2</code>", "<em>a</em>"]],
+  ["math after a URL at 4.5 KB", () => proseFiller(4500) + " https://example.com/p " + proseFiller(300) + " $x^2$",
+    ["<code>x^2</code>", '<a href="https://example.com/p"']],
+];
+
+test("math past the window still renders as math on the bot path (B1)", () => {
+  for (const [name, build, marks] of MATH_PAST_WINDOW) {
+    const doc = build();
+    const on = renderBotMarkdown(doc);
+    setBotTextWindowEnabled(false);
+    let off;
+    try {
+      off = renderBotMarkdown(doc);
+    } finally {
+      setBotTextWindowEnabled(true);
+    }
+    assert.equal(on, off,
+      `${name}: the window changed the render\n  windowed:  ${JSON.stringify(on.slice(-240))}\n  unlimited: ${JSON.stringify(off.slice(-240))}`);
+    for (const mark of marks) {
+      assert.ok(on.includes(mark), `${name}: ${mark} is rendered — got ${JSON.stringify(on.slice(-240))}`);
+    }
+    // Not vacuous: the document really is longer than the window.
+    assert.ok(doc.length > CUT_WINDOW * 1.1, `${name}: the document reaches past the window (${doc.length})`);
+  }
+});
+
+/** One opener spelling per shape the hint scans for. `\[…\]` is only math at a
+ *  line start, so mid-paragraph it is escaped text in BOTH renders — the case
+ *  that proves the hint may look for it without changing anything. */
+const MATH_SPELLINGS = [
+  (body) => `$${body}$`,
+  (body) => `$$${body}$$`,
+  (body) => `\\(${body}\\)`,
+  (body) => `\\[${body}\\]`,
+  (body) => `$${body}+1$`,
+  (body) => `$${body}_2$`,
+];
+
+// 240 cases: 6 spellings x 20 positions x 2 fillers, the positions straddling
+// the 4 KB window (3,000-7,750) and going past it. The reference side is
+// setBotTextWindowEnabled(false): math detection with NO window, which is
+// main's behaviour for the hint itself. main still missed 14 of these with its
+// own 4,096-character scan (recorded below as the sweep's baseline, so this
+// test can only fail if the fix makes things WORSE than main); the broken
+// commit missed 54.
+const MAIN_MATH_MISSES = 14;
+
+test("240-case math sweep around and beyond the 4 KB window: no new misses on the bot path", (t) => {
+  let cases = 0;
+  let misses = 0;
+  let referenceMath = 0;
+  let cutCases = 0;
+  let worst = null;
+  for (const spelling of MATH_SPELLINGS) {
+    for (const spaced of [false, true]) {
+      // Single-spaced prose has no usable cut at all; sentence-spaced prose has
+      // one every few characters, so half the sweep runs through the CUT branch
+      // of the hint (where the opener may sit anywhere on either side of it).
+      const fill = (n) => proseFiller(n, spaced ? "  " : " ");
+      for (let k = 0; k < 20; k++) {
+        const pos = 3000 + k * 250;
+        const doc = fill(pos) + " " + spelling("x^2") + " tail";
+        const on = renderBotMarkdown(doc);
+        if (mdBotTextWindowStats.cuts > 0) cutCases++;
+        setBotTextWindowEnabled(false);
+        let off;
+        try {
+          off = renderBotMarkdown(doc);
+        } finally {
+          setBotTextWindowEnabled(true);
+        }
+        cases++;
+        if (off.includes("<code>") || off.includes('class="math"')) referenceMath++;
+        if (on !== off) {
+          misses++;
+          if (!worst) worst = `${JSON.stringify(spelling("x^2"))} at ${pos} (${spaced ? "sentence" : "single"}-spaced)\n`
+            + `  windowed:  ${JSON.stringify(on.slice(pos - 40, pos + 120))}\n`
+            + `  unlimited: ${JSON.stringify(off.slice(pos - 40, pos + 120))}`;
+        }
+      }
+    }
+  }
+  assert.equal(cases, 240, "every case was rendered");
+  // Not vacuous: the reference really does find math in the sweep, and the sweep
+  // really does reach the window's cut branch.
+  assert.ok(referenceMath >= 190, `the reference renders math in the sweep (${referenceMath} of ${cases})`);
+  assert.ok(cutCases >= 100, `the sweep lands on the text-run cut (${cutCases} cases)`);
+  if (worst) t.diagnostic(`first miss: ${worst}`);
+  t.diagnostic(`math sweep: ${cases} cases, ${misses} misses (main recorded ${MAIN_MATH_MISSES}, the broken `
+    + `commit 54), ${referenceMath} with math, ${cutCases} through the cut`);
+  // Stricter than "no worse than main": the hint now scans exactly what the
+  // window-free reference does, so no case may differ at all.
+  assert.equal(misses, 0,
+    `${misses} of ${cases} math cases render differently with the window on (main recorded `
+    + `${MAIN_MATH_MISSES}, the broken commit 54): ${worst}`);
+});
+
+// (2) A RUN THAT ENDS IN A LINE BREAK IS USABLE UP TO ITS LAST TAB. Excluding
+// such a run whole (the old rule) left `"a" + " " * N + "\t\nb"` quadratic:
+// the tab makes ` *\n` fail, and the text rule's lazy `[\s\S]*?` retried it at
+// every position of the run — 1,175 ms for 60 KB on the bot path (main: 89 ms),
+// 5,255 ms for the 128 KB owner head and 4,576 ms for the 1 MiB chunked
+// document. Past the last tab the run IS one all-space stretch, which ` *\n`
+// stops at and `br` takes, so only that stretch is excluded (see the invariant
+// above textRunCut in servers/blog/renderer.js).
+
+/** Exactly `n` characters: the run, then a tab, then the line break. */
+const TAB_BREAK_SHAPES = {
+  "spaces then a tab then a line break": (n) => "a" + " ".repeat(n - 4) + "\t\nb",
+  "half spaces, half tabs, then a line break": (n) => {
+    const spaces = Math.floor((n - 3) / 2);
+    return "a" + " ".repeat(spaces) + "\t".repeat(n - 3 - spaces) + "\nb";
+  },
+};
+
+test("a run that ends in a line break is cut up to its last tab (B2): bot 60 KB < 500 ms, owner 128 KB < 1000 ms", async (t) => {
+  for (const [name, shape] of Object.entries(TAB_BREAK_SHAPES)) {
+    const botSrc = shape(60 * 1024);
+    assert.equal(botSrc.length, 60 * 1024, `${name}: the bot fixture is 60 KB`);
+    const bot = await renderInWorker("bot", botSrc);
+    assert.ok(bot.ms < 500, `${name}: 60 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 500 ms)`);
+    assert.ok(bot.length > 0, `${name}: the bot path still renders`);
+
+    const ownerSrc = shape(OWNER_HEAD);
+    assert.equal(ownerSrc.length, OWNER_HEAD, `${name}: the owner fixture is the 128 KB head`);
+    const owner = await renderInWorker("owner", ownerSrc);
+    assert.ok(owner.ms < 1000, `${name}: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 1000 ms)`);
+    assert.ok(owner.length >= ownerSrc.length * 0.99, `${name}: the content is on the page`);
+
+    // The cut is invisible: the same document renders byte-identically with the
+    // window off. A smaller document, because the reference side is quadratic on
+    // this shape by definition (that is the regression).
+    const small = shape(8 * 1024);
+    const botOn = renderBotMarkdown(small);
+    const botCuts = mdBotTextWindowStats.cuts;
+    const ownerOn = renderMarkdown(small);
+    const ownerCuts = mdOwnerTextWindowStats.cuts;
+    setBotTextWindowEnabled(false);
+    setOwnerTextWindowEnabled(false);
+    let botOff;
+    let ownerOff;
+    try {
+      botOff = renderBotMarkdown(small);
+      ownerOff = renderMarkdown(small);
+    } finally {
+      setBotTextWindowEnabled(true);
+      setOwnerTextWindowEnabled(true);
+    }
+    assert.ok(botCuts > 0, `${name}: the bot window cut the 8 KB shape (${botCuts} cuts)`);
+    assert.ok(ownerCuts > 0, `${name}: the owner window cut the 8 KB shape (${ownerCuts} cuts)`);
+    assert.equal(botOn, botOff, `${name}: the bot render changed with the window (${botCuts} cuts)`);
+    assert.equal(ownerOn, ownerOff, `${name}: the owner render changed with the window (${ownerCuts} cuts)`);
+    t.diagnostic(`${name}: bot 60 KB ${bot.ms.toFixed(0)} ms, owner 128 KB ${owner.ms.toFixed(0)} ms, `
+      + `${botCuts}+${ownerCuts} cuts on the 8 KB shape`);
+  }
+});
+
+/** The same shape in every spelling the new rule tells apart, each exactly `n`
+ *  characters: the run starts at index 1 and reaches past 4,096, so the cut the
+ *  window wants always falls INSIDE it. Past a run's last tab the run is one
+ *  all-space stretch (which ` *\n` stops at and `br` takes) — so that stretch
+ *  is the only part of a run this rule may not cut, and the all-spaces shape
+ *  must stay uncut while every spelling with a tab in it is cut and renders
+ *  exactly as it does with no window at all. */
+const BREAK_RUN_SHAPES = {
+  "all spaces (no cut: the br owns the stretch)": (n) => "a" + " ".repeat(n - 3) + "\nb",
+  "spaces, then one tab": (n) => "a" + " ".repeat(n - 4) + "\t\nb",
+  "spaces, a tab, then three spaces": (n) => "a" + " ".repeat(n - 7) + "\t   \nb",
+  "spaces, a tab, then one space": (n) => "a" + " ".repeat(n - 5) + "\t \nb",
+  "tabs, then two spaces": (n) => "a" + "\t".repeat(n - 5) + "  \nb",
+  "spaces, then two tabs": (n) => "a" + " ".repeat(n - 5) + "\t\t\nb",
+};
+
+test("every spelling of a run that ends in a line break renders exactly as it does with no window", () => {
+  let compared = 0;
+  let cuts = 0;
+  for (const [name, shape] of Object.entries(BREAK_RUN_SHAPES)) {
+    const allSpaces = name.startsWith("all spaces");
+    for (let size = 4100; size <= 4400; size += 10) {
+      const doc = shape(size);
+      assert.equal(doc.length, size, `${name}: the fixture is ${size} chars`);
+      const botOn = renderBotMarkdown(doc);
+      const botCuts = mdBotTextWindowStats.cuts;
+      const ownerOn = renderMarkdown(doc);
+      const ownerCuts = mdOwnerTextWindowStats.cuts;
+      cuts += botCuts + ownerCuts;
+      if (allSpaces) {
+        assert.equal(botCuts + ownerCuts, 0,
+          `${name}: an all-space stretch before the line break is never cut (${botCuts}+${ownerCuts})`);
+      }
+      setBotTextWindowEnabled(false);
+      setOwnerTextWindowEnabled(false);
+      let botOff;
+      let ownerOff;
+      try {
+        botOff = renderBotMarkdown(doc);
+        ownerOff = renderMarkdown(doc);
+      } finally {
+        setBotTextWindowEnabled(true);
+        setOwnerTextWindowEnabled(true);
+      }
+      assert.equal(botOn, botOff,
+        `${name} at ${size} chars (bot path) changed with the window (${botCuts} cuts): ${JSON.stringify(doc.slice(4080, 4130))}`);
+      assert.equal(ownerOn, ownerOff,
+        `${name} at ${size} chars (owner path) changed with the window (${ownerCuts} cuts): ${JSON.stringify(doc.slice(4080, 4130))}`);
+      compared++;
+    }
+  }
+  assert.ok(cuts > compared, `the shapes with a tab really cut (${cuts} cuts over ${compared} documents)`);
+});
+
+const TAB_BREAK_UNIT = "a" + " ".repeat(120000 - 2) + "\t\nb\n\n";
+
+test("the CHUNKED owner path renders 1 MiB of space-run-then-tab-then-line-break units in < 2500 ms", async (t) => {
+  const src = rep(TAB_BREAK_UNIT, CHUNKED);
+  assert.equal(src.length, CHUNKED, "the fixture is 1 MiB");
+  const r = await renderInWorker("owner", src);
+  assert.ok(r.ms < 2500,
+    `1 MiB of 120 KB space runs ending in ` + "`\\t\\n`" + ` took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 2500 ms)`);
+  assert.ok(r.length > 0, "the 1 MiB document still renders");
+  t.diagnostic(`1 MiB space-run/tab units: ${r.ms.toFixed(0)} ms (${r.length} chars of HTML)`);
+});
+
+// (3) THE MEMO IS PER INLINE FRAME. A 32-character fingerprint let one inline
+// block's answer — usually "no cut in this source" — apply to a DIFFERENT block
+// that merely matched it, which silenced the window for that block's space run
+// (the quadratic back in full) and could hand it a cut no run of its own
+// carries. The two blocks below are built to collide on BOTH fingerprints
+// (first 32 characters at the aligned offset, and last 32), the first with no
+// double space at all (so its answer is "no cut") and the second a long space
+// run: the memo is now reset per inlineTokens frame, so the second block scans
+// its own source.
+
+const COLLIDE_HEAD = "Start of the block: the same first thirty-two ch";
+const COLLIDE_TAIL = "Same last thirty-two characters: and then it ends";
+
+/** Two inline blocks (separate paragraphs) of the same length: `head` at the
+ *  start, `tail` at the end, single-spaced prose in the first and one long run
+ *  of spaces in the second. */
+function collisionDoc(size) {
+  const room = size - COLLIDE_HEAD.length - COLLIDE_TAIL.length;
+  assert.ok(room > 8192, `collisionDoc(${size}): the space run must reach past the window`);
+  // One space between words, none at either end: no double space anywhere, so
+  // the first block's text-run answer is "no cut" — the answer a fingerprint
+  // collision used to hand the second block.
+  let prose = "word";
+  while (prose.length < room - 1) prose += " word";
+  prose = prose.slice(0, room - 1).replace(/ +$/, "");
+  const a = COLLIDE_HEAD + prose + " " + COLLIDE_TAIL;
+  const b = COLLIDE_HEAD + " ".repeat(a.length - COLLIDE_HEAD.length - COLLIDE_TAIL.length) + COLLIDE_TAIL;
+  assert.equal(a.length, b.length, "the two blocks are the same length");
+  assert.equal(a.slice(0, 32), b.slice(0, 32), "they share their first 32 characters");
+  assert.equal(a.slice(-32), b.slice(-32), "they share their last 32 characters");
+  assert.ok(!/ {2}/.test(a), "the first block has no double space (its answer is 'no cut')");
+  assert.ok(/ {8192}/.test(b), "the second block carries a run well past the window");
+  return a + "\n\n" + b;
+}
+
+test("a memo collision between two inline blocks cannot silence the window (M)", async (t) => {
+  // The same document is small enough to render both ways here: identical bytes,
+  // on both paths, and both paths really cut the second block.
+  const small = collisionDoc(16 * 1024);
+  const botOn = renderBotMarkdown(small);
+  const botCuts = mdBotTextWindowStats.cuts;
+  const ownerOn = renderMarkdown(small);
+  const ownerCuts = mdOwnerTextWindowStats.cuts;
+  setBotTextWindowEnabled(false);
+  setOwnerTextWindowEnabled(false);
+  let botOff;
+  let ownerOff;
+  try {
+    botOff = renderBotMarkdown(small);
+    ownerOff = renderMarkdown(small);
+  } finally {
+    setBotTextWindowEnabled(true);
+    setOwnerTextWindowEnabled(true);
+  }
+  assert.ok(botCuts > 0, `the bot window cut the second block (${botCuts} cuts)`);
+  assert.ok(ownerCuts > 0, `the owner window cut the second block (${ownerCuts} cuts)`);
+  assert.equal(botOn, botOff, "the bot render changed with the window");
+  assert.equal(ownerOn, ownerOff, "the owner render changed with the window");
+
+  // …and the 128 KB version — the size at which a stale "no cut" answer cost
+  // the whole quadratic — renders in well under the bound instead of in ~5 s.
+  const big = collisionDoc(OWNER_HEAD - 1);
+  const r = await renderInWorker("owner", big);
+  assert.ok(r.ms < 1000, `the 128 KB collision document took ${r.ms.toFixed(0)} ms (bound 1000 ms)`);
+  assert.ok(r.length >= big.length * 0.99, "the content is on the page");
+  t.diagnostic(`collision document: 16 KB ${botCuts}+${ownerCuts} cuts, 128 KB owner ${r.ms.toFixed(0)} ms`);
 });

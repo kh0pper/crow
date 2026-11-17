@@ -37,8 +37,9 @@ marked.setOptions({ gfm: true, breaks: true });
  * nesting is bounded INSIDE marked's block lexer (boundedLexer + MD_MAX_NEST,
  * see "THE BLOCK-NESTING CLIFF" below), the inline-lexer cliff is guarded by
  * the same linear pre-pass the bot path uses (see "THE INLINE-LEXER CLIFF"),
- * and long inline TEXT runs are cut at the same 4,096-character window the bot
- * path gets from its math extension (see "THE OWNER PATH'S TEXT-RUN WINDOW").
+ * and long inline TEXT runs are cut inside a whitespace run near 4,096
+ * characters, at the same index the bot path's math extension cuts them at (see
+ * textRunCut and "THE OWNER PATH'S TEXT-RUN WINDOW").
  * Both matter to the OWNER path: /blog and /kb are PUBLIC and uncached, so any
  * reader can hand this function a document — which is exactly how the owner
  * path's quadratic render went from an operator-only annoyance to an
@@ -272,9 +273,10 @@ export const OWNER_MD_MAX_TOTAL_INPUT = 8 * 1024 * 1024;
  * budget plus one worst-case chunk. The worst chunk measured today is 128 KB of
  * ONE run of plain ASCII spaces (`'a' + ' ' x N + 'b'`, a single paragraph with
  * no newline in it), ~200 ms — marked's inline text rule is quadratic on it, and
- * the owner path now cuts every text run at 4,096 characters (see "THE OWNER
- * PATH'S TEXT-RUN WINDOW" below), which is what brought that chunk down from
- * 5.8 s. Next is a 128 KB chunk of Unicode-whitespace-only lines, ~180 ms —
+ * the owner path now cuts a long text run inside its space run, near 4,096
+ * characters but never inside the all-space stretch a line break owns (see
+ * textRunCut and "THE OWNER PATH'S TEXT-RUN WINDOW" below), which is what
+ * brought that chunk down from 5.8 s. Next is a 128 KB chunk of Unicode-whitespace-only lines, ~180 ms —
  * marked's inline `br` rule is quadratic on it, and that shape has its own guard
  * (brScanCost / MD_BR_SCAN_MAX) — and every other shape under the existing
  * block guards costs tens of milliseconds per chunk. Hence the number: 1000 ms
@@ -713,24 +715,26 @@ const MAX_DISPLAY = 2000;
 const START_WINDOW = 4096;
 export const BOT_MD_MAX_INPUT = 64 * 1024;
 
-/** The bot path's text-run window is on by default. false leaves the math
- *  extension's `$`/`\(` hint exactly as it is and only stops it reporting a
- *  text-run CUT — the "window off" side of tests/md-unicode-ws.test.js. */
+/** The bot path's text-run window is on by default. false stops the math
+ *  extension reporting a text-run CUT and leaves its `$`/`\(`/`\[` hint exactly
+ *  as it is — math detection with no window at all, the "window off" side of
+ *  tests/md-unicode-ws.test.js and its reference for the math sweep. */
 let botTextWindowOn = true;
 
 /** @param {boolean} enabled false renders the bot path with no text-run cut in
- *  the math extension's inline start() (the `$`/`\(` hint is unchanged). */
+ *  the math extension's inline start() (the math hint is unchanged and still
+ *  covers the whole source). */
 export function setBotTextWindowEnabled(enabled) {
   botTextWindowOn = enabled !== false;
 }
 
 /**
  * What the bot path's text-run window did in the LAST renderBotMarkdown call:
- * how many text-run cuts the math extension's start() FOUND (a cut is memoized
- * and reported again for every shorter suffix of the same source, so this
- * counts cuts, not calls). Reset at the start of every renderBotMarkdown call.
- * Read by tests/md-unicode-ws.test.js, which has to show that the documents it
- * compares byte for byte are not all too short to reach the window.
+ * how many text-run cuts the math extension's start() FOUND (a cut is found by
+ * a scan and reused for every shorter suffix until the tokenizer passes it, so
+ * this counts cuts, not calls). Reset at the start of every renderBotMarkdown
+ * call. Read by tests/md-unicode-ws.test.js, which has to show that the
+ * documents it compares byte for byte are not all too short to reach the window.
  */
 export const mdBotTextWindowStats = { cuts: 0 };
 
@@ -738,41 +742,70 @@ export const mdBotTextWindowStats = { cuts: 0 };
 // WHERE A TEXT-RUN CUT MAY LAND.
 //
 // Both paths cap marked's inline text rule by reporting a start() hint: the bot
-// path's math extension (inlineStart) once no `$`/`\(` opener is anywhere in
-// the window, and the owner path's ownerTextWindow. marked turns the hint into
+// path's math extension (inlineStart) and the owner path's ownerTextWindow, both
+// from textRunCut below, and there is no "once the window holds no opener" to it.
+// marked turns the hint into
 // `l = e.substring(0, p + 1)` and hands ONLY that slice to the text tokenizer,
 // so the cut reads as end-of-input to marked's own regexes. The pieces are
 // merged back (`p.raw += o.raw, p.text += o.text`), which makes most cuts
 // invisible — but NOT every cut:
 //
-//   - the text rule stops at `$` (end of the slice), so a multi-character token
+//   - the text rule stops at the end of the slice, so a multi-character token
 //     that crosses the cut is never matched: `https://…` cut inside the
 //     protocol is plain text, an email `foobar@example.com` cut after the `f`
-//     links to `oobar@example.com`, and `x  \nnext` cut between the two spaces
-//     keeps one space the `br` rule would have eaten (`x <br>` for `x<br>`);
+//     links to `oobar@example.com`, and `x  \nnext` cut inside the spaces keeps
+//     a space the `br` rule would have eaten (`x <br>` for `x<br>`);
 //   - the resume position is where the NEXT token is tried, and only a text
 //     token there merges back into the one before it.
 //
-// So the cut may only sit BETWEEN TWO characters of one run of spaces/tabs, and
-// that run must not be followed by a line break (the `br` rule owns the spaces
-// before a hard break, in both spellings marked knows: `{2,}\n` and, with
-// `breaks`, ` *\n`). Nothing else in the inline rules can start at a space, the
-// text rule cannot stop inside such a run (`(?=[\\<!\[`*~_]|\b_| {2,}\n|protocol:\/\/|www\.|$)`
-// needs a non-space or a newline for every alternative), and the text token on
-// the far side of the cut merges back into the near one — so the two renders
-// are byte-identical. Verified over 3,000 seeded documents and a set of
-// boundary documents at every offset around the cut (tests/md-unicode-ws.test.js).
+// So the cut may only sit BETWEEN TWO CHARACTERS of one run of spaces/tabs and,
+// in a run that ends in a line break, only before that run's final stretch of
+// ASCII SPACES. Nothing else in the inline rules can start at a space, and the
+// text token on the far side of the cut merges back into the near one — so the
+// two renders are byte-identical. Verified over 3,000 seeded documents and a
+// set of boundary documents at every offset around the cut
+// (tests/md-unicode-ws.test.js).
 //
-// A stretch with no such index at all is left uncut, and that stays linear: the
+// THE INVARIANT, stated against the rule that decides it. Both paths parse with
+// gfm + `breaks: true`, where marked 17.0.6's inline rules are
+//
+//   text: /^([`~]+|[^`~])(?:(?= *\n)|(?=[email chars]+@)|[\s\S]*?(?:(?=[\\<!\
+//          [`*~_]|\b_| *\n|[hH][tT][tT][pP][sS]?|[fF][tT][pP]:\/\/|www\.|$)|
+//          [^ ](?= *\n)|[^email chars](?=[email chars]+@)))/
+//   br:   /^( *|\\)\n(?!\s*$)/
+//
+// (the two email alternatives spelled out in short to keep this readable), and
+// two consequences own the cut:
+//
+//   - ` *\n` — zero or more SPACES then a newline — is in the text rule's stop
+//     set, so the rule ends its token at the FIRST index q where the rest of the
+//     line is spaces followed by `\n`, and `br` then takes `[q, \n]`, whose raw
+//     spaces never reach the page. A cut AFTER q leaves those spaces in a text
+//     token instead, so no cut may sit inside that final all-space stretch; a cut
+//     at q itself — just after the run's last TAB, which ` *` cannot cross — is
+//     invisible, because the text rule stops there on its own in both parses.
+//     That ONE exclusion is the whole rule. Excluding every run followed by a
+//     line break (what this did before) left `"a" + " " * N + "\t\nb"`
+//     quadratic, the tab being enough to make ` *\n` fail while the lazy
+//     `[\s\S]*?` retried it at every position — measured 1,175 ms for 60 KB on
+//     the bot path (main: 89 ms), 5,255 ms for the 128 KB owner head and
+//     4,576 ms for the 1 MiB chunked document.
+//   - no OTHER stop alternative can fire inside a space/tab run: `[\\<!\[`*~_]`,
+//     `\b_`, `[hH][tT][tT][pP][sS]?`, `www\.`, `ftp://` and the email
+//     alternatives all need a non-space character (the bare `http` word a
+//     greedy scan likes to sit on cannot start at a space either), so no token
+//     can start there and none can span the cut.
+//
+// A stretch with no usable index at all is left uncut, and that stays linear: the
 // quadratic this window exists for is one long run of spaces (each position of
 // the text rule's lazy `[\s\S]*?` walks the rest of the run looking for the
 // ` *\n` that is not there), and a stretch with no two adjacent spaces/tabs has
-// no such run. The same goes for a run that only exists before a line break:
-// that is the hard-break shape, whose own lookahead is one or two characters.
+// no such run. A run whose spaces all sit before a line break is the mirror
+// image: ` *\n` matches at every position of it, so the rule stops immediately
+// and there is nothing to walk.
 
 /** Space or tab — the two characters marked's inline `br` rule and the text
- *  rule's space-run lookahead look at (a tab is expanded to four spaces before
- *  inline lexing, so in practice it is always a space here). */
+ *  rule's space-run lookahead look at. */
 function isCutSpace(code) {
   return code === 32 || code === 9;
 }
@@ -786,8 +819,15 @@ function isCutSpace(code) {
  *
  * The last usable index at or below `limit` wins; failing that, the FIRST one
  * after it (a long run of spaces with no gap in the window is still cut, just
- * later); failing that, -1 — no cut, see the note above on why that is linear.
- * `limit` is START_WINDOW for both paths.
+ * later); failing that, -1 — no cut, see the invariant above on why that is
+ * linear. `limit` is START_WINDOW for both paths.
+ *
+ * A run that ends in a line break is usable only up to and including its last
+ * TAB (see the invariant): `hi` backs up over the run's trailing spaces,
+ * because that final all-space stretch is the one ` *\n` stops at and `br`
+ * takes. A run with no tab before the break therefore has no usable index at
+ * all, which is the one case the old "a run before a line break is never cut"
+ * rule got right.
  * @param {string} src marked's start() argument
  * @param {number} limit the largest preferred cut index
  * @returns {number} a cut index in [1, src.length - 1], or -1
@@ -804,16 +844,23 @@ function textRunCut(src, limit) {
       continue;
     }
     // The maximal run of spaces/tabs starting here: src[i .. end - 1]. A cut
-    // inside it is between src[p - 1] and src[p] with i + 1 <= p <= end - 1
-    // (p >= 1 whatever i is, which is all a cut at p == 1 needs).
+    // inside it is between src[p - 1] and src[p] with Math.max(i + 1, 1) <= p
+    // <= hi (p >= 1 whatever i is, which is all a cut at p == 1 needs).
     let end = i + 1;
     while (end < n && isCutSpace(src.charCodeAt(end))) end++;
-    const runEndsInBreak = end < n && src.charCodeAt(end) === 10 /* \n */;
-    if (!runEndsInBreak) {
-      const lo = Math.max(i + 1, 1);
-      const hi = end - 1;
+    let hi = end - 1;
+    if (end < n && src.charCodeAt(end) === 10 /* \n */) {
+      // The run ends in a line break: past its last tab the run is ONE all-space
+      // stretch, which the text rule stops at and `br` takes, so the cut may go
+      // no further than just past that tab. A run that is all spaces backs up to
+      // hi = i, below lo = i + 1: no cut in it, exactly as before.
+      while (hi >= i && src.charCodeAt(hi) === 32) hi--;
+      hi++;
+    }
+    const lo = Math.max(i + 1, 1);
+    if (lo <= hi) {
       if (hi <= limit) {
-        if (lo <= hi) before = hi;
+        before = hi;
       } else {
         if (before < 0) {
           const first = Math.max(lo, limit + 1);
@@ -881,22 +928,14 @@ function boundedExec(re, src, cap) {
   return m;
 }
 
-/** Inline start() hint, bounded and memoized. marked calls it on successive
- *  SUFFIXES of a paragraph (once per inline token), so a scan's answer — "the
- *  next opener is D chars from the end", or "none up to D chars from the
- *  end", or "the text-run cut is D chars from the end" — stays valid for
- *  every later, shorter suffix. Reset per renderBotMarkdown call and
- *  fingerprinted, so a different string misses rather than reusing a foreign
- *  answer. Past the window, a text-run CUT is reported — and a cut is only
- *  harmless where `textRunCut` says it is (between two characters of one run
- *  of spaces/tabs, never a run before a line break), because marked's text
- *  rule sees the slice's end as end-of-input and every multi-character token
- *  that crosses an arbitrary cut is lost or mangled. It is NOT harmless at
- *  block level at all — a paragraph cut is re-joined with "\n", which
- *  `breaks` turns into <br> — so the block hint never fakes one. */
-function makeStartMemo() { return { src: null, len: 0, hit: null, scanned: 0, cut: -1 }; }
-let inlineMemo = makeStartMemo();
-let blockMemo = makeStartMemo();
+/** Block start() hint memo. marked calls the block hint on successive SUFFIXES
+ *  of the source one block-lexing frame works through (once per block position),
+ *  so a scan's answer — "the next opener is D chars from the end", or "none up
+ *  to D chars from the end" — stays valid for every later, shorter suffix.
+ *  Fingerprinted (sameDoc), so a different string misses rather than reusing a
+ *  foreign answer. */
+function makeBlockMemo() { return { src: null, len: 0, hit: null, scanned: 0 }; }
+let blockMemo = makeBlockMemo();
 /** Block-opener validity, keyed by distance-from-end + a fingerprint. */
 let blockValid = new Map();
 const BLOCK_CHECKS_PER_CALL = 16;
@@ -908,55 +947,119 @@ function sameDoc(memo, src) {
   return memo.src.slice(off, off + 32) === src.slice(0, 32);
 }
 
+// ---------------------------------------------------------------------------
+// THE INLINE start() MEMO — ONE PER INLINE FRAME.
+//
+// marked calls an inline start() hint on successive SUFFIXES of ONE inline
+// source: its inlineTokens loop takes `src = src.substring(token.raw.length)`
+// and asks every hint about `src.slice(1)`, for every inline block in the
+// document (a paragraph, a heading, a table cell, a list item's text) AND for
+// every NESTED inline source inside one (a link label, an image's alt text, an
+// emphasis span), because marked's own link/em tokenizers call
+// `this.lexer.inlineTokens` again. A scan's answer is therefore valid for the
+// whole tail of ONE inlineTokens call, and for nothing else.
+//
+// It used to be ONE memo per parse, protected by a 32-character fingerprint
+// (sameDoc above, and an owner twin that compared both ends). A fingerprint is
+// not a proof: two different inline blocks can agree on it, and the answer that
+// then survived was usually "no cut in this source" — which silenced the window
+// for a 128 KB space run in a LATER block (the quadratic the window exists for,
+// back in full) or handed a block a cut no run of its own carries. boundedLexer
+// therefore pushes a FRESH memo around every `inlineTokens` call and pops it
+// after (see the wrapper there): frames nest strictly — a nested call opens its
+// own — and inside one frame every source asked about is a suffix of that
+// frame's own first source, so "what a scan proved about the tail" is exactly
+// what the next call needs. No fingerprint, and no way to answer for a source
+// the memo has not seen.
+//
+// The answers are DISTANCES FROM THE END of the scanned source, in two separate
+// fields: a scan that found no text-run cut says nothing about where the next
+// `$` is, and a source with no cut must still report a math opener that sits
+// beyond the window.
+// @returns {{math: number|undefined, cut: number|undefined}}
+function makeInlineMemo() {
+  // `undefined`: not scanned yet in this frame. Otherwise the distance from the
+  // end of the source to the nearest math opener (`-1`: none anywhere in it) and
+  // to the text-run cut (`-1`: no usable cut anywhere in it). Both "the first
+  // one" and "none" keep their meaning for every shorter suffix of the source
+  // they were scanned in, which is why nothing else has to be remembered.
+  return { math: undefined, cut: undefined };
+}
+
+/** The memos of the inlineTokens frames open right now, innermost last. */
+let inlineFrames = [];
+/** The memo of the frame being lexed, or a throwaway one outside any frame
+ *  (which cannot happen — an inline start() is only ever called from inside
+ *  one — and stays correct rather than shared if it ever does). */
+function inlineFrameMemo() {
+  return inlineFrames.length ? inlineFrames[inlineFrames.length - 1] : makeInlineMemo();
+}
+
+/** Where the inline hint looks for math: `$` (also the first character of
+ *  `$$`) and the two backslash spellings. Hinting at a position that turns out
+ *  not to tokenize costs nothing: marked's text rule stops there in main too,
+ *  and `\` is in its own stop set. */
+const MATH_START = /\$|\\\(|\\\[/;
+
+/**
+ * The bot path's inline start() hint: the nearest place the inline lexer has to
+ * look, i.e. the MINIMUM of "the next math opener" and "the text-run cut", or
+ * undefined when this source has neither.
+ *
+ * THE MATH HALF MUST NOT DEPEND ON THE CUT. marked's text rule does not stop at
+ * `$`, so this hint is the only thing that ever makes it stop where math starts.
+ * A hint built from the CUT alone lost every `$x$` past it
+ * (`prose(5000) + " $x^2$ end"` rendered the math as raw dollars), and a "no
+ * cut" remembered for the whole source silenced the scan for every shorter
+ * suffix, so math that later fell INSIDE a window was lost too. The opener scan
+ * therefore covers the WHOLE source — not just START_WINDOW, and not only up to
+ * the cut — once per frame (see makeInlineMemo), and the hint is the minimum of
+ * the two answers: when the cut comes first the text token stops there and the
+ * opener is found from the shorter suffix; when the opener comes first nothing
+ * cuts past it. With the window OFF the cut half is simply absent, so the
+ * seam renders math detection with no window at all — the differential's
+ * reference side.
+ *
+ * A cut is harmless only where textRunCut says it is. It is NOT harmless at
+ * block level at all — a paragraph cut is re-joined with "\n", which `breaks`
+ * turns into <br> — so the block hint never fakes one.
+ * @param {string} src marked's start() argument
+ * @returns {number|undefined}
+ */
 function inlineStart(src) {
-  const memo = inlineMemo;
-  if (sameDoc(memo, src)) {
-    if (memo.hit !== null && src.length >= memo.hit) return src.length - memo.hit;
-    if (memo.hit === null) {
-      // "No cut anywhere in this source" holds for every shorter suffix too.
-      if (memo.cut < 0) return undefined;
-      if (src.length > memo.scanned) {
-        // The head this suffix shares with the scan holds no `$`/`\(`, so the
-        // answer is the memoized cut, measured from the end of the source.
-        const p = src.length - memo.cut;
-        // Belt and braces against a foreign answer: a cut must still be
-        // between two characters of one space/tab run (that run's end was
-        // checked when the cut was found, and the fingerprint covers the rest).
-        if (p > 0 && p < src.length && isCutSpace(src.charCodeAt(p - 1)) && isCutSpace(src.charCodeAt(p))) return p;
-      }
+  const memo = inlineFrameMemo();
+  // 1. The math opener: the first one anywhere in this frame's source, measured
+  // from its END so the answer holds for every shorter suffix. A call whose
+  // suffix has moved PAST the opener last reported — the tokenizer consumed it —
+  // scans again from here, because there may be another one the frame has not
+  // looked at yet.
+  if (memo.math === undefined || (memo.math >= 0 && src.length < memo.math)) {
+    const m = MATH_START.exec(src);
+    memo.math = m ? src.length - m.index : -1;
+  }
+  // A hint of 0 is a real hint: it stops the text token after the source's
+  // FIRST character, which is where an opener at this suffix's own index 1 sits
+  // (p counts from the source marked passes in, which is this one minus one
+  // character — see the docstring above).
+  let hint = memo.math >= 0 ? src.length - memo.math : -1;
+  // 2. The text-run cut: none at all with the window off, none for a short
+  // source (a short run is cheap — see textRunCut).
+  if (botTextWindowOn && src.length > START_WINDOW) {
+    let c = memo.cut;
+    if (c === undefined || (c > 0 && src.length <= c)) {
+      // Not scanned yet in this frame, or the tokenizer has advanced PAST the
+      // last cut reported: look again from here, because this suffix's own tail
+      // may hold the next one.
+      const cut = textRunCut(src, START_WINDOW);
+      c = memo.cut = cut < 0 ? -1 : src.length - cut;
+      if (cut >= 0) mdBotTextWindowStats.cuts++;
+    }
+    if (c > 0 && src.length > c) {
+      const p = src.length - c;
+      if (hint < 0 || p < hint) hint = p;
     }
   }
-  const head = src.length > START_WINDOW ? src.slice(0, START_WINDOW) : src;
-  const m = head.match(/\$|\\\(/);
-  memo.src = src; memo.len = src.length;
-  if (m) { memo.hit = src.length - m.index; memo.cut = -1; return m.index; }
-  memo.hit = null;
-  if (src.length <= START_WINDOW) {
-    // A short run is cheap: no cut at all (see textRunCut).
-    memo.cut = -1;
-    memo.scanned = 0;
-    return undefined;
-  }
-  // No opener in the window: the text-run cut is the whole hint.
-  const cut = botTextWindowOn ? textRunCut(src, START_WINDOW) : -1;
-  memo.cut = cut < 0 ? -1 : src.length - cut;
-  // Everything up to the cut (never less than the window) was looked at and
-  // holds no opener, so a later, shorter suffix can reuse this answer.
-  memo.scanned = src.length - (cut < 0 ? START_WINDOW : cut);
-  if (cut < 0) return undefined;
-  if (cut > START_WINDOW) {
-    // A cut past the window must not step over an opener the window's scan
-    // could not see: look between the window's end and the cut for one.
-    const tail = src.slice(START_WINDOW, cut + 1).match(/\$|\\\(/);
-    if (tail) {
-      const q = START_WINDOW + tail.index;
-      memo.hit = src.length - q;
-      memo.cut = -1;
-      return q;
-    }
-  }
-  mdBotTextWindowStats.cuts++;
-  return cut;
+  return hint < 0 ? undefined : hint;
 }
 
 /** Block start() hint: the first opener in the window that will actually
@@ -2367,6 +2470,25 @@ function boundedLexer(options, inputLength = 0, depthState = null) {
       lexFrames--;
     }
   };
+  // 3. The inline start() memos are per INLINE FRAME (see makeInlineMemo): one
+  //    fresh memo per `inlineTokens` call, pushed here and popped after. This is
+  //    the only place a frame can be opened — marked calls inlineTokens itself
+  //    for every nested inline source (a link label, an image's alt text, an
+  //    emphasis span), so a per-entry reset in guardAndParse would leave those
+  //    sharing the outer block's memo, and two inline blocks whose text happens
+  //    to agree on a 32-character fingerprint could hand each other an answer
+  //    ("no cut in this source" included). Inside one frame every source a hint
+  //    is asked about is a suffix of that frame's own first source, which is
+  //    what makes the memo exact rather than heuristic.
+  const inlineTokens = lexer.inlineTokens;
+  lexer.inlineTokens = function (src, tokens) {
+    inlineFrames.push(makeInlineMemo());
+    try {
+      return inlineTokens.call(this, src, tokens || []);
+    } finally {
+      inlineFrames.pop();
+    }
+  };
   return lexer;
 }
 
@@ -3115,9 +3237,10 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
   mdBrScanStats.brFlattened = 0;
   mdBrScanStats.charged = 0;
   mdOwnerTextWindowStats.cuts = 0;
-  // The owner path's cut memo is per parse: a second render of the same
-  // document must cut (and count) its own text runs.
-  ownerTextMemo = makeStartMemo();
+  // The cut memo needs no reset here: there is one per INLINE FRAME, and a
+  // frame is pushed and popped around every inlineTokens call by boundedLexer
+  // (see makeInlineMemo), so a second render of the same document — and every
+  // inline block of it — cuts (and counts) its own text runs.
   for (const entry of lexer.inlineQueue) {
     // A block-lexer guard (flatGuardToken) already flattened this block: its
     // entry is here only because marked's paragraph-clipping branch expects one
@@ -3169,6 +3292,10 @@ function guardAndParse(src, instance, seedLinks = null, depthState = null) {
     if (!entry.guarded) lexer.inlineTokens(entry.src, entry.tokens);
   }
   lexer.inlineQueue.length = 0;
+  // Every inline frame is popped in a finally (see the inlineTokens wrapper in
+  // boundedLexer), so this is belt and braces: a parse that threw mid-frame
+  // cannot leave a frame behind for the next render.
+  inlineFrames.length = 0;
   return instance.parser(lexer.tokens);
 }
 
@@ -3219,10 +3346,12 @@ function renderImageToken(token) {
 // break.
 //
 // The BOT path never had it: botMarked's math extension has an inline start()
-// (inlineStart, above) that caps each text-rule scan at START_WINDOW (4,096)
-// characters — a window added for the `$`/`\(` scan, and its side effect is
-// that no bot text run is much longer than 4,097 characters. ownerMarked has
-// no math extension, so its runs were unlimited.
+// (inlineStart, above) that makes the text rule stop at the nearest `$`/`\(`
+// and, past START_WINDOW (4,096) characters, at the text-run cut — so no bot
+// text run is much longer than 4,097 characters. It was never safe to cut the
+// bot path AT 4,096: the hint is a math hint first, and only a position
+// textRunCut calls harmless may be cut at all. ownerMarked has no math
+// extension, so its runs were unlimited.
 //
 // So the owner parser gets the same window, from an extension whose ONLY job
 // is that stop: no token type, no renderer, and a tokenizer that never
@@ -3240,10 +3369,11 @@ function renderImageToken(token) {
 // (`https://example.com` cut inside the protocol is plain text; `foobar@…` cut
 // after the `f` links to `oobar@…`), and the resume position is where the NEXT
 // token is tried. So both paths cut only where textRunCut (above) allows it —
-// between two characters of one run of spaces/tabs, never a run before a line
-// break — and the rendered bytes are then identical to an unlimited text run.
-// The window is still a character count (the cut is at or just after 4,096),
-// but the invariant it relies on is the whitespace run, not the count.
+// between two characters of one run of spaces/tabs, and never inside the
+// all-space stretch a line break owns (see the invariant above textRunCut) —
+// and the rendered bytes are then identical to an unlimited text run. The
+// window is still a character count (the cut is at or just after 4,096), but
+// the invariant it relies on is the run of whitespace, not the count.
 //
 // Measured after it (CPU ms, one whole `renderMarkdown` call, this box; "off"
 // is the same document with setOwnerTextWindowEnabled(false), i.e. marked's own
@@ -3290,56 +3420,35 @@ export const mdOwnerTextWindowStats = { cuts: 0 };
 /**
  * marked's inline start() hint for the owner path: "stop this text run at the
  * text-run cut" — the same cut botMarked's math extension reports for content
- * with no `$` in it (textRunCut, above). Returning undefined leaves marked's
- * own (unlimited) text scan alone.
+ * with no `$` in it (textRunCut, above), from the same per-frame memo (see
+ * makeInlineMemo). Returning undefined leaves marked's own (unlimited) text
+ * scan alone.
  *
  * The argument is the source AFTER the first character (that is what marked
  * passes to a start()), and the return value is the number of characters the
  * text token may consume MINUS ONE — the cut then sits between two characters
- * of one run of spaces/tabs (never a run before a line break), which is the
- * only place a cut can land without changing the render, because marked slices
- * the source for the text tokenizer and an arbitrary cut reads as
- * end-of-input. The last usable index at or below START_WINDOW wins; failing
- * that, the first one after it; failing that there is no cut at all, which is
- * linear (see textRunCut).
+ * of one run of spaces/tabs, and never inside the all-space stretch a line
+ * break owns (see the invariant above textRunCut), which is the only place a
+ * cut can land without changing the render: marked slices the source for the
+ * text tokenizer, so an arbitrary cut reads as end-of-input. The last usable
+ * index at or below START_WINDOW wins; failing that, the first one after it;
+ * failing that there is no cut at all, which is linear (see textRunCut).
  * @param {string} src the rest of the inline source, minus its first character
  * @returns {number|undefined}
  */
 function ownerTextStart(src) {
   if (!ownerTextWindowOn || src.length <= START_WINDOW) return undefined;
-  const memo = ownerTextMemo;
-  if (sameOwnerTextDoc(memo, src)) {
-    // "No cut anywhere in this source" holds for every shorter suffix too.
-    if (memo.cut < 0) return undefined;
-    if (src.length > memo.scanned) {
-      const p = src.length - memo.cut;
-      if (p > 0 && p < src.length && isCutSpace(src.charCodeAt(p - 1)) && isCutSpace(src.charCodeAt(p))) return p;
-    }
+  const memo = inlineFrameMemo();
+  let c = memo.cut;
+  if (c === undefined || (c > 0 && src.length <= c)) {
+    // Not scanned yet in this frame, or the tokenizer has advanced PAST the last
+    // cut reported: look again from here.
+    const cut = textRunCut(src, START_WINDOW);
+    c = memo.cut = cut < 0 ? -1 : src.length - cut;
+    if (cut >= 0) mdOwnerTextWindowStats.cuts++;
   }
-  const cut = textRunCut(src, START_WINDOW);
-  memo.src = src;
-  memo.len = src.length;
-  memo.cut = cut < 0 ? -1 : src.length - cut;
-  memo.scanned = cut < 0 ? 0 : src.length - cut;
-  if (cut < 0) return undefined;
-  mdOwnerTextWindowStats.cuts++;
-  return cut;
-}
-
-/** The owner path's cut memo: marked calls start() on successive SUFFIXES of
- *  the same inline source, and a cut (or its absence) stays true for every
- *  shorter suffix, so the scan runs once per block instead of once per token
- *  (and repeats only after the cut itself, which every scan advances). */
-let ownerTextMemo = makeStartMemo();
-
-/** The same fingerprint as sameDoc, but comparing BOTH ends: the owner path's
- *  memo is reused across inline blocks, so two blocks that only share their
- *  first 32 characters must never hand each other a cut. */
-function sameOwnerTextDoc(memo, src) {
-  if (memo.src === null || src.length > memo.len) return false;
-  const off = memo.src.length - src.length;
-  return memo.src.slice(off, off + 32) === src.slice(0, 32)
-    && memo.src.slice(-32) === src.slice(-32);
+  if (c > 0 && src.length > c) return src.length - c;
+  return undefined;
 }
 
 /**
@@ -3360,8 +3469,8 @@ const ownerTextWindow = {
  * NO math extensions — a post about prices keeps its dollar signs), plus the
  * image rule, so a refused image leaves its escaped alt text where the <img>
  * would have been, and the text-run window (see "THE OWNER PATH'S TEXT-RUN
- * WINDOW" above), which cuts long text runs at a whitespace boundary near
- * 4,096 characters and changes nothing else about the output.
+ * WINDOW" above), which cuts a long text run at the whitespace run near 4,096
+ * characters that textRunCut allows and changes nothing else about the output.
  */
 const ownerMarked = new Marked({
   gfm: true,
@@ -3389,8 +3498,7 @@ export function renderBotMarkdown(markdown) {
   if (!markdown) return "";
   const src = String(markdown);
   if (src.length > BOT_MD_MAX_INPUT) return "";
-  inlineMemo = makeStartMemo();
-  blockMemo = makeStartMemo();
+  blockMemo = makeBlockMemo();
   blockValid = new Map();
   cutsLeft = MAX_PARAGRAPH_CUTS;
   mdBotTextWindowStats.cuts = 0;
