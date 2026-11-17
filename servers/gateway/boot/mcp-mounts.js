@@ -30,6 +30,7 @@ import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifac
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { mailEnabled } from "../mail/flag.js";
 import { createNotification } from "../../shared/notifications.js";
 import { keptSkillNotification } from "../bundle-skill-sync.js";
 import { startOutboxDrain } from "../../sharing/sync-outbox-drain.js";
@@ -405,6 +406,21 @@ export async function mountMcpServers(app, deps) {
   // this process (idempotent; the phone mount below reuses it).
   initGatewayActorKey();
   mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions, verifyActor: verifyBoardActorSig, verifyThread: verifyBoardThreadActorSig }), sessionManager, authMiddleware, peerExposureGate);
+  // Crow Mail (plan 3, Task 8a): the drafting turn's three tools, beside /board. Mounted only when
+  // the flag is on (unset: /mail-draft/mcp is not a route at all, like any unmounted path), and
+  // behind mailDraftMountAuth: a live per-turn `mdt_` token AND a `mail-draft` actor signature for
+  // the same draft and turn. Neither a Funnel path nor a peer-exposed capability: the funnel
+  // allowlist has no /mail-draft entry, and this guard is the only thing that admits a request.
+  if (mailEnabled()) {
+    try {
+      const { createMailDraftMcpServer, mailDraftMountAuth } = await import("../mail-draft-mcp.js");
+      app.use("/mail-draft", mailDraftMountAuth());
+      mountMcpServer(app, "/mail-draft", () => createMailDraftMcpServer({ createDb: createDbClient }), sessionManager, authMiddleware, peerExposureGate);
+      console.log("[gateway] mail draft MCP mounted at /mail-draft/mcp");
+    } catch (err) {
+      console.warn(`[gateway] mail draft mount skipped: ${err.message}`);
+    }
+  }
   // Project services Task 17: /services-tools/<uuid>/mcp, the bots' only door to the owner's
   // connected accounts (services/mount.js on the shared loopback mount). Loopback only and
   // never a Funnel path; its token was rotated above. The Perch engine accessor is SYNC (the

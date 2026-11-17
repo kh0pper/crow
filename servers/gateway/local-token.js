@@ -12,6 +12,7 @@ import { writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, unlinkSync
 import { join, dirname } from "node:path";
 import { ensureSecretsDir, migrateLegacySecretFile } from "../shared/peer-credentials.js";
 import { isRelayedSocket } from "../shared/bot-doors.js";
+import { verifyTurnToken } from "./mail/drafts/turn-token.js";
 import {
   readSetting, writeSetting, deleteLocalSetting,
 } from "./dashboard/settings/registry.js";
@@ -105,7 +106,7 @@ export async function validateLocalToken(db, token) {
  *  The 300s expiry is NOT a session lifetime: skipAuthForInstance re-runs and
  *  re-synthesizes per request, exactly like the peer branch (mcp.js:247).
  *  Nothing downstream re-checks expiresAt. */
-export function localOperatorAuth(tokenScope) {
+export function localOperatorAuth(tokenScope, claims = null) {
   const auth = {
     token: "local-mcp",
     clientId: "local-mcp",
@@ -115,7 +116,13 @@ export function localOperatorAuth(tokenScope) {
   // S2: which static token authenticated ("phone" for the path-scoped phone
   // token). Lets /phone/mcp tell a bot's shared token from the operator's full
   // local token; the full token carries no scope, exactly as before.
-  if (tokenScope) auth.extra = { tokenScope };
+  // `claims` carries what a scoped token proved (Crow Mail's mail-draft mount
+  // passes the draft, the turn and the head hash the turn started from), so a
+  // tool handler reads them off `authInfo.extra` and never from its arguments.
+  // `tokenScope` is written LAST: it is the caller's own scope, never something a
+  // claims object may restate (a claims object carrying `tokenScope` cannot widen
+  // or change the scope this auth stands for).
+  if (tokenScope) auth.extra = { ...(claims && typeof claims === "object" ? claims : {}), tokenScope };
   return auth;
 }
 
@@ -126,7 +133,14 @@ export function localOperatorAuth(tokenScope) {
  *  skipAuthForInstance in routes/mcp.js, after the instance branch. */
 export function applyLocalTokenAuth(req) {
   if (!req.localTokenAuth) return false;
-  req.auth = localOperatorAuth(req.localTokenAuth.scope);
+  // A mount guard that ran earlier on this request may already have built the full auth for this
+  // scope (Crow Mail's mail-draft guard pins the draft, the turn and the head hash the turn started
+  // from on `req.auth`). Rebuilding it here would drop those claims, so a same-scope auth is kept.
+  // A scoped auth only: the full local token carries no scope, and an absent scope must never match
+  // an absent tokenScope (that would leave `req.auth` unset for the operator's own token).
+  if (req.localTokenAuth.scope && req.auth?.extra?.tokenScope === req.localTokenAuth.scope) return true;
+  const { scope, draftId, turnId } = req.localTokenAuth;
+  req.auth = localOperatorAuth(scope, scope === "mail-draft" ? { draftId, turnId } : null);
   return true;
 }
 
@@ -616,6 +630,14 @@ function isMcpPath(p) {
   return typeof p === "string" && MCP_PATH_RE.test(p);
 }
 
+// Crow Mail (plan 3, Task 8a): the drafting turn's mount. Its ONLY credential is the per-turn `mdt_`
+// token a turn mints in this process's memory (mail/drafts/turn-token.js) — see the early branch in
+// localTokenAuthMiddleware. The full local token is deliberately not tried on this path (it is tried
+// first on every MCP path, so it has to be skipped by name), no other family's token authenticates
+// here, and an `mdt_` token authenticates nowhere else. A relayed socket may present one: bots are
+// relayed, and the token's per-draft, per-turn scope is what limits it.
+const MAIL_DRAFT_PATH_RE = /^\/mail-draft\/(?:mcp|sse|messages)$/;
+
 /** Express middleware. Mounted globally right after instanceAuthMiddleware, but
  *  it only reads the DB for MCP-path requests (cost guard). Sets
  *  req.localTokenAuth on a valid local token. Yields to instance auth, never
@@ -629,6 +651,21 @@ export function localTokenAuthMiddleware(db) {
       const h = req.headers?.authorization;
       if (!h || !h.startsWith("Bearer ")) return next();
       const token = h.slice(7);
+      // Crow Mail's drafting turn (plan 3, Task 8a): this path accepts the `mdt_` turn token and
+      // nothing else, so the full-local-token branch below is skipped here by name. The turn token
+      // is verified against this process's in-memory map; a value it does not know sets nothing, and
+      // the request falls through to OAuth (401) like any other unrecognized bearer.
+      if (MAIL_DRAFT_PATH_RE.test(req.path)) {
+        if (token.startsWith("mdt_")) {
+          const turn = verifyTurnToken(token);
+          if (turn) {
+            req.localTokenAuth = {
+              token: "local-mcp", scope: "mail-draft", draftId: turn.draftId, turnId: turn.turnId,
+            };
+          }
+        }
+        return next();
+      }
       // A socket that came through the egress relay is never the operator. A
       // contained bot has crow.db bound read-write (Phase 1), so it can write
       // mcp_local_token_hash and then present its own value as the operator's

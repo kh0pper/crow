@@ -196,6 +196,10 @@ test("the hold, the grace window and the stale cutoff are the plan's", () => {
     KEYCHAIN_KEY_MISSING_SENTENCE,
     "This Crow is missing its key file, so mail cannot be sent. Restore the key file or sign in to the account again.",
   );
+  assert.equal(
+    SEND_FAIL_REASONS.supervisor_missing,
+    "Mail isn't connected right now. Try again in a minute.",
+  );
   // Every reason is a short technical phrase and nothing else.
   for (const [key, phrase] of Object.entries(SEND_FAIL_REASONS)) {
     assert.match(key, /^[a-z][a-z0-9_]*$/, key);

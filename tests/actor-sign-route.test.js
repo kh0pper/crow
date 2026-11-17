@@ -175,6 +175,21 @@ test("refused: a caller that is not a bot host unit's main process", async () =>
   assert.equal((await ask({ ...LIVE(), kinds: ["peer-relay"] })).status, 200, "positive control");
 });
 
+test("the signing relay refuses kind 'mail-draft': the drafting turn signs in-process, never here", async () => {
+  // The drafting turn's actor signature is minted beside the token, in the gateway process, for a
+  // tuple no session and no job carries. A key-less host asking for one gets nothing.
+  const tuple = { ...LIVE(), threadId: "md-0123456789abcdef:mt-0123456789abcdef", gatewayType: null };
+  const r = await ask({ ...tuple, kinds: ["mail-draft"] });
+  assert.equal(r.status, 403, r.text);
+  assert.equal(r.json?.sigs, undefined, "no signature came back");
+  const mixed = await ask({ ...tuple, kinds: ["bot", "mail-draft"] });
+  assert.equal(mixed.status, 403, mixed.text);
+  assert.equal(mixed.json?.sigs, undefined, "never a partial answer");
+  const job = await ask({ botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1", kinds: ["mail-draft"] });
+  assert.equal(job.status, 403, job.text);
+  assert.equal(job.json?.sigs, undefined);
+});
+
 test("refused (404): a request that is not a plain loopback one", async () => {
   const r = await ask({ ...LIVE(), kinds: ["peer-relay"] }, { "X-Forwarded-For": "100.64.20.7" });
   assert.equal(r.status, 404, r.text);
@@ -293,7 +308,6 @@ test("the signing relay refuses kind 'service' for a session turn, never partial
 });
 
 // ---- the scope kind 'service' (loopback mount helper, spec §4.4) ----
-
 const OWNJOB = { botId: "hank", threadId: "job-job-own-1", gatewayType: "job", jobId: "job-own-1" };
 
 test("service: an owner job this host claimed gets a v3 sig for its generic tuple, under scope j:<id>", async () => {

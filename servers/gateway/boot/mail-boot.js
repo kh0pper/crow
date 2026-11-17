@@ -58,6 +58,10 @@ import { mailEnabled } from "../mail/flag.js";
 import { toMailError } from "../mail/errors.js";
 import { createMailSupervisor, shouldRunMailSync } from "../mail/sync/supervisor.js";
 import { registerMailSendHook } from "../mail/send/hook.js";
+// The two attachment readers the sweep's own preflight needs (a thread attachment's raw bytes, and
+// Crow storage's, which has no owner-checked read yet). Bound here to this start's db client and
+// supervisor so a held or scheduled send resolves an attachment exactly as the routes do.
+import { makeDraftReaders } from "../mail/drafts/readers.js";
 import { setMailSendSupervisor } from "../mail/send/send-service.js";
 import { clearMailApiRuntime, setMailApiRuntime } from "../routes/mail-api.js";
 
@@ -339,7 +343,10 @@ async function beginStart(options) {
     // supervisor's own copy of it is the strict boolean underneath.
     if (mailEnabled(env) && currentMailSendHook == null) {
       try {
-        currentMailSendHook = registerMailSendHook(db, { isClaimedElsewhere: claimOf });
+        currentMailSendHook = registerMailSendHook(db, {
+          isClaimedElsewhere: claimOf,
+          ...makeDraftReaders({ db, supervisor }),
+        });
       } catch (err) {
         // A hook that cannot register is a gateway without scheduled sends, never a failed boot.
         say({ event: "hook_failed", code: toMailError(err).code });

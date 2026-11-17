@@ -523,6 +523,31 @@ function revisionInsert(draftId, rev, author, input, mode, hash, createdAt) {
   };
 }
 
+/**
+ * The statement that folds this draft's comments into a revision: only comments that are `queued` and
+ * belong to `draftId` move, so another draft's comment named in the same list is never touched and a
+ * replay changes nothing.
+ */
+function commentsAppliedStatement(draftId, ids) {
+  return {
+    sql: `UPDATE mail_draft_comments SET state = 'applied'
+           WHERE state = 'queued' AND draft_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
+    args: [draftId, ...ids],
+  };
+}
+
+/** The comment ids an `addRevision` call names: strings only, each one kept once, absent is none. */
+function commentIdList(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw bad("applied_comment_ids");
+  const ids = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry) continue;
+    if (!ids.includes(entry)) ids.push(entry);
+  }
+  return ids;
+}
+
 /* -------------------------------------------------------------------- transitions */
 
 /**
@@ -748,11 +773,16 @@ async function notifyRevisionAdded(payload) {
  * any writer on a `sent`, `discarded` or `unknown` one) is refused `{refused:'frozen'}`; a stale
  * `expectHash` is refused `{refused:'changed'}` and nothing is written.
  *
+ * `appliedCommentIds` names the comments this revision folds in (a drafting turn's queued comments):
+ * they are marked `applied` by the same transaction, after the revision insert, so a revision that is
+ * refused or that fails to write leaves every one of them queued. An id that belongs to another
+ * draft, or that is not `queued`, is ignored rather than touched.
+ *
  * @param {object} db
  * @param {string} draftId
  * @param {object} input `RevisionInput`; a `from` in it is ignored (the store fills it from the account)
  * @param {{author: string, expectHash: string, cancelSchedule?: boolean,
- *   now?: (() => number)|number}} options
+ *   appliedCommentIds?: string[], now?: (() => number)|number}} options
  * @returns {Promise<{rev: number, hash: string}|{refused: "changed"|"frozen"}>}
  */
 export async function addRevision(db, draftId, input, options = {}) {
@@ -762,6 +792,7 @@ export async function addRevision(db, draftId, input, options = {}) {
   const expectHash = options.expectHash;
   if (typeof expectHash !== "string" || !expectHash) throw bad("expect_hash");
   const cancelSchedule = options.cancelSchedule === true;
+  const appliedCommentIds = commentIdList(options.appliedCommentIds);
 
   const head = await getDraft(db, id);
   if (!head) throw missing("draft");
@@ -797,6 +828,8 @@ export async function addRevision(db, draftId, input, options = {}) {
         throw new Rollback({ refused: "changed" });
       }
       run(revisionInsert(id, rev, author, revision, mode, hash, t));
+      // The comments this revision folds in move with it: same transaction, after the insert.
+      if (appliedCommentIds.length) run(commentsAppliedStatement(id, appliedCommentIds));
       return { rev, hash };
     });
   } catch (err) {

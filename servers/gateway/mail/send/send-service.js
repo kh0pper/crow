@@ -80,7 +80,7 @@ export const SEND_FAIL_REASONS = Object.freeze({
   seal: "The tap seal no longer matches the draft, so nothing was sent.",
   attachment_changed: "An attachment changed after the draft was tapped, so nothing was sent.",
   keychain_key_missing: "This Crow has no keychain key, so no tap can be sealed and nothing is sent.",
-  supervisor_missing: "This Crow is not running its mail connection, so nothing was sent.",
+  supervisor_missing: "Mail isn't connected right now. Try again in a minute.",
   account_removed: "The account this message was written from is no longer set up, so nothing was sent.",
   auth_failed: "The mail server did not accept the account's sign-in, so nothing was sent.",
   tls: "The mail server's certificate could not be trusted, so nothing was sent.",

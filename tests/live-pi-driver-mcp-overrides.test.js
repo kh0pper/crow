@@ -289,12 +289,12 @@ test("bridge.mjs: the mcpOverrides block opens with the guard, the option is rea
   assert.doesNotMatch(src, /process\.env\.[A-Z_]*MCP_OVERRIDE|env\[["'][A-Z_]*MCP_OVERRIDE/);
   assert.doesNotMatch(src, /def\.mcpOverrides|definition\.mcpOverrides|bot\.mcpOverrides/);
   assert.match(src, /no env var names an override/, "the reason is written down where the seam is");
-  // The --inject CLI refuses a payload with a prototype key, strips both eval-only seams out of
-  // anything else, and builds the opts with a spread (no Object.assign prototype setter).
+  // The --inject CLI refuses a payload with a prototype key, strips the eval-only seams and the
+  // drafting turn out of anything else, and builds the opts with a spread (no Object.assign setter).
   const inject = src.slice(src.indexOf('const inj = a[a.indexOf("--inject") + 1];'));
   assert.match(inject, /for \(const k of \["__proto__", "constructor", "prototype"\]\)/);
   assert.match(inject, /if \(Object\.hasOwn\(payload, k\)\)/);
-  assert.match(inject, /const \{ mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, \.\.\.rest \} = payload;/);
+  assert.match(inject, /const \{ mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, draftingTurn: _draftingTurn, \.\.\.rest \} = payload;/);
   assert.match(inject, /handleInbound\(\{ \.\.\.rest,/);
   assert.doesNotMatch(inject, /Object\.assign\(/, "no Object.assign: a spread defines own properties");
 });
