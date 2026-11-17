@@ -354,6 +354,12 @@ const ASSET_FILES = new Map([
   ["calibrate-emitter.js", join("engine", "calibrate-emitter.js")],
   ["calibrate-detector.js", join("engine", "calibrate-detector.js")],
   ["recorder-processor.js", join("engine", "recorder-processor.js")],
+  // The recording lane's meter: the level core the meter worklet reads (its
+  // `globalThis.StudioInputLevel`), then the worklet itself. Both are loaded by
+  // their own `addModule()` (engine-client.js's WORKLET_FILES), so the browser has
+  // to be able to fetch each one by name.
+  ["input-level.js", join("engine", "input-level.js")],
+  ["input-meter-processor.js", join("engine", "input-meter-processor.js")],
   ["studio-processor.js", join("engine", "studio-processor.js")],
   // The SoundFont hosts: one synth per font, one MIDI channel per track. Part of
   // the worklet module (engine-client.js's SOURCE_FILES) like the rest.
