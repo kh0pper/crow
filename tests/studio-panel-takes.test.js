@@ -2,13 +2,15 @@
  * Studio panel — the takes lane: which take plays where, keeping and
  * discarding a recording, and this device's own copy of the audio.
  *
- * Four of the five tests run everywhere: the emitted client script against a
+ * Every test but the last runs everywhere: the emitted client script against a
  * linkedom document built from the page the handler renders, a real Yjs song
  * with a recorded audio clip, a fake take store and a stubbed socket. What
  * they prove is what the page draws and what a click or a comp drag sends —
- * the GUI half of the plan's take commands.
+ * the GUI half of the plan's take commands. The comp drag's own cases pin the
+ * comp a drag assigns, which is the one splice `panel/punch.js` also gives a
+ * punch that lands: the page has no comp splice of its own.
  *
- * The fifth needs the networked half: a real session hub on a scratch database
+ * The last needs the networked half: a real session hub on a scratch database
  * behind the panel's own WebSocket, and a private headless Chrome driving the
  * page. Keep and Discard are then measured in the song's document, and the undo
  * that brings a discarded take back is the shared history's own step. No
@@ -31,6 +33,7 @@ import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { emptyNote } from "../bundles/studio/panel/shell.js";
+import { PUNCH_SCRIPT } from "../bundles/studio/panel/punch.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 /** The audio track the takes belong to. */
@@ -389,6 +392,11 @@ async function bootTakesPanel(options = {}) {
     },
   };
 
+  // The page inlines the punch rules before the client script, and the comp
+  // drag reads them from there: the stub is given the very same text.
+  new Function("window", PUNCH_SCRIPT)(windowStub);
+  assert.equal(typeof windowStub.StudioPunch.spliceComp, "function", "the stub holds the page's punch rules");
+
   const yjsUrl = pathToFileURL(
     new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
   ).href;
@@ -635,6 +643,144 @@ test("comp drag sends one set_comp", async () => {
     "the range snaps to whole beats, replaces what it covers and merges the same take",
   );
   assert.equal(sent[0].args.clip_id, CLIP, "against the clip whose bar was dragged");
+});
+
+/**
+ * Boot the takes panel on a song whose comp is `segments`, select one take and
+ * drag the clip's comp bar from one pixel column to another, the way a person
+ * does.
+ *
+ * The bar is 160 px wide over the clip's one bar (4 beats), so 40 px is a beat
+ * and 10 px is a sixteenth of one.
+ *
+ * @param {{segments?: object[], select: number, fromX: number, toX: number,
+ *          shiftKey?: boolean}} options
+ * @returns {Promise<object>} the booted page
+ */
+async function dragCompBar({ segments, select, fromX, toX, shiftKey = false }) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const doc = await takesDoc();
+  if (segments) runCommand(doc, "clip.set_comp", { clip_id: CLIP, segments });
+  const ui = await bootTakesPanel({ doc });
+  ui.click(`[data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  ui.click(`[data-role=take][data-take-n="${select}"]`);
+  await ui.settle();
+
+  const bar = ui.document.querySelector(`[data-role=comp-bar][data-clip-id=${CLIP}]`);
+  assert.ok(bar, "the audio clip's editor draws the comp bar");
+  bar.getBoundingClientRect = () => compBarBox();
+  bar.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: fromX, shiftKey }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: toX, shiftKey }));
+  ui.fireWindow("pointerup", ui.event("pointerup", { button: 0, clientX: toX, shiftKey }));
+  await ui.settle();
+  return ui;
+}
+
+/** The comp a drag sent: exactly one clip.set_comp, and its segments. */
+function oneComp(ui) {
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, "a drag is one clip.set_comp");
+  assert.equal(sent[0].args.clip_id, CLIP, "against the clip whose bar was dragged");
+  return sent[0].args.segments;
+}
+
+test("the comp drag sends the same clip.set_comp as before for a drag inside one segment, across two, over the whole clip, with a reversed drag and with Shift-drag sixteenths", async () => {
+  // Inside one segment: the range replaces the middle of the take that plays
+  // over the whole clip, so that take is split in three.
+  const inside = oneComp(await dragCompBar({ select: 3, fromX: 40, toX: 120 }));
+  assert.deepEqual(inside, [
+    { take_id: T1, from_beat: 0, to_beat: 1 },
+    { take_id: T3, from_beat: 1, to_beat: 3 },
+    { take_id: T1, from_beat: 3, to_beat: 4 },
+  ], "the dragged range sits between the two outer pieces of the take that played it");
+
+  // Across two segments: each neighbour is trimmed to what the range leaves.
+  const across = oneComp(await dragCompBar({
+    segments: [
+      { take_id: T1, from_beat: 0, to_beat: 2 },
+      { take_id: T2, from_beat: 2, to_beat: 4 },
+    ],
+    select: 3,
+    fromX: 40,
+    toX: 120,
+  }));
+  assert.deepEqual(across, [
+    { take_id: T1, from_beat: 0, to_beat: 1 },
+    { take_id: T3, from_beat: 1, to_beat: 3 },
+    { take_id: T2, from_beat: 3, to_beat: 4 },
+  ], "the range cuts the first take's end and the second take's start");
+
+  // Over the whole clip: one segment, edge to edge.
+  const whole = oneComp(await dragCompBar({
+    segments: [
+      { take_id: T1, from_beat: 0, to_beat: 2 },
+      { take_id: T2, from_beat: 2, to_beat: 4 },
+    ],
+    select: 3,
+    fromX: 0,
+    toX: 160,
+  }));
+  assert.deepEqual(whole, [{ take_id: T3, from_beat: 0, to_beat: 4 }],
+    "a range over the whole clip leaves exactly the dragged take");
+
+  // A reversed drag: right to left names the same range as left to right.
+  const reversed = oneComp(await dragCompBar({ select: 3, fromX: 120, toX: 40 }));
+  assert.deepEqual(reversed, inside, "a drag from right to left names the range the other way round");
+
+  // Shift snaps to sixteenths of a beat: 20 px is beat 0.5 and 50 px is 1.25.
+  const sixteenths = oneComp(await dragCompBar({ select: 3, fromX: 20, toX: 50, shiftKey: true }));
+  assert.deepEqual(sixteenths, [
+    { take_id: T1, from_beat: 0, to_beat: 0.5 },
+    { take_id: T3, from_beat: 0.5, to_beat: 1.25 },
+    { take_id: T1, from_beat: 1.25, to_beat: 4 },
+  ], "with Shift held the range snaps to whole sixteenths of a beat");
+});
+
+test("a drag that changes nothing sends no command (sameComp)", async () => {
+  // The whole clip already plays the selected take, so a drag inside it assigns
+  // a range the comp already says, piece for piece.
+  const whole = await dragCompBar({ select: 1, fromX: 40, toX: 120 });
+  assert.deepEqual(setCompCommands(whole), [], "a range the comp already says sends nothing");
+
+  // A drag that assigns a stretch the selected take already plays over, with
+  // the comp's own edge inside it, merges back to the comp it started from.
+  const joined = await dragCompBar({
+    segments: [
+      { take_id: T1, from_beat: 0, to_beat: 2 },
+      { take_id: T2, from_beat: 2, to_beat: 4 },
+    ],
+    select: 1,
+    fromX: 40,
+    toX: 80,
+  });
+  assert.deepEqual(setCompCommands(joined), [], "two pieces of one take that touch are the segment it had");
+
+  // A drag too short to cross a beat names no range at all.
+  const bar = whole.document.querySelector(`[data-role=comp-bar][data-clip-id=${CLIP}]`);
+  assert.ok(bar, "the comp bar is still on the page");
+  bar.getBoundingClientRect = () => compBarBox();
+  bar.dispatchEvent(whole.event("pointerdown", { button: 0, clientX: 80 }));
+  whole.fireWindow("pointerup", whole.event("pointerup", { button: 0, clientX: 82 }));
+  await whole.settle();
+  assert.deepEqual(setCompCommands(whole), [], "and neither does a drag of no width");
+});
+
+test("client.js no longer defines nextComp or sameComp", async () => {
+  const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
+  assert.equal(
+    CLIENT_SCRIPT.includes("function nextComp"),
+    false,
+    "the page has no comp splice of its own: panel/punch.js holds it",
+  );
+  assert.equal(
+    CLIENT_SCRIPT.includes("function sameComp"),
+    false,
+    "nor a comp comparison of its own",
+  );
+  assert.ok(CLIENT_SCRIPT.includes(".spliceComp("), "the comp drag calls the shared splice");
+  assert.ok(CLIENT_SCRIPT.includes(".sameComp("), "and the shared comparison");
 });
 
 test("remove from this device clears the cache", async () => {
