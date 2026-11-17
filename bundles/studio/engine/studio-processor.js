@@ -197,7 +197,10 @@
  * - **Speed:** `speed_pct` (50..150 %) and, while `bpm_sync` is on and the pad
  *   names a `source_bpm_x10`, the song's tempo against the sample's own move
  *   the voice's playback speed, held inside 0.25×..4×. It is varispeed: the
- *   pitch moves with the speed. `keep_pitch` is reserved for a later
+ *   pitch moves with the speed. A synced voice that is already sounding follows
+ *   a later tempo change from the next block on (`reconcileTempo`), and a pad's
+ *   Reverse flipped while it sounds turns that pad's voices round where they
+ *   stand (`flipChangedPadReverses`). `keep_pitch` is reserved for a later
  *   time-stretch and is deliberately not read here.
  * - **Fixed velocity:** a pad with `fixed_velocity` plays every trigger at 127,
  *   whichever velocity the step carries: the voice's own gain, the
@@ -2287,6 +2290,13 @@
       this.bpm = DEFAULT_BPM;
 
       /**
+       * The tempo the sounding, synced voices were last brought onto: a block
+       * compares it with `this.bpm` and walks the voices only when they differ
+       * (`reconcileTempo`).
+       */
+      this.reconciledBpm = DEFAULT_BPM;
+
+      /**
        * The transport the bus reads each block, kept as one object so the audio
        * thread allocates nothing: its first frame, whether the playhead runs, the
        * tempo, the frame of the bar line it is inside and the sequencer's own next
@@ -4069,6 +4079,9 @@
       this.mixer = mixerSpecOf(snapshot);
       this.bpm = bpmOf(snapshot);
       this.sequencer.setSong(snapshot);
+      // The pad map above is the new one, so a Reverse that was flipped while the
+      // pad sounds is applied to its voices here, before the block that follows.
+      this.flipChangedPadReverses();
       this.enqueue(() => this.syncSlots(tracks));
     }
 
@@ -7017,6 +7030,10 @@
         return;
       }
 
+      // A tempo change (an edit, an undo, MIDI) moves the voices that follow it:
+      // one compare here, and a scan only on the block the tempo really changed.
+      this.reconcileTempo();
+
       let cursor = 0;
       let next = 0;
       let nextMotion = 0;
@@ -8235,6 +8252,11 @@
       // when it names none).
       voice.bpm_sync = pad.bpm_sync === true;
       voice.source_bpm = sourceBpm;
+      voice.speed_pct = speedPct;
+      // The pad's own Reverse as this voice was started with. `dir` cannot stand
+      // for it, because a ping-pong turns `dir` round as it reflects; a flip of
+      // the pad's Reverse is applied to this voice only when it differs (B4c).
+      voice.reverse_src = pad.reverse === true;
       voice.locked = locks ? Object.keys(locks) : null;
       voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
       voice.motion_filter_type = typeof filterType === "string" ? filterType : "off";
@@ -8555,6 +8577,72 @@
           if (!voice.sounding) continue;
           if (this.pads.has(padKey(voice.trackId, voice.bankId, voice.index))) continue;
           StudioSamplerVoice.release(voice);
+        }
+      }
+    }
+
+    /**
+     * Bring the sounding, tempo-synced voices onto the song's current tempo.
+     *
+     * A `bpm_sync` voice is started at the tempo its pad was synced against, so
+     * without this a later tempo change would leave it running at the old rate
+     * for the rest of its life. Once per block the tempo is compared with the
+     * one the voices were last reconciled onto (`this.reconciledBpm`): the usual
+     * block is one compare and nothing else, and only a block that finds a new
+     * tempo walks the voices. Each synced voice's speed is worked out again from
+     * its pad's own `speed_pct` and the source tempo it stored at its start — the
+     * very formula, and the very bounds, its start used — and then `refreshStep`
+     * is asked for the product, so a pitch a lane has moved stays where the lane
+     * put it.
+     * @returns {void}
+     */
+    reconcileTempo() {
+      if (this.bpm === this.reconciledBpm) return;
+      this.reconciledBpm = this.bpm;
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding || !voice.bpm_sync) continue;
+          // A pad with no known source tempo was never synced (its start read
+          // the setting as off), so it is left at its own Speed % alone.
+          if (!(voice.source_bpm > 0)) continue;
+          voice.speed = clamp(
+            (numberOr(voice.speed_pct, 100) / 100) * (this.bpm / voice.source_bpm),
+            LOWEST_PAD_SPEED,
+            HIGHEST_PAD_SPEED,
+          );
+          StudioSamplerVoice.refreshStep(voice);
+        }
+      }
+    }
+
+    /**
+     * Follow a pad's `reverse` while its voices sound: an edit that flips Reverse
+     * (the panel's switch, an undo, an agent) turns the voices of that very pad
+     * round where they stand, with no position jump, instead of waiting for the
+     * next press.
+     *
+     * `setSong` runs on every edit, so it is the one place a sounding voice
+     * learns that its pad changed. Each voice remembers the pad's `reverse` it
+     * was started with (`voice.reverse_src`, updated on every flip it takes), and
+     * `dir` is NOT compared: a ping-pong voice turns `dir` round as it reflects,
+     * and an edit that has nothing to do with the pad must not turn it. A voice
+     * whose start carried a `reverse` lock keeps the direction its own step
+     * asked for.
+     * @returns {void}
+     */
+    flipChangedPadReverses() {
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding) continue;
+          if (voice.locked && voice.locked.indexOf("reverse") >= 0) continue;
+          const pad = this.pads.get(padKey(voice.trackId, voice.bankId, voice.index));
+          if (!pad) continue;
+          const reverse = pad.reverse === true;
+          if (reverse === voice.reverse_src) continue;
+          voice.reverse_src = reverse;
+          StudioSamplerVoice.flipReverse(voice);
         }
       }
     }

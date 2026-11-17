@@ -3442,3 +3442,247 @@ test("a stolen voice that carried held and paused (flags set by the test) leaves
     "pad 0's light goes off exactly once as its last voice goes",
   );
 });
+
+// --- a sounding voice follows its pad: tempo and Reverse (B4c) ---------------
+
+/**
+ * The level a voice reads off `ramp` when it stands on `position`: the sample is
+ * blended linearly, so a frame's level names the position it read.
+ * @param {number} position
+ * @returns {number}
+ */
+function rampLevel(position) {
+  return ((position + 1) / 100000) * CENTRE;
+}
+
+test("M11 a tempo change at 120 to 150 BPM speeds a running bpm_sync loop by 1.25x within one block and leaves a non-synced loop alone", async () => {
+  const frames = 48000;
+  const song = kitSong({
+    pads: [
+      // A 100 BPM sample, synced: 120 / 100 = 1.2x at the song's own tempo.
+      pad("track-1", 0, { loop: "loop", bpm_sync: true, source_bpm_x10: 1000 }),
+      // The same loop without the setting: the tempo is no business of its own.
+      pad("track-1", 1, { loop: "loop" }),
+    ],
+    frames,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(ramp(frames))] }]);
+
+  pressPad(engine, 0);
+  pressPad(engine, 1);
+  await engine.process(128, 2400);
+  const record = recordOf(engine, "track-1");
+  const synced = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  const plain = soundingOf(record).filter((voice) => voice.index === 1)[0];
+  assertLevel(synced.speed, 1.2, "a 100 BPM sample in a 120 BPM song runs at 1.2x", 1e-12);
+  assertLevel(plain.speed, 1, "a loop that names no source tempo keeps the pad's own speed", 1e-12);
+  // The positions the two voices stand on: the frame each one reads next.
+  const syncedStart = synced.position;
+  const plainStart = plain.position;
+
+  // The song moves to 150 BPM. The synced loop follows it from the next block on
+  // (150 / 100 = 1.5x, a quarter faster than 1.2x) and the plain one goes on at
+  // its own 1x.
+  const faster = JSON.parse(JSON.stringify(song));
+  faster.meta.bpm = 150;
+  engine.post({ type: "song", snapshot: faster });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const after = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(synced.speed, 1.5, "the new tempo reaches the running loop in the next block", 1e-12);
+  assertLevel(plain.speed, 1, "and leaves a loop that is not synced at its own speed", 1e-12);
+  for (const at of [0, 1, 100, 511]) {
+    const expected = rampLevel(syncedStart + 1.5 * at) + rampLevel(plainStart + at);
+    assertLevel(
+      after.left[at],
+      expected,
+      `frame ${at}: the synced loop reads 1.5 a frame and the plain one its own 1`,
+      1e-7,
+    );
+  }
+});
+
+test("a tempo change with a pitch lane running keeps the lane's pitch", async () => {
+  const frames = 48000;
+  const song = kitSong({
+    pads: [pad("track-1", 0, { bpm_sync: true, source_bpm_x10: 1000 })],
+    frames,
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+    patterns: {
+      "clip-1/a": {
+        id: "a",
+        clip_id: "clip-1",
+        name: "A",
+        order: 0,
+        // One standing point: the lane holds this pad an octave up.
+        motion: { [`${BANK}.0|pitch`]: [{ step_frac: 0, value: 12 }] },
+      },
+    },
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(ramp(frames))] }]);
+
+  // The step's voice runs at 1.2x (a 100 BPM source in a 120 BPM song), doubled
+  // by the lane's octave.
+  await engine.process(128, 2400);
+  const voice = soundingOf(recordOf(engine, "track-1")).filter((entry) => entry.index === 0)[0];
+  assertLevel(voice.step, 2.4, "the lane's octave on top of the synced 1.2x", 1e-9);
+  const start = voice.position;
+
+  const faster = JSON.parse(JSON.stringify(song));
+  faster.meta.bpm = 150;
+  engine.post({ type: "song", snapshot: faster });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const after = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // 1.5x under the lane's octave is 3 frames a frame: a reconcile that put the
+  // pitch back to the pad's own 0 would read 1.5 a frame instead.
+  assertLevel(voice.step, 3, "the lane's pitch is kept as the new tempo is applied under it", 1e-9);
+  for (const at of [0, 1, 100, 511]) {
+    assertLevel(after.left[at], rampLevel(start + 3 * at), `frame ${at} reads 3 frames ahead`, 1e-7);
+  }
+});
+
+test("M10 toggling reverse in the song while a pad sounds flips that pad's voices and no others", async () => {
+  const frames = 48000;
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1, { loop: "loop" })],
+    frames,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(ramp(frames))] }]);
+
+  pressPad(engine, 0);
+  pressPad(engine, 1);
+  await engine.process(128, 128);
+  const record = recordOf(engine, "track-1");
+  const flipped = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  const other = soundingOf(record).filter((voice) => voice.index === 1)[0];
+  // Both loops read one frame a frame, so both stand on frame 128 after 128
+  // frames: the frame each one reads next.
+  const flippedStart = flipped.position;
+  const otherStart = other.position;
+  assertLevel(flippedStart, 128, "the loop has read one frame for every frame", 1e-9);
+
+  // Reverse is switched on for pad 0 alone, in the song.
+  const reversed = JSON.parse(JSON.stringify(song));
+  reversed.pads[padKeyOf(pad("track-1", 0))].reverse = true;
+  engine.post({ type: "song", snapshot: reversed });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 100);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // No jump: the frame the flip lands on reads the position the voice stood on.
+  assertLevel(
+    after.left[0],
+    rampLevel(flippedStart) + rampLevel(otherStart),
+    "the flipped voice carries on from the frame it was about to read",
+    1e-7,
+  );
+  for (const at of [1, 50, 99]) {
+    const expected = rampLevel(flippedStart - at) + rampLevel(otherStart + at);
+    assertLevel(after.left[at], expected, `frame ${at}: pad 0 runs backwards and pad 1 on forwards`, 1e-7);
+  }
+});
+
+test("M10 a locked-reverse step voice is not flipped", async () => {
+  const frames = 4800;
+  const song = kitSong({
+    pads: [pad("track-1", 0)],
+    frames,
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    steps: [step("clip-1", 0, 0, { v: 127, locks: { reverse: true } })],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(ramp(frames))] }]);
+
+  // The step's lock starts the voice reversed: frame 0 reads the range's last
+  // sample, and 128 frames in the voice stands on 4671.
+  await engine.process(128, 128);
+  const voice = soundingOf(recordOf(engine, "track-1"))[0];
+  assert.equal(voice.locked.indexOf("reverse") >= 0, true, "the step's voice carries the reverse lock");
+  const start = voice.position;
+  assertLevel(start, 4671, "the reversed voice has read 128 frames backwards", 1e-9);
+
+  // The pad's own Reverse is switched on. This voice keeps the direction its own
+  // step asked for: the lock beats the pad, before and after the edit.
+  const flipped = JSON.parse(JSON.stringify(song));
+  flipped.pads[padKeyOf(pad("track-1", 0))].reverse = true;
+  engine.post({ type: "song", snapshot: flipped });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 100);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  for (const at of [0, 1, 50, 99]) {
+    assertLevel(
+      after.left[at],
+      rampLevel(start - at),
+      `frame ${at} keeps the direction the step's lock asked for`,
+      1e-7,
+    );
+  }
+});
+
+test("M10 an unrelated edit does not flip a ping-pong voice that has reflected", async () => {
+  const frames = 4800;
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "pingpong" }), pad("track-1", 1, { gain_db: -6 })],
+    frames,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(ramp(frames))] }]);
+
+  // Past the range's end: the ping-pong has reflected, so its own `dir` is −1
+  // while the pad's Reverse is still off.
+  pressPad(engine, 0);
+  await engine.process(128, 4900);
+  const voice = soundingOf(recordOf(engine, "track-1")).filter((entry) => entry.index === 0)[0];
+  assert.equal(voice.dir, -1, "the voice reflected at the range's end");
+  const start = voice.position;
+  assertLevel(start, 4698, "and it has come 100 frames back down from there", 1e-9);
+
+  // An edit that has nothing to do with the loop: another pad's gain.
+  const edited = JSON.parse(JSON.stringify(song));
+  edited.pads[padKeyOf(pad("track-1", 1))].gain_db = -12;
+  engine.post({ type: "song", snapshot: edited });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 100);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  for (const at of [0, 1, 50, 99]) {
+    assertLevel(after.left[at], rampLevel(start - at), `frame ${at} carries on down the range, not back up it`, 1e-7);
+  }
+});
+
+test("no tempo change and no pad change: the reconcile does no voice scan", async () => {
+  const frames = 48000;
+  const song = kitSong({
+    pads: [pad("track-1", 0, { loop: "loop", bpm_sync: true, source_bpm_x10: 1000 })],
+    frames,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [Float32Array.from(ramp(frames))] }]);
+
+  pressPad(engine, 0);
+  await engine.process(128, 384);
+  const voice = soundingOf(recordOf(engine, "track-1"))[0];
+  assertLevel(voice.speed, 1.2, "the synced loop runs at the song's own 120 BPM", 1e-12);
+
+  // A voice is only ever given its speed by its own start or by the reconcile, so
+  // a speed nothing recomputes is still standing after a block. The step is left
+  // alone, so the audio goes on exactly as it was.
+  voice.speed = 0.5;
+  await engine.process(128, 128);
+  assertLevel(
+    voice.speed,
+    0.5,
+    "a block with no tempo change must not walk the voices for their speed",
+    1e-12,
+  );
+  await engine.process(128, 128);
+  assertLevel(voice.speed, 0.5, "and neither does the block after it", 1e-12);
+
+  // The scan is there when the tempo does move: the very same voice follows.
+  const faster = JSON.parse(JSON.stringify(song));
+  faster.meta.bpm = 150;
+  engine.post({ type: "song", snapshot: faster });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await engine.process(128, 128);
+  assertLevel(voice.speed, 1.5, "a tempo change is what makes the reconcile walk the voices", 1e-12);
+});
