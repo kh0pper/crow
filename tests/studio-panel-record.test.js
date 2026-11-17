@@ -2127,3 +2127,179 @@ test("teardown mid-record keeps every chunk and uploads the take", async (t) => 
   const newest = takes[takes.length - 1];
   assert.ok(newest.frames > 0, "and the take holds audio");
 });
+
+// ---- the record flow as it stands, before count-in and punch-in -------------
+//
+// Characterisation: what Record does today, written down so a change to it is
+// visible as a failing test. A stopped transport asks for a scene launch and
+// waits; a launch report's frame is the take's first frame, with one pass per
+// loop from there; a running transport arms on the bar frame the engine
+// reports, not on the armed clip's loop grid; and Pause is off while a take
+// runs.
+
+test("today: Record while stopped in session view shows the launch-a-scene notice and waits", async () => {
+  const ui = await bootPanel();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.engine.plays = 0;
+  ui.engine.play = function () {
+    ui.engine.plays += 1;
+  };
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the panel built a recorder for the armed track");
+  assert.equal(recorder.armFrame, null, "and left it unarmed, waiting for a launch");
+  assert.deepEqual(recorder.splits, [], "with no pass boundary sent");
+  assert.equal(recorder.stopFrame, null, "and nothing asked it to stop");
+
+  const notice = String(ui.document.querySelector("[data-role=rec-notice]").textContent);
+  assert.ok(
+    notice.includes("Launch a scene on the armed track to start at its first bar."),
+    `the page asks for a scene launch (got: ${notice})`,
+  );
+
+  const status = ui.document.querySelector("[data-role=rec-status]");
+  assert.equal(
+    status.textContent,
+    "Waiting for a scene launch\u2026",
+    "the status names what it waits for",
+  );
+  assert.equal(status.getAttribute("data-ready"), "1", "the recorder is built and ready");
+  assert.equal(status.getAttribute("data-recording"), "0", "and nothing is being recorded");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "no clip was made for a take that has not begun",
+  );
+  assert.equal(ui.engine.plays, 0, "the transport was not started by itself");
+});
+
+test("today: a launch report arms the recorder on its frame and sends one split per pass", async () => {
+  const ui = await bootPanel();
+  const recorder = await startFakeRecording(ui, 48000);
+
+  assert.equal(recorder.armFrame, 48000, "the recorder armed on the frame the launch reported");
+  assert.equal(recorder.stopFrame, null, "nothing asked it to stop yet");
+  // The slot is empty, so the clip made for it is as long as the scene: four
+  // bars when the scene holds no clip. At 240 BPM one beat is 12,000 frames.
+  const fpb = (48000 * 60) / 240;
+  const loop = 4 * 4 * fpb;
+  assert.ok(recorder.splits.length > 1, "the boundary of every pass is sent up front");
+  for (let pass = 1; pass <= recorder.splits.length; pass += 1) {
+    assert.equal(
+      recorder.splits[pass - 1],
+      48000 + Math.round(pass * loop),
+      `pass ${pass} is cut on its own boundary`,
+    );
+  }
+
+  const status = ui.document.querySelector("[data-role=rec-status]");
+  assert.equal(status.textContent, "Recording, pass 1", "the status counts from the first pass");
+  assert.equal(status.getAttribute("data-recording"), "1", "and says the take is running");
+
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty slot got one audio clip");
+  assert.equal(added[0].args.track_id, AUDIO_TRACK, "on the armed track");
+  assert.equal(added[0].args.scene_id, SCENE, "in the slot the launch named");
+  assert.equal(added[0].args.length_bars, 4, "as long as the scene");
+});
+
+test("today: Record while playing arms at nextBarFrame, not at a loop start", async () => {
+  const ui = await bootPanel();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+
+  // The transport plays the scene. The take's own clip is four bars long, so
+  // its loop grid repeats every four bars while the engine counts bars.
+  ui.engine.plays = 0;
+  ui.engine.play = function () {
+    ui.engine.plays += 1;
+  };
+  ui.click("[data-act=play]");
+  await ui.settle();
+  assert.equal(ui.engine.plays, 1, "the transport was started");
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: 48000 }),
+  );
+  await ui.settle();
+
+  let asked = 0;
+  ui.engine.nextBarFrame = async () => {
+    asked += 1;
+    return { frame: 96000, bar: 2 };
+  };
+
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the panel built a recorder");
+  assert.equal(asked, 1, "the take's frame was asked of the engine's bar clock");
+  assert.equal(ui.engine.plays, 1, "and the transport was not started a second time");
+  assert.equal(recorder.armFrame, 96000, "the recorder armed on exactly that frame");
+
+  const fpb = (48000 * 60) / 240;
+  const loop = 4 * 4 * fpb;
+  assert.notEqual(recorder.armFrame, 48000 + loop, "one loop after the launch is not where it armed");
+  const intoTheClip = recorder.armFrame - 48000;
+  assert.equal(
+    intoTheClip % Math.round(fpb),
+    0,
+    "it begins a whole number of beats into the playing clip",
+  );
+  assert.notEqual(intoTheClip % Math.round(loop), 0, "so the take's beat 0 is not the clip's beat 0");
+  assert.equal(
+    recorder.splits[0],
+    96000 + Math.round(loop),
+    "and its first pass ends one loop after that bar",
+  );
+
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the clip is in the slot the armed track is playing");
+  assert.equal(added[0].args.scene_id, SCENE, "which is the scene the launch named");
+});
+
+test("today: Pause is disabled while a take runs", async () => {
+  const ui = await bootPanel({ clock: 0.75 });
+  ui.engine.paused = 0;
+  ui.engine.pause = function () {
+    ui.engine.paused += 1;
+  };
+  ui.engine.stopped = 0;
+  ui.engine.stop = function () {
+    ui.engine.stopped += 1;
+  };
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  const pause = ui.document.querySelector("[data-act=pause]");
+  assert.ok(pause, "the transport bar carries Pause");
+  assert.equal(pause.disabled, false, "Pause is offered while nothing is being recorded");
+
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: 48000 }),
+  );
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the panel built a recorder");
+  assert.equal(recorder.armFrame, 48000, "and armed it on the frame the engine's bar clock gave");
+  assert.equal(pause.disabled, true, "Pause is disabled while the take runs");
+  assert.equal(pause.getAttribute("title"), "Stop ends a recording", "and says Stop is what ends it");
+
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(ui.engine.paused, 0, "pressing it leaves the transport alone");
+  assert.equal(ui.engine.stopped, 0, "and stops nothing either");
+  assert.equal(
+    ui.document.querySelector("[data-role=rec-status]").getAttribute("data-recording"),
+    "1",
+    "and the take is still recording",
+  );
+});
