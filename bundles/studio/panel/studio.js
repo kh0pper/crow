@@ -231,6 +231,15 @@ const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
 const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
 
 /**
+ * The pad input rules, loaded once: press velocity and the chromatic / 16
+ * velocity pitches, the SAME pure functions the pad grid, the 16 velocity mode
+ * and the on-screen keyboard all read. They reach the page before the client,
+ * which asks `window.StudioPadInput` for them; a page served without the script
+ * plays its pads plainly instead of failing (see panel/pad-input.js).
+ */
+const PAD_INPUT_SCRIPT = await loadPanelScript("pad-input.js", "PAD_INPUT_SCRIPT");
+
+/**
  * The shell's layout model, loaded once: which widget is on the page, in what
  * order and at which size is this device's own view state, and the model that
  * decides it comes BEFORE the shell that reads it and before the client, which
@@ -1038,6 +1047,7 @@ const STYLES = `
   .studio .st-bank-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
   .studio .st-pad-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
   .studio .st-pad {
+    position: relative;
     aspect-ratio: 1 / 1; min-height: 72px; padding: 8px; border-radius: 10px;
     border: 2px solid #121417; background: #24282D; color: var(--st-text);
     font: inherit; text-align: left; cursor: pointer;
@@ -1052,6 +1062,19 @@ const STYLES = `
   .studio .st-pad.st-pad-on { background: #3A3222; }
   .studio .st-pad.st-pad-loop { background: #1E2C3A; }
   .studio .st-pad.st-pad-held { background: #3A2A1C; }
+  /* A pad HOLD latched keeps a steady glow and wears a small lock mark in its
+     corner: the light says it is still sounding, the mark says why (the latch,
+     not a finger, is what holds it). Neither is a flash, so neither animates. */
+  .studio .st-pad.st-pad-held { box-shadow: inset 0 0 0 2px var(--st-human); }
+  .studio .st-pad-lock {
+    position: absolute; top: 6px; right: 6px; width: 10px; height: 10px;
+    border-radius: 2px; background: var(--st-human); pointer-events: none;
+  }
+  .studio .st-pad-lock::before {
+    content: ''; position: absolute; left: 1px; top: -6px; width: 8px; height: 7px;
+    box-sizing: border-box; border: 2px solid var(--st-human); border-bottom: none;
+    border-radius: 5px 5px 0 0;
+  }
   .studio .st-pad.st-pad-hit {
     background: #F2A541; border-color: #FFFFFF;
     animation: st-pad-flash 180ms ease-out;
@@ -1073,6 +1096,48 @@ const STYLES = `
   }
   .studio .st-pad-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
   .studio .st-sampler-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  /* The live pad bar: HOLD, ROLL and Pause beside the pads, three controls a
+     thumb uses while a pad sounds. Each is a 44 px target that never selects
+     its own label and never opens the browser's menu on a long press (the HOLD
+     press IS a long press, and ROLL is held too). */
+  .studio .st-pad-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .studio .st-pad-bar .st-toggle {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* ROLL's interval sits beside its key on the same bar: a 44 px target too, and
+     its own label is never selected or called out. */
+  .studio .st-pad-bar .st-roll-interval {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* The pad mode's three buttons and its scale and key pickers, on the same bar:
+     44 px targets each, and none of them selects its own label or calls out a
+     menu on a long press. */
+  .studio .st-pad-bar .st-pad-modes {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 0 0 auto;
+  }
+  .studio .st-pad-bar .st-pad-choice {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  /* The sensitivity popover: its summary is the 44 px control that opens it, and
+     its body holds the curve picker and the two ranges. */
+  .studio .st-pad-bar .st-pad-sense { flex: 0 0 auto; }
+  .studio .st-pad-bar .st-pad-sense-open {
+    display: flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; padding: 0 8px;
+    font-size: 12px; color: var(--st-text);
+    background: var(--st-head); border: 1px solid var(--st-line); border-radius: 8px;
+    cursor: pointer;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-pad-bar .st-pad-sense-body {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+    padding: 6px 0 0;
+  }
+  .studio .st-pad-bar .st-pad-sense-body .st-pad-range { flex: 1 1 140px; }
+  .studio .st-pad-bar-note { flex: 1 1 100%; margin: 0; font-size: 11px; color: var(--st-muted); }
   .studio .st-import { position: relative; display: inline-flex; align-items: center; }
   .studio .st-file { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
   .studio .st-btn.st-on { background: #3D3420; border-color: #5C4A1E; }
@@ -1442,6 +1507,7 @@ async function libraryPage({ db, render, res }) {
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
       <script>${TAKE_STORE_SCRIPT}
+${PAD_INPUT_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
@@ -1558,6 +1624,7 @@ function studioPage({ songId, render, res }) {
            client converts a take recorded at another rate with it, and so does
            its worker. -->
       <script>${TAKE_STORE_SCRIPT}
+${PAD_INPUT_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${SHELL_LAYOUT_SCRIPT}

@@ -27,6 +27,7 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { CLIENT_SCRIPT } from "../bundles/studio/panel/client.js";
+import { PAD_INPUT_SCRIPT } from "../bundles/studio/panel/pad-input.js";
 
 const YJS_URL = pathToFileURL(
   new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
@@ -277,6 +278,11 @@ function fakeStudioEngine() {
   const engine = {
     live: [],
     releases: [],
+    // ROLL (C5b): the repeats the page started, the stops it asked for, and how
+    // often it ended them all at once.
+    rolls: [],
+    rollStops: [],
+    rollStopsAll: 0,
     create() {
       return Promise.resolve({
         node: { connect() {} },
@@ -293,11 +299,39 @@ function fakeStudioEngine() {
         onSampleNeeded() {
           return () => {};
         },
-        livePad(trackId, bankId, index) {
-          engine.live.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        livePad(trackId, bankId, index, v, locks, sourceIndex) {
+          engine.live.push({
+            track_id: String(trackId),
+            bank_id: String(bankId),
+            index: Number(index),
+            v: Number(v),
+            locks: locks && typeof locks === "object" ? locks : null,
+            source_index: sourceIndex === undefined || sourceIndex === null ? null : Number(sourceIndex),
+          });
         },
-        liveRelease(trackId, bankId, index) {
-          engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        liveRelease(trackId, bankId, index, sourceIndex) {
+          engine.releases.push({
+            track_id: String(trackId),
+            bank_id: String(bankId),
+            index: Number(index),
+            source_index: sourceIndex === undefined || sourceIndex === null ? null : Number(sourceIndex),
+          });
+        },
+        rollStart(trackId, bankId, index, interval, v) {
+          engine.rolls.push({
+            track_id: String(trackId),
+            bank_id: String(bankId),
+            index: Number(index),
+            interval: String(interval),
+            v: Number(v),
+          });
+          return true;
+        },
+        rollStop(trackId, bankId, index) {
+          engine.rollStops.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+        },
+        rollStopAll() {
+          engine.rollStopsAll += 1;
         },
         loadSample() {
           return Promise.resolve();
@@ -446,7 +480,7 @@ async function bootClient(options = {}) {
     "clearTimeout",
     "setInterval",
     "clearInterval",
-    scriptText,
+    `${PAD_INPUT_SCRIPT}\n${scriptText}`,
   );
   run(
     document,
@@ -790,7 +824,7 @@ test("a cancelled pad press lets the pad go exactly once", async () => {
   await ui.settle();
   assert.deepEqual(
     ui.engine.live,
-    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0 }],
+    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0, v: 100, locks: null, source_index: 0 }],
     "the press played the pad",
   );
 
@@ -800,7 +834,7 @@ test("a cancelled pad press lets the pad go exactly once", async () => {
   await ui.settle();
   assert.deepEqual(
     ui.engine.releases,
-    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0 }],
+    [{ track_id: SAMPLER_TRACK, bank_id: bankId, index: 0, source_index: 0 }],
     "the cancelled press sends one liveRelease",
   );
 
@@ -809,4 +843,136 @@ test("a cancelled pad press lets the pad go exactly once", async () => {
   ui.fire("pointerup", {});
   await ui.settle();
   assert.equal(ui.engine.releases.length, 1, "a pad already let go is not released again");
+});
+
+// --- ROLL (C5b): a phone's repeats end with the pointer ----------------------
+
+/** The live bar's ROLL key, as it is drawn right now. */
+function rollKey(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-roll]");
+  assert.ok(node, "the pads carry a ROLL key");
+  return node;
+}
+
+/** Hold ROLL down with one finger, the way a phone does. */
+function holdRoll(ui) {
+  const node = rollKey(ui);
+  node.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  return node;
+}
+
+test("pointercancel and blur stop every roll", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  holdRoll(ui);
+  await ui.settle();
+  for (const index of [0, 1]) {
+    ui.pad(index).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+    await ui.settle();
+  }
+  assert.equal(ui.engine.rolls.length, 2, "two pads roll while the key is held");
+
+  // The browser takes the pointer away (a scroll, a call, a drag off the page).
+  ui.fire("pointercancel", {});
+  await ui.settle();
+  assert.deepEqual(ui.engine.rollStops.map((one) => one.index).sort(), [0, 1],
+    "the cancelled pointer stopped every roll");
+  assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "and the key went up with it");
+
+  // A fresh roll, and the window loses the focus: it hears no lift at all.
+  holdRoll(ui);
+  await ui.settle();
+  ui.pad(2).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.rolls.map((one) => one.index), [0, 1, 2], "pad 3 rolls");
+
+  ui.fire("blur", {});
+  await ui.settle();
+  assert.equal(ui.engine.rollStops.length, 3, "the blur stopped the roll that was left running");
+  assert.equal(ui.engine.rollStops[2].index, 2, "and the one it named is that pad");
+  assert.deepEqual(ui.engine.rollStops.map((one) => one.index).sort(), [0, 1, 2],
+    "every roll this page started has been stopped");
+  assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "and the key came up with it");
+});
+
+test("visibilitychange to hidden calls rollStopAll and holds are left held", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  // HOLD armed, so there is a hold for the hidden page to leave alone.
+  ui.click("[data-role=sampler-pads] [data-act=pad-hold]");
+  await ui.settle();
+  const hold = () => ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-hold]");
+  assert.equal(hold().getAttribute("aria-pressed"), "true", "HOLD is armed");
+
+  holdRoll(ui);
+  await ui.settle();
+  ui.pad(0).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.equal(ui.engine.rolls.length, 1, "a pad is rolling");
+  assert.equal(ui.engine.rollStopsAll, 0, "nothing has ended them all yet");
+
+  // The page goes to the background: the context keeps running and the holds
+  // stay where they are, and only the repeat clock nobody is watching goes.
+  ui.setVisibility("hidden");
+  assert.equal(ui.engine.rollStopsAll, 1, "the hidden page ended every roll at once");
+
+  ui.fire("pointerup", {});
+  await ui.settle();
+  ui.setVisibility("visible");
+  assert.equal(ui.engine.rollStopsAll, 1, "coming back does not end them a second time");
+  assert.equal(hold().getAttribute("aria-pressed"), "true", "the hold was left held");
+  assert.equal(rollKey(ui).getAttribute("aria-pressed"), "false", "while ROLL is up again");
+});
+
+// --- the touch velocity the device's pressure asks for (C5b-2) --------------
+
+/** One pad pressed with a finger the pointer says the pressure of. */
+function touchDown(ui, index, pressure) {
+  ui.pad(index).dispatchEvent(ui.event("pointerdown", { button: 0, pointer: { pressure } }));
+}
+
+/** A reading the device sends while the finger moves on the pad. */
+function touchMove(ui, index, pressure) {
+  ui.pad(index).dispatchEvent(ui.event("pointermove", { pointer: { pressure } }));
+}
+
+/** The finger coming up anywhere: the page hears it on the window. */
+function touchUp(ui) {
+  ui.fire("pointerup", {});
+}
+
+test("touch velocity stays at 100 for a constant reading, and a real one is used", async () => {
+  const ui = await bootClient({ sampler: true });
+  await ui.openSampler();
+
+  // A device that sends one constant reading has no pressure to report: many
+  // Android WebViews send 0.5 whatever the finger does.
+  for (let press = 0; press < 2; press += 1) {
+    touchDown(ui, 0, 0.5);
+    await ui.settle();
+    touchMove(ui, 0, 0.5);
+    touchUp(ui);
+    await ui.settle();
+  }
+  assert.deepEqual(ui.engine.live.map((one) => one.v), [100, 100],
+    "a constant reading plays at the fixed touch velocity, press after press");
+
+  // A press whose readings CHANGE within it is real pressure. That press still
+  // played at 100 (the page had not learned the device yet), and the presses
+  // after it take the reading at pointerdown.
+  touchDown(ui, 0, 0.3);
+  await ui.settle();
+  touchMove(ui, 0, 0.6);
+  touchUp(ui);
+  await ui.settle();
+
+  touchDown(ui, 0, 0.6);
+  await ui.settle();
+  touchUp(ui);
+  await ui.settle();
+
+  assert.equal(ui.engine.live[2].v, 100, "the press that taught the page played at the fixed 100");
+  assert.equal(ui.engine.live[3].v, 76, "0.6 of the reading range through the linear curve is 76");
 });

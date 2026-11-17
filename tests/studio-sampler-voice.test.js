@@ -99,6 +99,16 @@ function assertNear(value, expected, what) {
   );
 }
 
+/** @param {Float32Array} samples @returns {number} the largest absolute sample */
+function peakOf(samples) {
+  let peak = 0;
+  for (let at = 0; at < samples.length; at += 1) {
+    const value = Math.abs(samples[at]);
+    if (value > peak) peak = value;
+  }
+  return peak;
+}
+
 /** @param {number} from @param {number} to @returns {number[]} from .. to-1 */
 function countTo(from, to) {
   const list = [];
@@ -280,6 +290,94 @@ test("beginFadeOut clears looping, held and paused", () => {
   assert.equal(voice.fadeRemaining, StudioSamplerVoice.FADE_FRAMES, "the fade is the 64-frame one");
 });
 
+test("a held gate voice survives release() and its gate countdown, and releaseHeld ends it through the envelope", () => {
+  const GATE = 100; // frames the step's gate would last
+  const RELEASE = 240; // 5 ms at 48 kHz
+  const samples = constant(48000, 0.5);
+  const voice = startVoice({ channels: [samples], mode: "gate", releaseMs: 5, gateFrames: GATE });
+  render(voice, 10);
+
+  StudioSamplerVoice.hold(voice);
+  assert.equal(voice.held, true, "hold() raises the latch");
+
+  // The operator lets go of the pad: a release is not the latch's to answer.
+  StudioSamplerVoice.release(voice);
+  assert.notEqual(voice.stage, StudioSamplerVoice.STAGE_RELEASE, "a held voice never enters its release");
+  assert.equal(voice.sounding, true, "so it keeps sounding");
+
+  // The gate the step gave it would have ended it four times over by now.
+  const held = render(voice, GATE * 4);
+  for (const at of [0, 1, GATE, GATE * 2, GATE * 4 - 1]) {
+    assert.equal(held.left[at], atCentre(0.5), `frame ${at} is still the held voice at full level`);
+  }
+  assert.equal(voice.sounding, true, "a held voice ignores its gate countdown too");
+
+  // Letting the latch go runs the ordinary release from where the voice stands.
+  StudioSamplerVoice.releaseHeld(voice);
+  assert.equal(voice.held, false, "releaseHeld clears the latch");
+  assert.equal(voice.stage, StudioSamplerVoice.STAGE_RELEASE, "and begins the envelope's release");
+  const tail = render(voice, RELEASE + 2);
+  // One frame at a time: the release starts from the level the voice held and
+  // falls to nothing over its own 5 ms.
+  for (const at of [0, 60, 120, 239]) {
+    const want = 0.5 * ((RELEASE - at) / RELEASE) * CENTRE;
+    assert.ok(
+      Math.abs(tail.left[at] - want) < 1e-6,
+      `frame ${at} is that far into the release: expected ${want}, got ${tail.left[at]}`,
+    );
+  }
+  // The last step of a linear release lands a rounding error short of 0 (the
+  // same way the engine suite's gate test reads it).
+  assert.ok(Math.abs(tail.left[RELEASE]) < 1e-12, `frame ${RELEASE} is the end of the release, got ${tail.left[RELEASE]}`);
+  assert.equal(tail.left[RELEASE + 1], 0, "and nothing is left sounding after the release time");
+  assert.equal(voice.sounding, false, "a 5 ms release ends the voice inside its release time");
+});
+
+test("beginFadeOut clears a HOLD latch raised by hold()", () => {
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], mode: "gate" });
+  render(voice, 10);
+
+  StudioSamplerVoice.hold(voice);
+  assert.equal(voice.held, true, "the voice is latched");
+
+  StudioSamplerVoice.beginFadeOut(voice);
+  assert.equal(voice.held, false, "a fade drops the latch, so its ramp runs to its end");
+  assert.equal(voice.sounding, true, "it is on its way out, not gone yet");
+  assert.equal(voice.fadeRemaining, StudioSamplerVoice.FADE_FRAMES, "the fade is the 64-frame one");
+
+  render(voice, StudioSamplerVoice.FADE_FRAMES);
+  assert.equal(voice.sounding, false, "64 frames of fade end a held voice as they end any other");
+});
+
+test("a start clears the HOLD latch a previous trigger left on the slot", () => {
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], mode: "gate" });
+  StudioSamplerVoice.hold(voice);
+  assert.equal(voice.held, true, "the latch is on the voice");
+
+  // The slot is reused by the next trigger: the live state the trigger that has
+  // just ended carried belongs to it, never to the new voice.
+  const restarted = StudioSamplerVoice.start(voice, {
+    channels: [samples],
+    sampleRate: SAMPLE_RATE,
+    velocity: 127,
+    gainDb: 0,
+    pan: 0,
+  });
+  assert.equal(restarted, true, "the slot starts again");
+  assert.equal(voice.held, false, "a start holds nothing");
+
+  // And the voice answers a release again, so the cleared latch is not cosmetic.
+  StudioSamplerVoice.release(voice);
+  assert.equal(voice.sounding, false, "a release of 0 ms ends the restarted voice at once");
+
+  // A voice that is not sounding has nothing to latch.
+  const idle = StudioSamplerVoice.create();
+  StudioSamplerVoice.hold(idle);
+  assert.equal(idle.held, false, "an idle voice cannot be latched");
+});
+
 test("the frame a fade ends on leaves a dead voice with no live state", () => {
   // A one-frame range: the voice reads it and its range is spent, which is the
   // fade the render loop starts on its own (no beginFadeOut involved).
@@ -352,6 +450,139 @@ test("a loop shorter than two frames runs out instead of spinning", () => {
     false,
     "an empty range has nothing to loop",
   );
+});
+
+// --- Pause-all ---------------------------------------------------------------
+
+test("a paused voice's position and level do not change over 1000 frames after the ramp and resume continues from the same frame", () => {
+  const samples = ramp(48000);
+  const voice = startVoice({ channels: [samples], loop: "loop" });
+  render(voice, 100);
+  assert.equal(voice.position, 100, "the voice stands on the frame it will read next");
+  const envelope = voice.level;
+
+  StudioSamplerVoice.pause(voice);
+  assert.equal(voice.paused, true, "pause() raises the pause");
+  // The ramp still advances the voice, a frame at a time.
+  render(voice, StudioSamplerVoice.FADE_FRAMES);
+  const stopped = voice.position;
+  assert.equal(stopped, 100 + StudioSamplerVoice.FADE_FRAMES, "the ramp lets the voice advance");
+  assert.equal(voice.pauseLevel, 0, "and it lands on silence");
+
+  const frozen = render(voice, 1000);
+  assert.equal(voice.position, stopped, "a frozen voice does not read on");
+  assert.equal(voice.level, envelope, "and its envelope stands still");
+  assert.equal(peakOf(frozen.left), 0, "with nothing heard at all");
+
+  // Resuming carries on from the very frame it stopped on, ramping up again.
+  StudioSamplerVoice.resume(voice);
+  assert.equal(voice.paused, false, "resume() lets the pause go");
+  const lifted = render(voice, StudioSamplerVoice.FADE_FRAMES + 2);
+  assert.equal(lifted.left[0], 0, "the resume's first frame is still silent");
+  for (let at = 1; at < StudioSamplerVoice.FADE_FRAMES; at += 1) {
+    assert.ok(lifted.left[at] > 0, `frame ${at} of the resume is heard`);
+  }
+  assert.equal(
+    lifted.left[StudioSamplerVoice.FADE_FRAMES],
+    atCentre(samples[stopped + StudioSamplerVoice.FADE_FRAMES]),
+    "the first full-level frame reads the frame the voice stopped on plus the ramp",
+  );
+  assert.equal(
+    lifted.left[StudioSamplerVoice.FADE_FRAMES + 1],
+    atCentre(samples[stopped + StudioSamplerVoice.FADE_FRAMES + 1]),
+    "and it walks on from there",
+  );
+});
+
+test("the first and last frames of the pause ramp are continuous (no step larger than one ramp increment)", () => {
+  const full = atCentre(0.5);
+  const step = full / StudioSamplerVoice.FADE_FRAMES;
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], loop: "loop" });
+  const before = render(voice, 10);
+  for (let at = 0; at < 10; at += 1) assert.equal(before.left[at], full, `frame ${at} plays at full level`);
+
+  StudioSamplerVoice.pause(voice);
+  const ramp = render(voice, StudioSamplerVoice.FADE_FRAMES + 1);
+  assert.equal(ramp.left[0], full, "the ramp's first frame is the level the voice had");
+  let previous = full;
+  for (let at = 0; at < ramp.left.length; at += 1) {
+    assert.ok(ramp.left[at] <= previous, `frame ${at} does not rise during a ramp down`);
+    assert.ok(
+      previous - ramp.left[at] <= step * 1.0001 + 1e-7,
+      `frames ${at} step down by no more than one ramp increment: ${previous} then ${ramp.left[at]}`,
+    );
+    previous = ramp.left[at];
+  }
+  assert.ok(
+    ramp.left[StudioSamplerVoice.FADE_FRAMES - 1] > 0,
+    "the ramp's last frame was still sounding",
+  );
+  assert.equal(ramp.left[StudioSamplerVoice.FADE_FRAMES], 0, "and the frame after the ramp is silence");
+});
+
+test("the resume ramp is continuous too", () => {
+  const full = atCentre(0.5);
+  const step = full / StudioSamplerVoice.FADE_FRAMES;
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], loop: "loop" });
+  render(voice, 10);
+  StudioSamplerVoice.pause(voice);
+  render(voice, StudioSamplerVoice.FADE_FRAMES);
+  const frozen = render(voice, 32);
+  assert.equal(peakOf(frozen.left), 0, "the voice is frozen and silent");
+
+  StudioSamplerVoice.resume(voice);
+  const up = render(voice, StudioSamplerVoice.FADE_FRAMES + 1);
+  assert.equal(up.left[0], 0, "the resume starts where the pause left the level");
+  let previous = 0;
+  for (let at = 0; at < up.left.length; at += 1) {
+    assert.ok(up.left[at] >= previous, `frame ${at} does not fall during a ramp up`);
+    assert.ok(
+      up.left[at] - previous <= step * 1.0001 + 1e-7,
+      `frames ${at} step up by no more than one ramp increment: ${previous} then ${up.left[at]}`,
+    );
+    previous = up.left[at];
+  }
+  assert.equal(up.left[StudioSamplerVoice.FADE_FRAMES], full, "and the frame after the ramp is the full level");
+});
+
+test("paused resets on start", () => {
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], loop: "loop" });
+  StudioSamplerVoice.pause(voice);
+  render(voice, StudioSamplerVoice.FADE_FRAMES + 8);
+  assert.equal(voice.paused, true, "the voice is paused");
+  assert.equal(voice.pauseLevel, 0, "at silence");
+
+  assert.equal(
+    StudioSamplerVoice.start(voice, { channels: [samples], sampleRate: SAMPLE_RATE }),
+    true,
+    "the slot starts again",
+  );
+  assert.equal(voice.paused, false, "a start is not paused");
+  assert.equal(voice.pauseLevel, 1, "so nothing ducks it");
+  assert.equal(voice.pauseFrames, 0, "and no ramp is left running");
+  const fresh = render(voice, 4);
+  assert.equal(fresh.left[0], atCentre(0.5), "the restarted voice plays at full level on its first frame");
+
+  // A start made while Pause-all is on (M22) is the other way round: silent and
+  // frozen from its own first frame, with no ramp to run.
+  const stalled = StudioSamplerVoice.create();
+  assert.equal(
+    StudioSamplerVoice.start(stalled, { channels: [samples], sampleRate: SAMPLE_RATE, paused: true }),
+    true,
+    "a voice starts under Pause-all",
+  );
+  assert.equal(stalled.paused, true, "it is paused");
+  assert.equal(stalled.pauseLevel, 0, "at silence");
+  assert.equal(stalled.pauseFrames, 0, "and it has no ramp");
+  const quiet = render(stalled, 1000);
+  assert.equal(peakOf(quiet.left), 0, "it is silent where it stands");
+  assert.equal(stalled.position, 0, "and has not read a frame");
+  StudioSamplerVoice.resume(stalled);
+  render(stalled, StudioSamplerVoice.FADE_FRAMES + 1);
+  assert.equal(stalled.sounding, true, "a resumed voice plays on");
 });
 
 // --- speed ------------------------------------------------------------------

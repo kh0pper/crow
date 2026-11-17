@@ -6,16 +6,18 @@
  * glues these sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sampler-voice.js + pad-events.js + perf-fx.js
- *       + sunvox.js + spessasynth.js + font-voice.js + dynamics.js
+ *     sequencer.js + resample.js + sampler-voice.js + pad-events.js + roll-clock.js
+ *       + perf-fx.js + sunvox.js + spessasynth.js + font-voice.js + dynamics.js
  *       + faust-host.js + meter.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
  * the client side of the port, before the PCM is handed over. `sampler-voice.js`
- * is the sampler's voice DSP, and `perf-fx.js` the performance-effects bus and
- * its looper, which the processor uses in that same scope. `spessasynth.js` is
- * the vendored SoundFont synth: one import-free classic script that defines
+ * is the sampler's voice DSP, `roll-clock.js` the ROLL's timing (the one frame a
+ * rolling pad's next repeat stands on) and `perf-fx.js` the performance-effects
+ * bus and its looper, which the processor uses in that same scope.
+ * `spessasynth.js` is the vendored SoundFont synth: one import-free classic
+ * script that defines
  * `globalThis.StudioSpessa` (see `vendor/spessasynth/`), which is the only shape
  * a worklet can load; `font-voice.js` is the host that drives it, one synth per
  * font with one MIDI channel per track (plan 1d). `dynamics.js` is Crow's own
@@ -193,11 +195,34 @@
  *   one-channel input, 2 for a stereo pair) and decides an amp's mono sum.
  *   `onMonitorLatency(listener)` follows `{track_id, ms}`, the delay the chain
  *   itself adds, for the page to add to the round trip it shows.
- * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
+ * - `livePad(track_id, bank, index, v, locks, source_index)` and
+ *   `liveRelease(track_id, bank, index, source_index)`
  *   audition a pad from the panel: straight to the voice, never through a
- *   command or a history step, and never quantized. `resetLive()` releases the
- *   pads' live state (every loop now), and the page sends it when a DIFFERENT
- *   song opens — never on an ordinary song update, which runs on every edit.
+ *   command or a history step, and never quantized. `index` is the pad whose
+ *   sample plays; `locks` overrides that one voice's fields exactly as a step's
+ *   does (C5b's `pitch`), and `source_index` names the pad the finger is on when
+ *   it is not this one (a chromatic or 16-velocity press sounds one sample pad
+ *   from every pad of the grid). Both are optional and both are appended, so a
+ *   call that names neither is the call it always was; a release that names a
+ *   source pad lets go of that press alone. `holdPad(track_id, bank,
+ *   index)` latches the Gate voices that pad is sounding — the HOLD key — and
+ *   answers `false` when the song has no Gate pad there, so a HOLD on a pad of
+ *   another mode is refused (M15); `releaseHeld(track, bank, index)` lets that
+ *   latch go again, and with no argument every latch. HOLD is page state, never
+ *   song data. `pauseVoices(on)` is Pause-all: it ramps every sounding pad voice
+ *   down and freezes it where it stands, and ramps it back up on resume (M17); a
+ *   start made while it is on is created paused and heard on resume (M22).
+ *   `resetLive()` releases the pads' live state (every loop, every HOLD and
+ *   every ROLL), and the page sends it when a DIFFERENT song opens — never on an
+ *   ordinary song update, which runs on every edit. `rollStart(track_id, bank,
+ *   index, interval, v)` repeats one pad at a straight interval (1/4, 1/8,
+ *   1/16, 1/32, 1/64) until `rollStop(track_id, bank, index)` or `rollStopAll()`,
+ *   the SP-404's ROLL key: at most four pads roll at once, its answer says
+ *   whether this one does, and a pad whose Loop setting is on is refused (M19).
+ *   Each repeat is a step-like start, so a Gate pad's repeats carry a gate of one
+ *   interval and never pile up (M18), and a repeat made under Pause-all starts
+ *   paused and is heard on resume (M21, M22). ROLL is live state: never a
+ *   command, never a history step, never in the song.
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
  *   own output (`track_id`) on, per block, as `{type:"tap_block", target, frame,
  *   channels}`: `frame` is the context frame the block's first sample sits on,
@@ -261,6 +286,9 @@
     // the gateway's engine-asset whitelist (`server/web.js`, `ASSET_FILES`),
     // which is what composes the module a browser page loads.
     "pad-events.js",
+    // The ROLL clock: when each rolling pad's next repeat stands, in frames (see
+    // `roll-clock.js`). Before the processor that steps it.
+    "roll-clock.js",
     "perf-fx.js",
     "sunvox.js",
     // The vendored SoundFont synth, before the processor that hosts it: it is
@@ -409,6 +437,28 @@
 
   /** How many bars the looper's buffers hold: the longest take it records. */
   const LOOPER_BARS = 8;
+
+  /**
+   * How many pads may ROLL at once: the engine's own limit, worked out here too so
+   * the page can be answered without a round trip to the audio thread.
+   */
+  const MAX_ROLLS = 4;
+
+  /**
+   * The key one pad lives under in a song's `pads` container — the very key
+   * `server/doc.js` writes and `studio-processor.js` looks a pad up with. This
+   * side of the port builds the same one, so `holdPad` can answer whether a pad
+   * is a Gate pad without waiting for the audio thread.
+   * @param {unknown} trackId
+   * @param {unknown} bankId
+   * @param {unknown} index
+   * @returns {string}
+   */
+  function padKeyOf(trackId, bankId, index) {
+    const track = trackId === undefined || trackId === null ? "" : String(trackId);
+    const bank = bankId === undefined || bankId === null ? "" : String(bankId);
+    return track + "/" + bank + "/" + Math.trunc(Number(index) || 0);
+  }
 
   /**
    * The page's own copy of one looper-take channel, clipped to [−1, 1].
@@ -1034,6 +1084,10 @@
    *                    play: function(): void,
    *                    stop: function(): void,
    *                    resetLive: function(): void,
+   *                    pauseVoices: function(boolean): void,
+   *                    rollStart: function(string, string, number, string, number): boolean,
+   *                    rollStop: function(string, string, number): void,
+   *                    rollStopAll: function(): void,
    *                    setMode: function(string): void,
    *                    seek: function(number): void,
    *                    setMetronome: function(boolean): void,
@@ -1598,6 +1652,37 @@
     let looperBufferFrames = 0;
     /** The tempo the song is at, as the last `setSong` read it. */
     let looperSongBpm = DEFAULT_BPM;
+    /**
+     * The keys of the pads the last song handed to `setSong` says are Gate pads.
+     * A HOLD is for Gate pads only (M15), and that is song data this side of the
+     * port may be asked about at once — `holdPad` answers from here instead of
+     * waiting for the audio thread to hear the message.
+     * @type {Set<string>}
+     */
+    const gatePads = new Set();
+    /**
+     * The keys of the pads the last song says loop (`loop` is `"loop"` or
+     * `"pingpong"`). A ROLL is refused on one of them (M19), which is song data
+     * `rollStart` answers from here rather than waiting for the audio thread.
+     * @type {Set<string>}
+     */
+    const loopPads = new Set();
+    /**
+     * Every pad the last song has, by its own pad key, with the sample it names.
+     * `rollStart` reads it to refuse a pad the song does not have and one with no
+     * sample at all: the audio thread enforces the same thing, and this is the
+     * answer the page gets at once.
+     * @type {Map<string, string>}
+     */
+    const padSamples = new Map();
+    /**
+     * The pads rolling right now, by pad key, with the sample each one was asked
+     * to roll. The engine cannot answer `rollStart` (a port cannot round-trip), so
+     * the count and the refusals the page is told about are kept here, and the
+     * processor keeps the very same limits for itself.
+     * @type {Map<string, string>}
+     */
+    const rollPads = new Map();
     const post = (message, transfer) => {
       if (transfer && transfer.length > 0) {
         try {
@@ -2086,6 +2171,29 @@
         const tracks = snapshot && Array.isArray(snapshot.tracks) ? snapshot.tracks : [];
         if (tracks.length > MAX_TRACKS) throw new Error(`A song can have at most ${MAX_TRACKS} tracks.`);
         post({ type: "song", snapshot: snapshot });
+        // Which pads a HOLD may latch, which ones loop and which ones have a
+        // sample is song data, so it is read here, once per song: `holdPad` and
+        // `rollStart` answer from it without a round trip.
+        gatePads.clear();
+        loopPads.clear();
+        padSamples.clear();
+        const pads = snapshot && typeof snapshot.pads === "object" && snapshot.pads ? snapshot.pads : {};
+        for (const key of Object.keys(pads)) {
+          const item = pads[key];
+          if (!item || typeof item !== "object") continue;
+          const padKey = padKeyOf(item.track_id, item.bank_id, item.index);
+          if (item.mode === "gate") gatePads.add(padKey);
+          if (item.loop === "loop" || item.loop === "pingpong") loopPads.add(padKey);
+          const sampleId = item.sample_id === undefined || item.sample_id === null ? "" : String(item.sample_id);
+          padSamples.set(padKey, sampleId);
+        }
+        // A roll whose pad or sample this song no longer has ends with it; every
+        // other roll plays on through an ordinary edit (`setSong` runs on every
+        // one of them). The engine prunes the same way, so neither side lies.
+        for (const [key, sampleId] of Array.from(rollPads)) {
+          if (padSamples.get(key) === sampleId) continue;
+          rollPads.delete(key);
+        }
         // The looper's buffers are the page's, so they are sized off this song's
         // tempo before anything can record into them.
         const meta = snapshot && typeof snapshot.meta === "object" && snapshot.meta ? snapshot.meta : {};
@@ -2138,18 +2246,23 @@
 
       /** @returns {void} */
       stop() {
+        // Stop clears the engine's rolls (and its loops and holds), so the page's
+        // own count follows it: a roll is not latched, it ends with the Stop.
+        rollPads.clear();
         post({ type: "stop" });
       },
 
       /**
-       * Release the pads' live state: every loop the engine is holding ends
-       * through the normal release. The page sends this when a DIFFERENT song
+       * Release the pads' live state: every loop, every HOLD and every ROLL the
+       * engine is holding ends through the normal release. The page sends this
+       * when a DIFFERENT song
        * opens — the live state belongs to the one going away — and never on an
        * ordinary song update, which runs on every edit and must leave what still
        * exists playing.
        * @returns {void}
        */
       resetLive() {
+        rollPads.clear();
         post({ type: "reset_live" });
       },
 
@@ -2504,42 +2617,227 @@
        * through a command or a history step, and is never quantized to the bar.
        * A `oneshot` pad plays to its end; a `gate` pad holds until
        * `liveRelease`.
+       *
+       * `index` is the pad whose sample plays. `locks` overrides that one
+       * voice's fields the way a step's locks do, and `sourceIndex` is the pad
+       * the finger is on when the press sounds another pad's sample (a chromatic
+       * or 16-velocity press). Both are optional and both are appended, so the
+       * four-argument call sends the message it always did.
        * @param {string} trackId
        * @param {string} bankId
-       * @param {number} index the pad, 0-15
+       * @param {number} index the pad whose sample plays, 0-15
        * @param {number} velocity 1-127
+       * @param {object} [locks] one voice's overrides, as a step's
+       * @param {number} [sourceIndex] the pad that was pressed, 0-15
        * @returns {void}
        */
-      livePad(trackId, bankId, index, velocity) {
+      livePad(trackId, bankId, index, velocity, locks, sourceIndex) {
         const v = Number(velocity);
-        post({
+        const message = {
           type: "live",
           track_id: String(trackId),
           bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
           index: Math.trunc(Number(index) || 0),
           v: Number.isFinite(v) ? v : 127,
           on: true,
-        });
+        };
+        if (locks && typeof locks === "object") message.locks = locks;
+        if (sourceIndex !== undefined && sourceIndex !== null) {
+          message.source_index = Math.trunc(Number(sourceIndex) || 0);
+        }
+        post(message);
       },
 
       /**
        * Release the `gate` voices one pad's live presses started. A `oneshot`
        * voice is left alone: a one-shot pad plays to the end of its range, as
        * `livePad` says.
+       *
+       * A `sourceIndex` lets go of only the press on that pad: one sample pad
+       * can carry a chord of chromatic presses, and a lifted finger ends its own
+       * note. A call that names none releases every Gate voice of the pad, which
+       * is what it always did.
        * @param {string} trackId
        * @param {string} bankId
-       * @param {number} index the pad, 0-15
+       * @param {number} index the pad whose sample plays, 0-15
+       * @param {number} [sourceIndex] the pad that was let go of, 0-15
        * @returns {void}
        */
-      liveRelease(trackId, bankId, index) {
-        post({
+      liveRelease(trackId, bankId, index, sourceIndex) {
+        const message = {
           type: "live",
           track_id: String(trackId),
           bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
           index: Math.trunc(Number(index) || 0),
           v: 0,
           on: false,
+        };
+        if (sourceIndex !== undefined && sourceIndex !== null) {
+          message.source_index = Math.trunc(Number(sourceIndex) || 0);
+        }
+        post(message);
+      },
+
+      /**
+       * Latch the `gate` voices one pad is sounding right now: the HOLD key.
+       *
+       * A held voice keeps sounding after the operator lets go and ignores its
+       * own gate countdown, so a Gate pad goes on by itself (M13) and a
+       * Gate+Loop pad's loop keeps turning (M14). Several pads may be held at
+       * once, and the SECOND tap of a latched pad is `releaseHeld` for that pad,
+       * not another call here.
+       *
+       * HOLD is page state, not engine state: while the page's HOLD key is armed
+       * it sends `livePad` and then this for each press. It works on Gate pads
+       * only (M15), and that is what the answer says: `false` means the song the
+       * engine was last handed has no Gate pad at this place, so nothing was
+       * asked of the engine and the page shows its note. A Gate pad that is not
+       * sounding has nothing to latch and still says `true` — the answer is about
+       * the pad's kind, never about what happens to be sounding.
+       * @param {string} trackId
+       * @param {string} bankId
+       * @param {number} index the pad, 0-15
+       * @returns {boolean} whether a HOLD was asked of the engine
+       */
+      holdPad(trackId, bankId, index) {
+        if (!gatePads.has(padKeyOf(trackId, bankId, index))) return false;
+        post({
+          type: "hold",
+          track_id: String(trackId),
+          bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
+          index: Math.trunc(Number(index) || 0),
         });
+        return true;
+      },
+
+      /**
+       * Let HOLD go: every latched voice when no pad is named (Stop and
+       * `resetLive` do this in the engine anyway), one track's when only it is
+       * named, and one pad's when the pad is. The latch is cleared and the
+       * voice's ordinary release runs from where it stands.
+       * @param {string} [trackId]
+       * @param {string} [bankId]
+       * @param {number} [index] the pad, 0-15
+       * @returns {void}
+       */
+      releaseHeld(trackId, bankId, index) {
+        if (trackId === undefined || trackId === null) {
+          post({ type: "release_held" });
+          return;
+        }
+        if (bankId === undefined || bankId === null) {
+          post({ type: "release_held", track_id: String(trackId) });
+          return;
+        }
+        post({
+          type: "release_held",
+          track_id: String(trackId),
+          bank_id: String(bankId),
+          index: Math.trunc(Number(index) || 0),
+        });
+      },
+
+      /**
+       * Pause everything the pads are playing, or let it go (the SP-404's
+       * SHIFT+HOLD Pause-all).
+       *
+       * A voice ducks to silence over 64 frames and then stands frozen where it
+       * reached: its read position, its envelope and its gate countdown stop
+       * with it, and resuming ramps it back up over the same 64 frames from that
+       * very frame (M17). Nothing is cut at full level, and a voice that is
+       * already ending or fading is not paused; it finishes.
+       *
+       * While the pause is on, every new start — a live press, a step, a roll
+       * repeat — is created paused: silent and frozen from its own first frame,
+       * and heard (ramping up) on resume (M22). Its hit and its light still land
+       * at the frame it starts on, because the voice really did start.
+       *
+       * It is live state: never a command, never a history step, never in the
+       * song. Stop and `resetLive` clear it in the engine.
+       * @param {boolean} on
+       * @returns {void}
+       */
+      pauseVoices(on) {
+        post({ type: "pause_voices", on: on === true });
+      },
+
+      /**
+       * Repeat one pad at a straight interval: the SP-404's ROLL key.
+       *
+       * Each repeat is a step-like start of that pad, so it flashes on the page,
+       * obeys the mute group and follows the pad's own mode — a Normal pad
+       * restarts on every repeat, a One-shot pad overlaps them (M20) — and a
+       * Gate pad's repeat carries a gate of one interval, so its repeats release
+       * themselves and never pile up (M18). The first hit of a roll is the press
+       * the operator made; the first REPEAT is one interval after that.
+       *
+       * At most four pads roll at once. Three things are refused, and this answer
+       * says so (the engine enforces the very same limits for itself): a fifth
+       * pad while four roll, a pad the song has no sample for, and a pad whose
+       * Loop setting is on (M19) — its loop is already what the operator hears.
+       * A pad that is already rolling is not refused and is not a fifth: it keeps
+       * its one roll and follows the interval it is given now.
+       *
+       * ROLL is live state: never a command, never a history step, never in the
+       * song. Stop and `resetLive` end every roll, and a roll made under Pause-all
+       * keeps its clock — each of its repeats starts paused and is heard on resume
+       * (M21, M22).
+       * @param {string} trackId
+       * @param {string} bankId
+       * @param {number} index the pad, 0-15
+       * @param {"1/4"|"1/8"|"1/16"|"1/32"|"1/64"} interval the gap between repeats
+       * @param {number} velocity 1-127
+       * @returns {boolean} whether that pad is rolling now
+       */
+      rollStart(trackId, bankId, index, interval, velocity) {
+        const key = padKeyOf(trackId, bankId, index);
+        // A looping pad rolls nothing (M19): its loop is what the operator
+        // hears, so the page says so instead of stacking repeats on it.
+        if (loopPads.has(key)) return false;
+        // Nothing to repeat without a sample: a pad the song does not have, or
+        // one it has cleared.
+        const sampleId = padSamples.get(key);
+        if (sampleId === undefined || sampleId === "") return false;
+        // Four pads, no more — a pad already rolling keeps its own slot.
+        if (!rollPads.has(key) && rollPads.size >= MAX_ROLLS) return false;
+        rollPads.set(key, sampleId);
+        const v = Number(velocity);
+        post({
+          type: "roll_start",
+          track_id: String(trackId),
+          bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
+          index: Math.trunc(Number(index) || 0),
+          interval: typeof interval === "string" ? interval : "",
+          v: Number.isFinite(v) ? v : 127,
+        });
+        return true;
+      },
+
+      /**
+       * End one pad's roll. The voices its repeats already started are left
+       * alone, as a press's voice is when the finger lifts.
+       * @param {string} trackId
+       * @param {string} bankId
+       * @param {number} index the pad, 0-15
+       * @returns {void}
+       */
+      rollStop(trackId, bankId, index) {
+        rollPads.delete(padKeyOf(trackId, bankId, index));
+        post({
+          type: "roll_stop",
+          track_id: String(trackId),
+          bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
+          index: Math.trunc(Number(index) || 0),
+        });
+      },
+
+      /**
+       * End every roll at once.
+       * @returns {void}
+       */
+      rollStopAll() {
+        rollPads.clear();
+        post({ type: "roll_stop_all" });
       },
 
       /**
@@ -2828,6 +3126,7 @@
         pendingSamples.clear();
         pendingLibrary.clear();
         pendingLooper.clear();
+        rollPads.clear();
         node.port.onmessage = null;
       },
     };

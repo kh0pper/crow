@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createStudioServer, patternClipRead } from "../bundles/studio/server/mcp.js";
+import { actionWords, createStudioServer, patternClipRead } from "../bundles/studio/server/mcp.js";
 import { createRenderer } from "../bundles/studio/server/render.js";
 import { decodeWav } from "../bundles/studio/server/wav.js";
 import { listCommands } from "../bundles/studio/server/commands/registry.js";
@@ -1466,6 +1466,12 @@ test("studio_midi lists mappings with who set them", async (t) => {
   } finally {
     await client.close();
   }
+});
+
+test("actionWords gives the three pad performance kinds plain words", () => {
+  assert.equal(actionWords({ kind: "pad.hold" }, {}), "press HOLD on the pads");
+  assert.equal(actionWords({ kind: "pad.roll" }, {}), "hold ROLL on the pads");
+  assert.equal(actionWords({ kind: "pad.pause_all" }, {}), "pause the pads, and resume them");
 });
 
 test("a long motion lane is read as a spread of at most 256 points", () => {

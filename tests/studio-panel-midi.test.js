@@ -18,9 +18,11 @@
  * the rest of the gesture Learn mapped is not also played, a knob waits for a
  * control change, an unplugged controller that comes back by name keeps its
  * mapping, the table says who set each row, a routed pedal runs its action
- * locally and writes no history step, a proposed mapping routes nothing, and a
- * second tab holds no routing lock and so routes nothing at all — asking again
- * on its beat, and letting go of a grant that arrives after the page closed.
+ * locally and writes no history step, a control change that falls but stays
+ * above 64 releases nothing a held action holds, a proposed mapping routes
+ * nothing, and a second tab holds no routing lock and so routes nothing at all —
+ * asking again on its beat, and letting go of a grant that arrives after the page
+ * closed.
  *
  * No browser is needed: nothing here touches audio or Web MIDI for real.
  */
@@ -266,8 +268,17 @@ function fakeEngine() {
     clips: [],
     pads: [],
     releases: [],
+    holds: [],
+    heldReleases: [],
+    pauses: [],
+    gatePads: [],
+    // ROLL (C5b): the repeats the page started, the stops it asked for, and how
+    // often it ended them all at once.
+    rolls: [],
+    rollStops: [],
+    rollStopsAll: 0,
     fx: [],
-    looper: [],
+    looperSteps: [],
     plays: 0,
     stops: 0,
     stopAlls: 0,
@@ -293,9 +304,45 @@ function fakeEngine() {
     liveRelease(trackId, bankId, index) {
       engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
     },
+    holdPad(trackId, bankId, index) {
+      const key = `${trackId}|${bankId}|${index}`;
+      if (!engine.gatePads.includes(key)) return false;
+      engine.holds.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+      return true;
+    },
+    releaseHeld(trackId, bankId, index) {
+      if (trackId === undefined || trackId === null) {
+        engine.heldReleases.push([]);
+        return;
+      }
+      engine.heldReleases.push([String(trackId), String(bankId), Number(index)]);
+    },
+    pauseVoices(on) {
+      engine.pauses.push(on === true);
+    },
+    rollStart(trackId, bankId, index, interval, v) {
+      engine.rolls.push({
+        track_id: String(trackId),
+        bank_id: String(bankId),
+        index: Number(index),
+        interval: String(interval),
+        v: Number(v),
+      });
+      return true;
+    },
+    rollStop(trackId, bankId, index) {
+      engine.rollStops.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+    },
+    rollStopAll() {
+      engine.rollStopsAll += 1;
+    },
+    /** Make one pad a Gate pad: HOLD latches it and nothing else (M15). */
+    gate(trackId, bankId, index) {
+      engine.gatePads.push(`${trackId}|${bankId}|${index}`);
+    },
     fxHold(name, amount) { engine.fx.push({ name: String(name), amount: Number(amount), on: true }); },
     fxRelease(name) { engine.fx.push({ name: String(name), amount: 0, on: false }); },
-    looper(action) { engine.looper.push(String(action)); },
+    looper(action) { engine.looperSteps.push(String(action)); },
     loadSample() { return Promise.resolve(); },
     unloadSample() {},
     loadAudio() {},
@@ -321,6 +368,7 @@ async function bootMidi(options = {}) {
   const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
   const { MIDI_SCRIPT } = await import("../bundles/studio/panel/midi.js");
   const { MIDI_ROUTE_SCRIPT } = await import("../bundles/studio/panel/midi-route.js");
+  const { PAD_INPUT_SCRIPT } = await import("../bundles/studio/panel/pad-input.js");
 
   const doc = options.doc || (await midiDoc());
   const res = {
@@ -436,7 +484,7 @@ async function bootMidi(options = {}) {
     "clearTimeout",
     "setInterval",
     "clearInterval",
-    `${MIDI_ROUTE_SCRIPT}\n${MIDI_SCRIPT}\n${clientText}`,
+    `${PAD_INPUT_SCRIPT}\n${MIDI_ROUTE_SCRIPT}\n${MIDI_SCRIPT}\n${clientText}`,
   );
   run(
     document,
@@ -936,6 +984,55 @@ const ROUTE_CASES = [
     routed: false,
   },
   {
+    name: "a HOLD press on a note",
+    maps: { a: liveMapping("a", { kind: "pad.hold" }, NOTE3) },
+    message: incoming({ type: "note" }),
+    routed: true,
+  },
+  {
+    name: "a HOLD press on a program change",
+    maps: { a: liveMapping("a", { kind: "pad.hold" }, PC3) },
+    routed: false,
+  },
+  {
+    name: "a ROLL on a control change",
+    maps: { a: liveMapping("a", { kind: "pad.roll" }, CC3) },
+    message: incoming({ type: "cc" }),
+    routed: true,
+  },
+  {
+    name: "a ROLL on a program change",
+    maps: { a: liveMapping("a", { kind: "pad.roll" }, PC3) },
+    routed: false,
+  },
+  {
+    name: "Pause on a program change",
+    maps: { a: liveMapping("a", { kind: "pad.pause_all" }, PC3) },
+    routed: true,
+  },
+  {
+    name: "a HOLD with an argument of its own",
+    maps: { a: liveMapping("a", { kind: "pad.hold", index: 0 }, NOTE3) },
+    message: incoming({ type: "note" }),
+    routed: false,
+  },
+  {
+    name: "a Pause holding an argument",
+    maps: { a: liveMapping("a", { kind: "pad.pause_all", paused: true }, PC3) },
+    routed: false,
+  },
+  {
+    name: "a proposed ROLL",
+    maps: { a: liveMapping("a", { kind: "pad.roll" }, CC3, { proposed: true }) },
+    message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "a Pause whose action changed after accept",
+    maps: { a: liveMapping("a", { kind: "pad.pause_all" }, PC3, { accepted_action: { kind: "stop_all" } }) },
+    routed: false,
+  },
+  {
     name: "a macro index past the end",
     maps: { a: liveMapping("a", { kind: "macro.set", index: 99 }, CC3) },
     message: incoming({ type: "cc" }),
@@ -1068,6 +1165,14 @@ const ACTION_CANDIDATES = [
   ["track.macro", { track_id: "t", index: 7 }],
   ["track.macro", { track_id: "t", index: 8 }],
   ["track.macro", { track_id: "t", index: 0.5 }],
+  ["pad.hold", {}],
+  ["pad.hold", { index: 0 }],
+  ["pad.hold", { on: true }],
+  ["pad.roll", {}],
+  ["pad.roll", { interval: "1/16" }],
+  ["pad.pause_all", {}],
+  ["pad.pause_all", { paused: true }],
+  ["pad.pause_all", { index: 0 }],
   ["fx.hold", { name: "stutter" }],
   ["fx.hold", { name: "reverb_throw" }],
   ["fx.hold", { name: "constructor" }],
@@ -1295,6 +1400,136 @@ test("a mapped trigger fires on the press, not on the release", async () => {
   ui.pedal(DEVICE, [0xb0, 20, 64]);
   await ui.settle();
   assert.deepEqual(ui.engine.clips, [CLIP], "a CC at 64 launches the clip it names");
+});
+
+test("a toggle on a knob fires only where it crosses 64, not on every value above it", async () => {
+  const doc = await midiDoc();
+  const toggles = [
+    ["m-knob-pause", 20, { kind: "pad.pause_all" }],
+    ["m-knob-stop", 21, { kind: "stop_all" }],
+    ["m-knob-loop", 22, { kind: "looper.cycle" }],
+    ["m-knob-hold", 23, { kind: "pad.hold" }],
+  ];
+  for (const [id, number, action] of toggles) {
+    await writeMapping(doc, {
+      id,
+      device_name: DEVICE,
+      message: { type: "cc", channel: 1, number },
+      action,
+    });
+  }
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  /** Turn one knob through these values, one message at a time. */
+  const turn = async (number, values) => {
+    for (const value of values) {
+      ui.pedal(DEVICE, [0xb0, number, value]);
+      await ui.settle();
+    }
+  };
+  const rise = [0, 10, 63, 64, 80, 100, 127];
+  const again = [63, 40, 0, 64, 100, 127];
+
+  // HOLD: one rise arms it once, however many values above 64 the knob reports.
+  await turn(23, rise);
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "true",
+    "HOLD armed once for the whole rise");
+  await turn(23, again);
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false",
+    "dropping below 64 armed it, and the next rise disarmed it once");
+
+  // Pause: one press for the rise, and one more for the next crossing.
+  await turn(20, rise);
+  assert.deepEqual(ui.engine.pauses, [true], "Pause fired once for the whole rise");
+  await turn(20, again);
+  assert.deepEqual(ui.engine.pauses, [true, false], "Pause's next crossing paused again");
+
+  // The looper walks one step per crossing, not one per value.
+  await turn(22, rise);
+  assert.deepEqual(ui.engine.looperSteps, ["record"], "the looper stepped once for the whole rise");
+  await turn(22, again);
+  assert.deepEqual(ui.engine.looperSteps, ["record", "play"], "the looper stepped on once more");
+
+  // Stop-all: one stop for the rise, and one more for the next crossing.
+  await turn(21, rise);
+  assert.equal(ui.engine.stopAlls, 1, "Stop-all fired once for the whole rise");
+  await turn(21, again);
+  assert.equal(ui.engine.stopAlls, 2, "Stop-all's next crossing stopped once more");
+});
+
+test("a control change still above 64 releases no held action", async () => {
+  const doc = await midiDoc();
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const song = snapshot(doc);
+  const bankId = String(Object.values(song.banks || {})[0].id);
+  await writeMapping(doc, {
+    id: "m-cc-pad",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 21 },
+    action: { kind: "pad.play", track_id: TRACK, bank_id: bankId, index: 0 },
+  });
+  await writeMapping(doc, {
+    id: "m-cc-fx",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 22 },
+    action: { kind: "fx.hold", name: "stutter" },
+  });
+  await writeMapping(doc, {
+    id: "m-cc-roll",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 20 },
+    action: { kind: "pad.roll" },
+  });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  /** Send one CC through a pressure reading's fall: 127, 110 and 90. */
+  const fall = async (number) => {
+    for (const value of [127, 110, 90]) {
+      ui.pedal(DEVICE, [0xb0, number, value]);
+      await ui.settle();
+    }
+  };
+
+  // A pad: the first crossing plays it, and the readings still above 64 leave
+  // the pad it is holding alone.
+  await fall(21);
+  assert.equal(ui.engine.pads.length, 1, "the first crossing played the pad, once");
+  assert.deepEqual(ui.engine.releases, [], "no pad was released while the pedal stayed above 64");
+  ui.pedal(DEVICE, [0xb0, 21, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.releases,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }], "crossing below 64 released it, once");
+
+  // An effect: the same, in the engine and on the button the pedal wears.
+  await fall(22);
+  assert.deepEqual(ui.engine.fx, [{ name: "stutter", amount: 1, on: true }],
+    "the effect was held once and stayed held");
+  const fxButton = ui.document.querySelector("[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]");
+  assert.ok(fxButton, "the effect's button is drawn");
+  assert.equal(fxButton.getAttribute("aria-pressed"), "true", "and it still shows the hold");
+  ui.pedal(DEVICE, [0xb0, 22, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx,
+    [{ name: "stutter", amount: 1, on: true }, { name: "stutter", amount: 0, on: false }],
+    "crossing below 64 released the effect, once");
+  assert.equal(fxButton.getAttribute("aria-pressed"), "false", "and the button came back up");
+
+  // ROLL: held through the whole fall, let go only where the value drops.
+  await fall(20);
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "true",
+    "ROLL stayed held while the pedal was still above 64");
+  ui.pedal(DEVICE, [0xb0, 20, 0]);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "false",
+    "crossing below 64 let ROLL go");
 });
 
 test("a knob's Learn waits for a control change", async () => {
@@ -1531,6 +1766,213 @@ test("a routed action is held to what the page can really do", async () => {
   assert.equal(ui.toastText(), "", "and it is said once");
 
   ui.window.StudioMidiRoute = real;
+});
+
+// ---- HOLD and Pause, from a pedal (C5a) ------------------------------------
+
+/** The pads host's HOLD button, asserted to be drawn. */
+function holdButtonOf(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-hold]");
+  assert.ok(node, "the pads carry a HOLD button");
+  return node;
+}
+
+test("a mapped pad.hold runs the HOLD button's own path", async () => {
+  const doc = await midiDoc();
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false", "HOLD starts unarmed");
+
+  // HOLD is a Learn target like any other control: picking it arms nothing, and
+  // the next message becomes its mapping.
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  ui.click("[data-role=sampler-pads] [data-act=pad-hold]");
+  await ui.settle();
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false",
+    "picking HOLD for Learn does not arm it");
+  assert.equal(String(holdButtonOf(ui).className).includes("st-learn"), true,
+    "and it is outlined while Learn waits on it");
+
+  ui.pedal(DEVICE, [0x90, 64, 100]);
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the pedal taught one mapping");
+  assert.deepEqual(maps[0].args.action, { kind: "pad.hold" }, "to HOLD itself");
+  await ui.apply("midi.map", maps[0].args, { kind: "human" });
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false",
+    "and the gesture that taught it armed nothing");
+
+  // From then on the pedal's press is the tap the button makes.
+  ui.pedal(DEVICE, [0x90, 64, 100]);
+  await ui.settle();
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "true", "the pedal's press armed HOLD");
+
+  // HOLD is a latch: letting the note go leaves it armed.
+  ui.pedal(DEVICE, [0x80, 64, 0]);
+  await ui.settle();
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "true", "and its release changes nothing");
+});
+
+test("with HOLD armed, a mapped pad.play latches the pad as a touch press does", async () => {
+  const doc = await midiDoc();
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const bankId = String(Object.values(snapshot(doc).banks || {})[0].id);
+  await writeMapping(doc, {
+    id: "m-hold-key",
+    device_name: DEVICE,
+    message: { type: "note", channel: 1, number: 64 },
+    action: { kind: "pad.hold" },
+  });
+  await writeMapping(doc, {
+    id: "m-pad-0",
+    device_name: DEVICE,
+    message: { type: "note", channel: 1, number: 70 },
+    action: { kind: "pad.play", track_id: TRACK, bank_id: bankId, index: 0 },
+  });
+  const ui = await bootMidi({ doc });
+  ui.engine.gate(TRACK, bankId, 0);
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  ui.pedal(DEVICE, [0x90, 64, 100]);
+  await ui.settle();
+  ui.pedal(DEVICE, [0x80, 64, 0]);
+  await ui.settle();
+
+  // A pad press from the controller goes through the same press a finger makes:
+  // it plays the pad at the message's velocity and HOLD latches it.
+  ui.pedal(DEVICE, [0x90, 70, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.pads,
+    [{ track_id: TRACK, bank_id: bankId, index: 0, v: 100 }], "the mapped press played the pad");
+  assert.deepEqual(ui.engine.holds,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }], "and HOLD latched it");
+
+  ui.pedal(DEVICE, [0x80, 70, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.releases, [], "letting the note go ends nothing: the latch holds the pad");
+
+  // The next press of that same note is HOLD's second tap on the pad: it lets a
+  // latched pad go and plays nothing.
+  ui.pedal(DEVICE, [0x90, 70, 100]);
+  await ui.settle();
+  assert.equal(ui.engine.pads.length, 1, "a latched pad's mapped tap plays nothing");
+  assert.deepEqual(ui.engine.heldReleases, [[TRACK, bankId, 0]], "and lets that pad go");
+});
+
+// ---- ROLL, from a pedal (C5b) ---------------------------------------------
+
+/** The pads host's ROLL key, as it is drawn right now. */
+function rollKeyOf(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-roll]");
+  assert.ok(node, "the pads carry a ROLL key");
+  return node;
+}
+
+/** Let go of the pointer anywhere on the page, as a finger's lift does. */
+function liftPointer(ui) {
+  for (const handler of [...(ui.windowListeners.pointerup || [])]) handler(ui.event("pointerup", {}));
+}
+
+test("ROLL is a Learn target, and the pedal's press holds it until it comes up", async () => {
+  const doc = await midiDoc();
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  // Picking ROLL for Learn arms nothing: it is the control being picked.
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  rollKeyOf(ui).dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  liftPointer(ui);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "false", "Learn did not hold ROLL");
+  assert.equal(String(rollKeyOf(ui).className).includes("st-learn"), true,
+    "and it is outlined while Learn waits on it");
+
+  ui.pedal(DEVICE, [0x90, 66, 100]);
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the pedal taught one mapping");
+  assert.deepEqual(maps[0].args.action, { kind: "pad.roll" }, "to ROLL itself");
+  assert.match(ui.toastText(), /ROLL a pad/, "and the toast names the action in the table's own words");
+  await ui.apply("midi.map", maps[0].args, { kind: "human" });
+
+  // From then on the pedal holds the key while its note is down.
+  ui.pedal(DEVICE, [0x90, 66, 100]);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "true", "the pedal's press holds ROLL");
+
+  ui.pedal(DEVICE, [0x80, 66, 0]);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "false", "and its release lets it go");
+});
+
+test("a MIDI pad.roll message holds ROLL, and a MIDI pad.play press while ROLL is held calls rollStart", async () => {
+  const doc = await midiDoc();
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const bankId = String(Object.values(snapshot(doc).banks || {})[0].id);
+  await writeMapping(doc, {
+    id: "m-roll",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 20 },
+    action: { kind: "pad.roll" },
+  });
+  await writeMapping(doc, {
+    id: "m-roll-pad-0",
+    device_name: DEVICE,
+    message: { type: "note", channel: 1, number: 71 },
+    action: { kind: "pad.play", track_id: TRACK, bank_id: bankId, index: 0 },
+  });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  // With ROLL up the mapped pad plays its own voice, exactly as it always did.
+  ui.pedal(DEVICE, [0x90, 71, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.rolls, [], "no roll while ROLL is up");
+  assert.deepEqual(ui.engine.pads,
+    [{ track_id: TRACK, bank_id: bankId, index: 0, v: 100 }], "the pad played its own voice");
+  ui.pedal(DEVICE, [0x80, 71, 0]);
+  await ui.settle();
+
+  // A control change at 64 or above holds ROLL.
+  ui.pedal(DEVICE, [0xb0, 20, 100]);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "true", "the pedal's press holds ROLL");
+
+  // The very next pad press is a repeat at the page's own interval, through the
+  // same press a finger makes, and plays no voice of its own.
+  ui.pedal(DEVICE, [0x90, 71, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.rolls,
+    [{ track_id: TRACK, bank_id: bankId, index: 0, interval: "1/16", v: 100 }],
+    "the mapped press rolled the pad at the default interval and its velocity");
+  assert.equal(ui.engine.pads.length, 1, "and played no voice of its own");
+
+  // The note's release is the roll's stop, and nothing else.
+  const releasedBefore = ui.engine.releases.length;
+  ui.pedal(DEVICE, [0x80, 71, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.rollStops,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }], "the release stopped that pad's roll, once");
+  assert.equal(ui.engine.releases.length, releasedBefore, "and released no voice of its own");
+
+  // A control change below 64 lets the key go.
+  ui.pedal(DEVICE, [0xb0, 20, 0]);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "false", "the single up released ROLL");
 });
 
 // ---- the MIDI page: proposals, accept, and what a row sends -----------------

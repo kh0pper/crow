@@ -111,6 +111,7 @@ const SOURCE_NAMES = Object.freeze([
   "resample.js",
   "sampler-voice.js",
   "pad-events.js",
+  "roll-clock.js",
   "perf-fx.js",
   "meter.js",
   "dynamics.js",
