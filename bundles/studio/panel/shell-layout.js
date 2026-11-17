@@ -2,9 +2,10 @@
  * Crow Studio — the shell's layout model, as one inline classic script.
  *
  * The Studio shell is a grid of widgets: the scene grid, the one editor slot,
- * the sampler's four (pads, steps, chop and effects), the takes lane, the MIDI
- * lane, the history and the agent box. Which of them are on the page, in what
- * order, and at which size is VIEW STATE and lives
+ * the sampler's four (pads, steps, chop and effects), the record lanes and the
+ * scene plan, the takes lane, the MIDI lane, the history and the agent box.
+ * Which of them are on the page, in what order, and at which size is VIEW STATE
+ * and lives
  * here — in this browser, for this song, in this mode and size class. It is
  * never a command, never a history entry and never part of the song document,
  * because a layout in the document would sync to every peer and the agent, and
@@ -64,7 +65,7 @@ export const SHELL_LAYOUT_SCRIPT = [
   "  // Every widget the shell knows, in the order a tray lists them, with the",
   "  // sizes each one may take. The sizes are the plan's: a widget that needs",
   "  // room for a grid or an editor never shrinks to a column.",
-  "  var WIDGET_ORDER = ['scene-grid', 'editor', 'pads', 'steps', 'chop', 'fx', 'keyboard', 'mixer-strip', 'takes', 'midi', 'history', 'agent'];",
+  "  var WIDGET_ORDER = ['scene-grid', 'editor', 'pads', 'steps', 'chop', 'fx', 'keyboard', 'mixer-strip', 'rec-lanes', 'scene-plan', 'takes', 'midi', 'history', 'agent'];",
   "  var WIDGETS = {",
   "    'scene-grid': { sizes: ['m', 'l'] },",
   "    'editor': { sizes: ['m', 'l'] },",
@@ -74,6 +75,8 @@ export const SHELL_LAYOUT_SCRIPT = [
   "    'fx': { sizes: ['s', 'm'] },",
   "    'keyboard': { sizes: ['m', 'l'] },",
   "    'mixer-strip': { sizes: ['s', 'm'] },",
+  "    'rec-lanes': { sizes: ['m', 'l'] },",
+  "    'scene-plan': { sizes: ['s', 'm'] },",
   "    'takes': { sizes: ['s', 'm', 'l'] },",
   "    'midi': { sizes: ['s', 'm'] },",
   "    'history': { sizes: ['s', 'm'] },",
@@ -88,7 +91,9 @@ export const SHELL_LAYOUT_SCRIPT = [
   "      ['scene-grid', 'l'], ['editor', 'm'], ['pads', 'm'], ['steps', 'l'], ['fx', 's'], ['history', 's']",
   "    ],",
   "    perform: [['scene-grid', 'l'], ['pads', 'l'], ['fx', 'm'], ['midi', 's'], ['history', 's']],",
-  "    record: [['scene-grid', 'm'], ['takes', 'l'], ['midi', 's'], ['history', 's']]",
+  "    record: [",
+  "      ['rec-lanes', 'l'], ['scene-plan', 'm'], ['takes', 'm'], ['pads', 'm'], ['scene-grid', 'm'], ['midi', 's'], ['history', 's']",
+  "    ]",
   "  };",
   "",
   "  // A widget's span: of 12 columns on a laptop, of 6 on a tablet. A phone is",

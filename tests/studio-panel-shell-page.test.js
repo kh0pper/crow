@@ -753,7 +753,7 @@ test("the studio's mode survives a reload", async () => {
   first.click("[data-mode=record]");
   await first.settle();
   assert.equal(storage.getItem(MODE_KEY), "record", "the choice is this device's");
-  assert.deepEqual(shownWidgets(first.page), ["scene-grid", "takes", "midi", "history"], "and the page followed it");
+  assert.deepEqual(shownWidgets(first.page), ["rec-lanes", "scene-plan", "takes", "pads", "scene-grid", "midi", "history"], "and the page followed it");
   first.stop();
 
   const second = await bootPage({ storage });
@@ -761,7 +761,7 @@ test("the studio's mode survives a reload", async () => {
   await second.settle();
   assert.equal(pressed(second, "record"), "true", "a reload comes back in the mode it was left in");
   assert.equal(pressed(second, "compose"), "false");
-  assert.deepEqual(shownWidgets(second.page), ["scene-grid", "takes", "midi", "history"]);
+  assert.deepEqual(shownWidgets(second.page), ["rec-lanes", "scene-plan", "takes", "pads", "scene-grid", "midi", "history"]);
   second.stop();
 });
 
@@ -791,7 +791,15 @@ test("the boot waits for the template, seeds the song from it, and remembers it 
   );
   assert.deepEqual(
     JSON.parse(storage.getItem(layoutKey(SONG, "record", "tablet"))).shown,
-    [{ id: "scene-grid", size: "m" }, { id: "takes", size: "l" }, { id: "midi", size: "s" }, { id: "history", size: "s" }],
+    [
+      { id: "rec-lanes", size: "l" },
+      { id: "scene-plan", size: "m" },
+      { id: "takes", size: "m" },
+      { id: "pads", size: "m" },
+      { id: "scene-grid", size: "m" },
+      { id: "midi", size: "s" },
+      { id: "history", size: "s" },
+    ],
     "and every other slot is materialized from the built-in default",
   );
   assert.deepEqual(shownWidgets(page), ["takes", "agent"], "the page shows the template's layout");

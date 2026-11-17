@@ -118,7 +118,7 @@ test("the widget table and the modes are the plan's", () => {
   assert.deepEqual(SIZE_CLASSES, ["phone", "tablet", "laptop"]);
   assert.deepEqual(WIDGET_ORDER, [
     "scene-grid", "editor", "pads", "steps", "chop", "fx", "keyboard", "mixer-strip",
-    "takes", "midi", "history", "agent",
+    "rec-lanes", "scene-plan", "takes", "midi", "history", "agent",
   ]);
   assert.deepEqual(WIDGETS["scene-grid"].sizes, ["m", "l"]);
   assert.deepEqual(WIDGETS.editor.sizes, ["m", "l"]);
@@ -214,6 +214,125 @@ test("the mixer strip is a widget with sizes, in no default, and in the tray", (
   assert.deepEqual(page.WIDGETS["mixer-strip"], WIDGETS["mixer-strip"], "the page's own table holds it too");
 });
 
+test("rec-lanes and scene-plan are in WIDGETS with their sizes", () => {
+  assert.deepEqual(WIDGETS["rec-lanes"].sizes, ["m", "l"], "the lanes take half a row or all of it");
+  assert.deepEqual(WIDGETS["scene-plan"].sizes, ["s", "m"], "the plan fits a column or half a row");
+  assert.equal(WIDGET_ORDER.includes("rec-lanes"), true, "the tray can list the record lanes");
+  assert.equal(WIDGET_ORDER.includes("scene-plan"), true, "and the scene plan");
+  assert.equal(
+    WIDGET_ORDER.indexOf("scene-plan"),
+    WIDGET_ORDER.indexOf("rec-lanes") + 1,
+    "the plan is listed beside the lanes it belongs to",
+  );
+  assert.equal(
+    WIDGET_ORDER.indexOf("rec-lanes"),
+    WIDGET_ORDER.indexOf("mixer-strip") + 1,
+    "and both sit after the strip, before the takes lane",
+  );
+
+  for (const mode of ["compose", "perform"]) {
+    for (const sizeClass of SIZE_CLASSES) {
+      const layout = defaultLayout(mode, sizeClass);
+      const tray = trayOf(layout);
+      for (const id of ["rec-lanes", "scene-plan"]) {
+        assert.equal(tray.includes(id), true, `${mode}.${sizeClass} offers ${id} in the tray`);
+        assert.equal(
+          layout.shown.some((row) => row.id === id),
+          false,
+          `${mode}.${sizeClass} does not put ${id} on the page by itself`,
+        );
+      }
+    }
+  }
+
+  const compose = defaultLayout("compose", "laptop");
+  assert.deepEqual(
+    showWidget(compose, "rec-lanes").shown.slice(-1),
+    [{ id: "rec-lanes", size: "m" }],
+    "the lanes come back at their first size",
+  );
+  assert.deepEqual(
+    resizeWidget(showWidget(compose, "rec-lanes"), "rec-lanes").shown.slice(-1),
+    [{ id: "rec-lanes", size: "l" }],
+    "and step to their second",
+  );
+  assert.deepEqual(
+    showWidget(compose, "scene-plan").shown.slice(-1),
+    [{ id: "scene-plan", size: "s" }],
+    "the plan comes back at a column",
+  );
+  assert.deepEqual(columnSpan("l", "laptop"), 12, "a full-width lane widget is the whole row");
+  assert.deepEqual(columnSpan("s", "tablet"), 3, "and a small plan is part of a tablet row");
+
+  const page = new Function("window", SHELL_LAYOUT_SCRIPT + "\nreturn window.StudioShellLayout;")({});
+  assert.deepEqual(page.WIDGETS["rec-lanes"], WIDGETS["rec-lanes"], "the page's own table holds the lanes");
+  assert.deepEqual(page.WIDGETS["scene-plan"], WIDGETS["scene-plan"], "and the plan");
+});
+
+test("the record default is rec-lanes l, scene-plan m, takes m, pads m, scene-grid m, midi s, history s", () => {
+  assert.deepEqual(defaultLayout("record", "laptop").shown, [
+    { id: "rec-lanes", size: "l" },
+    { id: "scene-plan", size: "m" },
+    { id: "takes", size: "m" },
+    { id: "pads", size: "m" },
+    { id: "scene-grid", size: "m" },
+    { id: "midi", size: "s" },
+    { id: "history", size: "s" },
+  ], "Record opens on the lanes, the plan, the takes, the pads, the grid, MIDI and the history");
+
+  for (const sizeClass of SIZE_CLASSES) {
+    const layout = defaultLayout("record", sizeClass);
+    assert.deepEqual(layout.shown, defaultLayout("record", "laptop").shown, `a ${sizeClass} starts from the same set`);
+    assert.equal(layout.v, 1);
+    for (const row of layout.shown) {
+      assert.equal(WIDGETS[row.id].sizes.includes(row.size), true, `${row.id} at ${row.size} is an allowed size`);
+    }
+  }
+
+  const tray = trayOf(defaultLayout("record", "laptop"));
+  for (const id of ["rec-lanes", "scene-plan"]) {
+    assert.equal(tray.includes(id), false, `${id} is on the page, not in the tray, in Record`);
+  }
+  assert.equal(tray.includes("pads"), false, "the sampler's pads join the Record page (C4: Resample lives there)");
+  assert.equal(tray.includes("editor"), true, "the editor stays in the tray");
+  assert.equal(tray.includes("agent"), true, "and so does the agent");
+
+  const page = new Function("window", SHELL_LAYOUT_SCRIPT + "\nreturn window.StudioShellLayout;")({});
+  assert.deepEqual(page.defaultLayout("record", "laptop"), defaultLayout("record", "laptop"));
+});
+
+test("a saved P2a layout keeps its widgets and the new ids are in the tray", () => {
+  // A layout this device saved before P2b: the lanes and the plan did not exist
+  // yet, so they are not on the page and are not inserted into it either.
+  const saved = JSON.stringify({
+    v: 1,
+    shown: [
+      { id: "scene-grid", size: "m" },
+      { id: "takes", size: "l" },
+      { id: "midi", size: "s" },
+      { id: "history", size: "s" },
+    ],
+  });
+  const layout = parseLayout(saved, defaultLayout("record", "laptop"));
+  assert.deepEqual(idsOf(layout), ["scene-grid", "takes", "midi", "history"], "the page the operator saved is the page they get");
+  assert.equal(sizeOf(layout, "takes"), "l", "including the size the old default gave the takes lane");
+
+  const tray = trayOf(layout);
+  for (const id of ["rec-lanes", "scene-plan"]) {
+    assert.equal(tray.includes(id), true, `${id} is offered by the tray`);
+    assert.equal(idsOf(layout).includes(id), false, `${id} is not put on the page by itself`);
+  }
+  assert.deepEqual(
+    tray,
+    ["editor", "pads", "steps", "chop", "fx", "keyboard", "mixer-strip", "rec-lanes", "scene-plan", "agent"],
+    "in table order",
+  );
+
+  const storage = memoryStorage();
+  assert.equal(saveLayout(storage, "song-a", "record", "laptop", layout), true);
+  assert.deepEqual(loadLayout(storage, "song-a", "record", "laptop"), layout, "and a reload reads the same page back");
+});
+
 test("sizeClassFor puts the boundaries at 640 and 1024", () => {
   assert.equal(sizeClassFor(320), "phone");
   assert.equal(sizeClassFor(639), "phone");
@@ -240,8 +359,11 @@ test("the default layout of each mode is the plan's, with the agent in the tray"
     { id: "history", size: "s" },
   ]);
   assert.deepEqual(defaultLayout("record", "laptop").shown, [
+    { id: "rec-lanes", size: "l" },
+    { id: "scene-plan", size: "m" },
+    { id: "takes", size: "m" },
+    { id: "pads", size: "m" },
     { id: "scene-grid", size: "m" },
-    { id: "takes", size: "l" },
     { id: "midi", size: "s" },
     { id: "history", size: "s" },
   ]);
@@ -342,7 +464,9 @@ test("a saved layout from P1 (no new ids) loads and the four new ids are in the 
     assert.equal(tray.includes(id), true, `${id} is offered by the tray`);
     assert.equal(idsOf(layout).includes(id), false, `${id} is not put on the page by itself`);
   }
-  assert.deepEqual(tray, ["pads", "steps", "chop", "fx", "keyboard", "mixer-strip", "takes", "midi", "agent"], "in table order");
+  assert.deepEqual(tray, [
+    "pads", "steps", "chop", "fx", "keyboard", "mixer-strip", "rec-lanes", "scene-plan", "takes", "midi", "agent",
+  ], "in table order");
 });
 
 test("an unknown id in a saved layout is dropped", () => {
@@ -376,15 +500,15 @@ test("parseLayout hands back a layout of its own, never the fallback it was give
 
   const page = defaultLayout("record", "laptop");
   const changed = moveWidget(page, "takes", 0);
-  assert.deepEqual(idsOf(page), ["scene-grid", "takes", "midi", "history"], "the argument is untouched");
-  assert.deepEqual(idsOf(changed), ["takes", "scene-grid", "midi", "history"]);
+  assert.deepEqual(idsOf(page), ["rec-lanes", "scene-plan", "takes", "pads", "scene-grid", "midi", "history"], "the argument is untouched");
+  assert.deepEqual(idsOf(changed), ["takes", "rec-lanes", "scene-plan", "pads", "scene-grid", "midi", "history"]);
 });
 
 test("hide then show round-trips a widget into the tray and back at the end", () => {
   const start = defaultLayout("compose", "laptop");
   const hidden = hideWidget(start, "editor");
   assert.deepEqual(idsOf(hidden), ["scene-grid", "pads", "steps", "fx", "history"]);
-  assert.deepEqual(trayOf(hidden), ["editor", "chop", "keyboard", "mixer-strip", "takes", "midi", "agent"]);
+  assert.deepEqual(trayOf(hidden), ["editor", "chop", "keyboard", "mixer-strip", "rec-lanes", "scene-plan", "takes", "midi", "agent"]);
   assert.deepEqual(idsOf(start), ["scene-grid", "editor", "pads", "steps", "fx", "history"], "the original keeps its editor");
 
   const back = showWidget(hidden, "editor");
@@ -396,7 +520,7 @@ test("hide then show round-trips a widget into the tray and back at the end", ()
     { id: "history", size: "s" },
     { id: "editor", size: "m" },
   ]);
-  assert.deepEqual(trayOf(back), ["chop", "keyboard", "mixer-strip", "takes", "midi", "agent"]);
+  assert.deepEqual(trayOf(back), ["chop", "keyboard", "mixer-strip", "rec-lanes", "scene-plan", "takes", "midi", "agent"]);
 
   assert.deepEqual(showWidget(back, "editor").shown, back.shown, "showing a shown widget changes nothing");
   assert.deepEqual(showWidget(back, "mystery").shown, back.shown, "an id no widget has is not shown");
@@ -414,13 +538,13 @@ test("resizeWidget steps the allowed sizes and wraps", () => {
   assert.equal(sizeOf(grid, "scene-grid"), "l");
 
   let takes = defaultLayout("record", "laptop");
-  assert.equal(sizeOf(takes, "takes"), "l");
+  assert.equal(sizeOf(takes, "takes"), "m");
   const steps = [];
   for (let i = 0; i < 4; i += 1) {
     takes = resizeWidget(takes, "takes");
     steps.push(sizeOf(takes, "takes"));
   }
-  assert.deepEqual(steps, ["s", "m", "l", "s"], "takes walks s, m, l and wraps");
+  assert.deepEqual(steps, ["l", "s", "m", "l"], "takes walks s, m, l and wraps");
 
   let midi = defaultLayout("record", "laptop");
   assert.equal(sizeOf(midi, "midi"), "s");
@@ -484,7 +608,8 @@ test("loadLayout returns the song's own key, else the built-in default", () => {
   storage.setItem(layoutKey("s1", "perform", "laptop"), JSON.stringify({ v: 1, shown: [{ id: "agent", size: "s" }] }));
   assert.deepEqual(loadLayout(storage, "s1", "perform", "laptop"), { v: 1, shown: [{ id: "agent", size: "s" }] });
   assert.deepEqual(trayOf(loadLayout(storage, "s1", "perform", "laptop")), [
-    "scene-grid", "editor", "pads", "steps", "chop", "fx", "keyboard", "mixer-strip", "takes", "midi", "history",
+    "scene-grid", "editor", "pads", "steps", "chop", "fx", "keyboard", "mixer-strip", "rec-lanes",
+    "scene-plan", "takes", "midi", "history",
   ]);
 });
 

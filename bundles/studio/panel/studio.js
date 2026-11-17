@@ -240,6 +240,15 @@ const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCR
 const PAD_INPUT_SCRIPT = await loadPanelScript("pad-input.js", "PAD_INPUT_SCRIPT");
 
 /**
+ * The record view's rules, loaded once: the level floor and the meter fill, the
+ * peak hold, the live waveform's draw ring and the words a lane uses for where
+ * it listens and what it hears. They reach the page before the client, which
+ * draws the record lanes with them; a page served without the script draws its
+ * lanes without those labels instead of failing (see panel/record-view.js).
+ */
+const RECORD_VIEW_SCRIPT = await loadPanelScript("record-view.js", "RECORD_VIEW_SCRIPT");
+
+/**
  * The shell's layout model, loaded once: which widget is on the page, in what
  * order and at which size is this device's own view state, and the model that
  * decides it comes BEFORE the shell that reads it and before the client, which
@@ -1080,6 +1089,91 @@ const STYLES = `
   .studio .st-tl-placement-help {
     flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
   }
+  /* The recording lanes widget (A4a): the arrangement's own bar axis under a
+     ruler that carries the bars, the section bands and the playhead, and one
+     lane per track. A lane is its colour, its name, Arm, M and S, and the clips
+     the ARRANGEMENT places on it; the record target (the first armed audio
+     track) is drawn tall and red with where it listens and what it hears, and
+     every other armed lane only says Armed. Every control is a 44 px target and
+     a press on one is a press, never a text selection. Nothing here is a
+     command: the arm, mute and solo buttons are the grid's and the mixer
+     strip's own. */
+  .studio .st-rec-lanes { display: block; min-width: 0; }
+  .studio .st-rec-lanes[hidden] { display: none; }
+  .studio .st-rec { display: flex; flex-direction: column; min-width: 0; }
+  .studio .st-rec-row {
+    display: grid; grid-template-columns: 148px minmax(0, 1fr);
+    border-bottom: 1px solid var(--st-line-soft);
+  }
+  .studio .st-rec-side {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+    min-width: 0; padding: 6px 8px; background: var(--st-head);
+    border-right: 1px solid var(--st-line);
+    font-size: 11px; line-height: 1.4; color: var(--st-muted);
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-rec-ruler .st-rec-side { border-bottom: 1px solid var(--st-line); }
+  .studio .st-rec-ruler-body {
+    position: relative; height: 52px; background: var(--st-head);
+    border-bottom: 1px solid var(--st-line);
+  }
+  .studio .st-rec-sections { position: absolute; top: 4px; left: 0; right: 0; height: 20px; }
+  .studio .st-rec-section {
+    position: absolute; top: 0; height: 20px; box-sizing: border-box; padding: 0 6px;
+    border-radius: 4px; border: 1px solid var(--st-edge); background: #2C3136; color: var(--st-text);
+    font-size: 11px; font-weight: 600; display: flex; align-items: center;
+    white-space: nowrap; overflow: hidden;
+  }
+  .studio .st-rec-bars {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 16px; display: grid;
+  }
+  .studio .st-rec-bar-n {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; color: #7E7A72;
+    border-left: 1px solid var(--st-line); padding-left: 2px; overflow: hidden; white-space: nowrap;
+  }
+  .studio .st-rec-playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px; background: #FFFFFF; pointer-events: none;
+  }
+  .studio .st-rec-color {
+    width: 6px; align-self: stretch; min-height: 26px; border-radius: 3px; flex: 0 0 auto;
+  }
+  .studio .st-rec-lane-name { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+  .studio .st-rec-lane-title {
+    font-size: 12px; font-weight: 600; color: var(--st-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-rec-lane-kind { font-size: 10px; color: var(--st-muted); white-space: nowrap; }
+  .studio .st-rec-armed-chip {
+    flex: 0 0 auto; padding: 0 6px; border-radius: 999px; border: 1px solid var(--st-danger);
+    color: var(--st-danger); font-size: 10px; font-weight: 700;
+  }
+  .studio .st-rec-acts { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 100%; }
+  .studio .st-rec-acts .st-toggle { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
+  .studio .st-rec-lane-body { position: relative; height: 42px; }
+  .studio .st-rec-lane-armed .st-rec-lane-body { background: #1E1512; }
+  /* The record target: taller, so A4b's meter and live waveform have the room,
+     and red, so the one lane a take lands on is never a guess. */
+  .studio .st-rec-lane-target { box-shadow: inset 0 0 0 2px var(--st-danger); }
+  .studio .st-rec-lane-target .st-rec-side { background: #2A1A18; }
+  .studio .st-rec-lane-target .st-rec-lane-body { height: 96px; }
+  .studio .st-rec-block {
+    position: absolute; top: 6px; height: 28px; box-sizing: border-box; padding: 0 6px;
+    border-radius: 5px; border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
+    font-size: 11px; display: flex; align-items: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-rec-target-info {
+    position: absolute; left: 8px; right: 8px; bottom: 6px;
+    display: flex; flex-wrap: wrap; gap: 4px 10px;
+    font-size: 11px; color: var(--st-muted);
+  }
+  .studio .st-rec-source,
+  .studio .st-rec-chain { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .studio .st-rec-note { margin: 10px 12px; font-size: 12px; line-height: 1.5; color: var(--st-muted); }
+  /* A phone keeps the lane headers narrow enough to leave a usable bar axis. */
+  @media (max-width: 639px) {
+    .studio .st-rec-row { grid-template-columns: 116px minmax(0, 1fr); }
+  }
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
      piano roll. Pads are real buttons, at least 72 px square, and the pad's
@@ -1660,6 +1754,11 @@ function studioPage({ songId, render, res }) {
           </div>
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
           <section class="st-mixer" data-role="mixer" hidden></section><section class="st-mix-strip-host" data-role="mixer-strip" hidden></section>
+          <!-- The recording lanes (panel/record-view.js and the client's own
+               renderRecLanes): the arrangement's bar axis under a ruler, and
+               one lane per track. The shell moves this host into its widget
+               frame. -->
+          <section class="st-rec-lanes" data-role="rec-lanes" hidden></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
           <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div><div class="st-sampler-host" data-role="sampler-keyboard" hidden></div></section>
@@ -1692,6 +1791,7 @@ function studioPage({ songId, render, res }) {
            its worker. -->
       <script>${TAKE_STORE_SCRIPT}
 ${PAD_INPUT_SCRIPT}
+${RECORD_VIEW_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${SHELL_LAYOUT_SCRIPT}
