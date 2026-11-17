@@ -37,7 +37,7 @@ const PERFORM = ["scene-grid", "pads", "fx", "midi", "history"];
 const RECORD = ["scene-grid", "takes", "midi", "history"];
 
 /** Every widget the shell knows: one frame each. */
-const WIDGET_COUNT = 10;
+const WIDGET_COUNT = 11;
 
 /** The stand-in dashboard layout: a bare document around the panel content. */
 function minimalLayout({ title, content }) {
@@ -445,6 +445,7 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(widgetName("steps"), "Steps");
   assert.equal(widgetName("chop"), "Chop");
   assert.equal(widgetName("fx"), "Effects");
+  assert.equal(widgetName("keyboard"), "Keyboard");
   assert.equal(widgetName("takes"), "Takes");
   assert.equal(widgetName("midi"), "MIDI");
   assert.equal(widgetName("history"), "History");
@@ -454,6 +455,7 @@ test("the emitted shell script follows the panel's inline rules and names the wi
   assert.equal(emptyNote("steps"), "Open a pattern clip on a sampler track to sequence its pads.");
   assert.equal(emptyNote("chop"), "Open a pattern clip and pick a pad to chop its sound.");
   assert.equal(emptyNote("fx"), "Open a pattern clip on a sampler track for the effects and the looper.");
+  assert.equal(emptyNote("keyboard"), "Pick a note track to play it");
   assert.equal(emptyNote("takes"), "Arm a track to record.");
   assert.equal(emptyNote("scene-grid"), "");
   assert.match(SHELL_CSS, /\.st-widget-tab\s*\{[^}]*min-height:\s*46px/, "a tab is a 46 px target");
@@ -555,7 +557,7 @@ test("compose mounts its six widgets; perform and record follow the defaults", a
   assert.deepEqual(shownWidgets(b.page), RECORD);
   assert.equal(sizeOf(b.page, "takes"), "l");
   assert.equal(frame(b.page, "agent").parentNode, b.page.querySelector("[data-role=widget-tray]"));
-  assert.deepEqual(trayWidgets(b.page), ["editor", "pads", "steps", "chop", "fx", "agent"]);
+  assert.deepEqual(trayWidgets(b.page), ["editor", "pads", "steps", "chop", "fx", "keyboard", "agent"]);
 });
 
 test("the page's hosts and header controls are moved, never cloned", async () => {
@@ -911,7 +913,7 @@ test("Edit layout gives every frame Remove, Size and a drag handle and the tray 
     assert.ok(frameAct(b, id, "widget-size"), `${id} can change size`);
     assert.ok(frame(b.page, id).querySelector("[data-role=widget-drag]"), `${id} can be moved`);
   }
-  for (const id of ["chop", "takes", "midi", "agent"]) {
+  for (const id of ["chop", "keyboard", "takes", "midi", "agent"]) {
     assert.ok(frameAct(b, id, "widget-add"), `${id} can come back from the tray`);
   }
 
@@ -935,7 +937,7 @@ test("Remove moves a widget to the tray and writes only this song, mode and clas
   click(b.domWindow, frameAct(b, "history", "widget-remove"));
 
   assert.deepEqual(shownWidgets(b.page), ["scene-grid", "editor", "pads", "steps", "fx"]);
-  assert.deepEqual(trayWidgets(b.page), ["chop", "takes", "midi", "history", "agent"]);
+  assert.deepEqual(trayWidgets(b.page), ["chop", "keyboard", "takes", "midi", "history", "agent"]);
   assert.deepEqual(storedIds(b.storage, SONG, "compose", "laptop"), ["scene-grid", "editor", "pads", "steps", "fx"]);
   assert.equal(b.storage.getItem(otherSongKey), otherSongValue, "another song is untouched");
   assert.equal(b.storage.getItem(layoutKey(SONG, "perform", "laptop")), null, "another mode is untouched");
