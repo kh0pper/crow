@@ -4,7 +4,9 @@
  * load it with a plain script tag next to figure.cjs and session.cjs. It draws
  * what the clock says and nothing else: the segment's own pose, the library
  * entry's own title and cue, and the next entry's name when the copy carries
- * that string. Every other word belongs to the page.
+ * that string. Every other word belongs to the page. Between the clock's own
+ * beats a frame redraws the figure alone, so a rep moves smoothly on a small
+ * screen; the engine is read only by the tick.
  *
  * mount(host, opts) -> { destroy(), state() }
  */
@@ -62,6 +64,28 @@
   function defaultClearInterval(id) {
     var scope = globalScope();
     if (typeof scope.clearInterval === "function") scope.clearInterval(id);
+  }
+
+  /* The page's own frame beat, when it has both halves of one. A page with
+   * neither, or with only one of them, gets the tick alone. */
+  function frameApiOf(source) {
+    var scope = globalScope();
+    var ask = null;
+    var drop = null;
+    if (source && typeof source.requestAnimationFrame === "function") {
+      ask = function (fn) { return source.requestAnimationFrame(fn); };
+    }
+    if (source && typeof source.cancelAnimationFrame === "function") {
+      drop = function (id) { source.cancelAnimationFrame(id); };
+    }
+    if (!ask && typeof scope.requestAnimationFrame === "function") {
+      ask = function (fn) { return scope.requestAnimationFrame(fn); };
+    }
+    if (!drop && typeof scope.cancelAnimationFrame === "function") {
+      drop = function (id) { scope.cancelAnimationFrame(id); };
+    }
+    if (!ask || !drop) return null;
+    return { request: ask, cancel: drop };
   }
 
   /* ---------- small helpers ---------- */
@@ -216,6 +240,9 @@
     var clearIntervalFn = timeSource && typeof timeSource.clearInterval === "function"
       ? function (id) { return timeSource.clearInterval(id); }
       : defaultClearInterval;
+    /* Frames draw the figure between ticks; the tick stays the only thing that
+     * reads the engine. */
+    var frames = frameApiOf(timeSource);
 
     var clock = Session.createClock({ timeline: timeline, now: nowFn });
 
@@ -355,6 +382,11 @@
     var started = false;
     var intervalId = null;
     var intervalLive = false;
+    var frameId = null;
+    var frameLive = false;
+    /* The moment the last clock read happened: a frame counts the stretch since
+     * it and nothing else. */
+    var frameFrom = nowFn();
     var unsubscribe = null;
     /* Once a visit is over the transport stays away: the terminal flag says
      * the controls belong to no running session any more. */
@@ -1391,6 +1423,8 @@
       } catch (err) {
         return;
       }
+      resyncFrames();
+      stopFrames();
       dropWakeLock();
       if (wasRunning) report(segmentEvent("pause", clock.state().segmentIndex));
     }
@@ -1399,6 +1433,7 @@
       if (!started || finished || endShown) return;
       finished = true;
       terminal = true;
+      stopFrames();
       leaveRunning();
       hideTransport();
       postCounted(function (list) {
@@ -1555,6 +1590,7 @@
       endShown = false;
       addOptionsShown = false;
       terminal = true;
+      stopFrames();
       hideTransport();
       postCounted();
       clearChildren(els.end);
@@ -1615,6 +1651,7 @@
       if (finished || endShown) return;
       endShown = true;
       terminal = true;
+      stopFrames();
       dropWakeLock();
       hideTransport();
       postCounted(function (list) {
@@ -1695,12 +1732,16 @@
       if (!started) return;
       if (clock.state().paused) return;
       clock.pause();
+      resyncFrames();
+      stopFrames();
       dropWakeLock();
       report(segmentEvent("pause", clock.state().segmentIndex));
     }
 
     function playNow(asking) {
       clock.play();
+      resyncFrames();
+      startFrames();
       takeWakeLock();
       if (asking) report(segmentEvent("resume", clock.state().segmentIndex));
     }
@@ -1864,6 +1905,7 @@
         /* Nothing else is on screen yet, but a tap on the strip still marks the
          * step it went to. */
         paintStrip(clock.state().segmentIndex);
+        syncFrames();
         return;
       }
       var snap = clock.state();
@@ -1875,12 +1917,14 @@
       paintClock(index, snap.segmentElapsed);
       paintStrip(index);
       els.progress.textContent = "";
+      syncFrames();
     }
 
     /* ---------- the clock's own beat ---------- */
 
     function onTick() {
       clock.tick();
+      resyncFrames();
       paint();
       ticks += 1;
       retryDue();
@@ -1890,6 +1934,86 @@
       if (intervalLive) return;
       intervalLive = true;
       intervalId = setIntervalFn(onTick, TICK_MS);
+    }
+
+    /* ---------- the figure's own beat, between ticks ---------- */
+
+    /* Where the clock stands inside its segment right now: what the last read
+     * counted, plus the stretch no read has taken yet, held inside the
+     * segment's own seconds. Only the engine advances that count. */
+    function frameElapsed(snap) {
+      var segment = segmentAt(snap.segmentIndex);
+      var into = typeof snap.segmentElapsed === "number" && isFinite(snap.segmentElapsed)
+        ? snap.segmentElapsed
+        : 0;
+      var since = (nowFn() - frameFrom) / 1000;
+      var elapsed = into + (since > 0 ? since : 0);
+      var limit = segment && typeof segment.seconds === "number" && segment.seconds > 0
+        ? segment.seconds
+        : 0;
+      if (elapsed > limit) elapsed = limit;
+      return elapsed;
+    }
+
+    /* Whether the drawing changes with time inside a segment: a rep between its
+     * two key positions, a step easing into its own, a held rep swapping at its
+     * midpoint. A still rep, a rest, a quiet move or a step with no position
+     * stays as it is, so no frame is asked for. */
+    function segmentMoves(index, elapsed) {
+      var segment = segmentAt(index);
+      if (!segment || !poseFor(index)) return false;
+      if (segment.still === true) return false;
+      if (hasTempo(segment)) return true;
+      if (reduced || !isWork(segment)) return false;
+      var span = Math.min(TWEEN_SECONDS, segment.seconds);
+      var into = typeof elapsed === "number" && isFinite(elapsed) ? elapsed : 0;
+      return span > 0 && into < span;
+    }
+
+    function framesWanted() {
+      if (!frames || destroyed || !started || finished || terminal) return false;
+      var snap = clock.state();
+      if (snap.paused || snap.ended) return false;
+      var page = documentOf();
+      if (page && page.hidden) return false;
+      return segmentMoves(snap.segmentIndex, frameElapsed(snap));
+    }
+
+    function stopFrames() {
+      if (!frames || !frameLive) return;
+      frames.cancel(frameId);
+      frameLive = false;
+      frameId = null;
+    }
+
+    /* One frame draws the figure in the segment the beat left the clock in, and
+     * nothing else: it never ticks the clock, never moves the step and never
+     * touches another word on the page. */
+    function onFrame() {
+      frameLive = false;
+      frameId = null;
+      if (!framesWanted()) return;
+      var snap = clock.state();
+      paintFigure(snap.segmentIndex, frameElapsed(snap));
+      startFrames();
+    }
+
+    function startFrames() {
+      if (!frames || frameLive || !framesWanted()) return;
+      frameLive = true;
+      frameId = frames.request(onFrame);
+    }
+
+    /* One place decides whether the figure is drawn between beats. */
+    function syncFrames() {
+      if (!frames) return;
+      if (framesWanted()) startFrames();
+      else stopFrames();
+    }
+
+    /* A clock read has just happened: a frame counts from it. */
+    function resyncFrames() {
+      frameFrom = nowFn();
     }
 
     /* The cards a record from earlier today was reported against are its own:
@@ -1946,6 +2070,7 @@
       var shown = documentOf();
       if (!shown || !shown.hidden) return;
       pauseNow();
+      stopFrames();
     }
 
     els.start.addEventListener("click", onStart);
@@ -2002,6 +2127,7 @@
         intervalLive = false;
         intervalId = null;
       }
+      stopFrames();
       if (typeof unsubscribe === "function") {
         unsubscribe();
         unsubscribe = null;

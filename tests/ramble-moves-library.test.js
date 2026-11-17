@@ -247,6 +247,65 @@ test("loadLibrary skips broken, invalid and dangling entries, naming each in a w
   assert.ok(warnings.some((w) => w.includes("flow-dangling")), "a flow over missing poses is named");
 });
 
+/** An anatomy id that no vocabulary file in these tests lists. */
+const UNKNOWN_ANATOMY = "no-such-muscle";
+
+/** A loadable entry whose anatomy names a part nothing can place. */
+function anatomyEntry(over = {}) {
+  return base({
+    id: "pose-unknown-anatomy",
+    anatomy: [{ main: UNKNOWN_ANATOMY, working: [UNKNOWN_ANATOMY] }],
+    ...over,
+  });
+}
+
+test("loadLibrary turns the anatomy id check off when the vocabulary is unreadable", () => {
+  const cases = [
+    { name: "missing", write: () => {} },
+    { name: "invalid-json", write: (p) => writeFileSync(p, "{ not json at all") },
+    { name: "no-vocab-array", write: (p) => writeFileSync(p, JSON.stringify({ reviewed: true })) },
+  ];
+  for (const c of cases) {
+    const dir = tempDir();
+    writeFileSync(join(dir, "pose-unknown-anatomy.json"), JSON.stringify(anatomyEntry()));
+    const vocabFile = join(tempDir(), `${c.name}.json`);
+    c.write(vocabFile);
+
+    const [lib, warnings] = captureWarnings(() => loadLibrary(dir, vocabFile));
+    assert.deepEqual(lib.map((e) => e.id), ["pose-unknown-anatomy"],
+      `${c.name} vocabulary: the entry with an unknown anatomy id is kept, not dropped`);
+    assert.ok(warnings.some((w) => w.includes("vocabulary") && w.includes(vocabFile)),
+      `${c.name} vocabulary: a warning names the vocabulary file (${vocabFile}): ${warnings.join(" | ")}`);
+    assert.equal(
+      warnings.some((w) => w.includes("skipping entry")),
+      false,
+      `${c.name} vocabulary: the entry is not skipped: ${warnings.join(" | ")}`,
+    );
+  }
+});
+
+test("loadLibrary skips an unknown anatomy id when the vocabulary does read", () => {
+  const dir = tempDir();
+  writeFileSync(join(dir, "a-unknown.json"), JSON.stringify(anatomyEntry()));
+  writeFileSync(join(dir, "b-known.json"), JSON.stringify(base({
+    id: "pose-known-anatomy",
+    anatomy: [{ main: "known-muscle", working: ["known-muscle"] }],
+  })));
+  const vocabFile = join(tempDir(), "vocab.json");
+  writeFileSync(vocabFile, JSON.stringify({
+    reviewed: true,
+    vocab: [{ id: "known-muscle", layer: "muscle", name: "Known muscle", anatomical: "Known muscle" }],
+  }));
+
+  const [lib, warnings] = captureWarnings(() => loadLibrary(dir, vocabFile));
+  assert.deepEqual(lib.map((e) => e.id), ["pose-known-anatomy"],
+    "the entry naming an id the vocabulary does not hold is skipped");
+  assert.ok(
+    warnings.some((w) => w.includes("pose-unknown-anatomy") && w.includes(UNKNOWN_ANATOMY)),
+    `the skipped entry and its unknown id are named: ${warnings.join(" | ")}`,
+  );
+});
+
 test("a missing directory loads as an empty library rather than throwing", () => {
   const [lib] = captureWarnings(() => loadLibrary(join(FIXTURES, "no-such-dir")));
   assert.deepEqual(lib, []);
