@@ -218,6 +218,25 @@ def test_wal_and_autocommit(store):
     assert store.conn().isolation_level is None
 
 
+def test_connections_carry_30s_busy_timeout(store):
+    """The connect timeout is the one place the busy timeout is set, per connection."""
+    assert store.conn().execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+    box = []
+
+    def worker():
+        try:
+            box.append(store.conn().execute("PRAGMA busy_timeout").fetchone()[0])
+        except BaseException as exc:  # surfaced in the asserting thread
+            box.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+
+    assert box == [30000]
+
+
 def test_tx_commits_and_rolls_back(store):
     with pytest.raises(RuntimeError):
         with store.tx():
@@ -327,20 +346,25 @@ def test_tx_body_failure_leaves_store_usable(store):
 def test_concurrent_begin_immediate_writers_both_succeed(store):
     started = threading.Event()
     errors = []
+    seen_by_second = []
 
     def first():
         try:
             with store.tx():
                 store.put("a", 1)
                 started.set()
-                time.sleep(0.5)  # hold the write lock while the other one waits
+                time.sleep(0.4)  # hold the write lock while the other one waits
         except BaseException as exc:  # surfaced in the asserting thread
             errors.append(exc)
 
     def second():
         try:
             assert started.wait(5)
-            with store.tx():
+            with store.tx() as db:
+                # BEGIN IMMEDIATE waited for the first writer instead of failing:
+                # we hold the lock only after its COMMIT, so its row is visible.
+                row = db.execute("SELECT value FROM kv WHERE key='a'").fetchone()
+                seen_by_second.append(row["value"])
                 store.put("b", 2)
         except BaseException as exc:  # surfaced in the asserting thread
             errors.append(exc)
@@ -353,6 +377,7 @@ def test_concurrent_begin_immediate_writers_both_succeed(store):
 
     assert [t.is_alive() for t in threads] == [False, False]
     assert not errors, errors
+    assert seen_by_second == ["1"]
     assert store.get("a") == 1
     assert store.get("b") == 2
 
@@ -400,14 +425,28 @@ def test_record_fill_stores_fill_product_and_trade_type(store):
     cid = ocid("b1", 1)
     store.insert_order(cid, "b1", "grid", XRP, "BUY", -1, D("1"), D("10"), status=OPEN)
 
-    f = fill("t1", "BUY", "4", "1", "0.02", product=BTC, trade_type="FILL")
+    # The fill's product must match the order's: a fill belongs to its order.
+    f = fill("t1", "BUY", "4", "1", "0.02", product=XRP, trade_type="FILL")
     assert store.record_fill(f, cid) is True
 
     row = store.conn().execute(
         "SELECT product, trade_type FROM fills WHERE trade_id=?", ("t1",)
     ).fetchone()
-    assert row["product"] == BTC
+    assert row["product"] == XRP
     assert row["trade_type"] == "FILL"
+
+
+def test_record_fill_rejects_product_mismatch(store):
+    store.create_bot("b1", XRP, "grid", {}, D("100"), D("50"))
+    cid = ocid("b1", 1)
+    store.insert_order(cid, "b1", "grid", XRP, "BUY", -1, D("1"), D("10"), status=OPEN)
+
+    with pytest.raises(ValueError):
+        store.record_fill(fill("t1", "BUY", "4", "1", "0.02", product=BTC), cid)
+
+    assert store.has_fill("t1") is False
+    assert store.conn().execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    assert store.order(cid)["filled_size"] == D("0")
 
 
 def test_record_fill_never_touches_order_totals(store):
@@ -489,24 +528,44 @@ def test_insert_order_requires_cb_owner_prefix(store):
     store.create_bot("b1", XRP, "grid", {}, D("100"), D("50"))
     store.create_bot("b2", XRP, "grid", {}, D("10"), D("0"))
 
-    for bad in ("B-1", "cb-b2-B-1", "b1-B-1"):  # no prefix, other owner, no `cb-`
+    for bad in ("B-1", "cb-b2-B-1", "b1-B-1", ""):  # other owner, no `cb-`
         with pytest.raises(ValueError):
             store.insert_order(
                 bad, "b1", "grid", XRP, "BUY", -1, D("1"), D("1"), status=OPEN
             )
 
+    # Orphan orders are exempt from the owner part of the id, not from `cb-`.
+    with pytest.raises(ValueError):
+        store.insert_order(
+            "0xdeadbeef", "orphan", "reconcile", XRP, "BUY", -1, D("1"), D("1")
+        )
+
     assert store.orders() == []  # a rejected id leaves no row behind
 
-    # Orphan orders carry whatever client order id the exchange showed.
+    orphan_cid = "cb-b9-B-1-000000000001"  # a bot that no longer exists
     store.insert_order(
-        "0xdeadbeef", "orphan", "reconcile", XRP, "BUY", -1, D("1"), D("1")
+        orphan_cid, "orphan", "reconcile", XRP, "BUY", -1, D("1"), D("1")
     )
-    assert store.order("0xdeadbeef")["owner"] == "orphan"
+    assert store.order(orphan_cid)["owner"] == "orphan"
 
     store.insert_order(
         ocid("b1", 1), "b1", "grid", XRP, "BUY", -1, D("1"), D("1"), status=OPEN
     )
     assert store.order(ocid("b1", 1))["owner"] == "b1"
+
+
+def test_orphan_order_accepts_any_cb_cid(store):
+    cid = "cb-gone1-S-2-000000000002"  # no bot "gone1" any more; id is still ours
+    store.insert_order(cid, "orphan", "reconcile", XRP, "SELL", 2, D("2"), D("3"))
+
+    o = store.order(cid)
+    assert o["client_order_id"] == cid
+    assert o["owner"] == "orphan"
+    assert o["side"] == "SELL"
+    assert o["level"] == 2
+    assert o["price"] == D("2")
+    assert o["size"] == D("3")
+    assert [x["client_order_id"] for x in store.orders(owner="orphan")] == [cid]
 
 
 def test_newer_schema_version_refused(tmp_path):

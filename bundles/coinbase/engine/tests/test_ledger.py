@@ -58,6 +58,12 @@ def check(h, quote, base, reserved_quote="0", reserved_base="0"):
     assert h.available_base == h.base - h.reserved_base
 
 
+def test_ledger_requires_fee_rate(store):
+    """A fee rate is an explicit decision: there is no default to fall back on."""
+    with pytest.raises(TypeError):
+        Ledger(store)
+
+
 def test_create_bot_starts_with_its_capital(store):
     make_bot(store, "b1", XRP, "100", "50")
 

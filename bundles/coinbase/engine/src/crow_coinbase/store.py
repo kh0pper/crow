@@ -288,13 +288,23 @@ class Store:
     ) -> None:
         """Record a local order row before it is (or is not) sent to the exchange.
 
-        Client order ids are built as `cb-<owner>-...`; any other prefix for a
-        bot owner would make the reconcile loop attribute the order to the wrong
-        owner.  Orphan orders (owner `orphan`) keep whatever id the exchange
-        showed, so they are exempt.
+        EVERY order's client order id starts with `cb-`: the engine's own ids all
+        carry that prefix, so an id without it is not recognisably ours.
+
+        For every owner except `orphan` the id must also carry the owner, i.e.
+        `cb-<owner>-...` — any other owner part would make the reconcile loop
+        attribute the order to the wrong owner.  An `orphan` order (a fill/order
+        the exchange reported whose bot row is gone) still needs a `cb-` id, e.g.
+        one built from the vanished bot's id (`cb-b9-B-1-000000000001`), but it
+        need not carry the literal string `orphan`.
+
+        Raises `ValueError` (nothing written) for any other id.
         """
+        cid = str(cid)
         prefix = f"cb-{owner}-"
-        if owner != "orphan" and not str(cid).startswith(prefix):
+        if not cid.startswith("cb-"):
+            raise ValueError(f"client order id {cid!r} must start with 'cb-'")
+        if owner != "orphan" and not cid.startswith(prefix):
             raise ValueError(f"client order id {cid!r} must start with {prefix!r}")
         now = time.time()
         self.conn().execute(
@@ -378,6 +388,10 @@ class Store:
         client order id (nothing written).  The owner is copied from the order
         row, so a fill keeps its owner even after that bot's row is gone.
 
+        A fill carrying a `product` that differs from the order row's product is
+        refused with `ValueError` (nothing written): a fill belongs to its order's
+        product.  When the fill carries no product, the order's product is used.
+
         This never writes `orders`: `filled_size` / `filled_value` / `fees` are
         the exchange's snapshot and only `update_order` sets them, so a fill seen
         by both the stream and the reconcile loop is counted once.
@@ -389,6 +403,12 @@ class Store:
             ).fetchone()
             if row is None:
                 raise KeyError(cid)
+            product = fill.get("product") or row["product"]
+            if product != row["product"]:
+                raise ValueError(
+                    f"fill trade_id {fill['trade_id']!r} product {product!r} does "
+                    f"not match order {cid!r} product {row['product']!r}"
+                )
             cur = db.execute(
                 "INSERT OR IGNORE INTO fills(trade_id,order_id,client_order_id,owner,"
                 "side,size,price,commission,trade_time,recorded_at,product,trade_type) "
@@ -405,7 +425,7 @@ class Store:
                     "commission": str(D(fill["commission"])),
                     "trade_time": fill["trade_time"],
                     "recorded_at": now,
-                    "product": fill.get("product") or row["product"],
+                    "product": product,
                     "trade_type": fill.get("trade_type"),
                 },
             )
