@@ -33,6 +33,7 @@ import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
 import { TIMELINE_BASE_PX, zoomedBarX } from "../bundles/studio/panel/client.js";
+import { PUNCH_SCRIPT } from "../bundles/studio/panel/punch.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 /** The SunVox track the timeline places a note clip on. */
@@ -516,6 +517,11 @@ async function bootTimeline(options = {}) {
     rigStorage.setItem("crow.studio.countin.v1", "0");
     windowStub.localStorage = rigStorage;
   }
+
+  // The page inlines the punch rules before the client script, and the comp
+  // drag reads them from there: the stub is given the very same text.
+  new Function("window", PUNCH_SCRIPT)(windowStub);
+  assert.equal(typeof windowStub.StudioPunch.spliceComp, "function", "the stub holds the page's punch rules");
 
   const yjsUrl = pathToFileURL(
     new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
