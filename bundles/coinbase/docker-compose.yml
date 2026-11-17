@@ -1,0 +1,68 @@
+## Crow's Coinbase trading engine (P1: dry-run only).
+##
+## Two services run the same image, built from ./engine:
+##   coinbase-engine   - the order gateway and the bots, its API on loopback
+##   coinbase-watchdog - follows the engine's heartbeat and applies CROW_COINBASE_WATCHDOG_POLICY (leave or cancel)
+##
+## The engine's API is published on 127.0.0.1 only: Crow's MCP server and panel run on
+## the host and reach it there. Keep this ports entry loopback.
+
+x-coinbase-env: &env
+  COINBASE_API_KEY: ${COINBASE_API_KEY:-}
+  COINBASE_API_SECRET: ${COINBASE_API_SECRET:-}
+  CROW_COINBASE_PORTFOLIO_ID: ${CROW_COINBASE_PORTFOLIO_ID:-}
+  CROW_COINBASE_ENGINE_TOKEN: ${CROW_COINBASE_ENGINE_TOKEN:?CROW_COINBASE_ENGINE_TOKEN is required}
+  CROW_COINBASE_LIVE: ${CROW_COINBASE_LIVE:-false}
+  CROW_COINBASE_POLL_SECONDS: ${CROW_COINBASE_POLL_SECONDS:-60}
+  CROW_COINBASE_MAKER_FEE_PCT: ${CROW_COINBASE_MAKER_FEE_PCT:-0.5}
+  CROW_COINBASE_PRODUCTS: ${CROW_COINBASE_PRODUCTS:-BTC-USDC,ETH-USDC,XRP-USDC}
+  CROW_COINBASE_DAILY_NOTIONAL_USD: ${CROW_COINBASE_DAILY_NOTIONAL_USD:-200}
+  CROW_COINBASE_ORDERS_PER_HOUR: ${CROW_COINBASE_ORDERS_PER_HOUR:-30}
+  CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT: ${CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT:-20}
+  CROW_COINBASE_BOT_MAX_ORDER_USD: ${CROW_COINBASE_BOT_MAX_ORDER_USD:-50}
+  CROW_COINBASE_MAX_BOT_CAPITAL_USD: ${CROW_COINBASE_MAX_BOT_CAPITAL_USD:-100}
+  CROW_COINBASE_AI_MAX_ORDER_USD: ${CROW_COINBASE_AI_MAX_ORDER_USD:-25}
+  CROW_COINBASE_AI_DAILY_NOTIONAL_USD: ${CROW_COINBASE_AI_DAILY_NOTIONAL_USD:-50}
+  CROW_COINBASE_AI_ORDERS_PER_HOUR: ${CROW_COINBASE_AI_ORDERS_PER_HOUR:-10}
+  CROW_COINBASE_WATCHDOG_POLICY: ${CROW_COINBASE_WATCHDOG_POLICY:-leave}
+  CROW_COINBASE_DATA_DIR: /data
+
+services:
+  coinbase-engine:
+    build:
+      context: ./engine
+      target: runtime
+    container_name: crow-coinbase-engine
+    ports:
+      - "127.0.0.1:3062:3062"
+    environment: *env
+    volumes:
+      - coinbase-data:/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      # urlopen raises on a 503, so a stale heartbeat fails the check.
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:3062/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  coinbase-watchdog:
+    build:
+      context: ./engine
+      target: runtime
+    container_name: crow-coinbase-watchdog
+    command: ["python", "-m", "crow_coinbase.watchdog"]
+    environment: *env
+    volumes:
+      - coinbase-data:/data
+    init: true
+    mem_limit: 512m
+    depends_on:
+      - coinbase-engine
+    restart: unless-stopped
+
+volumes:
+  coinbase-data:

@@ -1,0 +1,1 @@
+"""Crow's Coinbase trading engine (dry-run)."""

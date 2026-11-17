@@ -1,0 +1,5 @@
+# tests/ is NOT excluded: the Dockerfile's `test` stage copies it into the image.
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
