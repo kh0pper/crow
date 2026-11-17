@@ -19,9 +19,12 @@
  * attachment this reader serves) and must be either unscoped or scoped to the project the draft
  * belongs to; a file of another project reads exactly as a file that does not exist. A row whose
  * recorded size is over `MAX_SEND_BYTES` is refused before the object store is touched at all, and a
- * fetched object over the same ceiling is refused too, so a stale row cannot slip one past. A storage
- * that is not configured, a missing object, a broken stream and any other failure all answer null:
- * the reader never throws, so a caller's own refusal stays the one a person sees.
+ * fetched object over the same ceiling is refused too — by the object's own reported size before a
+ * byte of it is read, and otherwise by a running count that destroys the stream at the chunk which
+ * passes the ceiling — so a stale row with no recorded size cannot slip one past, and no oversized
+ * object is ever held in memory whole. A storage that is not configured, a missing object, a broken
+ * stream and any other failure all answer null: the reader never throws, so a caller's own refusal
+ * stays the one a person sees.
  *
  * Both readers answer `null` for "there is nothing readable here"; `readStorageFile` answers
  * `{content, filename, contentType}` from the row (`original_name` and `mime_type`) when there is,
@@ -62,7 +65,11 @@ function chunkBuffer(chunk) {
 /**
  * The bytes of one object answer, whether the seam handed back `getObject`'s `{stream, stat}`, a
  * stream on its own or the bytes themselves; null when the answer holds nothing readable. A stream
- * that fails part-way is null too, never a short file.
+ * that fails part-way is null too, never a short file. The ceiling is enforced twice: the object's
+ * own reported size is refused before a byte is pulled, and a running count stops a stream whose
+ * real size is larger — a row recorded with no size (a presigned upload) is exactly that case — by
+ * destroying the stream at the chunk that passes `MAX_SEND_BYTES`, so the answer is null and never a
+ * partial object.
  */
 async function objectBytes(answer) {
   if (answer == null) return null;
@@ -72,10 +79,22 @@ async function objectBytes(answer) {
   const stream = answer.stream ?? answer;
   if (stream == null || typeof stream !== "object") return null;
 
+  const declared = Number(answer.stat?.size);
+  if (Number.isFinite(declared) && declared > MAX_SEND_BYTES) return null;
+
   if (typeof stream[Symbol.asyncIterator] === "function") {
     const chunks = [];
+    let total = 0;
     try {
-      for await (const chunk of stream) chunks.push(chunkBuffer(chunk));
+      for await (const chunk of stream) {
+        const buffer = chunkBuffer(chunk);
+        total += buffer.length;
+        if (total > MAX_SEND_BYTES) {
+          stream.destroy?.();
+          return null;
+        }
+        chunks.push(buffer);
+      }
     } catch {
       return null;
     }
@@ -84,13 +103,24 @@ async function objectBytes(answer) {
   if (typeof stream.on === "function") {
     return new Promise((resolve) => {
       const chunks = [];
+      let total = 0;
       let settled = false;
       const finish = (value) => {
         if (settled) return;
         settled = true;
         resolve(value);
       };
-      stream.on("data", (chunk) => chunks.push(chunkBuffer(chunk)));
+      stream.on("data", (chunk) => {
+        if (settled) return;
+        const buffer = chunkBuffer(chunk);
+        total += buffer.length;
+        if (total > MAX_SEND_BYTES) {
+          stream.destroy?.();
+          finish(null);
+          return;
+        }
+        chunks.push(buffer);
+      });
       stream.on("error", () => finish(null));
       stream.on("end", () => finish(Buffer.concat(chunks)));
       if (typeof stream.resume === "function") stream.resume();

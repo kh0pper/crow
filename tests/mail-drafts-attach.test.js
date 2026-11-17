@@ -25,7 +25,7 @@ import Database from "better-sqlite3";
 import { markFromLaptop } from "./helpers/off-box.js";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
-import { MAIL_ERROR_TEXT } from "../servers/gateway/mail/errors.js";
+import { MAIL_ERROR_TEXT, MailError } from "../servers/gateway/mail/errors.js";
 import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import { createDraft, getDraft, listRevisions } from "../servers/gateway/mail/drafts/store.js";
 import { MAX_SEND_BYTES, preflight } from "../servers/gateway/mail/drafts/preflight.js";
@@ -225,6 +225,66 @@ function fakeObjectStore(objects = {}) {
   };
 }
 
+/**
+ * A stream that only stops when it is destroyed: an async iterator that keeps pulling `chunkSize`
+ * chunks out of nothing, the way an object store hands back an object whose declared size lied. The
+ * `limit` is well past the cap, so a reader that buffers everything it is given reads all of it.
+ */
+function endlessAsyncStream({ chunkSize, limit = 80 }) {
+  const state = { chunks: 0, destroyed: false };
+  const stream = {
+    destroy() {
+      state.destroyed = true;
+    },
+    async *[Symbol.asyncIterator]() {
+      for (let i = 0; i < limit && !state.destroyed; i += 1) {
+        state.chunks += 1;
+        yield Buffer.alloc(chunkSize, 1);
+      }
+    },
+  };
+  return { stream, state };
+}
+
+/**
+ * The same endless object in the event form: `on`/`resume`/`destroy` and no async iterator, so a
+ * reader has to go through its `data` events to see a byte of it.
+ */
+function endlessEventStream({ chunkSize, limit = 80 }) {
+  const state = { chunks: 0, destroyed: false };
+  const listeners = new Map();
+  const emit = (name, value) => {
+    for (const fn of listeners.get(name) ?? []) fn(value);
+  };
+  const stream = {
+    on(name, fn) {
+      const queue = listeners.get(name);
+      if (queue) queue.push(fn);
+      else listeners.set(name, [fn]);
+      return stream;
+    },
+    destroy() {
+      state.destroyed = true;
+      return stream;
+    },
+    resume() {
+      const pump = () => {
+        if (state.destroyed) return;
+        if (state.chunks >= limit) {
+          emit("end");
+          return;
+        }
+        state.chunks += 1;
+        emit("data", Buffer.alloc(chunkSize, 2));
+        if (!state.destroyed) setImmediate(pump);
+      };
+      setImmediate(pump);
+      return stream;
+    },
+  };
+  return { stream, state };
+}
+
 /** The two readers over one scratch DB, with the object store replaced by a fake. */
 function readersFor(db, { storage = fakeObjectStore(), supervisor = null } = {}) {
   return makeDraftReaders({
@@ -403,6 +463,59 @@ test("a storage file over the send cap is refused before any byte is read", asyn
   const second = readersFor(db, { storage: oversized });
   assert.equal(await second.readStorageFile(String(unknownId), { projectId: null }), null);
   assert.equal(oversized.calls.length, 1);
+});
+
+test("an object whose real size passes the cap is destroyed at that chunk, never buffered whole", async () => {
+  const db = await freshDb();
+  // A row with no recorded size is what a presigned upload leaves behind, so the object itself is
+  // the only thing that can say how big it is.
+  const id = await seedFile(db, { key: "huge.bin", name: "huge.bin", size: null });
+  const endless = endlessAsyncStream({ chunkSize: 1024 * 1024 });
+  const readers = makeDraftReaders({
+    db,
+    getObject: async () => ({ stream: endless.stream, stat: { size: null } }),
+    isConfigured: () => true,
+    defaultBucket: () => "crow-files",
+  });
+
+  assert.equal(await readers.readStorageFile(String(id), { projectId: null }), null);
+  assert.ok(endless.state.chunks > 0, "the read had begun");
+  assert.ok(endless.state.chunks <= 32,
+    `stopped after ${endless.state.chunks} chunks of an object that offers eighty`);
+  assert.equal(endless.state.destroyed, true, "the stream was destroyed rather than drained");
+});
+
+test("a data-event stream over the cap is destroyed at that chunk too", async () => {
+  const db = await freshDb();
+  const id = await seedFile(db, { key: "huge.bin", name: "huge.bin", size: null });
+  const endless = endlessEventStream({ chunkSize: 1024 * 1024 });
+  const readers = makeDraftReaders({
+    db,
+    getObject: async () => ({ stream: endless.stream, stat: { size: null } }),
+    isConfigured: () => true,
+    defaultBucket: () => "crow-files",
+  });
+
+  assert.equal(await readers.readStorageFile(String(id), { projectId: null }), null);
+  assert.ok(endless.state.chunks > 0, "the read had begun");
+  assert.ok(endless.state.chunks <= 32, `stopped after ${endless.state.chunks} chunks`);
+  assert.equal(endless.state.destroyed, true, "the stream was destroyed rather than drained");
+});
+
+test("a reported size over the cap is refused with no chunk read at all", async () => {
+  const db = await freshDb();
+  const id = await seedFile(db, { key: "declared.bin", name: "declared.bin", size: null });
+  const endless = endlessAsyncStream({ chunkSize: 1024, limit: 30 });
+  const readers = makeDraftReaders({
+    db,
+    getObject: async () => ({ stream: endless.stream, stat: { size: MAX_SEND_BYTES + 1 } }),
+    isConfigured: () => true,
+    defaultBucket: () => "crow-files",
+  });
+
+  assert.equal(await readers.readStorageFile(String(id), { projectId: null }), null);
+  assert.equal(endless.state.chunks, 0, "the object's own size answered first");
+  assert.equal(endless.state.destroyed, false, "nothing was opened that needed destroying");
 });
 
 test("the 18 MiB cap counts the attachments' raw bytes, not their base64 form", async () => {
@@ -656,6 +769,22 @@ test("save-draft on a mailbox with no Drafts folder gives the fixed NOT_FOUND se
   assert.equal(s.fake.drafts.length, 0);
 });
 
+test("save-draft answers the mail sentence only when the Drafts folder is what is missing", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+  // An account being removed is NOT_FOUND too, and its detail is not the drafts folder's.
+  s.fake.failNext("saveDraft", new MailError("NOT_FOUND", "account_removed"));
+
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/save-draft`, { body: { expectHash: draft.headHash } });
+  assert.equal(res.status, 404, res.text);
+  assert.equal(res.json?.error, "not_found");
+  assert.notEqual(res.json?.message, MAIL_ERROR_TEXT.NOT_FOUND,
+    "a folder that is not missing never says the item is not in this mailbox");
+  assert.equal(res.json?.message, "Not found.");
+  assert.equal((await getDraft(s.db, draft.id)).state, "draft");
+  assert.equal(s.fake.drafts.length, 0);
+});
+
 test("save-draft on a frozen draft is 409 frozen, and on a stale hash 409 changed", async () => {
   const s = await setup();
   const draft = await newDraft(s);
@@ -750,6 +879,32 @@ test("the receipt is null until the draft is sent, and links the reader only onc
   assert.equal(named.json?.receipt?.accountLabel, ALEX);
 });
 
+test("the receipt links the Sent copy when the same Message-ID also sits in INBOX", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+  const messageId = "<sent-self@mail.example.test>";
+  const sentAt = NOW + 20_000;
+  await s.db.execute({
+    sql: "UPDATE mail_drafts SET state = 'sent', sent_at = ?, message_id = ? WHERE id = ?",
+    args: [sentAt, messageId, draft.id],
+  });
+
+  // A send to self leaves its own copy in INBOX as well, and that copy arrives first: the reader's
+  // own Message-ID lookup prefers the inbox row, so the receipt has to look at the Sent-role row.
+  const inbox = await seedFolder(s.db, s.account.id, { path: "INBOX", name: "INBOX", specialUse: "\\Inbox" });
+  await seedMessage(s.db, s.account.id, inbox, { uid: 6, messageId, fromAddr: ALEX, subject: "Weekend", date: sentAt });
+
+  const syncing = await s.call("GET", `${DRAFTS}/${draft.id}`);
+  assert.equal(syncing.json?.receipt?.readerLink, null, "an inbox copy is not the sent copy");
+
+  const sent = await seedFolder(s.db, s.account.id, { path: "Sent", name: "Sent", specialUse: "\\Sent" });
+  await seedMessage(s.db, s.account.id, sent, { uid: 7, messageId, fromAddr: ALEX, subject: "Weekend", date: sentAt });
+
+  const linked = await s.call("GET", `${DRAFTS}/${draft.id}`);
+  assert.equal(linked.json?.receipt?.readerLink,
+    `/dashboard/mail?view=message&a=${s.account.id}&mid=${encodeURIComponent(messageId)}`);
+});
+
 /* ============================================================ the attachment picker */
 
 test("attachable lists the thread's stored parts and the owner's own newest files", async () => {
@@ -813,4 +968,22 @@ test("attachable lists the thread's stored parts and the owner's own newest file
 
   const missing = await s.call("GET", `${DRAFTS}/${SEEDED_ID}/attachable`);
   assert.equal(missing.status, 404, missing.text);
+});
+
+test("the picker offers what the reader would read: the default bucket, and inside the cap", async () => {
+  const s = await setup();
+  const small = await seedFile(s.db, { key: "global/small.txt", name: "small.txt", size: 12 });
+  const unsized = await seedFile(s.db, { key: "global/unsized.bin", name: "unsized.bin", size: null });
+  const oversized = await seedFile(s.db, { key: "global/big.bin", name: "big.bin", size: MAX_SEND_BYTES + 1 });
+  const elsewhere = await seedFile(s.db, {
+    key: "elsewhere/notes.txt", name: "notes.txt", size: 9, bucket: "some-other-bucket",
+  });
+  const draft = await newDraft(s);
+
+  const res = await s.call("GET", `${DRAFTS}/${draft.id}/attachable`);
+  assert.equal(res.status, 200, res.text);
+  const listed = res.json.storage.map((file) => file.fileId);
+  assert.deepEqual(listed, [String(unsized), String(small)], "newest first, and nothing the reader refuses");
+  assert.ok(!listed.includes(String(oversized)), "a file over the send cap is not offered");
+  assert.ok(!listed.includes(String(elsewhere)), "another bucket's file is not offered");
 });

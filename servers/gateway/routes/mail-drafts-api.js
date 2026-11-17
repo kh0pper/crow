@@ -32,8 +32,9 @@
  *
  * `GET /:id/attachable` (Task 12) is the card's attachment picker: the thread's own parts, read from
  * the store's attachment metadata and never from the network, and the owner's newest Crow files, by
- * id. It also carries the head revision's raw attachment total against the send ceiling, so the card
- * can show how much of it a draft already uses.
+ * id — the default bucket's rows, minus any recorded as over the send cap, so the list is what the
+ * storage reader would actually read. It also carries the head revision's raw attachment total
+ * against the send ceiling, so the card can show how much of it a draft already uses.
  *
  * The revision loop is `drafts/revise.js`'s (Task 9): `POST /:id/comments` queues one comment on one
  * line (a comment on a revision the draft has left is 409 `changed`) and revises at once when it is
@@ -61,6 +62,7 @@
 import { MAIL_ERROR_TEXT, MailError } from "../mail/errors.js";
 import { getAccount } from "../mail/store/accounts.js";
 import { folderRole, getFolder } from "../mail/store/messages.js";
+import { defaultBucket } from "../../storage/s3-client.js";
 import { listThreadMessages, resolveMessageRef } from "../mail/store/reader-queries.js";
 import { composeRaw } from "../mail/adapter/compose.js";
 import { safeAttachmentName } from "../mail/reader/attachments.js";
@@ -754,10 +756,11 @@ export function registerDraftRoutes(router, ctx) {
     try {
       saved = await supervisor.withAdapter(draft.accountId, (adapter) => adapter.saveDraft(raw));
     } catch (err) {
-      // A mailbox with no Drafts folder is NOT_FOUND from the adapter, and the person-facing sentence
-      // for it is the mail one, not the generic "Not found." this API answers a missing row with.
+      // Only a mailbox with no Drafts folder says the mail NOT_FOUND sentence. Any other NOT_FOUND —
+      // the account going away under the tap, say — is a missing row and nothing more.
       if (err instanceof MailError && err.code === "NOT_FOUND") {
-        return sendError(res, 404, "not_found", MAIL_ERROR_TEXT.NOT_FOUND);
+        if (err.detail === "drafts") return sendError(res, 404, "not_found", MAIL_ERROR_TEXT.NOT_FOUND);
+        return sendError(res, 404, "not_found");
       }
       throw err;
     }
@@ -997,20 +1000,24 @@ async function threadAttachables(db, draft) {
 }
 
 /**
- * The owner's own Crow files the picker may offer: the newest `ATTACHABLE_STORAGE_LIMIT` rows that are
- * unscoped or scoped to this draft's project. A file of another project is never listed, exactly as
- * the storage reader never reads one, and `fileId` is the digits-only id that reader accepts.
+ * The owner's own Crow files the picker may offer: the newest `ATTACHABLE_STORAGE_LIMIT` rows that
+ * are unscoped or scoped to this draft's project. A file of another project is never listed, exactly
+ * as the storage reader never reads one, and `fileId` is the digits-only id that reader accepts. The
+ * list is what the reader would actually accept: the default bucket's rows only, and no row recorded
+ * as over the send cap (a row with no recorded size is listed, and preflight is where its real size
+ * is measured).
  */
 async function storageAttachables(db, draft) {
   const projectId = draft?.projectId == null ? null : Number(draft.projectId);
   const scope = projectId == null ? "project_id IS NULL" : "(project_id IS NULL OR project_id = ?)";
+  const args = projectId == null ? [] : [projectId];
   try {
     const { rows } = await db.execute({
       sql: `SELECT id, original_name, mime_type, size_bytes FROM storage_files
-             WHERE ${scope}
+             WHERE bucket = ? AND (size_bytes IS NULL OR size_bytes <= ?) AND ${scope}
              ORDER BY id DESC
              LIMIT ${ATTACHABLE_STORAGE_LIMIT}`,
-      args: projectId == null ? [] : [projectId],
+      args: [defaultBucket(), MAX_SEND_BYTES, ...args],
     });
     return rows.map((row) => {
       const size = Number(row.size_bytes);
@@ -1026,7 +1033,11 @@ async function storageAttachables(db, draft) {
   }
 }
 
-/** The raw bytes the head revision's attachments add up to, as the card shows them against the cap. */
+/**
+ * The raw bytes the head revision's attachments add up to, as the card shows them against the cap.
+ * `totalBytes` is a display figure, from the sizes the revision recorded; preflight enforces the real
+ * cap on the bytes themselves.
+ */
 function attachmentBytes(head) {
   let total = 0;
   for (const ref of Array.isArray(head?.attachments) ? head.attachments : []) {
@@ -1037,21 +1048,31 @@ function attachmentBytes(head) {
 }
 
 /**
- * The reader link a sent draft's receipt carries, or null: the plan-2 message link, built only once
- * `resolveMessageRef` finds the Message-ID in one of this account's Sent-role folders. Before the
- * Sent copy is synced the card says "Sent, syncing..." rather than linking a message that is not here.
+ * The reader link a sent draft's receipt carries, or null: the plan-2 message link, built only once a
+ * copy of the Message-ID sits in one of this account's Sent-role folders. A send to self leaves the
+ * same Message-ID in INBOX as well, and `resolveMessageRef` prefers the inbox row of such a pair, so
+ * the account's rows for the id are asked which one is in a Sent folder and the link is built from
+ * that copy. Before the Sent copy is synced the card says "Sent, syncing..." rather than linking a
+ * message that is not here.
  */
 async function readerLinkFor(db, draft, messageId) {
   if (messageId == null) return null;
   try {
-    const row = await resolveMessageRef(db, { accountId: draft.accountId, mid: messageId });
-    if (!row) return null;
-    const folder = await getFolder(db, row.folderId);
-    if (!folder || folderRole(folder) !== "sent") return null;
+    const { rows } = await db.execute({
+      sql: `SELECT id, folder_id FROM mail_messages
+             WHERE account_id = ? AND message_id = ? ORDER BY id ASC`,
+      args: [draft.accountId, messageId],
+    });
+    for (const row of rows) {
+      const folder = await getFolder(db, row.folder_id);
+      if (folder && folderRole(folder) === "sent") {
+        return `/dashboard/mail?view=message&a=${encodeURIComponent(draft.accountId)}&mid=${encodeURIComponent(messageId)}`;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
-  return `/dashboard/mail?view=message&a=${encodeURIComponent(draft.accountId)}&mid=${encodeURIComponent(messageId)}`;
 }
 
 /**
