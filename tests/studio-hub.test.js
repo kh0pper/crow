@@ -2601,6 +2601,61 @@ test("pad.clear is the operator's own and keeps the pad's settings", async (t) =
   assert.equal(back.name, "Snare");
 });
 
+test("pad.set stores a pad's playback fields in one step, and one undo puts the defaults back", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id, bank_id } = await seedSampleSong(hub);
+  const pad = padPath(track_id, bank_id, 0);
+
+  const set = await applies(hub, song_id, "operator-pad-playback", "pad.set", {
+    track_id,
+    bank_id,
+    index: 0,
+    fields: {
+      mode: "normal",
+      loop: "loop",
+      bpm_sync: true,
+      source_bpm_x10: 1745,
+      speed_pct: 75,
+      fixed_velocity: true,
+      hold_ms: 1500,
+      choke: 10,
+    },
+  });
+
+  // The settings are song data: they come back with the song, pad for pad.
+  const saved = (await hub.openSong(song_id)).snapshot.pads[pad];
+  assert.equal(saved.mode, "normal");
+  assert.equal(saved.loop, "loop");
+  assert.equal(saved.bpm_sync, true);
+  assert.equal(saved.source_bpm_x10, 1745);
+  assert.equal(saved.speed_pct, 75);
+  assert.equal(saved.fixed_velocity, true);
+  assert.equal(saved.hold_ms, 1500);
+  assert.equal(saved.choke, 10, "mute group J is stored as itself");
+  assert.equal(saved.keep_pitch, false, "the reserved field is never written");
+
+  // Every setting is its own field of the one step, so the undo takes them all
+  // back together and leaves the sound on the pad.
+  assert.equal(Object.keys(set.entry.inverse.after).length, 8, "one history field per setting");
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-playback",
+    entry_id: set.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the undo was refused: ${undone.error}`);
+  const back = (await hub.openSong(song_id)).snapshot.pads[pad];
+  assert.equal(back.sample_id, SAMPLE_A, "the undo left the pad's sound alone");
+  assert.equal(back.mode, "oneshot");
+  assert.equal(back.loop, "off");
+  assert.equal(back.bpm_sync, false);
+  assert.equal(back.source_bpm_x10, 0);
+  assert.equal(back.speed_pct, 100);
+  assert.equal(back.fixed_velocity, false);
+  assert.equal(back.hold_ms, 0);
+  assert.equal(back.choke, 0);
+});
+
 test("agent cannot remove a sampler track with samples, replace its device, or undo a bank.add that holds samples", async (t) => {
   const { hub, db } = await setup(t);
   const { song_id, track_id, bank_id, tracked } = await seedSampleSong(hub);

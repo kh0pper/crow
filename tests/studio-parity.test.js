@@ -84,8 +84,8 @@ const stubRenderer = {
 /** A catalogue stub: the real catalogue has its own test below. */
 const stubCatalogue = async () => ({ modules: {} });
 
-/** @returns {Promise<string[]>} every tool name the server exposes. */
-async function toolNames() {
+/** @returns {Promise<object[]>} every tool the server lists, schema and all. */
+async function listedTools() {
   const server = createStudioServer({
     hub: stubHub(),
     renderer: stubRenderer,
@@ -97,12 +97,39 @@ async function toolNames() {
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
-    const listed = await client.listTools();
-    return listed.tools.map((tool) => tool.name);
+    return (await client.listTools()).tools;
   } finally {
     await client.close();
   }
 }
+
+/** @returns {Promise<string[]>} every tool name the server exposes. */
+async function toolNames() {
+  return (await listedTools()).map((tool) => tool.name);
+}
+
+test("the pad tool's schema names the mute groups A to J and leaves keep_pitch out", async () => {
+  const padSet = (await listedTools()).find((tool) => tool.name === "studio_pad_set");
+  assert.ok(padSet, "studio_pad_set is a tool");
+  const fields = padSet.inputSchema.properties.fields;
+  assert.ok(fields && fields.properties, "the tool describes the pad fields it takes");
+
+  const choke = fields.properties.choke;
+  assert.ok(choke, "the pad's fields carry a mute group");
+  assert.match(choke.description, /mute group/);
+  assert.match(choke.description, /A-J/, "the letters the groups are named by");
+  assert.equal(choke.maximum, 10, "the last group is J");
+
+  // The playback fields are the pad's own settings, and the reserved one is not
+  // among them: a future time-stretch is not something an agent may set yet.
+  const described = Object.keys(fields.properties).sort();
+  for (const field of ["mode", "loop", "bpm_sync", "source_bpm_x10", "speed_pct", "fixed_velocity", "hold_ms"]) {
+    assert.ok(described.includes(field), `${field} is part of the pad's fields`);
+  }
+  assert.equal(described.includes("keep_pitch"), false, "keep_pitch is reserved and read-only");
+  assert.deepEqual(fields.properties.mode.enum, ["oneshot", "gate", "normal"]);
+  assert.deepEqual(fields.properties.loop.enum, ["off", "loop", "pingpong"]);
+});
 
 test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
   const names = await toolNames();

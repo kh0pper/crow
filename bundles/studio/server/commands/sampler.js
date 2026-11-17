@@ -65,6 +65,7 @@ import {
   MOTION_PARAM_RANGES,
   MOTION_PARAMS,
   PAD_FILTER_TYPES,
+  PAD_LOOPS,
   PAD_MODES,
   SAMPLE_ORIGINS,
   SAMPLE_RATES,
@@ -435,11 +436,50 @@ const locksSchema = z
   .strict()
   .describe(`the pad fields this one step overrides; at most ${LIMITS.locksPerStep}`);
 
+/**
+ * The tempo a pad's sample was made at: times ten, 20.0-300.0 BPM, or 0 for
+ * "not set". A value between the two readings is refused rather than tidied
+ * into one, so a caller fixes its own number.
+ */
+const sourceBpmSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(3000)
+  .refine((value) => value === 0 || value >= 200, {
+    message: "the sample's tempo is 0 (not set) or 20.0-300.0 BPM, times ten",
+  })
+  .describe("the sample's own tempo times ten, 200-3000, or 0 for not set");
+
 /** The pad's own settings, the ones `pad.set` may change. */
 const padFieldsSchema = z
   .object({
     name: nameSchema.optional().describe("what the pad is called"),
-    mode: z.enum(PAD_MODES).optional().describe('"oneshot" plays to the end, "gate" releases at the step end'),
+    mode: z
+      .enum(PAD_MODES)
+      .optional()
+      .describe('"oneshot" plays to the end and presses overlap, "normal" restarts on each press, "gate" plays while held'),
+    loop: z
+      .enum(PAD_LOOPS)
+      .optional()
+      .describe('"off" plays once, "loop" repeats, "pingpong" reflects at each end'),
+    bpm_sync: z
+      .boolean()
+      .optional()
+      .describe("play in time with the song tempo; the speed, and with it the pitch, follows"),
+    source_bpm_x10: sourceBpmSchema.optional(),
+    speed_pct: z
+      .number()
+      .int()
+      .min(50)
+      .max(150)
+      .optional()
+      .describe("playback speed in percent, 50-150; it moves the pitch with it"),
+    fixed_velocity: z
+      .boolean()
+      .optional()
+      .describe("play at the pad's own level instead of following how hard it was hit"),
+    hold_ms: z.number().int().min(0).max(10000).optional().describe("hold length in ms, 0-10000"),
     pitch: lockFields.pitch.optional(),
     gain_db: lockFields.gain_db.optional(),
     pan: lockFields.pan.optional(),
@@ -456,12 +496,18 @@ const padFieldsSchema = z
       .strict()
       .optional()
       .describe("the pad's filter, all three fields together"),
-    choke: z.number().int().min(0).max(8).optional().describe("choke group, 0 for none, 1-8"),
+    choke: z
+      .number()
+      .int()
+      .min(0)
+      .max(10)
+      .optional()
+      .describe("mute group, 0 none, 1-10 = A-J"),
     reverse: z.boolean().optional(),
   })
   .strict()
   .refine((fields) => Object.keys(fields).length > 0, "pad.set needs at least one field to change")
-  .describe("the pad fields to change, each one its own history field");
+  .describe("the pad fields to change, each one its own history field; keep_pitch is reserved and read-only, so it is not one of them");
 
 /** The sample the gateway's upload finish route hands `sample.add`. */
 const sampleSchema = z

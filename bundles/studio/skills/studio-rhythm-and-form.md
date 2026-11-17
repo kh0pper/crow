@@ -96,7 +96,7 @@ Read `studio_module_types` first: the real controller names and ranges, and a wr
 
 **One DrumSynth track.** Bass, snare and hi-hat voices, each with volume, tone, length and panning controllers; polyphony 4 by default, so hits overlap.
 - The pitch that fires each voice is DrumSynth's own map, not General MIDI. Establish the three pitches once — one bar of one pitch per 16th, rendered, named by the operator's ear — and keep that map for the song.
-- Three voices only: toms, claps, rides and crashes need another track. There are no choke groups, so an open hat rings through closed ones; keep hats at `d` 0.1–0.2 beat or leave the open hat out.
+- Three voices only: toms, claps, rides and crashes need another track. There are no choke groups inside one DrumSynth track, so an open hat rings through closed ones; keep hats at `d` 0.1–0.2 beat or leave the open hat out. (Mute groups are a sampler-pad setting, not a voice setting of this track.)
 
 **One track per voice.** `studio_track_add` per voice: Analog generator for kick, snare and hat (its `Noise` 0–256 with `F.freq`, once `Filter` is set, does the noisy voices; `Release` keeps hits short), Generator for tonal clicks. Every hit of a voice sits on one pitch you choose.
 - Costs a track (16 per song) and one clip per voice per scene.
@@ -132,7 +132,7 @@ The swing column is `pattern.set_swing`'s own value, not a percentage: `swing = 
 | Folk | 60–140 | cajón low 1, 9 · cajón slap 5, 13 · tambourine 5, 13 | 0 | tambourine `gain_db` −3 on 5 |
 
 - A step carries up to 8 locks, one value per pad field: a step that wants a shorter hat and a lower one is one `step.set` with two locks. Velocity is not a lock — write it with `step.toggle`'s `v` or `step.set`'s `v`.
-- Set a choke group on the pads, not per step: put the closed and the open hat in group 1 so an open hat stops when the next closed one fires, and let a `gate` pad release at its step end.
+- Set a mute group on the pads, not per step: put the closed and the open hat in group A so an open hat stops when the next closed one fires, and let a `gate` pad release at its step end. The groups are `choke` 1–10, lettered A–J, and the last pad played in a group wins.
 - Where the archetype says a voice is late (boom bap's snare 5–20 ms), a lock cannot move a step in time: write the pattern one step later, or set `pattern.set_swing` and say what the grid became.
 - Two bars are two patterns of the same clip, and the chain loops them: `chain.set` `["a", "b"]` plays bar 1 then the variation. The fill goes in the second pattern's last four steps, not in a third pattern.
 - Write the hits with `v`, not with `gain_db` locks: 100–120 accent, 70–90 body, 20–45 ghost. A lock is for one hit that differs in colour — a filter, a pitch, a decay — not for the level of a whole lane.
