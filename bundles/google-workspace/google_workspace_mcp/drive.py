@@ -821,10 +821,21 @@ async def gdrive_upload_new_version(
     content in version history. This is the tool for the
     new-version-against-a-ledgered-id workflow.
 
-    Its parents are not touched, so the destination-folder check (folder_guard)
-    does not apply: the file stays exactly where it already is, with exactly the
-    sharing it already has.
+    Its parents are not touched, so the destination-FOLDER check (folder_guard)
+    does not apply: the file stays exactly where it already is. What does apply,
+    with GWS_OUTBOUND_GUARD on, is the same sharing decision asked of the FILE
+    itself (folder_guard.check_file_sharing): the new content is readable by
+    everyone who can already read that file, so its owners and everyone it is
+    shared with — and, in a Shared Drive, the drive's members — are checked before
+    anything is uploaded. A file whose sharing cannot be read, or that is open to
+    anyone/its whole domain/someone not on GWS_OUTBOUND_ALLOWLIST, is refused and
+    nothing is uploaded.
     """
+    refusal = await folder_guard.check_file_sharing(
+        file_id, "uploading a new version of a Drive file"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     if not os.path.isfile(local_path):
         return {"success": False, "error": f"Local file not found: {local_path}"}
     drive = get_drive_service()

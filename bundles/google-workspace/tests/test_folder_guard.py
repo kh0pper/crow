@@ -19,6 +19,7 @@ from google_workspace_mcp.folder_guard import _decide  # noqa: E402
 
 WHAT = "uploading a file into a Drive folder"
 FOLDER = "folder-1"
+TARGET = f"destination folder {FOLDER}"
 OWNER = "alex@example.com"
 ENTRIES = [OWNER]
 
@@ -34,8 +35,17 @@ def metadata(owners=(OWNER,), permissions=None):
     }
 
 
-def decide(info, entries=ENTRIES, self_address=OWNER):
-    return _decide(WHAT, FOLDER, info, entries, self_address)
+def shared_drive_metadata(permissions=(), drive_id="drive-1"):
+    """What files.get returns for an item in a Shared Drive.
+
+    Drive omits `owners` for such an item entirely — it has no owner of its own —
+    and its own permission list says nothing about the drive's members.
+    """
+    return {"id": FOLDER, "driveId": drive_id, "permissions": list(permissions)}
+
+
+def decide(info, entries=ENTRIES, self_address=OWNER, drive_members=None):
+    return _decide(WHAT, TARGET, info, entries, self_address, drive_members)
 
 
 class FolderDecisionTests(unittest.TestCase):
@@ -129,10 +139,68 @@ class FolderDecisionTests(unittest.TestCase):
         self.assertIsNotNone(decide({"owners": [], "permissions": {}}))
         self.assertIsNotNone(decide(None))
 
-    def test_a_shared_drive_destination_is_judged_on_its_direct_permissions(self):
-        # A shared-drive item carries no owner of its own; the drive's members are
-        # not in its permission list. Documented limit: pass on what IS visible.
-        self.assertIsNone(decide({"id": FOLDER, "owners": [], "permissions": []}))
+    def test_a_folder_reporting_no_owner_is_refused(self):
+        # An item in My Drive always has an owner: an empty list is unread metadata.
+        error = decide(metadata(owners=(), permissions=[]))
+        self.assertIsNotNone(error)
+        self.assertIn("no owner", error)
+
+    # --- Shared Drives: the drive's members are the effective sharing -------
+
+    def test_a_shared_drive_destination_is_judged_on_the_drives_members(self):
+        # A shared-drive item carries no owner of its own and its own permission
+        # list does not mention the drive's members; the effective listing does.
+        info = shared_drive_metadata(permissions=[])  # direct list looks empty
+        members = [{"type": "user", "role": "organizer", "emailAddress": OWNER}]
+        self.assertIsNone(decide(info, drive_members=members))
+
+    def test_a_shared_drive_member_outside_the_allowlist_is_refused(self):
+        info = shared_drive_metadata()
+        members = [
+            {"type": "user", "role": "organizer", "emailAddress": OWNER},
+            {"type": "group", "role": "writer", "emailAddress": "drive-team@example.net"},
+        ]
+        error = decide(info, drive_members=members)
+        self.assertIsNotNone(error)
+        self.assertIn("drive-team@example.net", error)
+        self.assertIn("GWS_OUTBOUND_ALLOWLIST", error)
+
+    def test_a_shared_drive_is_not_judged_on_the_items_own_permission_list(self):
+        # The direct list here says "only the owner", which would pass; the drive's
+        # members could not be read, so the write is refused rather than assumed safe.
+        info = shared_drive_metadata(
+            permissions=[{"type": "user", "role": "owner", "emailAddress": OWNER}]
+        )
+        error = decide(info)  # no effective listing
+        self.assertIsNotNone(error)
+        self.assertIn("Shared Drive", error)
+
+    def test_a_shared_drive_item_with_no_owners_field_is_still_judged(self):
+        # Drive omits `owners` entirely for a shared-drive item; that absence must
+        # not be read as unreadable metadata (it means "no owner of its own").
+        info = {"id": FOLDER, "driveId": "drive-1", "permissions": []}
+        members = [{"type": "user", "role": "organizer", "emailAddress": OWNER}]
+        self.assertIsNone(decide(info, drive_members=members))
+        members.append(
+            {"type": "user", "role": "writer", "emailAddress": "stranger@example.net"}
+        )
+        self.assertIn("stranger@example.net", decide(info, drive_members=members))
+
+    def test_a_shared_drive_with_no_readable_members_is_refused(self):
+        info = shared_drive_metadata()
+        for members in (None, [], {"permissions": []}):
+            with self.subTest(members=members):
+                error = decide(info, drive_members=members)
+                self.assertIsNotNone(error)
+                self.assertIn("Shared Drive", error)
+
+    def test_an_anyone_grant_on_a_shared_drive_is_refused(self):
+        info = shared_drive_metadata()
+        members = [
+            {"type": "user", "role": "organizer", "emailAddress": OWNER},
+            {"type": "anyone", "role": "reader"},
+        ]
+        self.assertIn("anyone with the link", decide(info, drive_members=members))
 
 
 if __name__ == "__main__":

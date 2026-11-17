@@ -5,10 +5,13 @@ The point of each test: a refused call makes no API call at all, an allowlisted
 invitations and every calendar but `primary`. The Apps Script write/run tools and
 a foreign Forms shim are refused by the outbound guard, and so is a write into a
 folder that guard does not cover (its owners and permissions are read first — see
-folder_guard), a write on a calendar other than `primary`, a local-image
-`gdocs_insert_image` (it would publish the upload briefly), and a `link_url`
-whose scheme is not http/https/mailto. The service objects are mocks, so nothing
-leaves the process.
+folder_guard), a new version of a file that is shared outside the allowlist (that
+file's own sharing is read first), a write on a calendar other than `primary`, a
+local-image `gdocs_insert_image` (it would publish the upload briefly) and the
+anyone/domain permission a Drive-hosted insert used to create under the guard
+(an image must already be shared, and a failed revoke is a reported failure),
+and a `link_url` whose scheme is not http/https/mailto. The service objects are
+mocks, so nothing leaves the process.
 
 Run with:
     python -m unittest discover -s tests -v
@@ -427,6 +430,52 @@ def folder_service(metadata=None, error=None, account=OWNER):
         "parents": [FOLDER],
         "mimeType": "text/plain",
     }
+    service.files.return_value.update.return_value.execute.return_value = {
+        "id": "file-1",
+        "name": "note.txt",
+        "mimeType": "text/plain",
+        "version": "2",
+    }
+    return service
+
+
+def shared_drive_service(members=(), listing_error=None, account=OWNER):
+    """A Drive service for a folder in a SHARED DRIVE.
+
+    files.get reports a `driveId` and an empty own-permission list (that is what a
+    shared-drive item looks like); the effective members come from
+    permissions().list, and `listing_error` makes that listing fail.
+    """
+    service = mock.MagicMock()
+    service.files.return_value.get.return_value.execute.return_value = {
+        "id": FOLDER,
+        "driveId": "drive-1",
+        # Drive omits `owners` for a shared-drive item: it has none of its own.
+        "permissions": [],
+    }
+    if listing_error is not None:
+        service.permissions.return_value.list.return_value.execute.side_effect = (
+            listing_error
+        )
+    else:
+        service.permissions.return_value.list.return_value.execute.return_value = {
+            "permissions": list(members)
+        }
+    service.about.return_value.get.return_value.execute.return_value = {
+        "user": {"emailAddress": account}
+    }
+    service.files.return_value.copy.return_value.execute.return_value = {
+        "id": "copy-1",
+        "name": "copy",
+        "parents": [FOLDER],
+        "mimeType": "text/plain",
+    }
+    service.files.return_value.update.return_value.execute.return_value = {
+        "id": "file-1",
+        "name": "note.txt",
+        "mimeType": "text/plain",
+        "version": "2",
+    }
     return service
 
 
@@ -520,6 +569,76 @@ class DriveFolderGuardTests(unittest.TestCase):
         self.assertTrue(result["success"])
         service.files().get.assert_not_called()
 
+    def test_a_folder_reporting_no_owner_is_refused(self):
+        # An item in My Drive always has an owner: an empty list is unread metadata.
+        service = folder_service({"id": FOLDER, "owners": [], "permissions": []})
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn("no owner", result["error"])
+        service.files().copy.assert_not_called()
+
+    # --- Shared Drives: judged on the drive's effective permissions ---------
+
+    def test_a_shared_drive_member_outside_the_allowlist_is_refused(self):
+        service = shared_drive_service(
+            members=[
+                {"type": "user", "role": "organizer", "emailAddress": OWNER},
+                {"type": "user", "role": "writer", "emailAddress": STRANGER},
+            ]
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn(STRANGER, result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_a_shared_drive_whose_members_are_all_allowlisted_is_allowed(self):
+        service = shared_drive_service(
+            members=[{"type": "user", "role": "organizer", "emailAddress": OWNER}]
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1"):  # the account's own address only
+            result = self.run_copy(service)
+        self.assertTrue(result["success"])
+        service.files().copy.assert_called_once()
+
+    def test_the_shared_drive_read_asks_for_the_drives_effective_permissions(self):
+        service = shared_drive_service(
+            members=[{"type": "user", "role": "organizer", "emailAddress": OWNER}]
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_copy(service)
+        self.assertTrue(result["success"])
+        kwargs = service.permissions().list.call_args.kwargs
+        self.assertEqual(kwargs["fileId"], FOLDER)
+        self.assertTrue(kwargs["supportsAllDrives"])
+        self.assertIn("permissionDetails", kwargs["fields"])
+        self.assertIn("emailAddress", kwargs["fields"])
+
+    def test_a_shared_drive_member_list_that_fails_is_refused(self):
+        service = shared_drive_service(listing_error=RuntimeError("boom"))
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn("Shared Drive", result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_an_empty_shared_drive_member_list_is_refused(self):
+        service = shared_drive_service(members=[])
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn("Shared Drive", result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_a_my_drive_folder_never_reads_a_member_list(self):
+        # The effective listing is only asked for when the item is in a Shared Drive.
+        service = folder_service(folder_metadata())
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_copy(service)
+        self.assertTrue(result["success"])
+        service.permissions.assert_not_called()
+
     def test_guard_off_reads_nothing_and_writes_where_it_was_told(self):
         service = folder_service(error=RuntimeError("must not be read"))
         with gws_env():
@@ -565,11 +684,93 @@ class DriveFolderGuardTests(unittest.TestCase):
                     self.assertIn(STRANGER, result["error"], name)
 
 
+# --- Drive: a new version of an existing file ------------------------------
+#
+# `gdrive_upload_new_version` writes IN PLACE: the file's own sharing (and, in a
+# Shared Drive, the drive's members) is the question, not a parent folder's.
+
+
+class DriveNewVersionGuardTests(unittest.TestCase):
+    def setUp(self):
+        # The account's own address is cached per process.
+        folder_guard.reset_cache()
+
+    def run_upload(self, service, local):
+        with mock.patch.object(
+            drive, "get_drive_service", return_value=service
+        ), mock.patch.object(folder_guard, "get_drive_service", return_value=service):
+            return asyncio.run(drive.gdrive_upload_new_version("file-1", local))
+
+    def write_local(self, tmp):
+        local = os.path.join(tmp, "note.txt")
+        with open(local, "w", encoding="utf-8") as fh:
+            fh.write("v2")
+        return local
+
+    def test_a_file_shared_with_a_stranger_is_refused_and_nothing_is_uploaded(self):
+        service = folder_service(folder_metadata(shared=[STRANGER]))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = self.write_local(tmp)
+            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+                result = self.run_upload(service, local)
+        self.assertFalse(result["success"])
+        self.assertIn(STRANGER, result["error"])
+        self.assertIn("GWS_OUTBOUND_GUARD", result["error"])
+        # Refused before the media upload: the content is never replaced.
+        service.files().update.assert_not_called()
+
+    def test_the_target_file_is_what_gets_checked(self):
+        service = folder_service(folder_metadata(shared=[STRANGER]))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = self.write_local(tmp)
+            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+                self.run_upload(service, local)
+        kwargs = service.files().get.call_args.kwargs
+        self.assertEqual(kwargs["fileId"], "file-1")
+        self.assertIn("owners", kwargs["fields"])
+        self.assertIn("permissions", kwargs["fields"])
+        self.assertTrue(kwargs["supportsAllDrives"])
+
+    def test_your_own_file_is_allowed(self):
+        service = folder_service(folder_metadata())
+        with tempfile.TemporaryDirectory() as tmp:
+            local = self.write_local(tmp)
+            with gws_env(GWS_OUTBOUND_GUARD="1"):  # the account's own address only
+                result = self.run_upload(service, local)
+        self.assertTrue(result["success"])
+        service.files().update.assert_called_once()
+
+    def test_a_file_whose_sharing_cannot_be_read_is_refused(self):
+        service = folder_service(error=RuntimeError("boom"))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = self.write_local(tmp)
+            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+                result = self.run_upload(service, local)
+        self.assertFalse(result["success"])
+        self.assertIn("could not be read", result["error"])
+        service.files().update.assert_not_called()
+
+    def test_guard_off_uploads_without_reading_the_file(self):
+        service = folder_service(error=RuntimeError("must not be read"))
+        with tempfile.TemporaryDirectory() as tmp:
+            local = self.write_local(tmp)
+            with gws_env():
+                result = self.run_upload(service, local)
+        self.assertTrue(result["success"])
+        service.files().get.assert_not_called()
+        service.files().update.assert_called_once()
+
+
 # --- Docs: a local image insert, and the link scheme -----------------------
 
 
-def docs_image_mocks():
-    """Docs + Drive services good enough for one gdocs_insert_image call."""
+def docs_image_mocks(permissions=(), revoke_error=None, list_error=None):
+    """Docs + Drive services good enough for one gdocs_insert_image call.
+
+    `permissions` is the sharing the Drive file already carries (what
+    permissions().list reports), `list_error` makes that listing fail, and
+    `revoke_error` makes deleting the tool's own grant fail.
+    """
     docs_svc = mock.MagicMock()
     docs_svc.documents.return_value.batchUpdate.return_value.execute.return_value = {}
     drive_svc = mock.MagicMock()
@@ -580,7 +781,20 @@ def docs_image_mocks():
     drive_svc.permissions.return_value.create.return_value.execute.return_value = {
         "id": "perm-1"
     }
-    drive_svc.permissions.return_value.delete.return_value.execute.return_value = {}
+    if list_error is not None:
+        drive_svc.permissions.return_value.list.return_value.execute.side_effect = (
+            list_error
+        )
+    else:
+        drive_svc.permissions.return_value.list.return_value.execute.return_value = {
+            "permissions": list(permissions)
+        }
+    if revoke_error is not None:
+        drive_svc.permissions.return_value.delete.return_value.execute.side_effect = (
+            revoke_error
+        )
+    else:
+        drive_svc.permissions.return_value.delete.return_value.execute.return_value = {}
     return docs_svc, drive_svc
 
 
@@ -634,13 +848,104 @@ class DocsImageGuardTests(unittest.TestCase):
         self.assertEqual(body["type"], "anyone")
         drive_svc.permissions.return_value.delete.assert_called_once()
 
-    def test_a_drive_hosted_image_is_still_allowed_under_the_guard(self):
-        docs_svc, drive_svc = docs_image_mocks()
+    def test_a_drive_hosted_image_is_refused_under_the_guard_when_it_is_private(self):
+        docs_svc, drive_svc = docs_image_mocks(
+            permissions=[{"id": "perm-owner", "type": "user", "role": "owner"}]
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertFalse(result["success"])
+        # The required wording: already-shared or nothing happens.
+        self.assertIn("must already be shared for embedding", result["error"])
+        self.assertIn("won't make a file public", result["error"])
+        self.assertIn("GWS_OUTBOUND_GUARD", result["error"])
+        # Nothing was published, and nothing was inserted.
+        drive_svc.permissions.return_value.create.assert_not_called()
+        drive_svc.permissions.return_value.delete.assert_not_called()
+        docs_svc.documents.return_value.batchUpdate.assert_not_called()
+
+    def test_a_whole_domain_grant_does_not_count_as_readable_under_the_guard(self):
+        # A domain grant still needs a sign-in, so the Docs API cannot fetch it.
+        docs_svc, drive_svc = docs_image_mocks(
+            permissions=[
+                {"id": "perm-d", "type": "domain", "role": "reader", "domain": "example.org"}
+            ]
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertFalse(result["success"])
+        self.assertIn("must already be shared for embedding", result["error"])
+        drive_svc.permissions.return_value.create.assert_not_called()
+        docs_svc.documents.return_value.batchUpdate.assert_not_called()
+
+    def test_an_already_shared_drive_image_is_inserted_with_no_new_permission(self):
+        docs_svc, drive_svc = docs_image_mocks(
+            permissions=[{"id": "perm-any", "type": "anyone", "role": "reader"}]
+        )
         with gws_env(GWS_OUTBOUND_GUARD="1"):
             result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
         self.assertTrue(result["success"])
-        drive_svc.files.return_value.create.assert_not_called()
+        drive_svc.permissions.return_value.create.assert_not_called()
+        drive_svc.permissions.return_value.delete.assert_not_called()
+        self.assertIsNone(result["data"]["public_permission_created"])
         docs_svc.documents.return_value.batchUpdate.assert_called_once()
+
+    def test_a_drive_image_whose_sharing_cannot_be_read_is_refused(self):
+        docs_svc, drive_svc = docs_image_mocks(list_error=RuntimeError("boom"))
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertFalse(result["success"])
+        self.assertIn("could not be read", result["error"])
+        drive_svc.permissions.return_value.create.assert_not_called()
+        docs_svc.documents.return_value.batchUpdate.assert_not_called()
+
+    def test_a_drive_hosted_image_with_the_guard_off_creates_and_revokes_one_grant(self):
+        docs_svc, drive_svc = docs_image_mocks()
+        with gws_env():
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertTrue(result["success"])
+        body = drive_svc.permissions.return_value.create.call_args.kwargs["body"]
+        self.assertEqual(body["type"], "anyone")
+        self.assertEqual(body["role"], "reader")
+        drive_svc.permissions.return_value.delete.assert_called_once()
+        kwargs = drive_svc.permissions.return_value.delete.call_args.kwargs
+        self.assertEqual(kwargs["permissionId"], "perm-1")
+        self.assertEqual(kwargs["fileId"], "drive-file-1")
+        self.assertEqual(result["data"]["public_permission_created"], "perm-1")
+
+    def test_the_revoke_targets_exactly_the_permission_the_tool_created(self):
+        docs_svc, drive_svc = docs_image_mocks()
+        drive_svc.permissions.return_value.create.return_value.execute.return_value = {
+            "id": "perm-42"
+        }
+        with gws_env():
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertTrue(result["success"])
+        kwargs = drive_svc.permissions.return_value.delete.call_args.kwargs
+        self.assertEqual(kwargs["permissionId"], "perm-42")
+
+    def test_a_failed_revoke_is_reported_as_a_failure_not_a_success(self):
+        docs_svc, drive_svc = docs_image_mocks(revoke_error=RuntimeError("boom"))
+        with gws_env():
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertFalse(result["success"])
+        self.assertIn("STILL readable by anyone with the link", result["error"])
+        self.assertIn("perm-1", result["error"])
+        self.assertIn("drive-file-1", result["error"])
+        self.assertEqual(result["data"]["permission_id"], "perm-1")
+        self.assertFalse(result["data"]["permission_revoked"])
+        self.assertTrue(result["data"]["inserted"])
+
+    def test_a_failed_revoke_while_the_insert_failed_is_still_reported(self):
+        docs_svc, drive_svc = docs_image_mocks(revoke_error=RuntimeError("boom"))
+        docs_svc.documents.return_value.batchUpdate.return_value.execute.side_effect = (
+            RuntimeError("doc")
+        )
+        with gws_env():
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertFalse(result["success"])
+        self.assertIn("STILL readable by anyone with the link", result["error"])
+        self.assertFalse(result["data"]["inserted"])
 
 
 class DocsLinkGuardTests(unittest.TestCase):

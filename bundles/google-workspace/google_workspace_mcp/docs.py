@@ -1046,6 +1046,67 @@ async def gdocs_rewrite_passages(doc_id: str, passages: list[dict]) -> dict:
     }
 
 
+async def _anonymously_readable(drive, file_id: str):
+    """(readable, problem) for a Drive file the Docs API is asked to fetch.
+
+    `readable` is True only when the file already carries an `anyone` (anyone with
+    the link) permission, which is the only sharing that lets an anonymous fetch
+    through; a `domain` grant still needs a sign-in, so it does not count.
+    `problem` is the reason the sharing could not be read, or None when it could —
+    an unreadable file is never assumed readable. `permissions().list` is used so
+    the answer is the file's own effective sharing, including a Shared Drive's.
+    """
+    try:
+        listing = await asyncio.to_thread(
+            lambda: (
+                drive.permissions()
+                .list(
+                    fileId=file_id,
+                    supportsAllDrives=True,
+                    fields="permissions(id, type, role)",
+                )
+                .execute()
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - unreadable sharing fails closed
+        return False, f"{type(e).__name__}: {e}"
+    permissions = listing.get("permissions") if isinstance(listing, dict) else None
+    if not isinstance(permissions, list):
+        return False, "Drive returned no permission list"
+    for permission in permissions:
+        if not isinstance(permission, dict):
+            continue
+        kind = permission.get("type")
+        kind = kind.strip().lower() if isinstance(kind, str) else ""
+        if kind == "anyone":
+            return True, None
+    return False, None
+
+
+async def _revoke_permission(drive, file_id: str, permission_id: str) -> Optional[str]:
+    """Delete exactly the permission this tool created: the reason it failed, or None.
+
+    `permission_id` is always the id the create call returned — never a re-read
+    match — so a revoke cannot remove someone else's grant. A failure is returned
+    (and logged), not swallowed: the caller reports it as a failure, because the
+    file is still public.
+    """
+    try:
+        await asyncio.to_thread(
+            lambda: (
+                drive.permissions()
+                .delete(fileId=file_id, permissionId=permission_id)
+                .execute()
+            )
+        )
+    except Exception as e:  # noqa: BLE001 - reported to the caller, not swallowed
+        logger.warning(
+            "could not revoke permission %s on %s: %s", permission_id, file_id, e
+        )
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
 @handle_google_errors
 async def gdocs_insert_image(
     doc_id: str,
@@ -1068,11 +1129,16 @@ async def gdocs_insert_image(
     Drive, shared anyone-with-link **briefly**, inserted, then un-shared and (unless
     keep_drive_copy) trashed — the embedded copy in the doc is self-contained. The
     brief public window means: do NOT use this for images containing student PII.
+    The grant is created with no other permission and revoked by the exact id Drive
+    returned; if that revoke fails the call is reported as a FAILURE naming the
+    still-public file (it is never reported as a success).
 
     That window is why a LOCAL image is refused outright while GWS_OUTBOUND_GUARD
     is on: the guard will not publish a file, however briefly. A Drive-hosted image
-    still works — put it in Drive yourself, share it as you intend, and pass its
-    file id."""
+    works only if it is ALREADY shared anyone-with-the-link — this tool never adds
+    an "anyone" or "domain" permission while the guard is on, so an image whose
+    owner has not shared it that way is refused with nothing changed. Put the image
+    in Drive yourself, share it as you intend, and pass its file id."""
     # Decided before any client is built, so a refused call touches nothing: a guard-
     # refused local image must not be uploaded at all.
     is_local = os.path.exists(image)
@@ -1110,21 +1176,71 @@ async def gdocs_insert_image(
     else:
         file_id = image  # assume it is already a Drive file id
 
-    perm_id = None
+    guarded = outbound_guard.guard_enabled()
+    perm_id: Optional[str] = None
+    if guarded:
+        # The guard never publishes a file, not even for the length of an insert and
+        # not as a grant it promises to revoke. The Docs API can only fetch an image
+        # it can read anonymously, so a Drive-hosted image is embedded only when its
+        # owner has ALREADY shared it that way; otherwise the call is refused with
+        # nothing created. (A local image never reaches here: refused above.)
+        readable, problem = await _anonymously_readable(drive, file_id)
+        if problem is not None or not readable:
+            return {
+                "success": False,
+                "error": (
+                    "gdocs_insert_image is disabled on this server (GWS_OUTBOUND_GUARD): "
+                    "under the outbound guard, images must already be shared for "
+                    "embedding; Crow won't make a file public. "
+                    + (
+                        f"The sharing of Drive file {file_id} could not be read "
+                        f"({problem}), so it cannot be embedded."
+                        if problem is not None
+                        else (
+                            f"Drive file {file_id} carries no anyone-with-the-link "
+                            f"permission, and the Docs API can only fetch an image it "
+                            f"can read anonymously."
+                        )
+                    )
+                    + " Nothing was inserted and no sharing was changed. Share the "
+                    "image as you intend (anyone-with-the-link reader) and call "
+                    "again, or pass a different image."
+                ),
+                "data": {"doc_id": doc_id, "image_drive_id": file_id},
+            }
+
+    revoke_error: Optional[str] = None
+    insert_error: Optional[Exception] = None
+    anchor_missing = False
+    # Where the image lands: `index` (document start by default), or the anchor's
+    # position once it is resolved below.
+    start = 1 if index is None else int(index)
     try:
-        # 2. share anyone-with-link reader so the Docs API can fetch it
-        perm = await asyncio.to_thread(
-            lambda: (
-                drive.permissions()
-                .create(
-                    fileId=file_id,
-                    body={"type": "anyone", "role": "reader"},
-                    fields="id",
+        if not guarded:
+            # 2. share anyone-with-link reader so the Docs API can fetch it. Guarded
+            # calls never get here: they embed a file the owner already shared.
+            perm = await asyncio.to_thread(
+                lambda: (
+                    drive.permissions()
+                    .create(
+                        fileId=file_id,
+                        body={"type": "anyone", "role": "reader"},
+                        fields="id",
+                    )
+                    .execute()
                 )
-                .execute()
             )
-        )
-        perm_id = perm["id"]
+            # Only the id Drive hands back is ever revoked, so the revoke cannot take
+            # someone else's grant with it. A create that returns no id cannot be
+            # undone: that is a failure here, not a silent public file.
+            perm_id = perm.get("id") if isinstance(perm, dict) else None
+            if not perm_id:
+                raise RuntimeError(
+                    f"Drive created an anyone-with-the-link permission on {file_id} "
+                    f"but returned no permission id, so this tool cannot revoke it — "
+                    f"that file is still readable by anyone with the link; remove the "
+                    f"sharing in Drive now."
+                )
 
         # 3. compute object size from the image header (cap to max_width_pt)
         size_req = {}
@@ -1141,60 +1257,78 @@ async def gdocs_insert_image(
                 }
 
         # 4. resolve the insertion index
+        requests = []
         if anchor_text:
             doc = await asyncio.to_thread(
                 lambda: docs.documents().get(documentId=doc_id).execute()
             )
-            start = _find_anchor_index(doc, anchor_text)
-            if start is None:
-                return {
-                    "success": False,
-                    "error": f"anchor_text not found in doc: {anchor_text!r}",
-                    "data": {"doc_id": doc_id},
-                }
-            requests = [
-                {
-                    "deleteContentRange": {
-                        "range": {
-                            "startIndex": start,
-                            "endIndex": start + len(anchor_text),
-                        }
-                    }
-                },
-            ]
-        else:
-            start = 1 if index is None else int(index)
-            requests = []
-        img_req = {
-            "location": {"index": start},
-            "uri": f"https://drive.google.com/uc?export=view&id={file_id}",
-        }
-        img_req.update(size_req)
-        requests.append({"insertInlineImage": img_req})
+            start_index = _find_anchor_index(doc, anchor_text)
+            if start_index is None:
+                anchor_missing = True
+            else:
+                start = start_index
+                requests = [
+                    {
+                        "deleteContentRange": {
+                            "range": {
+                                "startIndex": start,
+                                "endIndex": start + len(anchor_text),
+                            }
+                        },
+                    },
+                ]
+        if not anchor_missing:
+            img_req = {
+                "location": {"index": start},
+                "uri": f"https://drive.google.com/uc?export=view&id={file_id}",
+            }
+            img_req.update(size_req)
+            requests.append({"insertInlineImage": img_req})
 
-        # 5. apply (delete-anchor + insert-image are sequential in one batchUpdate)
-        await asyncio.to_thread(
-            lambda: (
-                docs.documents()
-                .batchUpdate(documentId=doc_id, body={"requests": requests})
-                .execute()
+            # 5. apply (delete-anchor + insert-image are sequential in one batchUpdate)
+            await asyncio.to_thread(
+                lambda: (
+                    docs.documents()
+                    .batchUpdate(documentId=doc_id, body={"requests": requests})
+                    .execute()
+                )
             )
-        )
+    except Exception as e:  # noqa: BLE001 - kept so a failed revoke can be reported
+        insert_error = e
     finally:
-        # 6. always revoke the public permission we added
+        # 6. always revoke the public permission we added — exactly that one, by the
+        # id Drive returned for it. A revoke that fails leaves the file public, so it
+        # is reported below as a failure, never as a success.
         if perm_id:
-            try:
-                await asyncio.to_thread(
-                    lambda: (
-                        drive.permissions()
-                        .delete(fileId=file_id, permissionId=perm_id)
-                        .execute()
-                    )
-                )
-            except Exception as e:
-                logger.warning(
-                    "could not revoke public permission on %s: %s", file_id, e
-                )
+            revoke_error = await _revoke_permission(drive, file_id, perm_id)
+
+    if revoke_error is not None:
+        inserted = insert_error is None and not anchor_missing
+        return {
+            "success": False,
+            "error": (
+                f"gdocs_insert_image could not revoke the anyone-with-the-link "
+                f"permission it added to Drive file {file_id} (permission {perm_id}): "
+                f"{revoke_error}. That file is STILL readable by anyone with the "
+                f"link — remove the sharing in Drive now."
+                + ("" if inserted else " The insert itself did not complete.")
+            ),
+            "data": {
+                "doc_id": doc_id,
+                "image_drive_id": file_id,
+                "permission_id": perm_id,
+                "permission_revoked": False,
+                "inserted": inserted,
+            },
+        }
+    if anchor_missing:
+        return {
+            "success": False,
+            "error": f"anchor_text not found in doc: {anchor_text!r}",
+            "data": {"doc_id": doc_id},
+        }
+    if insert_error is not None:
+        raise insert_error
 
     # 7. trash the temp upload (the doc holds its own copy now)
     trashed = False
@@ -1218,6 +1352,8 @@ async def gdocs_insert_image(
             "inserted_at_index": start,
             "replaced_anchor": anchor_text,
             "image_drive_id": file_id,
+            "public_permission_created": perm_id,
+            "permission_revoked": bool(perm_id),
             "temp_upload_trashed": trashed,
             "kept_drive_copy": bool(keep_drive_copy and temp_id),
         },

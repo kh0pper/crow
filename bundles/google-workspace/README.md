@@ -102,7 +102,7 @@ run code that can. Two switches decide what may happen:
 | Setting | Default | Effect |
 |---|---|---|
 | `GWS_CALENDAR_NO_INVITES` | off | Events go on the `primary` calendar only: any other `calendar_id` is refused (another calendar has its own owner to notify), guests are refused, Google is never asked to email anyone, and replying to an invitation is refused. |
-| `GWS_OUTBOUND_GUARD` | **off** | When on, every channel above is refused unless its recipient (or, for a folder write, every owner and grantee of the destination folder) is on `GWS_OUTBOUND_ALLOWLIST`, and no request is made to Google at all. A local-image `gdocs_insert_image` is refused, and Apps Script's write/run tools are refused regardless of any address. |
+| `GWS_OUTBOUND_GUARD` | **off** | When on, every channel above is refused unless its recipient (or, for a folder write, every owner and grantee of the destination folder) is on `GWS_OUTBOUND_ALLOWLIST`, and no request is made to Google at all. A local-image `gdocs_insert_image` is refused, a Drive-hosted one must already be shared anyone-with-the-link (this server never adds an `anyone`/`domain` permission while the guard is on), and Apps Script's write/run tools are refused regardless of any address. |
 | `GWS_OUTBOUND_ALLOWLIST` | empty | Addresses and domains that may be written to, e.g. `you@example.com,example.org` (a domain covers exactly that domain, no subdomains). Commas separate entries in the Extensions form; a semicolon or a space also works if you set the variable outside it. Only read while the guard is on; empty then means nothing may be sent (and only folders of your own may be written to). |
 
 A recipient has to be **one** well-formed address: a single `@`, ASCII only, no
@@ -116,16 +116,34 @@ every owner and everyone it is shared with is on the allowlist, and it is
 refused outright when it carries an `anyone` (anyone with the link) or `domain`
 (whole Workspace domain) permission. Your own address is always allowed — a
 folder you own is shared with you — and it is found once through Drive's own
-account endpoint and then remembered; when that lookup cannot answer, only the
-allowlist lets a folder through. A folder whose sharing cannot be read is
-refused rather than assumed safe. Nothing is written in any of these cases, and
-the refusal names the folder and what is wrong with it.
+account endpoint and then remembered for the life of the server process (so a
+change of signed-in account is noticed only after a restart); when that lookup
+cannot answer, only the allowlist lets a folder through. A folder whose sharing
+cannot be read is refused rather than assumed safe, and so is a folder that
+reports no owner at all. Nothing is written in any of these cases, and the
+refusal names the folder and what is wrong with it.
 
-One tool is refused outright while the guard is on: `gdocs_insert_image` with a
-**local** image. The Docs API only fetches an image it can read anonymously, so
-the upload is shared anyone-with-link for the length of the insert — a public
-window the guard will not open. A Drive-hosted image still works: put it in
-Drive yourself, share it exactly as you intend, and pass its file id.
+A folder in a **Shared Drive** is judged on the drive's *effective* permissions
+— `permissions().list`, which includes the members the folder inherits from the
+drive, since an item there has no owner of its own and its own permission list
+does not mention them — under the same rule, and it is refused if that listing
+fails or comes back empty. A file whose content is replaced in place
+(`gdrive_upload_new_version`) gets the same check on its own sharing, because the
+new content is readable by everyone who can already read that file.
+
+`gdocs_insert_image` is the one tool that used to *make* a file public just long
+enough to work: the Docs API only fetches an image it can read anonymously, so
+the insert shared the file anyone-with-link and then un-shared it. `anyone` (and
+`domain`) permissions are now created **only with the guard off**. With the guard
+on, a **local** image is refused outright (it would have to be published to be
+uploaded and embedded at all), and a Drive-hosted image is embedded only if it is
+**already** shared anyone-with-the-link — put it in Drive, share it exactly as
+you intend, and pass its file id. An image that is not shared that way (or whose
+sharing cannot be read) is refused with nothing inserted and nothing changed:
+under the outbound guard, images must already be shared for embedding; Crow won't
+make a file public. In every mode the temporary grant is revoked by the exact
+permission id Drive returned for it, and a revoke that fails is reported as a
+**failure** naming the file that is still public — never as a success.
 
 The guard ships **off** so an existing install keeps behaving exactly as before;
 it is meant for an assistant that also reads untrusted mail, where a crafted
@@ -142,11 +160,8 @@ particular it does **not** cover:
 - **edits and comments on files others own** — a collaborator's file can be
   changed, or a comment added, with no mail-like call of the kind above;
 - **who can read the folder later** — the destination is checked at the moment
-  of the write; anyone granted access to that folder afterwards can read what
-  landed there;
-- **membership of a Shared Drive** — a file in a Shared Drive has no owner of
-  its own and the drive's members are not listed in the file's permissions, so a
-  Shared Drive destination is judged on its direct permissions only.
+  of the write; anyone granted access to that folder afterwards — including a
+  member added to its Shared Drive afterwards — can read what landed there.
 
 If that matters for an account, narrow what the account can do with
 `GWS_OAUTH_SCOPES` (below) rather than relying on the guard alone.

@@ -98,8 +98,10 @@ async def gdocs_insert_image(
     placeholder token); otherwise it inserts at `index` (default: doc start). PNG/GIF size auto-scales to
     max_width_pt (aspect preserved). Mechanism: the image is briefly shared anyone-with-link so the Docs API can
     fetch it, then un-shared + (unless keep_drive_copy) trashed — the doc keeps its own embedded copy. The brief
-    public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA), and with
-    GWS_OUTBOUND_GUARD on a LOCAL image is refused outright (a Drive-hosted file id still works)."""
+    public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA). A revoke that
+    fails is reported as a failure (the file is still public). With GWS_OUTBOUND_GUARD on a LOCAL image is refused
+    outright, and a Drive-hosted image must ALREADY be shared anyone-with-the-link: the guard never adds an
+    anyone/domain permission, so an unshared file is refused with nothing changed."""
     return await docs.gdocs_insert_image(
         doc_id, image, anchor_text=anchor_text, index=index,
         max_width_pt=max_width_pt, keep_drive_copy=keep_drive_copy,

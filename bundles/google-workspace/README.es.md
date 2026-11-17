@@ -108,7 +108,7 @@ correr código que puede hacerlo. Dos ajustes deciden qué puede pasar:
 | Ajuste | Por defecto | Efecto |
 |---|---|---|
 | `GWS_CALENDAR_NO_INVITES` | apagado | Los eventos van solo al calendario `primary`: cualquier otro `calendar_id` se rechaza (otro calendario tiene su propio dueño al que notificar), los invitados se rechazan, Google nunca recibe la orden de escribirle a nadie y responder a una invitación se rechaza. |
-| `GWS_OUTBOUND_GUARD` | **apagado** | Encendido, todo canal de arriba cuyo destinatario no esté en `GWS_OUTBOUND_ALLOWLIST` se rechaza —y, en una escritura en carpeta, si algún dueño o alguien con quien está compartida la carpeta de destino no lo está— y no se hace ninguna llamada a Google. `gdocs_insert_image` con una imagen **local** se rechaza, y las herramientas de escritura/ejecución de Apps Script se rechazan sin importar la dirección. |
+| `GWS_OUTBOUND_GUARD` | **apagado** | Encendido, todo canal de arriba cuyo destinatario no esté en `GWS_OUTBOUND_ALLOWLIST` se rechaza —y, en una escritura en carpeta, si algún dueño o alguien con quien está compartida la carpeta de destino no lo está— y no se hace ninguna llamada a Google. `gdocs_insert_image` con una imagen **local** se rechaza; con una imagen alojada en Drive, esta tiene que estar ya compartida como «cualquiera con el enlace» (con el tope encendido este servidor nunca añade un permiso `anyone`/`domain`); y las herramientas de escritura/ejecución de Apps Script se rechazan sin importar la dirección. |
 | `GWS_OUTBOUND_ALLOWLIST` | vacía | Direcciones y dominios a los que se puede escribir, p. ej. `tu@example.com,example.org` (un dominio cubre exactamente ese dominio, sin subdominios). En el formulario de Extensiones las entradas se separan con comas; un punto y coma o un espacio también sirve si pones la variable fuera de él. Solo se lee mientras el tope está encendido; vacía entonces significa que no se puede enviar nada (y solo se puede escribir en carpetas tuyas). |
 
 Un destinatario tiene que ser **una** dirección bien formada: un único `@`, solo
@@ -122,17 +122,37 @@ si todos sus dueños y todos con quienes está compartida están en la lista bla
 y se rechaza sin más cuando tiene un permiso `anyone` (cualquiera con el enlace)
 o `domain` (un dominio entero de Workspace). Tu propia dirección siempre vale
 —una carpeta tuya está compartida contigo— y se averigua una vez con el endpoint
-de cuenta de Drive y queda recordada; cuando esa consulta no responde, solo la
-lista blanca deja pasar una carpeta. Una carpeta cuya forma de compartir no se
-puede leer se rechaza en vez de darla por segura. En ninguno de estos casos se
-escribe nada, y el rechazo nombra la carpeta y lo que tiene de malo.
+de cuenta de Drive y queda recordada mientras viva el proceso del servidor (así
+que un cambio de cuenta solo se nota tras reiniciarlo); cuando esa consulta no
+responde, solo la lista blanca deja pasar una carpeta. Una carpeta cuya forma de
+compartir no se puede leer se rechaza en vez de darla por segura, y también una
+que no declara ningún dueño. En ninguno de estos casos se escribe nada, y el
+rechazo nombra la carpeta y lo que tiene de malo.
 
-Hay una herramienta que se rechaza sin más mientras el tope está encendido:
-`gdocs_insert_image` con una imagen **local**. La API de Docs solo descarga una
-imagen que pueda leer de forma anónima, así que la subida se comparte como
-«cualquiera con el enlace» durante el tiempo del insertado: una ventana pública
-que el tope no abre. Una imagen que ya está en Drive sigue funcionando: súbela tú,
-compártela como quieras y pasa su id de archivo.
+Una carpeta en una **unidad compartida** se juzga por los permisos *efectivos* de
+la unidad — `permissions().list`, que incluye los miembros que la carpeta hereda
+de ella, porque allí un elemento no tiene dueño propio y su lista de permisos no
+los menciona — con la misma regla, y se rechaza si esa consulta falla o vuelve
+vacía. Un archivo cuyo contenido se reemplaza en sitio
+(`gdrive_upload_new_version`) recibe la misma comprobación sobre cómo está
+compartido él mismo, porque el contenido nuevo queda legible para quien ya podía
+leer ese archivo.
+
+`gdocs_insert_image` es la única herramienta que *hacía* público un archivo justo
+el tiempo necesario para funcionar: la API de Docs solo descarga una imagen que
+pueda leer de forma anónima, así que el insertado compartía el archivo como
+«cualquiera con el enlace» y después lo descompartía. Los permisos `anyone` (y
+`domain`) ahora se crean **solo con el tope apagado**. Con el tope encendido, una
+imagen **local** se rechaza sin más (habría que publicarla para poder subirla y
+incrustarla), y una imagen alojada en Drive se incrusta solo si **ya** está
+compartida como «cualquiera con el enlace»: súbela tú, compártela exactamente como
+quieras y pasa su id de archivo. Una imagen que no está compartida así (o cuya
+forma de compartir no se puede leer) se rechaza sin insertar nada y sin cambiar
+nada: con el tope encendido, las imágenes ya tienen que estar compartidas para
+poder incrustarlas; Crow no hará público un archivo. En todos los modos el permiso
+temporal se revoca por el id exacto que devolvió Drive al crearlo, y una revocación
+que falla se informa como un **fallo** que nombra el archivo que sigue siendo
+público — nunca como un éxito.
 
 El tope viene **apagado** para que una instalación existente siga igual que
 antes; está pensado para un asistente que además lee correo que no controlas,
@@ -150,12 +170,8 @@ cuenta. En concreto **no** cubre:
   colaborador se puede cambiar, o comentar, sin ninguna llamada del tipo de
   arriba;
 - **quién podrá leer la carpeta después** — el destino se revisa en el momento
-  de la escritura; quien reciba acceso a esa carpeta más tarde podrá leer lo que
-  quedó allí;
-- **la pertenencia a una unidad compartida** — un archivo en una unidad
-  compartida no tiene dueño propio y los miembros de la unidad no aparecen en los
-  permisos del archivo, así que un destino en una unidad compartida se juzga solo
-  por sus permisos directos.
+  de la escritura; quien reciba acceso a esa carpeta más tarde —incluido un
+  miembro añadido después a su unidad compartida— podrá leer lo que quedó allí.
 
 Si eso importa en una cuenta, reduce lo que la cuenta puede hacer con
 `GWS_OAUTH_SCOPES` (abajo) en vez de confiar solo en el tope.
