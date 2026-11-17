@@ -31,6 +31,7 @@ import { createDbClient } from "../db.js";
 import { localOperatorAuth } from "./local-token.js";
 import { writingRulesBody } from "../shared/writing-rules.js";
 import { getDraft, addRevision, listRevisions, listComments } from "./mail/drafts/store.js";
+import { forgetTurnCommentIds, turnCommentIds } from "./mail/drafts/revise.js";
 import { verifyTurnToken } from "./mail/drafts/turn-token.js";
 import { listThreadMessages, resolveMessageRef } from "./mail/store/reader-queries.js";
 import { getMessage } from "./mail/store/messages.js";
@@ -282,6 +283,54 @@ function latestRevisionNote(revisions) {
   return null;
 }
 
+/* --------------------------------------------------------------------- propose */
+
+/**
+ * The write behind `mail_draft_propose`, without the MCP plumbing, so the revision loop's tests drive
+ * the same code the tool does.
+ *
+ * The revision is written by the store's compare-and-set on the hash the turn started from, and the
+ * comments the turn started with are marked applied by that SAME transaction (`appliedCommentIds`): a
+ * revision that is refused — because the person edited the draft meanwhile — leaves every one of them
+ * queued, and a comment the person added while the turn was running was never in the turn's record,
+ * so it stays queued too.
+ *
+ * @param {object} store the libsql-style client
+ * @param {{draftId: string, turnId: string, startHash: string}} claims the turn token's claims
+ * @param {{to?: object[], cc?: object[], subject?: string, body: string, note?: string}} args
+ * @returns {Promise<{rev: number}|{refused: "changed"|"frozen"}|{error: string}>}
+ */
+export async function proposeDraftRevision(store, claims, args = {}) {
+  const draft = await getDraft(store, claims.draftId);
+  if (!draft) return { error: "not_found" };
+  const head = (await listRevisions(store, draft.id)).find((revision) => revision.rev === draft.headRev) ?? null;
+  if (!head) return { error: "not_found" };
+  const outcome = await addRevision(store, draft.id, {
+    // Recipients and subject default to the head revision's; `bcc`, the From, the reply ids and the
+    // attachments are always the head's, because this tool has no way to set any of them.
+    to: args.to ?? head.to,
+    cc: args.cc ?? head.cc,
+    bcc: head.bcc,
+    // The store's canonical snapshot collapses CR/LF in a subject to one space (staged/canonical.js),
+    // so the header a send writes is the subject the revision is hashed with.
+    subject: args.subject ?? head.subject,
+    body: args.body,
+    inReplyTo: head.inReplyTo,
+    references: head.references,
+    attachments: head.attachments,
+    note: args.note ?? null,
+  }, {
+    author: "bot",
+    expectHash: claims.startHash,
+    appliedCommentIds: turnCommentIds(claims.turnId),
+  });
+  if (outcome.refused === "changed") return { refused: "changed" };
+  if (outcome.refused === "frozen") return { refused: "frozen" };
+  // The turn's record is spent: a second propose in the same turn is refused changed anyway.
+  forgetTurnCommentIds(claims.turnId);
+  return { rev: outcome.rev };
+}
+
 /* --------------------------------------------------------------------- the server */
 
 /** One address, as a bare string or the `{name, address}` pair the store takes. */
@@ -375,26 +424,8 @@ export function createMailDraftMcpServer(options = {}) {
     "Write the draft's next revision for the person to read. `body` is required; `to`, `cc`, `subject` and `note` are optional, and omitting them keeps what the draft already has. There is no bcc, no From, no attachment and no header to set. Refused when the person has edited the draft since this turn started (read it again and keep their edit) or when the draft is frozen.",
     PROPOSE_SCHEMA,
     async (args, claims) => {
-      const store = dbOf();
-      const draft = await getDraft(store, claims.draftId);
-      if (!draft) return failed("not_found");
-      const head = (await listRevisions(store, draft.id)).find((revision) => revision.rev === draft.headRev) ?? null;
-      if (!head) return failed("not_found");
-      const outcome = await addRevision(store, draft.id, {
-        // Recipients and subject default to the head revision's; `bcc`, the From, the reply ids and the
-        // attachments are always the head's, because this tool has no way to set any of them.
-        to: args.to ?? head.to,
-        cc: args.cc ?? head.cc,
-        bcc: head.bcc,
-        // The store's canonical snapshot collapses CR/LF in a subject to one space (staged/canonical.js),
-        // so the header a send writes is the subject the revision is hashed with.
-        subject: args.subject ?? head.subject,
-        body: args.body,
-        inReplyTo: head.inReplyTo,
-        references: head.references,
-        attachments: head.attachments,
-        note: args.note ?? null,
-      }, { author: "bot", expectHash: claims.startHash });
+      const outcome = await proposeDraftRevision(dbOf(), claims, args);
+      if (outcome.error) return failed(outcome.error);
       if (outcome.refused === "changed") return refused(CHANGED_SENTENCE);
       if (outcome.refused === "frozen") return refused(FROZEN_SENTENCE);
       return ok({ rev: outcome.rev });

@@ -53,7 +53,7 @@ const {
 } = await import("../servers/gateway/mail/send/schedule-service.js");
 const { instanceZone } = await import("../servers/shared/schedule-store.js");
 const { createAccount } = await import("../servers/gateway/mail/store/accounts.js");
-const { createDraft, getDraft, listRevisions } = await import("../servers/gateway/mail/drafts/store.js");
+const { createDraft, getDraft, listRevisions, addRevision } = await import("../servers/gateway/mail/drafts/store.js");
 const { makeDraftReaders } = await import("../servers/gateway/mail/drafts/readers.js");
 const { upsertFolders, upsertMessage, getMessage } = await import("../servers/gateway/mail/store/messages.js");
 const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs");
@@ -686,6 +686,145 @@ test("create derives a reply from the message it answers", async () => {
     body: { accountId: s.account.id, mode: "reply", replyToMid: "<missing@mail.example.test>" },
   });
   assert.equal(unknown.status, 404, unknown.text);
+});
+
+test("one comment revises at once and a second one waits for Revise", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+
+  const first = await s.call("POST", `${DRAFTS}/${draft.id}/comments`, {
+    body: { rev: 1, lineIndex: 2, quote: "Are we still on for Saturday?", text: "Say Sunday instead." },
+  });
+  assert.equal(first.status, 200, first.text);
+  assert.equal(first.json?.comment?.state, "queued");
+  assert.equal(first.json?.comment?.text, "Say Sunday instead.");
+  assert.equal(first.json?.turnId, "turn-1", "one comment on its own revises at once");
+  assert.equal(s.turns.length, 1);
+  assert.match(s.turns[0].options.instruction, /Say Sunday instead\./);
+  assert.match(s.turns[0].options.instruction, /Are we still on for Saturday\?/, "the quoted line travels with it");
+
+  const second = await s.call("POST", `${DRAFTS}/${draft.id}/comments`, {
+    body: { rev: 1, text: "Shorter, please." },
+  });
+  assert.equal(second.status, 200, second.text);
+  assert.equal(second.json?.turnId, null, "a second comment waits");
+  assert.equal(s.turns.length, 1, "no second turn was started");
+
+  const card = await s.call("GET", `${DRAFTS}/${draft.id}`);
+  assert.equal(card.json?.comments?.length, 2);
+  assert.deepEqual(card.json.comments.map((comment) => comment.state), ["queued", "queued"]);
+});
+
+test("Revise carries every queued comment in one turn", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+  await s.call("POST", `${DRAFTS}/${draft.id}/comments`, { body: { rev: 1, text: "Warmer." } });
+  await s.call("POST", `${DRAFTS}/${draft.id}/comments`, { body: { rev: 1, text: "Shorter." } });
+  assert.equal(s.turns.length, 1);
+
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/revise`, { body: { expectHash: draft.headHash } });
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.json?.turnId, "turn-1");
+  assert.equal(s.turns.length, 2);
+  const instruction = s.turns[1].options.instruction;
+  assert.match(instruction, /Warmer\./);
+  assert.match(instruction, /Shorter\./);
+  assert.match(instruction, /Keep every edit the person made by hand \(revisions authored 'user'\)\./);
+});
+
+test("a note typed in the card's note box reaches the turn as the person's own wording", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/turn`, {
+    body: { botId: "bot-1", instruction: "Use my note.", reviseFrom: "Hi Sam, Sunday at ten works for me." },
+  });
+  assert.equal(res.status, 200, res.text);
+  assert.equal(s.turns[0].options.reviseFrom, "Hi Sam, Sunday at ten works for me.");
+  assert.equal(s.turns[0].options.instruction, "Use my note.");
+});
+
+test("a comment on an old revision is refused changed", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+  const edit = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, {
+    body: {
+      expectHash: draft.headHash,
+      to: [{ address: SAM }],
+      cc: [],
+      subject: "Weekend",
+      body: "Sunday it is.",
+      attachments: [],
+    },
+  });
+  assert.equal(edit.status, 200, edit.text);
+
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/comments`, { body: { rev: 1, text: "On the old one" } });
+  assert.equal(res.status, 409, res.text);
+  assert.equal(res.json?.error, "changed");
+  assert.equal(res.json?.message, CHANGED_SENTENCE);
+  assert.equal((await s.call("GET", `${DRAFTS}/${draft.id}`)).json.comments.length, 0);
+  assert.deepEqual(s.turns, []);
+
+  const onHead = await s.call("POST", `${DRAFTS}/${draft.id}/comments`, { body: { rev: 2, text: "On the head" } });
+  assert.equal(onHead.status, 200, onHead.text);
+  assert.equal(onHead.json?.comment?.rev, 2);
+});
+
+test("a revise on a scheduled draft is refused with the cancel it needs", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+  const tap = await s.call("POST", `${DRAFTS}/${draft.id}/schedule`, {
+    body: { hash: draft.headHash, dueAt: await zonedTime(s.db, NOW + 2 * 60 * 60 * 1000) },
+  });
+  assert.equal(tap.status, 200, tap.text);
+
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/revise`, { body: {} });
+  assert.equal(res.status, 409, res.text);
+  assert.equal(res.json?.error, "frozen");
+  assert.equal(res.json?.needsCancel, true);
+  assert.equal(res.json?.state, "scheduled");
+  assert.deepEqual(s.turns, [], "no turn was started");
+});
+
+test("a revise against a stale hash is refused changed", async () => {
+  const s = await setup({ turn: true });
+  const draft = await newDraft(s);
+  await s.call("POST", `${DRAFTS}/${draft.id}/comments`, { body: { rev: 1, text: "Warmer." } });
+  const res = await s.call("POST", `${DRAFTS}/${draft.id}/revise`, {
+    body: { expectHash: "not-the-head", chatNote: "And shorter." },
+  });
+  assert.equal(res.status, 409, res.text);
+  assert.equal(res.json?.error, "changed");
+  assert.equal(res.json?.message, CHANGED_SENTENCE);
+  assert.equal(s.turns.length, 1, "only the comment's own turn ran");
+});
+
+test("history lists every revision in order with author", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+  const drafted = await addRevision(s.db, draft.id, {
+    to: [{ address: SAM }], cc: [], bcc: [], subject: "Weekend", body: "Sunday it is.", attachments: [],
+  }, { author: "bot", expectHash: draft.headHash, now: () => NOW + 1_000 });
+  assert.ok(!drafted.refused);
+  const edit = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, {
+    body: {
+      expectHash: drafted.hash,
+      to: [{ address: SAM }],
+      cc: [],
+      subject: "Weekend",
+      body: "Sunday at ten.",
+      attachments: [],
+    },
+  });
+  assert.equal(edit.status, 200, edit.text);
+
+  const card = await s.call("GET", `${DRAFTS}/${draft.id}`);
+  assert.equal(card.status, 200, card.text);
+  assert.deepEqual(card.json?.history?.map((entry) => [entry.rev, entry.author]), [
+    [1, "user"], [2, "bot"], [3, "user"],
+  ]);
+  assert.deepEqual(card.json.history.map((entry) => typeof entry.created_at), ["number", "number", "number"]);
+  assert.equal(card.json?.head?.rev, 3);
 });
 
 /* ------------------------------------------------------------------ readers */

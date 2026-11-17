@@ -467,6 +467,82 @@ test("addRevision on a draft that does not exist is NOT_FOUND and needs an expec
   assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_draft_revisions"), 1);
 });
 
+test("appliedCommentIds marks this draft's queued comments applied in the revision's own transaction", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const one = await createDraft(db, {
+    accountId: account.id, mode: "new", first: revInput(), author: "bot",
+  }, { now: () => T0 });
+  const other = await createDraft(db, {
+    accountId: account.id, mode: "new", first: revInput({ body: "Other." }), author: "bot",
+  }, { now: () => T0 + 1 });
+  const waiting = await addComment(db, one.id, { rev: 1, text: "Warmer" }, { now: () => T0 + 2 });
+  const already = await addComment(db, one.id, { rev: 1, text: "Shorter" }, { now: () => T0 + 3 });
+  const elsewhere = await addComment(db, other.id, { rev: 1, text: "Not mine" }, { now: () => T0 + 4 });
+  assert.equal(await markCommentsApplied(db, one.id, [already.id], 1), 1);
+
+  const result = await addRevision(db, one.id, revInput({ body: "Warmer, and shorter." }), {
+    author: "bot",
+    expectHash: one.headHash,
+    appliedCommentIds: [waiting.id, already.id, elsewhere.id, "mdc-0000000000000000"],
+    now: () => T0 + 5,
+  });
+  assert.ok(!result.refused);
+  assert.equal(result.rev, 2);
+
+  assert.deepEqual(
+    (await listComments(db, one.id, { state: "applied" })).map((comment) => comment.id).sort(),
+    [waiting.id, already.id].sort(),
+    "the queued comment moved, the already-applied one was left alone",
+  );
+  const theirs = await listComments(db, other.id);
+  assert.equal(theirs.length, 1);
+  assert.equal(theirs[0].id, elsewhere.id);
+  assert.equal(theirs[0].state, "queued", "another draft's comment is untouched");
+});
+
+test("a revision write that fails leaves the comments its batch would have applied queued", async () => {
+  const db = await freshDb();
+  const { draft } = await makeDraft(db);
+  const waiting = await addComment(db, draft.id, { rev: 1, text: "Warmer" }, { now: () => T0 + 1 });
+  // A revision row already holds (draft, 2), so the insert collides: the head move and the comment
+  // marking that share its transaction go with it.
+  await db.execute({
+    sql: `INSERT INTO mail_draft_revisions
+            (draft_id, rev, author, to_json, cc_json, bcc_json, subject, body, in_reply_to,
+             references_json, attachments_json, from_json, mode, content_hash, note, created_at)
+          SELECT draft_id, 2, author, to_json, cc_json, bcc_json, subject, body, in_reply_to,
+             references_json, attachments_json, from_json, mode, content_hash, note, created_at
+            FROM mail_draft_revisions WHERE draft_id = ? AND rev = 1`,
+    args: [draft.id],
+  });
+
+  await assert.rejects(() => addRevision(db, draft.id, revInput({ body: "Warmer, and shorter." }), {
+    author: "bot", expectHash: draft.headHash, appliedCommentIds: [waiting.id], now: () => T0 + 2,
+  }));
+
+  const row = await draftRow(db, draft.id);
+  assert.equal(row.head_rev, 1, "the head did not move");
+  assert.equal(row.head_hash, draft.headHash);
+  assert.equal(row.updated_at, T0);
+  assert.equal((await listComments(db, draft.id))[0].state, "queued", "the comment is still waiting");
+  assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_draft_revisions WHERE draft_id = ? AND rev = 3", [draft.id]), 0);
+});
+
+test("appliedCommentIds must be an array of ids, and an empty one writes nothing extra", async () => {
+  const db = await freshDb();
+  const { draft } = await makeDraft(db);
+  await assert.rejects(() => addRevision(db, draft.id, revInput({ body: "One." }), {
+    author: "user", expectHash: draft.headHash, appliedCommentIds: "mdc-1",
+  }), badInput());
+  assert.equal((await getDraft(db, draft.id)).headRev, 1, "a refused option wrote nothing");
+
+  const result = await addRevision(db, draft.id, revInput({ body: "One." }), {
+    author: "user", expectHash: draft.headHash, appliedCommentIds: [], now: () => T0 + 1,
+  });
+  assert.equal(result.rev, 2);
+});
+
 test("a revision row has no update or delete path in the store", () => {
   assert.doesNotMatch(STORE_SOURCE, /UPDATE\s+mail_draft_revisions/i);
   assert.doesNotMatch(STORE_SOURCE, /DELETE\s+FROM\s+mail_draft_revisions/i);

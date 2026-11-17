@@ -33,7 +33,8 @@ import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs
 import { join } from "node:path";
 import { MailError } from "../errors.js";
 import { getAccount } from "../store/accounts.js";
-import { getDraft } from "./store.js";
+import { getDraft, listComments } from "./store.js";
+import { forgetTurnCommentIds, noteTurnCommentIds } from "./revise.js";
 import { mintTurnToken, revokeTurnToken, TURN_TOKEN_MARGIN_MS } from "./turn-token.js";
 import {
   DRAFTING_TURN_TOOLS, MAIL_DRAFT_TURNS_DIRNAME, isMailDraftDirSegment, mailDraftBlock, mailDraftTurnDir,
@@ -454,6 +455,14 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
   }
 
   const prompt = draftingTurnPrompt({ instruction: words, reviseFrom: revised });
+  // The comments this turn starts with, read once here and recorded under the turn id: the turn's
+  // `mail_draft_propose` folds exactly these into its revision and marks them applied in the same
+  // transaction, so a comment the person adds while the turn runs stays queued for the next Revise.
+  // A read that fails costs only the marking, never the turn.
+  try {
+    const starting = await listComments(db, draft.id, { state: "queued" });
+    noteTurnCommentIds(turnId, starting.map((comment) => comment.id));
+  } catch { /* nothing is marked applied, so every comment stays queued */ }
   const run = (async () => {
     try {
       await resolved.handleInbound({
@@ -480,6 +489,7 @@ export async function startDraftingTurn(db, deps = {}, { draftId, botId = null, 
       log("turn_error:" + codeOf(err));
     } finally {
       revokeTurnToken(token);
+      forgetTurnCommentIds(turnId);
       scheduleTurnDirRemoval(db, sessionDir, draft.id, turnBotId, resolved.setTimeout);
       turnsInFlight.delete(run);
     }

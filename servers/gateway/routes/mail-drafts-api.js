@@ -23,8 +23,14 @@
  *     scheduled draft returns it to `draft` and the person re-schedules it. The 409
  *     `{error:"scheduled", needsCancel:true}` branch exists only for `cancelSchedule: false`, which
  *     this route never sends, so it is not here.
- *   - `POST /:id/revise`, `POST /:id/comments` and `POST /:id/save-draft` belong to later tasks and
- *     are not registered here.
+ *   - `POST /:id/save-draft` belongs to a later task and is not registered here.
+ *
+ * The revision loop is `drafts/revise.js`'s (Task 9): `POST /:id/comments` queues one comment on one
+ * line (a comment on a revision the draft has left is 409 `changed`) and revises at once when it is
+ * the only one waiting; `POST /:id/revise` carries every queued comment in one turn; and
+ * `POST /:id/turn` with `reviseFrom` is the card's note box — the wording the person typed, handed to
+ * the bot as theirs. A revise or a turn on a frozen draft is 409 `frozen`, with `needsCancel` when
+ * there is a schedule to give up first.
  *
  * Error bodies are `{error, message}`: `changed` answers `CHANGED_SENTENCE`, a tap's own refusal
  * passes the service's sentence through, a preflight refusal answers the `bad_input` (or
@@ -56,6 +62,7 @@ import {
 } from "../mail/drafts/store.js";
 import { preflight } from "../mail/drafts/preflight.js";
 import { deriveForward, deriveReply } from "../mail/drafts/recipients.js";
+import { queueComment, reviseNow } from "../mail/drafts/revise.js";
 import { makeDraftReaders } from "../mail/drafts/readers.js";
 import {
   CHANGED_SENTENCE,
@@ -83,7 +90,9 @@ const REVISION_KEYS = Object.freeze([
 ]);
 const SEND_KEYS = Object.freeze(["hash", "confirmUnknown"]);
 const SCHEDULE_KEYS = Object.freeze(["hash", "dueAt"]);
-const TURN_KEYS = Object.freeze(["botId", "instruction"]);
+const TURN_KEYS = Object.freeze(["botId", "instruction", "reviseFrom"]);
+const COMMENT_KEYS = Object.freeze(["rev", "lineIndex", "quote", "text"]);
+const REVISE_KEYS = Object.freeze(["expectHash", "chatNote"]);
 
 /* --------------------------------------------------------------------- the seam */
 
@@ -156,6 +165,20 @@ function turnDeps() {
   return typeof runtime.now === "function" ? { now: runtime.now } : {};
 }
 
+/**
+ * The deps one revise gets: the turn's own seam, plus the drafting turn the seam injects (a test, or
+ * a caller that spawns turns its own way). A revise turns into one drafting turn and nothing else, so
+ * it gets no adapter, no sync and no key either.
+ *
+ * @returns {{now?: Function, startDraftingTurn?: Function}}
+ */
+function reviseDeps() {
+  const deps = {};
+  if (typeof runtime.now === "function") deps.now = runtime.now;
+  if (typeof runtime.startDraftingTurn === "function") deps.startDraftingTurn = runtime.startDraftingTurn;
+  return deps;
+}
+
 /* ------------------------------------------------------------------ the bodies */
 
 function isPlainObject(value) {
@@ -225,12 +248,44 @@ function readSendBody(body) {
   return { hash: body.hash, confirmUnknown: body.confirmUnknown === true };
 }
 
-/** The turn body, or null: a bot and the instruction the person typed. */
+/** The turn body, or null: a bot and the instruction the person typed, and their own wording if any. */
 function readTurnBody(body) {
   if (!keysWithin(body, TURN_KEYS)) return null;
   if (typeof body.botId !== "string" || body.botId === "") return null;
   if (typeof body.instruction !== "string" || body.instruction.trim() === "") return null;
-  return { botId: body.botId, instruction: body.instruction };
+  if (!isStringOrAbsent(body.reviseFrom)) return null;
+  return {
+    botId: body.botId,
+    instruction: body.instruction,
+    reviseFrom: typeof body.reviseFrom === "string" && body.reviseFrom.trim() !== "" ? body.reviseFrom : null,
+  };
+}
+
+/** The comment body, or null: the revision and line it points at, the words quoted, and the ask. */
+function readCommentBody(body) {
+  if (!keysWithin(body, COMMENT_KEYS)) return null;
+  if (!Number.isInteger(body.rev) || body.rev < 1) return null;
+  if (typeof body.text !== "string" || body.text.trim() === "") return null;
+  if (body.lineIndex !== undefined && body.lineIndex !== null && !Number.isInteger(body.lineIndex)) return null;
+  if (body.lineIndex != null && body.lineIndex < 0) return null;
+  if (!isStringOrAbsent(body.quote)) return null;
+  return {
+    rev: body.rev,
+    lineIndex: body.lineIndex ?? null,
+    quote: typeof body.quote === "string" && body.quote !== "" ? body.quote : null,
+    text: body.text,
+  };
+}
+
+/** The revise body, or null: the hash the card was drawn from and the note the person typed. */
+function readReviseBody(body) {
+  if (!keysWithin(body, REVISE_KEYS)) return null;
+  if (!isStringOrAbsent(body.expectHash)) return null;
+  if (!isStringOrAbsent(body.chatNote)) return null;
+  return {
+    expectHash: typeof body.expectHash === "string" && body.expectHash !== "" ? body.expectHash : null,
+    chatNote: typeof body.chatNote === "string" && body.chatNote.trim() !== "" ? body.chatNote : null,
+  };
 }
 
 /** The schedule body, or null: the hash and the due time, which must be text (see `parseRouteDueAt`). */
@@ -487,11 +542,34 @@ export function registerDraftRoutes(router, ctx) {
     res.json({ rev: outcome.rev, hash: outcome.hash });
   }));
 
+  /**
+   * A drafting turn that refused while it started, answered by its own code: `frozen` (409, with the
+   * cancel a scheduled draft needs), the two cloud gates and this host's delivery mode with the code
+   * alone (the card owns that copy), and the store's own two codes.
+   */
+  const answerTurnError = async (db, res, draft, err) => {
+    const code = err && typeof err.code === "string" ? err.code : "";
+    if (code === "frozen") return answerFrozen(res, (await getDraft(db, draft.id)) ?? draft);
+    if (code === "cloud_drafting_off" || code === "local_models_only") {
+      // No sentence exists for either yet: the card owns that copy, so the code goes alone.
+      return res.status(403).json({ error: code });
+    }
+    if (code === "delivery_unsupported" || code === "unavailable") {
+      // A drafting turn is fd-only (the bridge refuses the file mode before it spawns anything,
+      // because that mode would write the turn's token to disk), and a host with no drafting turn to
+      // start answers `unavailable`. No copy here either: the code alone.
+      return res.status(503).json({ error: code });
+    }
+    if (code === "NOT_FOUND") return sendError(res, 404, "not_found");
+    if (code === "BAD_INPUT") return sendError(res, 400, "bad_input");
+    if (code === "CHANGED") return sendError(res, 409, "changed", CHANGED_SENTENCE);
+    return internal(res);
+  };
+
   // POST /:id/turn — one drafting turn over this draft. The card's note box is this route too: the
-  // instruction is the person's feedback, and the bot's answer is a revision they read before tapping
-  // anything. A draft no bot may touch is refused before a turn is started, and a turn that refuses
-  // while it starts answers by its own code: `frozen` 409 (with the cancel the card needs to offer
-  // when the draft is scheduled), `cloud_drafting_off` and `local_models_only` 403 with the code alone.
+  // instruction is the person's feedback, `reviseFrom` is the wording they wrote themselves, and the
+  // bot's answer is a revision they read before tapping anything. A draft no bot may touch is refused
+  // before a turn is started, and a turn that refuses while it starts answers by its own code.
   router.post(`${base}/:id/turn`, route("POST /drafts/:id/turn", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -508,23 +586,79 @@ export function registerDraftRoutes(router, ctx) {
         draftId: draft.id,
         botId: input.botId,
         instruction: input.instruction,
+        reviseFrom: input.reviseFrom,
       });
       res.json({ turnId: started?.turnId ?? null });
     } catch (err) {
+      await answerTurnError(db, res, draft, err);
+    }
+  }));
+
+  // POST /:id/comments — one comment on one line of the draft. A comment on a revision the draft has
+  // left is 409 `changed` (the card the person was reading has moved). When this is the only comment
+  // waiting it revises at once (D-c): a second comment queues until Revise. A revise that refuses here
+  // never costs the comment — it is queued, and its code rides back so the card can say why nothing
+  // started.
+  router.post(`${base}/:id/comments`, route("POST /drafts/:id/comments", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const body = bodyOf(req);
+    if (body == null) return sendError(res, 400, "bad_input");
+    const input = readCommentBody(body);
+    if (input == null) return sendError(res, 400, "bad_input");
+
+    let comment;
+    try {
+      comment = await queueComment(db, draft.id, input, runtime.now == null ? {} : { now: runtime.now });
+    } catch (err) {
       const code = err && typeof err.code === "string" ? err.code : "";
-      if (code === "frozen") return answerFrozen(res, (await getDraft(db, draft.id)) ?? draft);
-      if (code === "cloud_drafting_off" || code === "local_models_only") {
-        // No sentence exists for either yet: the card owns that copy, so the code goes alone.
-        return res.status(403).json({ error: code });
-      }
-      if (code === "delivery_unsupported") {
-        // A drafting turn is fd-only (the bridge refuses the file mode before it spawns anything,
-        // because that mode would write the turn's token to disk). No copy here either: the code alone.
-        return res.status(503).json({ error: code });
-      }
+      if (code === "CHANGED") return sendError(res, 409, "changed", CHANGED_SENTENCE);
       if (code === "NOT_FOUND") return sendError(res, 404, "not_found");
       if (code === "BAD_INPUT") return sendError(res, 400, "bad_input");
       return internal(res);
+    }
+
+    let turnId = null;
+    let refused = null;
+    const waiting = await listComments(db, draft.id, { state: "queued" });
+    if (waiting.length === 1 && EDITABLE_STATES.includes(draft.state)) {
+      try {
+        const out = await reviseNow(db, reviseDeps(), { draftId: draft.id, expectHash: draft.headHash });
+        turnId = out?.turnId ?? null;
+        refused = out?.refused ?? null;
+      } catch (err) {
+        // The comment is queued either way; a revise that cannot start says so by its code alone.
+        refused = typeof err?.code === "string" ? err.code : "error";
+      }
+    }
+    const answer = { comment, turnId };
+    if (refused) answer.error = refused;
+    res.json(answer);
+  }));
+
+  // POST /:id/revise — Revise: every queued comment in one turn, with the note the person typed in
+  // the card's note box when there is one. A frozen draft is refused with the code alone, and a
+  // scheduled one with the cancel it needs first.
+  router.post(`${base}/:id/revise`, route("POST /drafts/:id/revise", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const body = bodyOf(req);
+    if (body == null) return sendError(res, 400, "bad_input");
+    const input = readReviseBody(body);
+    if (input == null) return sendError(res, 400, "bad_input");
+    if (!EDITABLE_STATES.includes(draft.state)) return answerFrozen(res, draft);
+
+    try {
+      const out = await reviseNow(db, reviseDeps(), {
+        draftId: draft.id,
+        expectHash: input.expectHash,
+        chatNote: input.chatNote,
+      });
+      if (out?.refused === "changed") return sendError(res, 409, "changed", CHANGED_SENTENCE);
+      if (out?.refused === "frozen") return answerFrozen(res, (await getDraft(db, draft.id)) ?? draft);
+      res.json({ turnId: out?.turnId ?? null });
+    } catch (err) {
+      await answerTurnError(db, res, draft, err);
     }
   }));
 
