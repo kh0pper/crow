@@ -18,9 +18,11 @@
  * the rest of the gesture Learn mapped is not also played, a knob waits for a
  * control change, an unplugged controller that comes back by name keeps its
  * mapping, the table says who set each row, a routed pedal runs its action
- * locally and writes no history step, a proposed mapping routes nothing, and a
- * second tab holds no routing lock and so routes nothing at all — asking again
- * on its beat, and letting go of a grant that arrives after the page closed.
+ * locally and writes no history step, a control change that falls but stays
+ * above 64 releases nothing a held action holds, a proposed mapping routes
+ * nothing, and a second tab holds no routing lock and so routes nothing at all —
+ * asking again on its beat, and letting go of a grant that arrives after the page
+ * closed.
  *
  * No browser is needed: nothing here touches audio or Web MIDI for real.
  */
@@ -1457,6 +1459,77 @@ test("a toggle on a knob fires only where it crosses 64, not on every value abov
   assert.equal(ui.engine.stopAlls, 1, "Stop-all fired once for the whole rise");
   await turn(21, again);
   assert.equal(ui.engine.stopAlls, 2, "Stop-all's next crossing stopped once more");
+});
+
+test("a control change still above 64 releases no held action", async () => {
+  const doc = await midiDoc();
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const song = snapshot(doc);
+  const bankId = String(Object.values(song.banks || {})[0].id);
+  await writeMapping(doc, {
+    id: "m-cc-pad",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 21 },
+    action: { kind: "pad.play", track_id: TRACK, bank_id: bankId, index: 0 },
+  });
+  await writeMapping(doc, {
+    id: "m-cc-fx",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 22 },
+    action: { kind: "fx.hold", name: "stutter" },
+  });
+  await writeMapping(doc, {
+    id: "m-cc-roll",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 20 },
+    action: { kind: "pad.roll" },
+  });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  /** Send one CC through a pressure reading's fall: 127, 110 and 90. */
+  const fall = async (number) => {
+    for (const value of [127, 110, 90]) {
+      ui.pedal(DEVICE, [0xb0, number, value]);
+      await ui.settle();
+    }
+  };
+
+  // A pad: the first crossing plays it, and the readings still above 64 leave
+  // the pad it is holding alone.
+  await fall(21);
+  assert.equal(ui.engine.pads.length, 1, "the first crossing played the pad, once");
+  assert.deepEqual(ui.engine.releases, [], "no pad was released while the pedal stayed above 64");
+  ui.pedal(DEVICE, [0xb0, 21, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.releases,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }], "crossing below 64 released it, once");
+
+  // An effect: the same, in the engine and on the button the pedal wears.
+  await fall(22);
+  assert.deepEqual(ui.engine.fx, [{ name: "stutter", amount: 1, on: true }],
+    "the effect was held once and stayed held");
+  const fxButton = ui.document.querySelector("[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]");
+  assert.ok(fxButton, "the effect's button is drawn");
+  assert.equal(fxButton.getAttribute("aria-pressed"), "true", "and it still shows the hold");
+  ui.pedal(DEVICE, [0xb0, 22, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx,
+    [{ name: "stutter", amount: 1, on: true }, { name: "stutter", amount: 0, on: false }],
+    "crossing below 64 released the effect, once");
+  assert.equal(fxButton.getAttribute("aria-pressed"), "false", "and the button came back up");
+
+  // ROLL: held through the whole fall, let go only where the value drops.
+  await fall(20);
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "true",
+    "ROLL stayed held while the pedal was still above 64");
+  ui.pedal(DEVICE, [0xb0, 20, 0]);
+  await ui.settle();
+  assert.equal(rollKeyOf(ui).getAttribute("aria-pressed"), "false",
+    "crossing below 64 let ROLL go");
 });
 
 test("a knob's Learn waits for a control change", async () => {
