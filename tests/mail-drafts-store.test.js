@@ -12,10 +12,10 @@ import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers
 import { MailError } from "../servers/gateway/mail/errors.js";
 import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import {
-  ATTACHMENT_SOURCES, COMMENT_STATES, DRAFT_MODES, DRAFT_STATES, REVISION_AUTHORS, TAP_ACTIONS,
-  addComment, addRevision, createDraft, discardDraft, getDraft, getVoice, hashOf, listComments,
-  listDraftsForChat, listRevisions, markCommentsApplied, onRevisionAdded, revisionToInput, setVoice,
-  transition,
+  ATTACHMENT_SOURCES, COMMENT_STATES, DRAFT_AUDIENCES, DRAFT_MODES, DRAFT_STATES, REVISION_AUTHORS,
+  TAP_ACTIONS, addComment, addRevision, createDraft, discardDraft, getDraft, getVoice, hashOf,
+  listComments, listDraftsForChat, listRevisions, markCommentsApplied, onRevisionAdded,
+  revisionToInput, setAudience, setVoice, transition,
 } from "../servers/gateway/mail/drafts/store.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1050,4 +1050,50 @@ test("addRevision refuses a bad input before it opens a transaction, leaving a s
   assert.equal(after.head_hash, before.head_hash);
   assert.equal(after.updated_at, before.updated_at);
   assert.equal(await count(db, "SELECT COUNT(*) AS n FROM mail_draft_revisions WHERE draft_id = ?", [draft.id]), 1);
+});
+
+/* --------------------------------------------------------------------- audience */
+
+test("the audience is one word from the store's list, and only while a person may still change it", async () => {
+  const db = await freshDb();
+  const { draft } = await makeDraft(db);
+  assert.deepEqual([...DRAFT_AUDIENCES], ["colleague", "client", "personal"]);
+
+  const set = await setAudience(db, draft.id, "client", { now: () => T0 + 5 });
+  assert.deepEqual(set, { ok: true, audience: "client" });
+  assert.equal((await getDraft(db, draft.id)).audience, "client");
+  assert.equal((await draftRow(db, draft.id)).updated_at, T0 + 5, "the row's own clock moves with it");
+  assert.equal((await getDraft(db, draft.id)).headHash, draft.headHash, "no revision, no head move");
+
+  // Anything not on the list is this store's bad input, and nothing is written.
+  await assert.rejects(() => setAudience(db, draft.id, "Everyone", { now: () => T0 + 6 }), badInput());
+  await assert.rejects(() => setAudience(db, draft.id, 42, { now: () => T0 + 6 }), badInput());
+  assert.equal((await getDraft(db, draft.id)).audience, "client");
+
+  // Clearing it is null, not the empty string.
+  assert.deepEqual(await setAudience(db, draft.id, null, { now: () => T0 + 7 }), { ok: true, audience: null });
+  assert.equal((await getDraft(db, draft.id)).audience, null);
+
+  // A draft a tap or a schedule has frozen keeps the audience it was frozen with.
+  for (const state of ["holding", "scheduled"]) {
+    const frozenDb = await freshDb();
+    const frozen = await sealedDraft(frozenDb, state);
+    const refused = await setAudience(frozenDb, frozen.id, "personal", { now: () => T0 + 8 });
+    assert.deepEqual(refused, { refused: true, state });
+    assert.equal((await getDraft(frozenDb, frozen.id)).audience, "sam", "the stored audience is untouched");
+  }
+  const sentDb = await freshDb();
+  const sent = await makeDraft(sentDb);
+  assert.equal(await transition(sentDb, sent.draft.id, ["draft"], "sent", {}, { now: () => T0 }), true);
+  assert.deepEqual(await setAudience(sentDb, sent.draft.id, "colleague", { now: () => T0 + 9 }), { refused: true, state: "sent" });
+
+  // A failed or missed draft is still the person's to change.
+  for (const state of ["failed", "missed"]) {
+    const otherDb = await freshDb();
+    const other = await makeDraft(otherDb);
+    assert.equal(await transition(otherDb, other.draft.id, ["draft"], state, { fail_reason: "network" }, { now: () => T0 }), true);
+    assert.deepEqual(await setAudience(otherDb, other.draft.id, "personal", { now: () => T0 + 10 }), { ok: true, audience: "personal" });
+  }
+
+  await assert.rejects(() => setAudience(db, "md-0000000000000000", "client"), (err) => err.code === "NOT_FOUND");
 });

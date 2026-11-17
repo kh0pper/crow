@@ -129,6 +129,24 @@ const IDENTICAL_OK = new Set([
   "mail.sentCopyProvider",
   "mail.sentCopyAppend",
   "mail.saveSettings",
+  // Crow Mail's draft card in chat (plan 3, Task 10a): the English is the plan's own sentence and the
+  // Spanish is pending operator copy; the keys the plan does not fix (refusal states, chip labels,
+  // form buttons) carry an English placeholder in both languages for the same reason.
+  "mail.draftHead", "mail.draftTo", "mail.draftCc", "mail.draftBcc", "mail.draftSubject",
+  "mail.draftNoSubject", "mail.draftFromLine", "mail.draftFollowsRules", "mail.draftNotChecked",
+  "mail.draftSend", "mail.draftSchedule", "mail.draftMore", "mail.draftEdit", "mail.draftSaveDraft",
+  "mail.draftDiscard", "mail.draftHistory", "mail.draftHistoryRow", "mail.draftNewRecipient",
+  "mail.draftChanged", "mail.draftReplyToDiffers", "mail.draftNote", "mail.draftRevising",
+  "mail.draftSending", "mail.draftUndo", "mail.draftScheduled", "mail.draftChangeTime",
+  "mail.draftCancelSend", "mail.draftMissed", "mail.draftChangedSentence", "mail.draftUnknown",
+  "mail.draftSent", "mail.draftSyncing", "mail.draftSize", "mail.draftFailed", "mail.draftDiscarded",
+  "mail.draftConfirmSend", "mail.draftEditCancelsSchedule", "mail.draftWritingRules",
+  "mail.draftAudience", "mail.draftAudienceColleague", "mail.draftAudienceClient",
+  "mail.draftAudiencePersonal", "mail.draftComment", "mail.draftRevise", "mail.draftNoteSend",
+  "mail.draftCancel", "mail.draftOffline", "mail.draftError", "mail.draftNotOwner",
+  "mail.draftFrozen", "mail.draftCloudOff", "mail.draftLocalOnly", "mail.draftTurnOff",
+  "mail.draftNotScheduled", "mail.draftNotDiscardable", "mail.draftNeedsCancel",
+  "mail.draftScheduleUnavailable", "mail.draftSavedDraft", // pending operator copy
 ]);
 
 const keys = Object.keys(translations);

@@ -422,9 +422,54 @@ test("GET /:id is the card: the row, the head, the flags, the comments and the h
   assert.deepEqual(res.json?.comments, []);
   assert.deepEqual(res.json?.history?.map((entry) => entry.rev), [1]);
   assert.equal(res.json?.history?.[0]?.author, "user");
+  assert.equal(res.json?.voice, null, "no voice note until plan 4 writes one");
+
+  // The card's voice line reads this: one note per head revision, and never another revision's.
+  const { setVoice } = await import("../servers/gateway/mail/drafts/store.js");
+  assert.equal(await setVoice(s.db, draft.id, 1, { transcript: "warmer" }, { now: () => NOW }), true);
+  const voiced = await s.call("GET", `${DRAFTS}/${draft.id}`);
+  assert.equal(voiced.json?.voice?.rev, 1);
+  assert.deepEqual(voiced.json?.voice?.voice, { transcript: "warmer" });
 
   const missing = await s.call("GET", `${DRAFTS}/${SEEDED_ID}`);
   assert.equal(missing.status, 404, missing.text);
+});
+
+test("PATCH /:id/audience writes one of the store's words, and refuses everything else", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+
+  const ok = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: { audience: "client" } });
+  assert.equal(ok.status, 200, ok.text);
+  assert.deepEqual(ok.json, { ok: true, audience: "client" });
+  const row = await getDraft(s.db, draft.id);
+  assert.equal(row.audience, "client");
+  assert.equal(row.headRev, 1, "the audience is not a revision");
+  assert.equal(row.headHash, draft.headHash, "and it moves no head");
+
+  for (const bad of [{ audience: "Everyone" }, { audience: "" }, { audience: 3 }, {}, { audience: "client", extra: 1 }]) {
+    const res = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: bad });
+    assert.equal(res.status, 400, `${JSON.stringify(bad)}: ${res.text}`);
+    assert.equal(res.json?.error, "bad_input");
+  }
+  assert.equal((await getDraft(s.db, draft.id)).audience, "client", "a refused body wrote nothing");
+
+  const cleared = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: { audience: null } });
+  assert.equal(cleared.status, 200, cleared.text);
+  assert.equal((await getDraft(s.db, draft.id)).audience, null);
+
+  // A draft a tap has frozen answers its state and keeps the audience it was frozen with.
+  const scheduled = await s.call("POST", `${DRAFTS}/${draft.id}/schedule`, {
+    body: { hash: draft.headHash, dueAt: await zonedTime(s.db, NOW + 2 * 60 * 60 * 1000) },
+  });
+  assert.equal(scheduled.status, 200, scheduled.text);
+  const frozen = await s.call("PATCH", `${DRAFTS}/${draft.id}/audience`, { body: { audience: "personal" } });
+  assert.equal(frozen.status, 409, frozen.text);
+  assert.deepEqual(frozen.json, { error: "frozen", state: "scheduled" });
+  assert.equal((await getDraft(s.db, draft.id)).audience, null);
+
+  assert.equal((await s.call("PATCH", `${DRAFTS}/${SEEDED_ID}/audience`, { body: { audience: "client" } })).status, 404);
+  assert.equal((await s.call("PATCH", `${DRAFTS}/not-an-id/audience`, { body: { audience: "client" } })).status, 404);
 });
 
 test("a hand edit writes the next revision and always cancels a schedule", async () => {

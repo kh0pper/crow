@@ -6,6 +6,7 @@ import { perchSecretCardJs } from "./secret-card.js";
 import { perchSecretWarnJs } from "./secret-warn.js";
 import { perchConnectCardJs } from "./connect-card.js";
 import { perchStagedCardJs } from "./staged-card.js";
+import { perchMailDraftCardJs } from "./mail-draft-card.js";
 import { perchCardChipJs } from "./card-chip.js";
 import { perchBriefingJs } from "./briefing-card.js";
 import { sessionCardsJs } from "../shared/session-cards.js";
@@ -1656,7 +1657,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                         /* Wave 3: the chip index dies with the transcript */
     fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged(); resetMailDrafts();
     resetBrowserTiles();                  /* live browser tile: its pollers and header line die with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     draftRestore(sid);                      /* nor its composer text: this session's own draft, or empty */
@@ -2269,7 +2270,7 @@ export function perchHubJs(lang = "en") {
     toolChips={}; resetToolGroups();                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     fileSeen={};
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged(); resetMailDrafts();
     resetBrowserTiles();
     histSettled=false; histBuf=[];
     seamEchoes=[];                   /* their rows died with the transcript */
@@ -2552,6 +2553,8 @@ export function perchHubJs(lang = "en") {
     loadBriefing(current.sid);     /* R1.2 PR 4: the Briefing card on top, the summary in the Session tab */
     loadSecret(current.sid);       /* credential card: an open password card comes back on reload */
     loadStaged(current.sid);       /* spec 12: this chat's open Gmail drafts, as the card reads them */
+    loadMailDrafts(current.sid);   /* plan 3, task 10a: this chat's mail drafts, one card each */
+    loadMailDraftFromQuery();      /* a draft made in the reader has no chat: its id rides the URL */
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -2789,7 +2792,7 @@ export function perchHubJs(lang = "en") {
     planState=null; renderPlan();
     toolChips={}; resetToolGroups(); fileSeen={}; commandsCache=null; hideCmdMenu();
     resetPhoneCards();
-    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged();
+    resetArtifactCards(); resetCardChip(); resetBriefing(); resetSecretCard(); resetStaged(); resetMailDrafts();
     resetFacts();
     /* Composer dictation: a switch drops the recording and frees the mic;
        each open re-probes the server (dictation.js). */
@@ -4440,6 +4443,7 @@ ${perchSecretCardJs(lang)}
 ${perchSecretWarnJs(lang)}
 ${perchConnectCardJs(lang)}
 ${perchStagedCardJs(lang)}
+${perchMailDraftCardJs(lang)}
   /* The staged card's host hooks (spec 12): the composer for "Ask for a change" — the note goes
      into the ordinary message box, so the normal send path and its paste detector run — and the
      refetch after a replacement. */
@@ -4581,6 +4585,7 @@ ${perchTakeOverJs(lang)}
      pure function and it was green throughout. */
   if(parseHash(location.hash)) applyHash();
   else { startListPolling(); loadList(); }
+  loadMailDraftFromQuery();   /* ?maildraft= on a page with no chat yet still shows the card */
   takeOverFromLink();
   toMineRefresh();
 })();`;

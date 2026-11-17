@@ -5845,6 +5845,127 @@ export const translations = {
   "mail.doneDeleted": { en: "Deleted.", es: "Eliminado." },
   "mail.doneMoved": { en: "Moved to {folder}.", es: "Movido a {folder}." },
   "mail.doneUnread": { en: "Marked unread.", es: "Marcado como no leído." },
+  // Crow Mail's draft card in chat (plan 3, Task 10a). The English of every key below is the plan's
+  // own sentence, verbatim; the plan gives no Spanish, and several keys are not in the plan at all
+  // (refusal-state lines, chip labels, form buttons), so each one is TODO(copy) — pending operator
+  // copy — with the English placeholder in both languages and an entry in the parity test's
+  // IDENTICAL_OK.
+  // TODO(copy): pending operator copy
+  "mail.draftHead": { en: "{bot} · Reply to: {subject}", es: "{bot} · Reply to: {subject}" },
+  // TODO(copy): pending operator copy
+  "mail.draftTo": { en: "To", es: "To" },
+  // TODO(copy): pending operator copy
+  "mail.draftCc": { en: "Cc", es: "Cc" },
+  // TODO(copy): pending operator copy
+  "mail.draftBcc": { en: "Bcc", es: "Bcc" },
+  // TODO(copy): pending operator copy
+  "mail.draftSubject": { en: "Subject", es: "Subject" },
+  // TODO(copy): pending operator copy
+  "mail.draftNoSubject": { en: "(no subject)", es: "(no subject)" },
+  // TODO(copy): pending operator copy
+  "mail.draftFromLine": { en: "From {account} · Draft {n}", es: "From {account} · Draft {n}" },
+  // TODO(copy): pending operator copy
+  "mail.draftFollowsRules": { en: "follows your writing rules", es: "follows your writing rules" },
+  // TODO(copy): pending operator copy
+  "mail.draftNotChecked": { en: "Not checked for voice", es: "Not checked for voice" },
+  // TODO(copy): pending operator copy
+  "mail.draftSend": { en: "Send", es: "Send" },
+  // TODO(copy): pending operator copy
+  "mail.draftSchedule": { en: "Schedule", es: "Schedule" },
+  // TODO(copy): pending operator copy
+  "mail.draftMore": { en: "...", es: "..." },
+  // TODO(copy): pending operator copy
+  "mail.draftEdit": { en: "Edit by hand", es: "Edit by hand" },
+  // TODO(copy): pending operator copy
+  "mail.draftSaveDraft": { en: "Save as draft", es: "Save as draft" },
+  // TODO(copy): pending operator copy
+  "mail.draftDiscard": { en: "Discard", es: "Discard" },
+  // TODO(copy): pending operator copy
+  "mail.draftHistory": { en: "Draft history", es: "Draft history" },
+  // TODO(copy): pending operator copy
+  "mail.draftHistoryRow": { en: "Draft {n} · {author}", es: "Draft {n} · {author}" },
+  // TODO(copy): pending operator copy
+  "mail.draftNewRecipient": { en: "New recipient", es: "New recipient" },
+  // TODO(copy): pending operator copy
+  "mail.draftChanged": { en: "Changed in Draft {n}", es: "Changed in Draft {n}" },
+  // TODO(copy): pending operator copy
+  "mail.draftReplyToDiffers": { en: "Reply goes to {address}, not the sender", es: "Reply goes to {address}, not the sender" },
+  // TODO(copy): pending operator copy
+  "mail.draftNote": { en: "Tell the bot...", es: "Tell the bot..." },
+  // TODO(copy): pending operator copy
+  "mail.draftRevising": { en: "Bot is revising this line...", es: "Bot is revising this line..." },
+  // TODO(copy): pending operator copy
+  "mail.draftSending": { en: "Sending in 10 s", es: "Sending in 10 s" },
+  // TODO(copy): pending operator copy
+  "mail.draftUndo": { en: "Undo", es: "Undo" },
+  // TODO(copy): pending operator copy
+  "mail.draftScheduled": { en: "Scheduled for {time} from {account}", es: "Scheduled for {time} from {account}" },
+  // TODO(copy): pending operator copy
+  "mail.draftChangeTime": { en: "Change time", es: "Change time" },
+  // TODO(copy): pending operator copy
+  "mail.draftCancelSend": { en: "Cancel send", es: "Cancel send" },
+  // TODO(copy): pending operator copy
+  "mail.draftMissed": { en: "This was due at {time} and did not go out. Send now, pick a new time, or cancel.", es: "This was due at {time} and did not go out. Send now, pick a new time, or cancel." },
+  // TODO(copy): pending operator copy
+  "mail.draftChangedSentence": { en: "The draft just changed. Check it and press Send again.", es: "The draft just changed. Check it and press Send again." },
+  // TODO(copy): pending operator copy
+  "mail.draftUnknown": { en: "We could not confirm this went out. Check your Sent folder, then press Send again only if it is not there.", es: "We could not confirm this went out. Check your Sent folder, then press Send again only if it is not there." },
+  // TODO(copy): pending operator copy
+  "mail.draftSent": { en: "Sent from {account} at {time}", es: "Sent from {account} at {time}" },
+  // TODO(copy): pending operator copy
+  "mail.draftSyncing": { en: "Sent, syncing...", es: "Sent, syncing..." },
+  // TODO(copy): pending operator copy
+  "mail.draftSize": { en: "{n} MB of 18 MB", es: "{n} MB of 18 MB" },
+  // TODO(copy): pending operator copy
+  "mail.draftFailed": { en: "This draft did not go out.", es: "This draft did not go out." },
+  // TODO(copy): pending operator copy
+  "mail.draftDiscarded": { en: "Discarded.", es: "Discarded." },
+  // TODO(copy): pending operator copy
+  "mail.draftConfirmSend": { en: "Send it again", es: "Send it again" },
+  // TODO(copy): pending operator copy
+  "mail.draftEditCancelsSchedule": { en: "Editing cancels the scheduled send.", es: "Editing cancels the scheduled send." },
+  // TODO(copy): pending operator copy
+  "mail.draftWritingRules": { en: "Writing rules", es: "Writing rules" },
+  // TODO(copy): pending operator copy
+  "mail.draftAudience": { en: "Who it is for", es: "Who it is for" },
+  // TODO(copy): pending operator copy
+  "mail.draftAudienceColleague": { en: "Colleague", es: "Colleague" },
+  // TODO(copy): pending operator copy
+  "mail.draftAudienceClient": { en: "Client", es: "Client" },
+  // TODO(copy): pending operator copy
+  "mail.draftAudiencePersonal": { en: "Personal", es: "Personal" },
+  // TODO(copy): pending operator copy
+  "mail.draftComment": { en: "Comment", es: "Comment" },
+  // TODO(copy): pending operator copy
+  "mail.draftRevise": { en: "Revise", es: "Revise" },
+  // TODO(copy): pending operator copy
+  "mail.draftNoteSend": { en: "Ask the bot", es: "Ask the bot" },
+  // TODO(copy): pending operator copy
+  "mail.draftCancel": { en: "Cancel", es: "Cancel" },
+  // TODO(copy): pending operator copy
+  "mail.draftOffline": { en: "No connection.", es: "No connection." },
+  // TODO(copy): pending operator copy
+  "mail.draftError": { en: "Something went wrong. Try again.", es: "Something went wrong. Try again." },
+  // TODO(copy): pending operator copy
+  "mail.draftNotOwner": { en: "Only the owner can see this draft.", es: "Only the owner can see this draft." },
+  // TODO(copy): pending operator copy
+  "mail.draftFrozen": { en: "This draft can no longer be changed.", es: "This draft can no longer be changed." },
+  // TODO(copy): pending operator copy
+  "mail.draftCloudOff": { en: "Cloud models are not allowed to draft here.", es: "Cloud models are not allowed to draft here." },
+  // TODO(copy): pending operator copy
+  "mail.draftLocalOnly": { en: "This account drafts with local models only.", es: "This account drafts with local models only." },
+  // TODO(copy): pending operator copy
+  "mail.draftTurnOff": { en: "This Crow cannot start a drafting turn.", es: "This Crow cannot start a drafting turn." },
+  // TODO(copy): pending operator copy
+  "mail.draftNotScheduled": { en: "This draft has no scheduled send.", es: "This draft has no scheduled send." },
+  // TODO(copy): pending operator copy
+  "mail.draftNotDiscardable": { en: "This draft can no longer be discarded.", es: "This draft can no longer be discarded." },
+  // TODO(copy): pending operator copy
+  "mail.draftNeedsCancel": { en: "Cancel the scheduled send first.", es: "Cancel the scheduled send first." },
+  // TODO(copy): pending operator copy
+  "mail.draftScheduleUnavailable": { en: "Scheduling is not open yet.", es: "Scheduling is not open yet." },
+  // TODO(copy): pending operator copy
+  "mail.draftSavedDraft": { en: "Saved to {folder}.", es: "Saved to {folder}." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

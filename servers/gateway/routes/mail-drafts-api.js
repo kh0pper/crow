@@ -36,6 +36,10 @@
  * storage reader would actually read. It also carries the head revision's raw attachment total
  * against the send ceiling, so the card can show how much of it a draft already uses.
  *
+ * `PATCH /:id/audience` is the card's one-tap audience chip: one word from the store's `DRAFT_AUDIENCES`
+ * list, written to the draft's `audience` column (or null, to clear it). It is neither a tap nor a
+ * revision — no state moves, no hash is compared — and a frozen draft answers its state.
+ *
  * The revision loop is `drafts/revise.js`'s (Task 9): `POST /:id/comments` queues one comment on one
  * line (a comment on a revision the draft has left is 409 `changed`) and revises at once when it is
  * the only one waiting; `POST /:id/revise` carries every queued comment in one turn; and
@@ -67,13 +71,16 @@ import { listThreadMessages, resolveMessageRef } from "../mail/store/reader-quer
 import { composeRaw } from "../mail/adapter/compose.js";
 import { safeAttachmentName } from "../mail/reader/attachments.js";
 import {
+  DRAFT_AUDIENCES,
   DRAFT_MODES,
   addRevision,
   createDraft,
   discardDraft,
   getDraft,
+  getVoice,
   listComments,
   listRevisions,
+  setAudience,
 } from "../mail/drafts/store.js";
 import { MAX_SEND_BYTES, preflight } from "../mail/drafts/preflight.js";
 import { deriveForward, deriveReply } from "../mail/drafts/recipients.js";
@@ -109,6 +116,7 @@ const TURN_KEYS = Object.freeze(["botId", "instruction", "reviseFrom"]);
 const COMMENT_KEYS = Object.freeze(["rev", "lineIndex", "quote", "text"]);
 const REVISE_KEYS = Object.freeze(["expectHash", "chatNote"]);
 const SAVE_DRAFT_KEYS = Object.freeze(["expectHash"]);
+const AUDIENCE_KEYS = Object.freeze(["audience"]);
 
 /** How many of the owner's Crow files the attachment picker lists: the newest, and no more. */
 const ATTACHABLE_STORAGE_LIMIT = 50;
@@ -321,6 +329,15 @@ function readSaveDraftBody(body) {
   return { expectHash: body.expectHash };
 }
 
+/** The audience body, or null: one word from the store's own list, or null to clear it. */
+function readAudienceBody(body) {
+  if (!keysWithin(body, AUDIENCE_KEYS)) return null;
+  if (!Object.hasOwn(body, "audience")) return null;
+  if (body.audience === null) return { audience: null };
+  if (typeof body.audience !== "string" || !DRAFT_AUDIENCES.includes(body.audience)) return null;
+  return { audience: body.audience };
+}
+
 /* --------------------------------------------------------------- the answers */
 
 /**
@@ -435,7 +452,6 @@ export function registerDraftRoutes(router, ctx) {
   };
 
   /* ------------------------------------------------------------------ create */
-
   // POST / — one draft and its first revision, from the reply's own derivation when the mode names a
   // message. No bot is started here; the card starts a turn when the person asks for one.
   router.post(base, route("POST /drafts", async (db, req, res) => {
@@ -470,11 +486,30 @@ export function registerDraftRoutes(router, ctx) {
     res.json({ draft });
   }));
 
+  // PATCH /:id/audience — the card's one-tap audience chip: one word from `DRAFT_AUDIENCES`, written
+  // to the draft's `audience` column (what a drafting turn reads as the draft's audience) or null to
+  // clear it. It is not a tap and not a revision: no state moves and the hash is not needed, because
+  // nothing a person reads before pressing Send changes. A draft a tap or a schedule has frozen
+  // answers 409 with its state, like the other write routes.
+  router.patch(`${base}/:id/audience`, route("PATCH /drafts/:id/audience", async (db, req, res) => {
+    const draft = await draftFor(db, req);
+    if (!draft) return sendError(res, 404, "not_found");
+    const body = bodyOf(req);
+    if (body == null) return sendError(res, 400, "bad_input");
+    const input = readAudienceBody(body);
+    if (input == null) return sendError(res, 400, "bad_input");
+    const out = await setAudience(db, draft.id, input.audience, runtime.now == null ? {} : { now: runtime.now });
+    if (out?.ok) return res.json({ ok: true, audience: out.audience });
+    res.status(409).json({ error: "frozen", state: out?.state ?? null });
+  }));
+
   /* ------------------------------------------------------------------- reads */
 
-  // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment and the
-  // history line per revision. The flags are null when the draft does not pass preflight (nothing is
-  // invented for it here): the card's own refusal copy is the panel's.
+  // GET /:id — the card: the row, the head revision, the flags preflight marks, every comment, the
+  // history line per revision and the head revision's voice note (null while plan 4 has not checked
+  // it, which is what the card's "Not checked for voice" line reads). The flags are null when the
+  // draft does not pass preflight (nothing is invented for it here): the card's own refusal copy is
+  // the panel's.
   router.get(`${base}/:id`, route("GET /drafts/:id", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -513,6 +548,9 @@ export function registerDraftRoutes(router, ctx) {
       // A sent draft's receipt: when, which Message-ID, from which account, and the reader link once
       // the Sent copy is in the store (until then the card says "Sent, syncing...").
       receipt: await receiptFor(db, draft),
+      // The head revision's voice note, or null: the card says "Not checked for voice" while plan 4
+      // has written none. Part of the card's one read, so the card never guesses.
+      voice: await getVoice(db, draft.id, draft.headRev),
     });
   }));
 

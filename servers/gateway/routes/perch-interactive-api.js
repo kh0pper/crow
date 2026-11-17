@@ -76,6 +76,8 @@ import { providerModelListWarm, pickerModels, loadPiProviderNames, referencedMod
 import { renderBotMarkdown } from "../../blog/renderer.js";
 import { randomBytes } from "node:crypto";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
+import { mailEnabled } from "../mail/flag.js";
+import { listDraftsForChat } from "../mail/drafts/store.js";
 
 /**
  * Project services (plan decision 1; Task 16 fix round 1, I1): who started a turn from this
@@ -1294,6 +1296,45 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       jsonError(res, 500, "internal");
     } finally {
       try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- Crow Mail's draft card (plan 3, Task 10a): the drafts this chat made ----
+  //   GET /interactive/:sid/mail-drafts      the ids only; the card reads each one from the owner's
+  //                                          own draft route (/dashboard/mail/api/drafts/:id), which
+  //                                          is where every field and every flag comes from.
+  //
+  // The two rails are the mail API's, in its order: the flag first (a Crow with mail off answers the
+  // same 404 for this path as for every other mail route, before a row is read), then the owner
+  // (this machine's own password session; a peer's SSO session or a signed peer call is refused with
+  // no data at all). No-store, like every answer on this path.
+  //
+  // A Perch session's id IS its chat thread id, which is what `mail_drafts.chat_thread_id` records
+  // when a draft is made from this chat, so the list is one indexed read. Only ids travel: the card
+  // is built from the draft route's answer, never from this list.
+  router.get(P + "/interactive/:sid/mail-drafts", stagedNoStore, async (req, res, next) => {
+    if (!mailEnabled()) return jsonError(res, 404, "not_found");
+    let owner = false;
+    let db = null;
+    try {
+      db = createDbClient();
+      owner = (await ownerCheck(db, req)) === true;
+    } catch {
+      owner = false;
+    } finally {
+      if (db) { try { db.close(); } catch { /* closed */ } }
+    }
+    if (!owner) return jsonError(res, 403, "owner_only");
+    const sid = String(req.params.sid);
+    const conn = createDbClient();
+    try {
+      const drafts = await listDraftsForChat(conn, sid);
+      res.json({ drafts: drafts.map((draft) => ({ id: draft.id })) });
+    } catch (err) {
+      console.warn("[perch-interactive-api] mail drafts list failed: " + ((err && err.name) || "Error"));
+      jsonError(res, 500, "internal");
+    } finally {
+      try { conn.close(); } catch { /* already closed */ }
     }
   });
 
