@@ -20,14 +20,18 @@
  *
  *   Actions. The opened message's bar posts read/unread, archive, delete and move to the mail API for
  *   the row the bar names, one action at a time (every control waits for the answer, so a double tap
- *   is one intention). Mark unread takes its own control away once the server agrees; archive, delete
- *   and move send the reader back to the list the page's own back link names, and from the moment the
- *   server agrees the bar stays disabled, because the page is on its way out and a control that came
- *   back to life could send a second action for a message that has already moved. Only a failure
- *   frees the bar again. An unread message is
+ *   is one intention). The bar draws both read controls and shows one of them, so an answer — from a
+ *   click or from the automatic mark-read below — swaps them: Mark read goes away and Mark unread
+ *   takes its place, or the other way round. Mark unread also says its own sentence in the bar, which
+ *   the page drew into the bar's data attribute; Mark read shows nothing, because the plan approved no
+ *   sentence for it. Archive, delete and move send the reader back to the list the page's own back
+ *   link names, carrying the action's own note in the URL's `flash` (a move names the folder by id
+ *   only), and from the moment the server agrees the bar stays disabled, because the page is on its
+ *   way out and a control that came back to life could send a second action for a message that has
+ *   already moved. Only a failure frees the bar again. An unread message is
  *   marked read once, 1.5 s after the page is shown, and only while the page is visible: the page's GET
  *   writes nothing, so a prefetch marks nothing read. A failure shows the fixed sentence for its code
- *   and stays; the plan approved no success line, so none is shown.
+ *   and stays; a success swaps the read controls and shows nothing more.
  *
  *   Refresh. The refresh control and a pull down of 80 px or more at the top of the list (the pull is
  *   bound on the list element alone) post one sync per account, then reload through Turbo. One round
@@ -147,6 +151,7 @@ export function mailClientJs(lang = "en") {
     line = document.createElement('p');
     line.className = 'ml-note ml-status-line';
     line.setAttribute('role', 'status');
+    line.setAttribute('aria-live', 'polite');
     line.setAttribute('data-ml-status-line', '');
     line.setAttribute('hidden', '');
     host.appendChild(line);
@@ -170,8 +175,8 @@ export function mailClientJs(lang = "en") {
   }
   function reload() { navigate(String(location.href || '')); }
 
-  function flashHref(value) {
-    var href = String(location.href || '');
+  function flashHref(value, from) {
+    var href = String(from || location.href || '');
     var hash = '';
     var hashAt = href.indexOf('#');
     if (hashAt >= 0) { hash = href.slice(hashAt); href = href.slice(0, hashAt); }
@@ -260,6 +265,8 @@ export function mailClientJs(lang = "en") {
 
   var ACTION_PATH = '/dashboard/mail/api/messages/';
   var MARK_READ_DELAY_MS = 1500;
+  // The note each returning action leaves on the list it goes back to; a move adds the folder's id.
+  var ACTION_FLASH = { archive: 'archived', delete: 'deleted' };
   var actionBusy = false;
 
   function actionUrl(row) {
@@ -282,6 +289,41 @@ export function mailClientJs(lang = "en") {
       if (waiting) { controls[i].setAttribute('disabled', ''); }
       else { controls[i].removeAttribute('disabled'); }
     }
+  }
+  // The two read controls are always drawn and one of them is hidden. An answer that changed the
+  // message's read state swaps them: 'read' hides Mark read and shows Mark unread, 'unread' the other
+  // way round. Anything else about the bar is left alone.
+  function swapReadControls(bar, action) {
+    if (!bar || typeof bar.querySelectorAll !== 'function') { return; }
+    var found = bar.querySelectorAll('[data-ml-action]');
+    var read = null;
+    var unread = null;
+    for (var i = 0; i < found.length; i++) {
+      var verb = String(found[i].getAttribute('data-ml-action') || '');
+      if (verb === 'read') { read = found[i]; }
+      if (verb === 'unread') { unread = found[i]; }
+    }
+    if (!read || !unread) { return; }
+    var reading = action === 'read';
+    if (reading) {
+      read.setAttribute('hidden', '');
+      unread.removeAttribute('hidden');
+    } else {
+      unread.setAttribute('hidden', '');
+      read.removeAttribute('hidden');
+    }
+  }
+  // The automatic mark-read swaps the controls only while the bar still shows Mark read: an answer
+  // that arrived first has already changed the bar, and it is the newer one.
+  function readControlShown(bar) {
+    if (!bar || typeof bar.querySelectorAll !== 'function') { return false; }
+    var found = bar.querySelectorAll('[data-ml-action]');
+    for (var i = 0; i < found.length; i++) {
+      if (String(found[i].getAttribute('data-ml-action') || '') === 'read') {
+        return !found[i].hasAttribute('hidden');
+      }
+    }
+    return false;
   }
   // The list the person came from: the page's own back link, never a URL built here.
   function backHref() {
@@ -306,18 +348,23 @@ export function mailClientJs(lang = "en") {
         sayError(bar, result);
         return;
       }
-      // Mark unread has done its job when the server agrees, so its own control goes away and the
-      // rest of the bar is usable again.
-      if (action === 'unread') {
+      // Mark unread and Mark read leave the reader on the message: the bar is usable again and the two
+      // read controls swap. Any answer about the read state first clears what the bar was saying — the
+      // sentence for a mark unread belongs to that state and must not outlive it. Mark unread then says
+      // its own sentence; Mark read says nothing, because the plan approved no sentence for it.
+      if (action === 'unread' || action === 'read') {
         actionBusy = false;
         setActionsWaiting(false);
-        control.setAttribute('hidden', '');
+        say(bar, '');
+        swapReadControls(bar, action);
+        if (action === 'unread') { say(bar, bar ? String(bar.getAttribute('data-ml-done-unread') || '') : ''); }
         return;
       }
       // Archive, delete and move change which list the person was looking at, so the reader goes back
-      // to that list. It is already on its way out: the bar stays disabled, and a click that lands
-      // while the next page loads sends nothing.
-      navigate(backHref());
+      // to that list carrying the action's own note. It is already on its way out: the bar stays
+      // disabled, and a click that lands while the next page loads sends nothing.
+      var note = action === 'move' ? 'moved:' + String(folderId) : ACTION_FLASH[action];
+      navigate(flashHref(note, backHref()));
     });
   }
   function clickAction(control) {
@@ -331,11 +378,23 @@ export function mailClientJs(lang = "en") {
       runAction(control, 'move', chosen);
       return;
     }
-    if (action === 'archive' || action === 'delete' || action === 'unread') { runAction(control, action); }
+    // A click on either read control is the person's own decision, so the automatic mark-read that is
+    // still pending is cleared before it can fire over it.
+    if (action === 'read' || action === 'unread') {
+      clearMarkTimer();
+      runAction(control, action);
+      return;
+    }
+    if (action === 'archive' || action === 'delete') { runAction(control, action); }
   }
   // Opening an unread message marks it read once, 1.5 s after the page is shown, and only while the
   // page is visible: the GET itself writes nothing, so a prefetch marks nothing read. The timer lives
-  // in window.__mlTimer, which this run already cleared and every departure clears again.
+  // in window.__mlTimer, which this run already cleared and every departure clears again; a click on
+  // either read control clears it too, so it can never override the person's own choice. While the post
+  // is in flight the bar is busy exactly as it is for a click (actionBusy and every control disabled),
+  // so a click that lands in that moment is ignored rather than sent as a second request. When another
+  // action is already in flight (an Archive that is taking the page away, say) it stands aside
+  // entirely: it posts nothing and leaves that action's busy state to be released by its own answer.
   function bindMarkRead() {
     var bar = root.querySelector('[data-ml-actions][data-ml-unread-row]');
     if (!bar) { return; }
@@ -344,8 +403,14 @@ export function mailClientJs(lang = "en") {
     window.__mlTimer = setTimeout(function () {
       window.__mlTimer = null;
       if (String(document.visibilityState || '') !== 'visible') { return; }
+      if (actionBusy) { return; }
+      actionBusy = true;
+      setActionsWaiting(true);
       post(actionUrl(row), { action: 'read' }).then(function (result) {
-        if (!result.ok) { sayError(bar, result); }
+        actionBusy = false;
+        setActionsWaiting(false);
+        if (!result.ok) { sayError(bar, result); return; }
+        if (readControlShown(bar)) { swapReadControls(bar, 'read'); }
       });
     }, MARK_READ_DELAY_MS);
   }

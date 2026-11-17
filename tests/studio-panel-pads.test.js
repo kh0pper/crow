@@ -14,8 +14,12 @@
  *     only gets the button;
  *   - the step sequencer says where the transport is, on the cells already
  *     drawn, and clears it when the transport stops;
+ *   - a queued step paints the position IT was made for, and the queue a page
+ *     comes back to drops what went stale while no frames ran;
  *   - lock mode's strip lives with the steps (not in the right column), and the
- *     sentence about locking a step is the visible hint while no lock is on.
+ *     sentence about locking a step is the visible hint while no lock is on;
+ *   - a controller's effect hold outlives a tap on the page, and a rebuilt host
+ *     gives the keyboard back to the control it was on.
  */
 
 import { test } from "node:test";
@@ -1037,4 +1041,210 @@ test("a reduced-motion browser gets a colour change with no animation", async ()
   const flash = html.slice(flashAt, flashAt + 300);
   assert.match(flash, /animation: st-pad-flash/, "which does animate");
   assert.match(html.slice(0, at), /--hit/, "and its strength is --hit");
+});
+
+// --- the fx hold a controller is holding ------------------------------------
+
+test("a tap anywhere on the page does not release a controller's effect", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await mapFxHold(doc, "stutter", 60);
+  const ui = await bootSong({ doc, engine: true });
+  const holds = [];
+  const releases = [];
+  ui.engine.engine.fxHold = function (name) {
+    holds.push(String(name));
+  };
+  ui.engine.engine.fxRelease = function (name) {
+    releases.push(String(name));
+  };
+  await ui.openSampler();
+  ui.connectMidi();
+  await ui.settle();
+
+  const fxButton = () => ui.document.querySelector(
+    "[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]",
+  );
+  assert.ok(fxButton(), "the Stutter button is on the page");
+
+  ui.pedal([0x90, 60, 100]);
+  await ui.settle();
+  assert.deepEqual(holds, ["stutter"], "the pedal holds the effect in the engine");
+  assert.equal(fxButton().getAttribute("aria-pressed"), "true", "and its button shows the hold");
+
+  // A finger's release anywhere on the page: it lets go of what a FINGER holds,
+  // and the pedal is still down.
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(releases, [], "nothing was released in the engine");
+  assert.equal(fxButton().getAttribute("aria-pressed"), "true", "the pedal's hold is still on the button");
+
+  ui.pedal([0x80, 60, 0]);
+  await ui.settle();
+  assert.deepEqual(releases, ["stutter"], "letting the note go is what releases it");
+  assert.equal(fxButton().getAttribute("aria-pressed"), "false", "and the button says so");
+});
+
+// --- the step a queued report was made for ----------------------------------
+
+test("two reports waiting in the queue each paint the step they were made for", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  const clock = ui.audio();
+  clock.currentTime = 1;
+
+  // Two reports arrive before either is heard, one report apart: step 4 (bar 1,
+  // beat 2) and step 6 (bar 1, beat 2, sixteenth 3), both on the page drawn.
+  // Each brings the hit its block started.
+  const firstFrame = 48000 * 2;
+  const secondFrame = 48000 * 2 + 4800;
+  ui.playhead(1, 2, 1, firstFrame);
+  ui.hit(TRACK, bankId, 0, 110, firstFrame);
+  ui.playhead(1, 2, 3, secondFrame);
+  ui.hit(TRACK, bankId, 1, 110, secondFrame);
+
+  clock.currentTime = 2.05;
+  ui.runFrames();
+  const first = ui.nowCells();
+  assert.equal(first.length, 1, "one step is marked");
+  assert.equal(first[0].getAttribute("data-at"), "4", "the step the FIRST report named, not the newest");
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), true, "with the pad that block started");
+  assert.equal(String(padAt(ui, 1).className).includes("st-pad-hit"), false, "and not the later block's pad");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 2, "the later report and its hit are still waiting");
+
+  clock.currentTime = 2.15;
+  ui.runFrames();
+  const second = ui.nowCells();
+  assert.equal(second.length, 1, "still one step marked");
+  assert.equal(second[0].getAttribute("data-at"), "6", "and it is the step the SECOND report named");
+  assert.equal(String(padAt(ui, 1).className).includes("st-pad-hit"), true, "with its own pad");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "and nothing waits any more");
+});
+
+// --- a state's light -------------------------------------------------------
+
+test("a state event lights its pad on arrival, even for a frame still to come", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  ui.audio().currentTime = 1;
+
+  // A pad's light is a state that stays where the engine left it, not a flash
+  // landing on an instant: it is drawn when the report arrives, so it can lead
+  // the hit it belongs to by up to the output latency.
+  ui.padEvent({
+    frame: 48000 * 90, track_id: TRACK, bank_id: bankId, index: 0, kind: "state", state: 1,
+  });
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-on"), true,
+    "the light is on as soon as the report is in");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "and nothing about it waits for a frame");
+});
+
+// --- the queue a page comes back to ----------------------------------------
+
+test("a page that was not painting drops the hits whose frames are long gone", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+  const clock = ui.audio();
+  clock.currentTime = 1;
+
+  // One hit painted while the page is painting.
+  ui.hit(TRACK, bankId, 2, 100, 48000);
+  clock.currentTime = 1.05;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 2).className).includes("st-pad-hit"), true, "a hit lands on its frame");
+
+  // The tab is hidden and gets no animation frames: the engine plays on.
+  for (let index = 0; index < 8; index += 1) {
+    ui.hit(TRACK, bankId, 4, 90, Math.round(48000 * (1 + index * 0.1)));
+  }
+  // Back in the foreground: the hit that is being heard now, and the backlog
+  // behind it.
+  clock.currentTime = 3;
+  ui.hit(TRACK, bankId, 5, 90, Math.round(2.95 * clock.sampleRate));
+  ui.runFrames();
+
+  assert.equal(ui.window.__crowStudioPadQueue.length, 0, "nothing waits afterwards");
+  assert.equal(String(padAt(ui, 4).className).includes("st-pad-hit"), false,
+    "the backlog's lights are not all painted in one frame");
+  assert.equal(String(padAt(ui, 5).className).includes("st-pad-hit"), true,
+    "the hit that is being heard now is");
+});
+
+// --- a clock that has not started ------------------------------------------
+
+test("a context that answers no timestamp is timed from its output latency", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  // A context that has not started answers 0 for both the context time and the
+  // performance time: that pairing maps every frame a latency too early.
+  const clock = ui.audio();
+  clock.getOutputTimestamp = function () {
+    return { contextTime: 0, performanceTime: 0 };
+  };
+  clock.currentTime = 1;
+
+  // Frame 48000 is 1 s of context time, and it is heard 50 ms after that.
+  ui.hit(TRACK, bankId, 0, 100, 48000);
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), false,
+    "it is not painted at its own context time");
+  assert.equal(ui.window.__crowStudioPadQueue.length, 1, "it waits for the latency the fallback adds");
+
+  clock.currentTime = 1.05;
+  ui.runFrames();
+  assert.equal(String(padAt(ui, 0).className).includes("st-pad-hit"), true,
+    "and is painted 50 ms after its context time");
+});
+
+// --- the control the keyboard was on ---------------------------------------
+
+test("focus comes back to the effect it was on, not the first one like it", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  const fxButtons = () => [...ui.document.querySelectorAll("[data-role=sampler-fx] [data-act=fx-hold]")];
+  const stutter = ui.document.querySelector(
+    "[data-role=sampler-fx] [data-act=fx-hold][data-fx-name=stutter]",
+  );
+  assert.ok(stutter, "the Stutter button is drawn");
+  assert.notEqual(fxButtons()[0], stutter, "and it is not the first of the effects drawn");
+
+  // This document only keeps the focus the page ASKS for, so every focus() is
+  // caught here.
+  const focused = [];
+  const prototype = Object.getPrototypeOf(stutter);
+  const original = prototype.focus;
+  prototype.focus = function () {
+    focused.push(this.getAttribute ? this.getAttribute("data-fx-name") : null);
+    return original.call(this);
+  };
+  try {
+    ui.document.activeElement = stutter;
+    // A redraw of the song as it is: the effects host is drawn again from it.
+    ui.frame(ui.stateFrame());
+    await ui.settle();
+
+    assert.notEqual(fxButtons().length, 0, "the effects are drawn again");
+    assert.deepEqual(focused, ["stutter"], "the focus went back to the same effect and nowhere else");
+  } finally {
+    prototype.focus = original;
+    ui.document.activeElement = null;
+  }
 });

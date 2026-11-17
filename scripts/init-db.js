@@ -12,7 +12,7 @@ import {
   SERVICE_CONNECTIONS_DDL, CHAT_PROJECT_COLUMN, KEYCHAIN_CONNECTION_COLUMN, KEYCHAIN_SERVICE_INDEX_DDL,
 } from "../servers/shared/project-services-schema.js";
 import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
-import { MAIL_DDL } from "../servers/shared/mail-schema.js";
+import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS } from "../servers/shared/mail-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -3088,6 +3088,16 @@ await initTable("voice_handoffs table", `
 // servers/shared/mail-schema.js, which scripts/migrations/0027-mail-store.mjs also runs — one shape,
 // two rails; additive, no SCHEMA_GENERATION bump.
 await initTable("mail tables", MAIL_DDL);
+
+// mail_accounts' send columns (plan 3 A3): display_name (the name on From), aliases_json (the
+// account's other addresses, for reply-all) and sent_copy ('provider' | 'append'). ADD COLUMN only,
+// from MAIL_ACCOUNT_SEND_COLUMNS — the same list scripts/migrations/0029-mail-account-send-columns.mjs
+// adds, through the same kind of guard (one shape, two rails). MAIL_DDL is untouched, so a fresh
+// install gets the columns here and an existing one gets them from the migration. Additive, no
+// SCHEMA_GENERATION bump; the defaults are what existing rows read.
+for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
+  await addColumnIfMissing(spec.table, spec.column, spec.definition);
+}
 
 // staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
 // servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the

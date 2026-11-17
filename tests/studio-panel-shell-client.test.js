@@ -5,8 +5,9 @@
  * tests/studio-panel-shell-page.test.js for that whole page), and this file
  * drives the client against it with a real Yjs song. Three things it pins:
  *
- *   - the editor widget comes forward ONCE when a clip is opened, and a later
- *     render never takes a phone's tab back from where the operator put it;
+ *   - the editor widget comes forward ONCE when a clip is opened, a later
+ *     render never takes a phone's tab back from where the operator put it, and
+ *     a clip closed and opened again comes forward a second time;
  *   - a scene launch the engine refused leaves nothing queued for the next bar;
  *   - the client keeps no copy of the shell's mode key.
  */
@@ -493,6 +494,36 @@ test("a clip opened on a phone brings the editor forward once, and a later rende
   await ui.settle();
   assert.equal(ui.tabOpen("scene-grid"), true);
   assert.deepEqual(calls, ["editor"]);
+
+  ui.stop();
+});
+
+test("a clip reopened on a phone brings its widget forward again", async () => {
+  const ui = await bootPage({ width: PHONE });
+  await ui.waitFor(() => ui.page.querySelector("[data-role=studio-top]"), "the shell to mount");
+  await ui.settle();
+
+  const calls = recordShowCalls(ui.page);
+
+  ui.click("[data-act=open-clip]");
+  await ui.settle();
+  assert.equal(ui.tabOpen("editor"), true, "the first open brings the editor forward");
+  assert.deepEqual(calls, ["editor"], "and asks the shell once");
+
+  // The operator closes the clip: nothing is open, and the widget that was in
+  // front has nothing to show any more.
+  ui.click("[data-act=close-clip]");
+  await ui.settle();
+
+  // They leave to the grid tab, and tap the very same clip again.
+  ui.click("[data-widget-tab=scene-grid]");
+  await ui.settle();
+  assert.equal(ui.tabOpen("scene-grid"), true, "the operator is on the grid");
+
+  ui.click("[data-act=open-clip]");
+  await ui.settle();
+  assert.equal(ui.tabOpen("editor"), true, "reopening the clip brings the editor forward again");
+  assert.deepEqual(calls, ["editor", "editor"], "and the shell is asked a second time");
 
   ui.stop();
 });

@@ -78,10 +78,17 @@ installedBundle("fx-norequire", [{ name: "OPTIONAL_KEY", required: false }], { O
 // AC-8: TWO required keys — one holds the sentinel (in .env AND mcp-addons.json),
 // one is empty. The empty one is what makes the card render an affordance at all;
 // without it this test would be vacuous (a configured bundle renders nothing).
+// The entry stays an UNMIGRATED fixture (a plain value an entry could still hold from
+// before sealing): it must keep counting as configured.
 installedBundle("fx-secret", REQUIRED("SENTINEL_KEY", "EMPTY_KEY"), {
   SENTINEL_KEY: SENTINEL,
   EMPTY_KEY: "",
 });
+
+// PR2 shape: sealing is on by default, so a saved secret lives in the KEYCHAIN and the
+// entry only NAMES it (`keychainEnv`). That is configured too — the value is never needed
+// here, and never reaches this process.
+installedBundle("fx-sealed", REQUIRED("SEALED_KEY"), null);
 
 // the route test's target: two required keys, both blank
 installedBundle("fx-route", REQUIRED("KEY_A", "KEY_B"), { KEY_A: "", KEY_B: "" });
@@ -90,10 +97,11 @@ writeMcpAddons({
   "fx-mcp": { command: "node", args: ["x.js"], env: { MCP_KEY: "live-value" } },
   "fx-ambient": { command: "node", args: ["x.js"], env: {} },
   "fx-secret": { command: "node", args: ["x.js"], env: { SENTINEL_KEY: SENTINEL } },
+  "fx-sealed": { command: "node", args: ["x.js"], env: {}, keychainEnv: ["SEALED_KEY"] },
 });
 
 writeFileSync(join(HOME, "installed.json"), JSON.stringify(
-  ["fx-docker", "fx-mcp", "fx-ambient", "fx-stub", "fx-done", "fx-norequire", "fx-secret", "fx-route"]
+  ["fx-docker", "fx-mcp", "fx-ambient", "fx-stub", "fx-done", "fx-norequire", "fx-secret", "fx-sealed", "fx-route"]
     .map((id) => ({ id, version: "1.0.0", installed_at: "2026-07-11T00:00:00Z" })),
 ));
 
@@ -138,6 +146,11 @@ test("fetchNeedsConfig: a configured bundle and a bundle with no required keys r
   const map = fetchNeedsConfig(getInstalled());
   assert.ok(!map["fx-done"]);
   assert.ok(!map["fx-norequire"]);
+});
+
+test("fetchNeedsConfig: a keychain-listed (sealed) key counts as configured, and no value is needed (PR2 shape)", () => {
+  const map = fetchNeedsConfig(getInstalled());
+  assert.ok(!map["fx-sealed"], "keychainEnv names the key, so its value lives in the keychain — never in the entry");
 });
 
 test("fetchNeedsConfig: the map is keyed by bundle id over the installed OBJECT", () => {

@@ -2197,7 +2197,25 @@ test("in Chrome, the operator accepts a bot's FCB1010 proposal and pedal 2 launc
   assert.equal(Object.values(proposed.midi_maps).filter((row) => row.proposed === true).length, 4, "four proposals");
 
   const page = await openPage(`${base}/dashboard/studio?song=${encodeURIComponent(id)}`);
-  t.after(() => page.close());
+  // The shell keeps its mode for the whole browser profile
+  // (`crow.studio.mode.v1` in localStorage), shared by every page of it, and in
+  // Perform the grid launches a filled cell instead of opening it. So this test
+  // puts the profile back in Compose before it closes its page — from a hook, so
+  // it happens after a failed assertion too: a test that follows and needs
+  // `open-clip` would otherwise boot into Perform, where no such control is drawn.
+  t.after(async () => {
+    try {
+      const composeBox = await pressSettled(page, "[data-mode=compose]", {
+        already: "document.querySelector('[data-mode=compose]').getAttribute('aria-pressed') === 'true'",
+      });
+      if (composeBox) {
+        await waitFor(page, "document.querySelector('[data-mode=compose]').getAttribute('aria-pressed') === 'true'", 10000);
+      }
+    } catch (err) {
+      // The page is going away either way.
+    }
+    await page.close();
+  });
   assert.ok(await waitFor(page, `!!document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]')`, 20000), "the page drew the song before the pedalboard is connected");
   assert.ok(await waitFor(page, "!!document.querySelector('[data-act=midi-connect]')", 20000), "the page offers Connect controllers");
 

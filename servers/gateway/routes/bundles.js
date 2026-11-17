@@ -1871,9 +1871,10 @@ function writeJsonSafe(path, data) {
   mkdirSync(dirname(path), { recursive: true });
   // mcp-addons.json carries MCP children's secrets (generated keys reach their MCP entry
   // here): always written atomically at mode 600, whatever the umask or the old file's mode.
-  // Secrets reach the entry only while keychain sealing is OFF (addonSecretsSealingOn):
-  // with it on, a secret is sealed into the keychain and the entry keeps its NAME in
-  // `keychainEnv` instead (servers/gateway/addon-secrets-seal.js).
+  // Secrets reach the entry only while keychain sealing is OFF (`CROW_ADDON_SECRETS_KEYCHAIN=0`
+  // or a split-DB host, addonSecretsSealingOn): with it on — the default — a secret is sealed
+  // into the keychain and the entry keeps its NAME in `keychainEnv` instead
+  // (servers/gateway/addon-secrets-seal.js).
   if (path === MCP_ADDONS_PATH) { writePrivateFile(path, JSON.stringify(data, null, 2)); return; }
   writeFileSync(path, JSON.stringify(data, null, 2));
 }
@@ -2018,7 +2019,8 @@ async function pinnedMcpEntry({ manifest, reqEnv, generated, ownerEnv, editedEnv
   }
   if (JSON.stringify(entry) !== JSON.stringify(built)) appendLog(job, `Pinned ${bundleId} to one exact version`);
   // The origin of each value: one Crow minted is "generated", one the request typed is
-  // "typed" (the seal's default). Sealing OFF (PR1) keeps every value plain, as today.
+  // "typed" (the seal's default). With sealing off (`CROW_ADDON_SECRETS_KEYCHAIN=0`) every
+  // value stays plain, as it did before the keychain.
   const origins = {};
   for (const name of Object.keys(generated || {})) origins[name] = "generated";
   try {
@@ -2220,9 +2222,9 @@ export async function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_P
     entry.ownerSet = sorted;
   }
   // The seal: every value this save may not keep plain moves into the keychain, and the
-  // entry comes back with `keychainEnv` naming it. With sealing OFF (PR1) it still runs —
-  // that is the 0.3 row-4 opt-out, where a listed name written plain is un-listed so the
-  // value the owner just typed is the one used.
+  // entry comes back with `keychainEnv` naming it. With sealing off (the operator's
+  // `CROW_ADDON_SECRETS_KEYCHAIN=0`) it still runs — that is the 0.3 row-4 opt-out, where a
+  // listed name written plain is un-listed so the value the owner just typed is the one used.
   const sealed = await sealEntrySecrets({ bundleId, entry, manifest, deps });
   // The seal awaited (keychain rows, read-back proof), so this document may be stale by now.
   // Re-read the file and replace ONLY this entry: a lost update here would drop another
