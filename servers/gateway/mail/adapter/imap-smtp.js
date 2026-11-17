@@ -219,7 +219,9 @@ function isMissingMailbox(err) {
  * folder is gone; a message the server refused for its size is TOO_LARGE; a STARTTLS upgrade that
  * could not happen is TLS, because that is the protection it lost, and so is a certificate OpenSSL
  * refused (nodemailer keeps that code in `originalCode` after overwriting `code` with `ESOCKET`). A
- * send the deadline cancelled is TIMEOUT rather than a protocol fault.
+ * send the deadline cancelled is TIMEOUT rather than a protocol fault, and a send nodemailer refused
+ * before transmitting anything (`EENVELOPE`: a refused MAIL FROM, or every recipient refused) is
+ * BAD_INPUT with that token, because it is a refused message rather than an unreadable answer.
  */
 function asMailError(err) {
   if (err instanceof MailError) return err;
@@ -239,6 +241,11 @@ function asMailError(err) {
   }
   if (err != null && typeof err === "object" && IMAP_TIMEOUT_CODES.has(err.code)) {
     return new MailError("TIMEOUT", err.code);
+  }
+  // nodemailer's envelope refusal is the nothing-was-transmitted case; only the code is read, so the
+  // reply text and the addresses it quotes never travel.
+  if (err != null && typeof err === "object" && err.code === "EENVELOPE") {
+    return new MailError("BAD_INPUT", "EENVELOPE");
   }
   return toMailError(err);
 }

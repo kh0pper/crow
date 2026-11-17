@@ -587,6 +587,23 @@ test("a rejected recipient is reported in rejected, not thrown", async () => {
   await stopFake(fake);
 });
 
+test("a server that refuses every recipient is BAD_INPUT with the EENVELOPE token and carries no address", async () => {
+  const fake = await startSmtp({ rejectRcpt: () => true });
+  const adapter = adapterFor(fake);
+  const err = await rejectionOf(adapter.send(outgoing()));
+
+  assert.ok(err instanceof MailError, `expected a MailError, got ${err && err.name}`);
+  assert.equal(err.code, "BAD_INPUT", "nothing was transmitted, so this is a refused message");
+  assert.equal(err.detail, "EENVELOPE", "the detail names the nothing-was-transmitted case");
+  assert.equal(err.message, MAIL_ERROR_TEXT.BAD_INPUT);
+  const shown = shownError(err);
+  assert.ok(!shown.includes(SAM), "no recipient address in the error");
+  assert.ok(!shown.includes("550"), "no server reply text in the error");
+  assert.equal(fake.messages.length, 0, "nothing was transmitted");
+  await adapter.close();
+  await stopFake(fake);
+});
+
 test("a refused SMTP sign-in is AUTH_FAILED and carries neither the password nor the username", async () => {
   const fake = await startSmtp({ users: { [ALEX]: "the-right-app-password" } });
   const adapter = adapterFor(fake, { credentials: passwordCredentials(WRONG_PASSWORD) });

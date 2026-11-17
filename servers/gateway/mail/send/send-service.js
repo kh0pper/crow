@@ -705,7 +705,12 @@ export async function deliver(db, deps, draftId, options = {}) {
       const changed = await markUnknown(db, draftId, claimToken, now, unknownReason);
       return { outcome: "unknown", reason: unknownReason, changed };
     }
-    const reason = FAILED_OUTCOMES[code] ?? "send_failed";
+    // The adapter reports nodemailer's envelope refusal (every recipient, or the MAIL FROM, refused
+    // before any byte was transmitted) as BAD_INPUT with this token: the same fixed sentence as a send
+    // whose every recipient came back rejected.
+    const reason = code === "BAD_INPUT" && err?.detail === "EENVELOPE"
+      ? "all_rejected"
+      : (FAILED_OUTCOMES[code] ?? "send_failed");
     await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor(reason) });
     return { outcome: "failed", reason };
   } finally {
