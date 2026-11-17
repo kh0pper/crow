@@ -18,7 +18,9 @@
  *   (c) the one harmless tool still works for a bot;
  *   (d) the frozen operator-voice actor really publishes (create → publish token round-trip), and
  *       the owner and an unidentified caller are unchanged (create + publish);
- *   (e) a registration the guard cannot see the call's actor through is refused at registration.
+ *   (e) the gateway's router path: an `x-crow-actor-kind` header marking a bot refuses the write
+ *       (with or without an id), and a header claiming the owner is ignored either way;
+ *   (f) a registration the guard cannot see the call's actor through is refused at registration.
  *
  * No network: nothing here opens a peer connection. Scratch CROW_HOME/data dir, a real crow.db from
  * scripts/init-db.js; nothing here touches ~/.crow.
@@ -368,7 +370,74 @@ test("the owner and an unidentified caller create and publish as before", { time
   }
 });
 
-// --- (e) a registration the guard could not guard is refused at registration ---------------
+// --- (e) the gateway path: an actor header marking a bot is refused ---------------------------
+
+/**
+ * A router (`/router/mcp`, the gateway's consolidated endpoint) wired to an in-process client whose
+ * transport carries request headers — InMemoryTransport carries none, so this is how an
+ * `x-crow-actor-*` header from the gateway arrives at the router's handler. `crow_blog` then
+ * dispatches to the router's OWN in-process blog server, the path the gateway really uses.
+ */
+async function openRouter(routerActor, headers) {
+  const { createRouterServer } = await import("../servers/gateway/router.js");
+  const server = createRouterServer({ actor: routerActor });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const inner = serverTransport.onmessage;
+  serverTransport.onmessage = (m, extra) => inner(m, { ...(extra || {}), requestInfo: { headers } });
+  const client = new Client({ name: "blog-router", version: "0" });
+  await client.connect(clientTransport);
+  const entry = {
+    server,
+    call: async (tool, args = {}) => {
+      const r = await client.callTool({ name: "crow_blog", arguments: { action: tool, params: args } });
+      return { text: textOf(r), isError: !!r.isError };
+    },
+    async close() {
+      try { await client.close(); } catch { /* gone */ }
+      try { await server.close(); } catch { /* gone */ }
+    },
+  };
+  openServers.push(entry);
+  return entry;
+}
+
+const BOT_HEADER = { "x-crow-actor-kind": "bot" };
+const BOT_ID_HEADER = { "x-crow-actor-kind": "bot", "x-crow-actor-id": META_BOT };
+const OWNER_HEADER = { "x-crow-actor-kind": "owner" };
+
+const routerWrite = (title) => ["crow_create_post", { title, content: "words" }, "Created draft:"];
+
+test("the gateway path refuses a bot-marked create_post, and an owner header is ignored", async () => {
+  // A caller marking itself a bot: refused with an id and refused without one. The id-less claim
+  // resolves to the same actor an unmarked client gets, so the guard reads the CLAIM, not only the
+  // resolved actor — an unverifiable bot is never treated as the operator's own client.
+  for (const [label, headers] of [
+    ["bot, no id", BOT_HEADER],
+    ["bot, with id", BOT_ID_HEADER],
+  ]) {
+    const [tool, args, sentinel] = routerWrite(`A router post from a ${label} caller`);
+    const e = await openRouter(actor.OWNER, headers);
+    await expectOwnerOnly(e.call, `router ${label}`, tool, args, sentinel);
+  }
+
+  // A header cannot upgrade either: on a router built for a bot, `x-crow-actor-kind: owner` is
+  // ignored and the mount's own actor still decides (the bot is refused).
+  const botRouter = await openRouter({ kind: "bot", id: BOT }, OWNER_HEADER);
+  const [tool, args, sentinel] = routerWrite("A router post claiming to be the owner");
+  await expectOwnerOnly(botRouter.call, "router owner header on a bot mount", tool, args, sentinel);
+
+  // And on an owner-built router the same header is ignored the other way: it is no credential,
+  // and no downgrade — the mount's actor, the owner, still creates the post.
+  const ownerRouter = await openRouter(actor.OWNER, OWNER_HEADER);
+  const title = "A router post from the owner with an owner header";
+  const created = await ownerRouter.call("crow_create_post", { title, content: "The operator's words." });
+  assert.equal(created.isError, false, created.text);
+  assert.match(created.text, /Created draft/);
+  assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", [title]), 1, "the owner's post exists");
+});
+
+// --- (f) a registration the guard could not guard is refused at registration ---------------
 
 test("the blog guard refuses to register a tool it could not see the call's actor through", async () => {
   const { guardBlogServer } = await import("../servers/blog/bot-owner-only.js");

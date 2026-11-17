@@ -112,9 +112,109 @@ test("(c) a def that says kind:'voice' on another bot's id is still gated", with
   assert.deepEqual(calls, []);
 }));
 
-// --- (d) the voice bot: own turn runs an unselected addon, a relay turn does not -----------
+// --- (d) the same tool name on two add-ons: the grant is (server, tool), never the name ----------
 
-test("(d) relay crow.voice is gated on an unselected addon tool; the same def without relay runs it",
+const DUP_A = "stub-dup-a";
+const DUP_B = "stub-dup-b";
+const SHARED = "shared_stub_tool";
+
+/**
+ * Two connected add-ons that BOTH expose `SHARED` (plus one tool only each owns). The grant is keyed
+ * by (server, tool) for exactly this case: a grant keyed by the tool name alone would hand over —
+ * and dispatch to — whichever add-on came first in localFirst order.
+ */
+function withDuplicateStubs(fn) {
+  return async () => {
+    const calls = { [DUP_A]: [], [DUP_B]: [] };
+    for (const id of [DUP_A, DUP_B]) {
+      connectedServers.set(id, {
+        status: "connected",
+        tools: [{ name: SHARED }, { name: id.replace(/-/g, "_") + "_own" }],
+        client: { callTool: async (p) => { calls[id].push(p); return { content: [{ type: "text", text: id }] }; } },
+      });
+    }
+    try { await fn(calls); } finally { connectedServers.delete(DUP_A); connectedServers.delete(DUP_B); }
+  };
+}
+
+const dupBot = (selection) => ({ bot_id: "glass", display_name: "Glasses", tools: { crow_mcp: selection } });
+
+/** The same tool call by its two routes: the direct name and the crow_tools proxy. */
+const bothRoutes = (name, args = {}) => [
+  { id: "direct", name, arguments: args },
+  { id: "proxied", name: "crow_tools", arguments: { action: name, params: args } },
+];
+
+test("(d) two add-ons exposing one tool name: only the one the bot was given is called", withDuplicateStubs(async (calls) => {
+  const ex = createToolExecutor({ botDef: dupBot([`${DUP_A}/${SHARED}`]) });
+  for (const [i, tc] of bothRoutes(SHARED).entries()) {
+    const [r] = await ex.executeToolCalls([{ ...tc, id: String(i) }]);
+    assert.equal(r.isError, false, `${tc.id}: ${r.result}`);
+    assert.equal(r.result, DUP_A, `${tc.id}: the add-on the bot was given answered`);
+  }
+  assert.equal(calls[DUP_A].length, 2, "both routes reached the granted add-on");
+  assert.deepEqual(calls[DUP_B], [], "the add-on the bot was not given saw no call at all");
+}));
+
+test("(d) the grant picks the add-on, not the order localFirst walks them in", withDuplicateStubs(async (calls) => {
+  // stubA is set (and so walked) first: a first-name-match dispatch would call it.
+  assert.equal([...connectedServers.keys()].filter((k) => k.startsWith("stub-dup-"))[0], DUP_A);
+  const ex = createToolExecutor({ botDef: dupBot([`${DUP_B}/${SHARED}`]) });
+  for (const [i, tc] of bothRoutes(SHARED).entries()) {
+    const [r] = await ex.executeToolCalls([{ ...tc, id: String(i) }]);
+    assert.equal(r.isError, false, `${tc.id}: ${r.result}`);
+    assert.equal(r.result, DUP_B, `${tc.id}: the add-on the bot was given, not the first name match`);
+  }
+  assert.deepEqual(calls[DUP_A], [], "the add-on that came first never ran");
+  assert.equal(calls[DUP_B].length, 2);
+}));
+
+test("(d) neither add-on granted: the call is refused, and neither add-on is called", withDuplicateStubs(async (calls) => {
+  const ex = createToolExecutor({ botDef: dupBot([`${DUP_A}/some_other_tool`]) });
+  for (const [i, tc] of bothRoutes(SHARED).entries()) {
+    const [r] = await ex.executeToolCalls([{ ...tc, id: String(i) }]);
+    assert.equal(r.isError, true, `${tc.id}: ${r.result}`);
+    assert.equal(r.result, notGranted(SHARED), `${tc.id}: the fixed refusal, naming the tool`);
+  }
+  assert.deepEqual(calls[DUP_A], []);
+  assert.deepEqual(calls[DUP_B], []);
+}));
+
+test("(d) a bare-server grant covers that server's tools, and only that server's", withDuplicateStubs(async (calls) => {
+  // effectiveCrowMcp (as pi and the advertising code read it): a bare "<server>" entry grants the
+  // whole server, exactly as it grants every mcp__<server>__<tool> for pi.
+  const ex = createToolExecutor({ botDef: dupBot([DUP_A]) });
+  const [shared] = await ex.executeToolCalls([{ id: "1", name: SHARED, arguments: {} }]);
+  assert.equal(shared.isError, false, shared.result);
+  assert.equal(shared.result, DUP_A, "the bare grant covers the granted server's copy");
+  const [own] = await ex.executeToolCalls([{ id: "2", name: "stub_dup_a_own", arguments: {} }]);
+  assert.equal(own.isError, false, own.result);
+  assert.equal(calls[DUP_A].length, 2, "both of its tools ran");
+
+  // The OTHER add-on's own tool is not covered: the bare grant names one server.
+  const [other] = await ex.executeToolCalls([{ id: "3", name: "stub_dup_b_own", arguments: {} }]);
+  assert.equal(other.isError, true, other.result);
+  assert.equal(other.result, notGranted("stub_dup_b_own"));
+  assert.deepEqual(calls[DUP_B], [], "nothing of the other add-on ran");
+}));
+
+test("(d) the crow_tools not-found listing names only the add-ons a bound bot was given", withDuplicateStubs(async () => {
+  const bound = createToolExecutor({ botDef: dupBot([`${DUP_A}/${SHARED}`]) });
+  const [r] = await bound.executeToolCalls([{ id: "1", name: "crow_tools", arguments: { action: "no_such_stub_tool", params: {} } }]);
+  assert.equal(r.isError, true, r.result);
+  assert.match(r.result, /not found in any connected extension/);
+  assert.ok(r.result.includes(`${DUP_A}(1)`), `the granted add-on, and how many of its tools it holds: ${r.result}`);
+  assert.ok(!r.result.includes(DUP_B), `an add-on the bot was not given is never named: ${r.result}`);
+
+  // Unbound (the operator's own chat) is unchanged: every connected add-on is listed.
+  const unbound = createToolExecutor({});
+  const [u] = await unbound.executeToolCalls([{ id: "2", name: "crow_tools", arguments: { action: "no_such_stub_tool", params: {} } }]);
+  assert.ok(u.result.includes(`${DUP_A}(2)`) && u.result.includes(`${DUP_B}(2)`), u.result);
+}));
+
+// --- (e) the voice bot: own turn runs an unselected addon, a relay turn does not -----------
+
+test("(e) relay crow.voice is gated on an unselected addon tool; the same def without relay runs it",
   withStub(async (calls) => {
     const relay = createToolExecutor({ botDef: { bot_id: "crow.voice", display_name: "Crow" }, relay: true });
     const refused = await relay.executeToolCalls([{ id: "1", name: "gcal_create_event", arguments: { title: "x" } }]);
