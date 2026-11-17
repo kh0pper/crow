@@ -8,6 +8,9 @@
  * `studio-processor.js` posts the block's whole ring once, at the end of the
  * block, as `{type:"pad_events", events:[…]}`.
  *
+ * A note rides the same ring: a step's note and one the page's keyboard sends
+ * (`pushNote`) are recorded so a key can light on the frame the note sounds.
+ *
  * ## Why a ring and not an array
  *
  * The push happens inside `process()`, where an allocation is a dropout waiting
@@ -24,7 +27,8 @@
  *
  * ## What a record says
  *
- * `{frame, track_id, bank_id, index, kind, v?, state?}`
+ * `{frame, track_id, bank_id, index, kind, v?, state?}` or, for a note,
+ * `{frame, track_id, kind: "note", p, on}`.
  *
  * - `frame` is the CONTEXT frame the voice starts on, in the very clock
  *   `launched`, `next_bar` and a `position` report use, so a light is timed
@@ -33,7 +37,9 @@
  * - `kind` is `"hit"` (a voice started; `v` is its EFFECTIVE velocity, 1..127 —
  *   the one the voice's own gain was worked out from) or `"state"` (the pad's
  *   stored state changed; `state` is that code, one of `STATE_OFF`,
- *   `STATE_ON`, `STATE_LOOP` or `STATE_HELD`).
+ *   `STATE_ON`, `STATE_LOOP` or `STATE_HELD`) or `"note"` (a note started or
+ *   ended on a track; `p` is its MIDI pitch and `on` says which, so a page's
+ *   keys light and go dark on the frame the note sounds).
  *
  * It is a classic script (no `import`/`export`): it assigns
  * `globalThis.StudioPadEvents` for the worklet scope and `module.exports` when a
@@ -51,6 +57,7 @@
   /** The kinds a record can hold, as the numbers `push` is given. */
   const KIND_HIT = 0;
   const KIND_STATE = 1;
+  const KIND_NOTE = 2;
 
   /**
    * A pad's state, as the processor scans it out of its voices: off, sounding,
@@ -64,13 +71,16 @@
   const STATE_HELD = 3;
 
   /**
-   * The kind a code stands for: anything but the state code is a hit, so a
-   * caller that passes nothing still says something the page can draw.
+   * The kind a code stands for: a state or a note is kept, and anything else is
+   * a hit, so a caller that passes nothing still says something the page can
+   * draw.
    * @param {number} code
    * @returns {number}
    */
   function kindOf(code) {
-    return code === KIND_STATE ? KIND_STATE : KIND_HIT;
+    if (code === KIND_STATE) return KIND_STATE;
+    if (code === KIND_NOTE) return KIND_NOTE;
+    return KIND_HIT;
   }
 
   /** @returns {number} a value as a whole number, 0 when it is not one. */
@@ -92,7 +102,17 @@
   function create() {
     const records = new Array(RING_SIZE);
     for (let at = 0; at < RING_SIZE; at += 1) {
-      records[at] = { frame: 0, trackId: "", bankId: "", index: 0, kind: KIND_HIT, v: 0, state: 0 };
+      records[at] = {
+        frame: 0,
+        trackId: "",
+        bankId: "",
+        index: 0,
+        kind: KIND_HIT,
+        v: 0,
+        state: 0,
+        p: 0,
+        on: false,
+      };
     }
     /** The oldest standing record's slot. */
     let start = 0;
@@ -100,8 +120,21 @@
     let count = 0;
 
     /**
-     * Record one event, in place. A full ring drops its OLDEST record first, so
-     * a block that starts more voices than the ring holds keeps the newest ones.
+     * The slot the next record takes, dropping the OLDEST one when the ring is
+     * full, so a block that records more events than the ring holds keeps the
+     * newest ones. No object is made: the slot's own record is refilled.
+     * @returns {object} the record to fill
+     */
+    function nextRecord() {
+      if (count === RING_SIZE) start = (start + 1) % RING_SIZE;
+      else count += 1;
+      // The write slot: the end of the standing records, which on a full ring is
+      // the slot just released by dropping the oldest one.
+      return records[(start + count - 1) % RING_SIZE];
+    }
+
+    /**
+     * Record one pad event, in place.
      * @param {number} frame the context frame the voice starts on
      * @param {string} trackId
      * @param {string} bankId
@@ -114,11 +147,7 @@
      * @returns {void}
      */
     function push(frame, trackId, bankId, index, kindCode, v, stateCode) {
-      if (count === RING_SIZE) start = (start + 1) % RING_SIZE;
-      else count += 1;
-      // The write slot: the end of the standing records, which on a full ring is
-      // the slot just released by dropping the oldest one.
-      const record = records[(start + count - 1) % RING_SIZE];
+      const record = nextRecord();
       record.frame = whole(frame);
       record.trackId = typeof trackId === "string" ? trackId : "";
       record.bankId = typeof bankId === "string" ? bankId : "";
@@ -126,6 +155,32 @@
       record.kind = kindOf(kindCode);
       record.v = whole(v);
       record.state = whole(stateCode);
+      record.p = 0;
+      record.on = false;
+    }
+
+    /**
+     * Record one note event: a note a sequencer step or a live press started or
+     * ended on a track. Its record carries the pitch and whether the note started
+     * or ended, so a page's key can light on the frame the note is heard and go
+     * dark on the frame it is released.
+     * @param {number} frame the context frame the note starts (or ends) on
+     * @param {string} trackId
+     * @param {number} p the MIDI pitch, 0..127
+     * @param {boolean} on whether the note started (true) or ended (false)
+     * @returns {void}
+     */
+    function pushNote(frame, trackId, p, on) {
+      const record = nextRecord();
+      record.frame = whole(frame);
+      record.trackId = typeof trackId === "string" ? trackId : "";
+      record.bankId = "";
+      record.index = 0;
+      record.kind = KIND_NOTE;
+      record.v = 0;
+      record.state = 0;
+      record.p = whole(p);
+      record.on = on === true;
     }
 
     /**
@@ -137,6 +192,16 @@
       const events = [];
       for (let at = 0; at < count; at += 1) {
         const record = records[(start + at) % RING_SIZE];
+        if (record.kind === KIND_NOTE) {
+          events.push({
+            frame: record.frame,
+            track_id: record.trackId,
+            kind: "note",
+            p: record.p,
+            on: record.on,
+          });
+          continue;
+        }
         const event = {
           frame: record.frame,
           track_id: record.trackId,
@@ -172,6 +237,7 @@
     return {
       records: records,
       push: push,
+      pushNote: pushNote,
       drain: drain,
       size: size,
       clear: clear,
@@ -183,6 +249,7 @@
     RING_SIZE: RING_SIZE,
     KIND_HIT: KIND_HIT,
     KIND_STATE: KIND_STATE,
+    KIND_NOTE: KIND_NOTE,
     STATE_OFF: STATE_OFF,
     STATE_ON: STATE_ON,
     STATE_LOOP: STATE_LOOP,

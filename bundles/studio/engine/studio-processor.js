@@ -292,6 +292,11 @@
  * with nobody listening nothing is recorded and nothing is posted. A block with
  * no trigger posts nothing.
  *
+ * A note travels on the same channel: a note a sequencer step starts or ends,
+ * and one a page's keyboard sends, is recorded as
+ * `{frame, track_id, kind: "note", p, on}` — the frame it sounds on, its pitch,
+ * and whether it started — so a key lights with the note it hears.
+ *
  * A pad's LIGHT is not a hit: it stays on while the pad sounds and goes off when
  * the last of its voices is gone. A voice ends in a dozen places (its range, its
  * envelope, a choke fade, a steal, the song-wide cap, a track torn down by a new
@@ -683,7 +688,9 @@
  * or `"ir"` with `channels`/`rate`), `{type:"library_unload", library_id}`,
  * `{type:"nam-wasm", bytes}` (the NAM engine binary, once per page),
  * `{type:"monitor", track_id, on}`, `{type:"live", track_id,
- * bank_id, index, v, on}`, `{type:"hold", track_id, bank_id, index}`,
+ * bank_id, index, v, on}`, `{type:"live_note", track_id, p, v, on}` (a note
+ * from the page's own keyboard: see `liveNote`),
+ * `{type:"hold", track_id, bank_id, index}`,
  * `{type:"release_held", track_id?, bank_id?, index?}`,
  * `{type:"pause_voices", on}`, `{type:"roll_start", track_id, bank_id, index,
  * interval, v}`, `{type:"roll_stop", track_id, bank_id, index}`,
@@ -960,6 +967,17 @@
    */
   const PAD_EVENT_HIT = 0;
   const PAD_EVENT_STATE = 1;
+
+  /**
+   * The SunVox event tracks a live note stands on: 1..8, round robin, never
+   * track 0. Track 0 is the sequencer's own — every sequenced note is sent on
+   * it — so a live press never cuts a sequenced note, and two live notes of one
+   * track land on different event tracks so a chord stays a chord. SunVox
+   * numbers its event tracks 0..15, so 1..8 sits well inside what the library
+   * takes.
+   */
+  const FIRST_LIVE_EVENT_TRACK = 1;
+  const LIVE_EVENT_TRACKS = 8;
 
   /**
    * `pad-events.js`'s state codes, duplicated here for the same reason as the
@@ -2849,6 +2867,12 @@
         case "live":
           this.live(message);
           break;
+        case "live_note":
+          // A note from the page's own keyboard: it sounds through the same note
+          // path a step does, but on its own SunVox event tracks, so it never
+          // cuts what the sequencer is playing (see `liveNote`).
+          this.liveNote(message.track_id, message.p, message.v, message.on !== false);
+          break;
         case "hold":
           // HOLD latches the Gate voices a pad is sounding right now: live
           // state on the voice, never a command, never a history step.
@@ -4025,6 +4049,22 @@
     }
 
     /**
+     * Record one note event for the page, in the context's own frames: the note a
+     * step started or ended, or one the page's keyboard sent. Nothing is recorded
+     * while no page listens, exactly as for a pad event, and a push allocates
+     * nothing.
+     * @param {number} frame the context frame the note sounds on
+     * @param {string} trackId
+     * @param {number} p the MIDI pitch, 0..127
+     * @param {boolean} on whether the note started (true) or ended (false)
+     * @returns {void}
+     */
+    pushPadNote(frame, trackId, p, on) {
+      if (!this.padEventsOn || this.padEvents === null) return;
+      this.padEvents.pushNote(frame, trackId, p, on);
+    }
+
+    /**
      * Post the block's pad events: ONE message, and only when a page is listening
      * and something was recorded. The event array is the one allocation, and it
      * is made here, after the block rendered.
@@ -4520,6 +4560,8 @@
         paramsKey: null,
         left: 0,
         right: 0,
+        /** The pitches a live note is holding on this track's channel (`liveNote`). */
+        liveNotes: new Map(),
       };
     }
 
@@ -4547,6 +4589,10 @@
         paramsKey: null,
         left: 0,
         right: 0,
+        /** The pitches a live note holds, and the event track each stands on. */
+        liveNotes: new Map(),
+        /** Which live event track the next press takes (0..7, see `liveNote`). */
+        liveNoteNext: 0,
       };
 
       let engine = null;
@@ -4635,6 +4681,8 @@
           tail.channels = null;
         }
       }
+      // The track is going away, so whatever live note it held goes with it.
+      if (record.liveNotes) record.liveNotes.clear();
       const own = engine || record.engine;
       if (!own) return;
       try {
@@ -8768,6 +8816,81 @@
     }
 
     /**
+     * One live note from the page — its on-screen keyboard, or a key routed
+     * through it — straight to the track's device, never through the sequencer
+     * and never quantized.
+     *
+     * A SunVox track keeps event track 0 for the sequencer, so a live note takes
+     * one of its own: tracks 1..8 round robin, remembered per slot against the
+     * pitch it holds. The release is then sent on the very event track that note
+     * started on, so it leaves every other note alone — a sequenced note playing
+     * under the fingers, or the other half of a chord — and Stop can release what
+     * is still held (`releaseLiveNotes`). A soundfont track needs no event track:
+     * its host is per MIDI channel and polyphonic (`fonts.noteOn`/`noteOff`, the
+     * very calls a step makes).
+     *
+     * An unknown track is a no-op. A pitch is held between 0 and 127, a velocity
+     * between 1 and 127, and a release for a pitch that is not held is a no-op.
+     * The note also goes out as a note event for the page's keys when one is
+     * listening.
+     * @param {unknown} trackId
+     * @param {unknown} p the MIDI pitch, 0..127
+     * @param {unknown} v the velocity, 1..127
+     * @param {boolean} on whether this is a press (true) or a release (false)
+     * @returns {void}
+     */
+    liveNote(trackId, p, v, on) {
+      const index = this.trackSlots.get(asId(trackId));
+      if (index === undefined) return;
+      const record = this.slots[index];
+      if (!record || !record.liveNotes) return;
+      const pitch = Math.trunc(clamp(numberOr(p, 0), 0, 127));
+      const down = on !== false;
+      if (record.font) {
+        if (this.fonts === null) return;
+        if (down) {
+          // 0: a soundfont track's entry holds no event track, only the pitch.
+          record.liveNotes.set(pitch, 0);
+          this.fonts.noteOn(record.track_id, pitch, Math.trunc(clamp(numberOr(v, 127), 1, 127)));
+        } else {
+          if (!record.liveNotes.has(pitch)) return;
+          record.liveNotes.delete(pitch);
+          this.fonts.noteOff(record.track_id, pitch);
+        }
+        this.pushPadNote(this.contextOffset() + this.frame, record.track_id, pitch, down);
+        return;
+      }
+      if (!record.engine || record.module < 0) return;
+      const module = record.module + 1;
+      if (down) {
+        // Round robin over the live event tracks. A pitch that is already held
+        // keeps the track it started on, so repeating a press never moves its
+        // note-off elsewhere.
+        let eventTrack = record.liveNotes.get(pitch);
+        if (eventTrack === undefined) {
+          eventTrack = FIRST_LIVE_EVENT_TRACK + record.liveNoteNext;
+          record.liveNoteNext = (record.liveNoteNext + 1) % LIVE_EVENT_TRACKS;
+        }
+        record.liveNotes.set(pitch, eventTrack);
+        record.engine.sendEvent(
+          SLOT,
+          eventTrack,
+          noteFor(pitch),
+          sunvoxVelocity(Math.trunc(clamp(numberOr(v, 127), 1, 127))),
+          module,
+          0,
+          0,
+        );
+      } else {
+        const eventTrack = record.liveNotes.get(pitch);
+        if (eventTrack === undefined) return;
+        record.liveNotes.delete(pitch);
+        record.engine.sendEvent(SLOT, eventTrack, NOTECMD_NOTE_OFF, 0, module, 0, 0);
+      }
+      this.pushPadNote(this.contextOffset() + this.frame, record.track_id, pitch, down);
+    }
+
+    /**
      * Latch the voices one pad is sounding right now: the SP-404's HOLD key.
      *
      * A held voice ignores the operator letting go and its own gate countdown,
@@ -9096,8 +9219,9 @@
     }
 
     /**
-     * Release the pads' live state: every loop, every HOLD and every ROLL now,
-     * through the normal release.
+     * Release the pads' live state: every loop, every HOLD, every ROLL and every
+     * live note the page's keys hold, now, through the normal release (a note
+     * through its note-off).
      *
      * This is what Stop and `reset_live` (a DIFFERENT song being opened) do, and
      * it is the one place the later live state — ROLL and Pause-all — is
@@ -9114,6 +9238,9 @@
       // A ROLL is live state like a loop and a HOLD, so Stop ends every one of
       // them: the repeats stop before the voices they started are released below.
       this.rollStopAll();
+      // A live note held by the page's keys is live state like a loop: Stop sends
+      // its note-off, so nothing outlives the stop.
+      this.releaseLiveNotes();
       for (const record of this.slots) {
         if (!record || !record.sampler) continue;
         for (const voice of record.voices) {
@@ -9126,6 +9253,39 @@
           if (!voice.looping) continue;
           StudioSamplerVoice.release(voice);
         }
+      }
+    }
+
+    /**
+     * Send the note-off for every live note still held and forget them: what Stop
+     * and `reset_live` do, so a key the page never released (a lost pointer, a
+     * song closed with a finger down) does not ring on.
+     *
+     * The map is the per-slot one `liveNote` fills: a soundfont pitch goes back to
+     * its channel, a SunVox pitch to the event track it started on. This runs on
+     * the message path, never inside a block, so walking a Map here is not the
+     * audio thread's business.
+     * @returns {void}
+     */
+    releaseLiveNotes() {
+      for (const record of this.slots) {
+        if (!record || !record.liveNotes || record.liveNotes.size === 0) continue;
+        if (record.font) {
+          if (this.fonts !== null) {
+            for (const pitch of record.liveNotes.keys()) this.fonts.noteOff(record.track_id, pitch);
+          }
+          record.liveNotes.clear();
+          continue;
+        }
+        if (!record.engine || record.module < 0) {
+          record.liveNotes.clear();
+          continue;
+        }
+        const module = record.module + 1;
+        for (const eventTrack of record.liveNotes.values()) {
+          record.engine.sendEvent(SLOT, eventTrack, NOTECMD_NOTE_OFF, 0, module, 0, 0);
+        }
+        record.liveNotes.clear();
       }
     }
 
@@ -9335,6 +9495,10 @@
     /**
      * Send one sequencer event to its track's device: a note of a SunVox engine,
      * or of a soundfont track's channel.
+     *
+     * The note is also recorded for the page (while one listens) as a note event
+     * on the frame it sounds on, so a key lights with the note it hears instead of
+     * with the block that happened to carry it.
      * @param {{track_id: string, type: string, p: number, v: number}} event
      * @returns {void}
      */
@@ -9343,6 +9507,17 @@
       if (index === undefined) return;
       const record = this.slots[index];
       if (!record) return;
+      const down = event.type === "on";
+      // The block-relative frame the note stands on, as a pad hit's is read: a
+      // step's own frame, and 0 for a live message (which sounds on the block's
+      // first frame).
+      const offset = Number(event.frame);
+      this.pushPadNote(
+        this.contextOffset() + this.frame + (Number.isFinite(offset) && offset > 0 ? Math.trunc(offset) : 0),
+        asId(event.track_id),
+        Math.trunc(clamp(numberOr(event.p, 0), 0, 127)),
+        down,
+      );
       if (record.font) {
         // A soundfont track's note goes to its own MIDI channel. A track whose
         // font is not loaded has no channel and stays silent; the engine has
