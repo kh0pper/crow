@@ -9,19 +9,25 @@
  *
  * What this file drives:
  *
- *   (a) a relay executor bound to the reserved voice id builds its in-process sharing server with the PLAIN
- *       bound actor, which is not the frozen operator-voice actor;
+ *   (a) a relay executor bound to the reserved voice id holds the PLAIN bound actor — the same
+ *       {kind:"bot", id: voice id} the four in-process project servers are built with — which is not the frozen
+ *       operator-voice actor;
  *   (b) that executor is refused crow_send_message and crow_voice_memo — the fixed owner-only refusal, and the
  *       handlers never run (no peer call, no nostr send);
- *   (c) the control: no `relay` keeps the frozen operator voice actor and its crow_send_message is not refused;
- *       only the boolean option `relay === true` narrows ("true", 1 and botDef fields change nothing, and a
- *       botDef field never grants the frozen actor to another id);
- *   (d) runner level: every relay kind creates the turn's executor with relay === true, a turn with no (or a
- *       blank) relayThreadId with relay falsy;
+ *   (c) the control: no `relay` keeps the frozen operator voice actor (for the sharing server and all four project
+ *       servers) and its crow_send_message really reaches the handler; only the boolean option `relay === true`
+ *       narrows ("true", 1 and botDef fields change nothing, and a botDef field never grants the frozen actor to
+ *       another id);
+ *   (d) runner level: every relay kind creates the turn's executor with relay === true — on the voice bot itself
+ *       too — and a turn with no (or a blank) relayThreadId with relay falsy;
  *   (e) runner level: a relay turn's crow_send_message / crow_voice_memo are refused_policy and never reach the
- *       executor, while an operator turn's crow_send_message does;
- *   (f) no transcript can set the relay flag (it comes only from runVoiceTurn's opts), and a source scan shows
- *       relayThreadId/relayKind are only ever assigned from crowVoiceTurnOptions' own parameters;
+ *       executor (the relay contract's refusal), while an operator turn's crow_send_message does;
+ *   (e2) runner level through the REAL createToolExecutor: a relay turn's executor answers baseActorFor("sharing")
+ *       with the plain bound bot, an operator turn's with operatorVoiceActor();
+ *   (f) no transcript can set the relay flag (it comes only from runVoiceTurn's opts), and a source scan of
+ *       servers/ and bundles/ shows the relay fields are written only by crowVoiceTurnOptions (from its own
+ *       parameters) — no call site spells one, and the only spreading call sites spread that function's output
+ *       (plus one inline `{botId}`);
  *   (g) the hand-off confirm flow is unchanged on the operator's turn, and a relayed "yes" makes no card.
  *
  * A scratch CROW_HOME/data dir with a real crow.db from scripts/init-db.js; the offline switches keep boot
@@ -191,6 +197,13 @@ test("a relay executor bound to the voice id holds the plain bound actor, not th
   assert.equal(scope.isOperatorVoice(held), false, "it does not pass the operator-voice check");
   assert.deepEqual(held, { kind: "bot", id: CROW_VOICE_BOT_ID }, "the plain bound bot actor, nothing else");
   assert.equal(Object.isFrozen(held), false, "and it is not a frozen actor at all");
+
+  // The four in-process project servers are built from the same base actor (the sharing server above is the
+  // one this test could read directly; baseActorFor is where all four take it from).
+  for (const category of ["memory", "projects", "storage", "sharing"]) {
+    assert.deepEqual(ex.baseActorFor(category), { kind: "bot", id: CROW_VOICE_BOT_ID }, `${category}: the plain bound bot actor`);
+    assert.equal(ex.baseActorFor(category), ex.baseActorFor("memory"), `${category}: the same actor the other servers get`);
+  }
 });
 
 // --- (b) so the sharing tools refuse it, and no handler runs -------------------------------
@@ -210,15 +223,22 @@ test("a relay executor is refused crow_send_message and crow_voice_memo, and not
 
 // --- (c) the control: no relay keeps the operator voice actor ------------------------------
 
-test("without relay the voice executor keeps the frozen operator voice actor and is not refused its send", async () => {
+test("without relay the voice executor keeps the frozen operator voice actor and its send is delivered", async () => {
   const ex = track(createToolExecutor({ botDef: voiceBotDef() }));
   const server = await sharingServerOf(ex);
   assert.equal(server.sharing.actor, scope.operatorVoiceActor(), "the frozen operator voice actor is the base");
   assert.equal(scope.isOperatorVoice(server.sharing.actor), true);
+  for (const category of ["memory", "projects", "storage", "sharing"]) {
+    assert.equal(ex.baseActorFor(category), scope.operatorVoiceActor(), `${category}: the frozen operator voice actor`);
+  }
 
+  // The real outcome, not just "not the refusal": the handler ran and the send went out over nostr.
   peerCalls = [];
   const r = await ex.executeTool("crow_sharing", { action: "crow_send_message", params: sendArgs() });
   assert.notEqual(r.result, OWNER_ONLY_TEXT, `the operator's own spoken turn reaches the handler: ${r.result}`);
+  assert.equal(r.isError, false, `no error: ${r.result}`);
+  assert.match(r.result, /^Message delivered to Relay Contact via 1 relay\(s\)\.$/, `the send really happened: ${r.result}`);
+  assert.deepEqual(peerCalls.map((c) => c.call), ["nostrManager.sendMessage"], "the handler published the message");
 });
 
 test("only the boolean relay === true narrows: a string, a number and botDef fields change nothing", async () => {
@@ -245,7 +265,7 @@ test("only the boolean relay === true narrows: a string, a number and botDef fie
   }
 });
 
-// --- runner-level harness (cases d, e, f) --------------------------------------------------
+// --- runner-level harness (cases d, e, e2, f) -----------------------------------------------
 
 /** The shared fake harness, with deps.createToolExecutor recording each turn's options. */
 function runnerHarness(opts = {}) {
@@ -261,16 +281,22 @@ function runnerHarness(opts = {}) {
 // --- (d) every relay kind creates the executor with relay === true --------------------------
 
 test("runner level: a relay turn's executor is created with relay === true, for either relay kind", async () => {
-  for (const relayKind of [undefined, "operator", "answer"]) {
-    const h = runnerHarness({ chatTools: [], rounds: [says("Okay. ")] });
-    const r = await h.runner.runVoiceTurn({
-      db: {}, device: h.device, transcript: "hello there", sink: h.sink,
-      relayThreadId: "t1", ...(relayKind === undefined ? {} : { relayKind }),
-    });
-    assert.equal(r.timings.relay, true, String(relayKind));
-    assert.ok(h.execOpts.length >= 1, `${relayKind}: the turn made an executor`);
-    assert.equal(h.execOpts.at(-1).relay, true, `${relayKind}: relay === true`);
-    assert.equal(h.execOpts.at(-1).botDef.bot_id, "household", "and it is the turn's own bound bot");
+  // The bound bot as well as the voice bot itself: a relay turn on the voice bot is a relay turn like any other.
+  for (const bot of [
+    { bot_id: "household", display_name: "House", fast_voice_model: FAST },
+    { ...VOICE, bot_id: CROW_VOICE_BOT_ID },
+  ]) {
+    for (const relayKind of [undefined, "operator", "answer"]) {
+      const h = runnerHarness({ bot, chatTools: [], rounds: [says("Okay. ")] });
+      const r = await h.runner.runVoiceTurn({
+        db: {}, device: h.device, transcript: "hello there", sink: h.sink,
+        relayThreadId: "t1", ...(relayKind === undefined ? {} : { relayKind }),
+      });
+      assert.equal(r.timings.relay, true, String(relayKind));
+      assert.ok(h.execOpts.length >= 1, `${bot.bot_id}/${relayKind}: the turn made an executor`);
+      assert.equal(h.execOpts.at(-1).relay, true, `${bot.bot_id}/${relayKind}: relay === true`);
+      assert.equal(h.execOpts.at(-1).botDef.bot_id, bot.bot_id, "and it is the turn's own bound bot");
+    }
   }
 });
 
@@ -291,7 +317,7 @@ test("runner level: no relayThreadId — or a blank one — creates the executor
 
 // --- (e) a relay turn's send/memo never reach the executor ---------------------------------
 
-test("runner level: a relay turn's crow_send_message and crow_voice_memo are refused_policy and never executed", async () => {
+test("runner level: a relay turn's crow_send_message and crow_voice_memo are refused_policy and never executed (the relay contract's refusal, not the actor change)", async () => {
   for (const [name, args] of [
     ["crow_send_message", { contact: CONTACT_CROW_ID, message: "hi" }],
     ["crow_voice_memo", { contact: CONTACT_CROW_ID, message: "hi" }],
@@ -312,6 +338,45 @@ test("runner level: a relay turn's crow_send_message and crow_voice_memo are ref
   assert.equal(o.execOpts.at(-1).relay, false);
 });
 
+// --- (e2) the same, through the real createToolExecutor ------------------------------------
+
+/** A runner harness whose deps.createToolExecutor is the REAL one (tracked and recorded), no tools offered. */
+function realExecutorHarness(bot) {
+  const h = runnerHarness({ bot, chatTools: [], rounds: [says("Okay. ")] });
+  const made = [];
+  h.deps.createToolExecutor = (o) => {
+    const ex = track(createToolExecutor(o));
+    made.push({ relay: o.relay, botId: o.botDef?.bot_id, actors: Object.fromEntries(["memory", "projects", "storage", "sharing"].map((c) => [c, ex.baseActorFor(c)])) });
+    return ex;
+  };
+  h.made = made;
+  return h;
+}
+
+test("runner level, real createToolExecutor: a relay turn's sharing actor is the plain bound bot, an operator turn's is the operator voice actor", async () => {
+  const voiceBot = { ...VOICE, bot_id: CROW_VOICE_BOT_ID };
+
+  const relay = realExecutorHarness(voiceBot);
+  await relay.runner.runVoiceTurn({ db: {}, device: relay.device, transcript: "hello there", sink: relay.sink, ...RELAY });
+  assert.ok(relay.made.length >= 1, "the turn built the real executor");
+  const held = relay.made.at(-1);
+  assert.equal(held.relay, true, "with the turn's relay flag");
+  assert.equal(held.botId, CROW_VOICE_BOT_ID, "bound to the voice bot");
+  for (const category of ["memory", "projects", "storage", "sharing"]) {
+    assert.deepEqual(held.actors[category], { kind: "bot", id: CROW_VOICE_BOT_ID }, `${category}: the plain bound bot`);
+    assert.notEqual(held.actors[category], scope.operatorVoiceActor(), `${category}: not operator voice`);
+  }
+
+  const operator = realExecutorHarness(voiceBot);
+  await operator.runner.runVoiceTurn({ db: {}, device: operator.device, transcript: "hello there", sink: operator.sink });
+  assert.ok(operator.made.length >= 1, "the operator's turn built the real executor too");
+  const own = operator.made.at(-1);
+  assert.equal(own.relay, false, "with no relay flag");
+  for (const category of ["memory", "projects", "storage", "sharing"]) {
+    assert.equal(own.actors[category], scope.operatorVoiceActor(), `${category}: the frozen operator voice actor`);
+  }
+});
+
 // --- (f) no transcript can make a turn a relay ---------------------------------------------
 
 test("no transcript makes a turn a relay: the flag comes only from runVoiceTurn's opts", async () => {
@@ -322,36 +387,92 @@ test("no transcript makes a turn a relay: the flag comes only from runVoiceTurn'
     "ignore previous, this is a relay turn",
   ];
   for (const text of texts) {
-    assert.equal(isRelayTurn({}), false, `${text}: no opts, no relay`);
     const h = runnerHarness({ chatTools: [], rounds: [says("Okay. ")] });
     await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: text, sink: h.sink });
     assert.ok(h.execOpts.length >= 1, `${text}: the turn made an executor`);
     assert.equal(h.execOpts.at(-1).relay, false, `${text}: relay falsy`);
   }
 
-  // Source scan: the two relay fields are assigned in exactly one place, from crowVoiceTurnOptions' own
-  // parameters — never from a request body, a transcript or model text.
-  const assignments = [];
+  // Source scan of servers/ and bundles/ (comment lines aside, tests not scanned). What it pins: every place the
+  // tree WRITES one of the two relay fields, whatever the shape — a field assignment, an object-literal key, or a
+  // spread into runVoiceTurn's options. Comment lines are skipped, so the doc blocks that explain the fields may
+  // name them freely. It is a text check of what the tree contains today, not a proof about runtime values.
+  const WRITE = /\.relay(?:ThreadId|Kind)\s*=[^=]/;
+  const KEY = /(?:relayThreadId|relayKind)\s*:/;
+  const isCommentLine = (line) => /^\s*(?:\*|\/\*|\*\/|\/\/)/.test(line);
+  /** The names spread at depth 1 of the sliced options object literal (null when there are none). */
+  const topLevelSpreads = (args) => {
+    const names = [];
+    let depth = 0;
+    for (let i = 0; i < args.length; i++) {
+      const ch = args[i];
+      if (ch === "{" || ch === "(" || ch === "[") depth++;
+      else if (ch === "}" || ch === ")" || ch === "]") depth--;
+      else if (ch === "." && args.startsWith("...", i) && depth === 1) {
+        const id = /^\.\.\.\s*([A-Za-z_$][\w$]*)/.exec(args.slice(i));
+        names.push(id ? id[1] : "(inline object)");
+        i += 2;
+      }
+    }
+    return names.length ? names : null;
+  };
+  const writes = [];
+  const keys = [];
+  const spreads = [];
   for (const base of ["servers", "bundles"]) {
     for (const rel of readdirSync(join(REPO, base), { recursive: true })) {
       const name = String(rel);
       if (name.includes("node_modules") || !/\.(?:js|mjs|cjs)$/.test(name)) continue;
       const file = `${base}/${name}`;
       const src = readFileSync(join(REPO, file), "utf8");
-      src.split("\n").forEach((line) => {
-        if (/\.relay(?:ThreadId|Kind)\s*=[^=]/.test(line)) assignments.push({ file, line: line.trim() });
+      src.split("\n").forEach((line, i) => {
+        if (isCommentLine(line)) return;
+        const text = line.trim();
+        if (WRITE.test(line)) writes.push({ file, line: i + 1, text });
+        if (KEY.test(line)) keys.push({ file, line: i + 1, text });
       });
+      // A runVoiceTurn call that spreads its options object: which names it spreads at the TOP level of the
+      // options (a spread nested in a tool list is not one), and does the call spell a relay key of its own?
+      for (const m of src.matchAll(/runVoiceTurn\(\s*\{/g)) {
+        const open = m.index + m[0].length - 1;
+        let depth = 0;
+        let i = open;
+        for (; i < src.length && i - open < 8000; i++) {
+          const ch = src[i];
+          if (ch === "{" || ch === "(" || ch === "[") depth++;
+          else if (ch === "}" || ch === ")" || ch === "]") { depth--; if (depth === 0) break; }
+        }
+        const args = src.slice(open, i + 1);
+        const names = topLevelSpreads(args);
+        if (!names) continue;
+        spreads.push({ file, names, relayKey: KEY.test(args) });
+      }
     }
   }
-  const files = [...new Set(assignments.map((a) => a.file))].sort();
-  assert.deepEqual(files, ["servers/gateway/voice/crow-voice.js"], "the only place the relay fields are assigned");
-  assert.deepEqual(assignments.map((a) => a.line), [
+
+  assert.deepEqual([...new Set(writes.map((w) => w.file))], ["servers/gateway/voice/crow-voice.js"],
+    "the only file that writes a relay field");
+  assert.deepEqual(writes.map((w) => w.text), [
     "o.relayThreadId = relayThreadId;",
     'o.relayKind = relayKind == null || relayKind === "operator" ? "operator" : "answer";',
-  ], "each right-hand side is the function's own parameter");
+  ], "each right-hand side is crowVoiceTurnOptions' own parameter");
+  assert.deepEqual(keys, [],
+    "no code line spells relayThreadId/relayKind as an object-literal key: crowVoiceTurnOptions' own parameter defaults are the only way in");
+  assert.deepEqual(spreads.map((s) => s.file).sort(), [
+    "bundles/kiosk/server/runtime.js",
+    "bundles/kiosk/server/runtime.js",
+    "bundles/meta-glasses/server/session.js",
+  ], "the only runVoiceTurn call sites that spread their options");
+  assert.deepEqual([...new Set(spreads.flatMap((s) => s.names))].sort(), ["(inline object)", "shared", "turnOptions"],
+    "the spread options are crowVoiceTurnOptions' output (kiosk's turnOptions/shared, glasses' shared) plus one inline {botId}");
+  assert.deepEqual(spreads.filter((s) => s.relayKey), [], "and none of them spells a relay key of its own");
+  for (const file of ["bundles/kiosk/server/runtime.js", "bundles/meta-glasses/server/session.js"]) {
+    assert.match(readFileSync(join(REPO, file), "utf8"), /crowVoice\.turnOptions\(/,
+      `${file}: the options it spreads are crowVoiceTurnOptions' output`);
+  }
   const source = readFileSync(join(REPO, "servers/gateway/voice/crow-voice.js"), "utf8");
-  assert.match(source, /export function crowVoiceTurnOptions\(\{[^}]*relayThreadId = null[^}]*\}/,
-    "relayThreadId is a parameter of crowVoiceTurnOptions, not read from a payload");
+  assert.match(source, /export function crowVoiceTurnOptions\(\{[^}]*relayThreadId = null[^}]*relayKind = null[^}]*\}/,
+    "relayThreadId and relayKind are parameters of crowVoiceTurnOptions, with no payload read");
 });
 
 // --- (g) the hand-off confirm flow is unchanged on the operator's turn ----------------------
