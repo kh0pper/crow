@@ -32,8 +32,9 @@
 #   6. verify: GET /json/version without a token -> 401; with the token -> 200 (the header
 #      travels in a 0600 file read by `curl -H @file`, never on a command line); and the
 #      token appears in no /proc/<pid>/cmdline, in no `docker inspect` output and in no
-#      container log (found / not found / cannot verify — a producer that fails cannot be
-#      verified and FAILS the gate; only "found"/"not found"/"cannot verify" is printed).
+#      container log (found / not found / cannot verify — a producer that fails, or a grep
+#      that cannot read its pattern file, cannot be verified and FAILS the gate; only
+#      "found"/"not found"/"cannot verify" is printed).
 #   7. print the exact rollback commands.
 # --dry-run prints the plan and changes nothing (it does not need docker or git).
 #
@@ -303,24 +304,39 @@ say "with the token           -> $AUTH"
 # grep still reads the pattern from the 0600 file (`-Ff "$TOK"`): never an argv.
 PROBE_DIR="$TMPDIR_GATE/probe"
 mkdir -m 700 "$PROBE_DIR" || fail "cannot create $PROBE_DIR for the leak probes"
-# has_token TEXT / file_has_token FILE — is the token in it? No upstream writer either way.
-has_token() { grep -qFf "$TOK" <<<"$1" 2>/dev/null; }
-file_has_token() { grep -qFf "$TOK" -- "$1" 2>/dev/null; }
+# token_state text TEXT / token_state file FILE — is the token in it? No upstream writer either
+# way. Only grep's exit 1 ("no match") is an answer: 2 is grep failing to run at all (an
+# unreadable pattern file, a bad argument), and reading that as "not found" fails open exactly
+# like the pipe bug above. So the answer is one of three words, and the gate decides.
+token_state() {
+  local rc=0
+  if [ "$1" = file ]; then grep -qFf "$TOK" -- "$2" 2>/dev/null || rc=$?
+  else grep -qFf "$TOK" <<<"$2" 2>/dev/null || rc=$?; fi
+  case "$rc" in
+    0) printf found ;;
+    1) printf 'not found' ;;
+    *) printf 'cannot verify' ;;
+  esac
+}
 
 ARGV_STATE='not found'
 for pid in /proc/[0-9]*; do
   [ -r "$pid/cmdline" ] || continue
   # The process exited between the two lines: its cmdline cannot carry a live leak now.
   CMDLINE="$(tr '\0' ' ' < "$pid/cmdline" 2>/dev/null)" || continue
-  if has_token "$CMDLINE"; then ARGV_STATE=found; break; fi
+  ARGV_ONE="$(token_state text "$CMDLINE")"
+  if [ "$ARGV_ONE" = found ]; then ARGV_STATE=found; break; fi
+  # A detector that could not run is neither a leak nor a clean bill: remember it, and let
+  # the verdict below fail the gate. A later "found" still wins over it.
+  [ "$ARGV_ONE" = 'not found' ] || ARGV_STATE="$ARGV_ONE"
 done
 INSPECT_STATE='cannot verify'
 if "$DOCKER" inspect "$SERVICE" > "$PROBE_DIR/inspect" 2>/dev/null; then
-  if file_has_token "$PROBE_DIR/inspect"; then INSPECT_STATE=found; else INSPECT_STATE='not found'; fi
+  INSPECT_STATE="$(token_state file "$PROBE_DIR/inspect")"
 fi
 LOGS_STATE='cannot verify'
 if "$DOCKER" logs "$SERVICE" > "$PROBE_DIR/logs" 2>&1; then
-  if file_has_token "$PROBE_DIR/logs"; then LOGS_STATE=found; else LOGS_STATE='not found'; fi
+  LOGS_STATE="$(token_state file "$PROBE_DIR/logs")"
 fi
 say "token in any /proc/<pid>/cmdline: $ARGV_STATE"
 say "token in docker inspect output:   $INSPECT_STATE"

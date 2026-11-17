@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,19 @@ const SCRIPT = join(ROOT, "scripts/ops/browser-cdp-gate.sh");
 const SOURCE = readFileSync(SCRIPT, "utf8");
 /** Code lines only: the header comment documents the tool, it does not run. */
 const CODE = SOURCE.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+
+/** The real grep, for a stand-in that only fails on the pattern-file read. */
+const REAL_GREP = (process.env.PATH || "")
+  .split(":")
+  .map((dir) => join(dir, "grep"))
+  .find((candidate) => {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 
 /** A scratch instance with the browser bundle installed as it was before this change. */
 function scratchInstance(t) {
@@ -207,7 +220,7 @@ test("the old pipe shape reports a leak as 'not found' once the output is 1 MiB;
  * "leak" = the token FIRST and then ~1 MiB of noise (the shape that used to fail open),
  * "clean" = the noise only, "fail" = the producer errors ("cannot verify").
  */
-function gateToolchain(t, home, { inspect = "clean", logs = "clean" } = {}) {
+function gateToolchain(t, home, { inspect = "clean", logs = "clean", grepBroken = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "crow-cdp-gate-tools-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const put = (name, body) => {
@@ -250,7 +263,28 @@ exit 0
 for a in "$@"; do case "$a" in @*) printf 200; exit 0 ;; esac; done
 printf 401
 `);
-  return { dir, env: { DOCKER: docker, GIT: git, CURL: curl, FAKE_HOME: home, FAKE_INSPECT: inspect, FAKE_LOGS: logs } };
+  // A grep whose pattern-file read FAILS (rc 2), the way an unreadable 0600 token file does
+  // for a dropped privilege or a bad mount. Everything else is the real grep.
+  put("grep", `#!/usr/bin/env bash
+if [ -n "\${FAKE_GREP_BROKEN:-}" ]; then
+  case " $* " in *" -qFf "*) echo "grep: pattern file: Permission denied" >&2; exit 2 ;; esac
+fi
+exec ${REAL_GREP} "$@"
+`);
+  const basePath = process.env.PATH || "/usr/bin:/bin";
+  return {
+    dir,
+    env: {
+      DOCKER: docker,
+      GIT: git,
+      CURL: curl,
+      FAKE_HOME: home,
+      FAKE_INSPECT: inspect,
+      FAKE_LOGS: logs,
+      PATH: `${dir}:${basePath}`,
+      ...(grepBroken ? { FAKE_GREP_BROKEN: "1" } : {}),
+    },
+  };
 }
 
 /** A full, non-dry gate run against the stand-in toolchain (recreate + verify included). */
@@ -300,4 +334,59 @@ test("a full run: a producer that FAILS is 'cannot verify' and fails the gate, n
   assert.equal(inspectDown.code, 1, inspectDown.out);
   assert.match(inspectDown.out, /token in docker inspect output: +cannot verify/, inspectDown.out);
   assert.match(inspectDown.out, /VERIFICATION INCOMPLETE/);
+});
+
+/**
+ * The detector's own failure was the other fail-open door: `grep` exits 2 when it cannot read
+ * its pattern file (a 0600 token file the run cannot read, a bad argument), and the old
+ * `if has_token …` read that as "no match" — a clean bill printed for a check that never ran.
+ */
+test("token_state: grep's exit 1 is 'not found'; a pattern file it cannot read is 'cannot verify'", (t) => {
+  const start = SOURCE.indexOf("token_state() {");
+  assert.ok(start > -1, "token_state is the one detector (the script defines it)");
+  const end = SOURCE.indexOf("\n}\n", start);
+  const fn = SOURCE.slice(start, end + 3);
+  const dir = mkdtempSync(join(tmpdir(), "crow-cdp-token-state-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const tok = join(dir, "token");
+  writeFileSync(tok, "SUBJECT-TOKEN\n", { mode: 0o600 });
+  const clean = join(dir, "clean");
+  writeFileSync(clean, "nothing to see\n");
+  const leak = join(dir, "leak");
+  writeFileSync(leak, "x SUBJECT-TOKEN x\n");
+  const missing = join(dir, "missing");
+  const script = join(dir, "state.sh");
+  writeFileSync(
+    script,
+    `#!/usr/bin/env bash\nset -uo pipefail\nTOK="$1"\n${fn}\n` +
+      `printf '%s|%s|%s|%s\\n' "$(token_state text "$2")" "$(token_state text "$3")" "$(token_state file "$4")" "$(token_state file "$5")"\n` +
+      `printf '%s|%s\\n' "$(token_state file "$6")" "$(token_state file "$4")"\n`,
+  );
+  const [first, second] = execFileSync(
+    "bash",
+    [script, tok, "x SUBJECT-TOKEN x", "nothing here", clean, leak, missing],
+    { encoding: "utf8" },
+  ).trim().split("\n");
+  assert.equal(first, "found|not found|not found|found", "the three real answers");
+  assert.equal(second, "cannot verify|not found", "a file grep cannot open is not 'not found'");
+  // A pattern file grep cannot read at all (a directory, an unreadable 0600 file): rc 2 every
+  // time, so every answer is 'cannot verify' and the gate will fail.
+  const bad = execFileSync(
+    "bash",
+    [script, dir, "x SUBJECT-TOKEN x", "nothing here", clean, leak, missing],
+    { encoding: "utf8" },
+  ).trim().split("\n");
+  assert.equal(bad[0], "cannot verify|cannot verify|cannot verify|cannot verify");
+  assert.equal(bad[1], "cannot verify|cannot verify");
+});
+
+test("a full run: a grep that cannot read its pattern file is 'cannot verify' everywhere and FAILS the gate", (t) => {
+  const r = runGate(t, { grepBroken: true });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /token in any \/proc\/<pid>\/cmdline: cannot verify/, r.out);
+  assert.match(r.out, /token in docker inspect output: +cannot verify/, r.out);
+  assert.match(r.out, /token in the container log: +cannot verify/, r.out);
+  assert.match(r.out, /VERIFICATION INCOMPLETE/);
+  assert.doesNotMatch(r.out, /(cmdline|docker inspect output|in the container log): +not found/, "nothing a broken detector looked at may read as clean");
+  assert.doesNotMatch(r.out, /verified: the relay refuses an unauthenticated request/);
 });

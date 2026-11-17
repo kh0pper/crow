@@ -14,38 +14,64 @@
  * and where the check matters, the producer's own failure is read separately ("cannot
  * verify" fails the gate) instead of being folded into grep's exit 1.
  *
- * This scans EVERY *.sh in the repo that enables pipefail (`set -euo pipefail`,
- * `set -uo pipefail`, `set -e -o pipefail`, `set -o pipefail`), plus the extension-less
- * shell scripts this PR touched. bundles/<app>/scripts/*.sh is the sibling PR's territory
- * (it fixes the same bug class there); it is exempted here by path so this guard can land
- * first, and the exemption goes away when that PR merges.
+ * This scans EVERY shell script in the repo that enables pipefail (`set -euo pipefail`,
+ * `set -uo pipefail`, `set -e -o pipefail`, `set -o pipefail`): every *.sh, plus every
+ * extension-less file whose shebang says bash or sh (scripts/crow, scripts/crow-satellite,
+ * scripts/fence/crow-publish-snapshot, scripts/hooks/pre-push, …). bundles/<app>/scripts/*.sh
+ * is the sibling PR's territory (it fixes the same bug class there); it is exempted here by
+ * path so this guard can land first, and the exemption is asserted dead the moment that PR
+ * merges (its files clean here) instead of quietly outliving its reason.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, readSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "coverage", ".turbo", "vendor"]);
 
-/** Every *.sh under the repo (skipping dependencies and VCS metadata). */
+/** The first line of a file (a few bytes), or "" when it cannot be read. */
+function firstLine(file) {
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    const buffer = Buffer.alloc(256);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytes).toString("utf8").split("\n")[0];
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** `#!/usr/bin/env bash`, `#!/bin/sh`, `#!/usr/local/bin/bash -e` … */
+const SHEBANG_SHELL = /^#!.*[\s/](?:bash|sh)\b/;
+
+/**
+ * Every shell script under the repo (skipping dependencies and VCS metadata): `*.sh`, plus
+ * any file whose shebang says bash/sh. A hard-coded name list goes stale — scripts/crow,
+ * crow-satellite, fence/crow-publish-snapshot and hooks/pre-push are not `*.sh`.
+ */
 function shellScripts(dir = ROOT, out = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (!SKIP_DIRS.has(entry.name)) shellScripts(join(dir, entry.name), out);
-    } else if (entry.name.endsWith(".sh")) {
-      out.push(join(dir, entry.name));
+    } else if (entry.isFile()) {
+      const file = join(dir, entry.name);
+      if (entry.name.endsWith(".sh") || SHEBANG_SHELL.test(firstLine(file))) out.push(file);
     }
   }
   return out;
 }
 
-/** Extension-less shell scripts this PR edits; they are not `*.sh`, so scan them by name. */
-const EXTRA_SCRIPTS = ["scripts/crow", "scripts/fence/crow-engine-fence"];
-
-/** The sibling PR fixes bundles/<app>/scripts/*.sh: exempted by path, never by file name. */
+/**
+ * The sibling PR fixes bundles/<app>/scripts/*.sh: exempted by path, never by file name.
+ * DELETE THIS the moment that PR is on main — the `sibling` assertion in the repo-wide test
+ * fails as soon as the exemption has nothing left to hide, so an orphaned regex cannot linger.
+ */
 const SIBLING_OWNED = /^bundles\/[^/]+\/scripts\/[^/]+\.sh$/;
 
 const relOf = (file) => relative(ROOT, file).split(sep).join("/");
@@ -53,8 +79,31 @@ const relOf = (file) => relative(ROOT, file).split(sep).join("/");
 /** Does this script turn pipefail on? Accepts the bundled and the separate-flags form. */
 const SETS_PIPEFAIL = /^\s*set\s+(?:-[A-Za-z]+\s+)*.*\bpipefail\b/m;
 
-/** Code lines only: a commented-out command does not run. */
-const codeLines = (text) => text.split("\n").filter((line) => !/^\s*#/.test(line));
+/**
+ * The shell commands that actually run, one entry per logical line: a commented-out command
+ * is dropped, and a line continued with a trailing `|` (or `\`) is joined to its first line
+ * — otherwise `producer |` newline `grep -q …` reads as two harmless lines, and the early-exit
+ * reader at the end of a two-line pipeline is never seen.
+ */
+function logicalLines(text) {
+  const out = [];
+  let current = null;
+  text.split("\n").forEach((raw, index) => {
+    if (/^\s*#/.test(raw)) return; // a commented-out command does not run (and joins nothing)
+    const piece = raw.trim();
+    if (current === null) current = { text: piece, line: index + 1 };
+    else current.text += " " + piece;
+    if (/[|\\]$/.test(piece)) {
+      // A `|` stays (it is the pipeline); a continuation `\` goes.
+      current.text = current.text.replace(/\\$/, "");
+      return;
+    }
+    out.push(current);
+    current = null;
+  });
+  if (current !== null) out.push(current);
+  return out;
+}
 
 /**
  * The same line with quoted strings blanked out (same length, so offsets still line up):
@@ -85,14 +134,25 @@ function pipelineSegments(line) {
 }
 
 /**
- * grep's SHORT flags decide it: `-q`, `-qFf`, `-qx`, `-qw` … stop grep at its first match.
- * Accepted and not reported: `-m` (`grep -m1`), and the long `--quiet` / `--silent` (a
- * long option is not a short-flag bundle, and those sites are rewritten deliberately).
+ * grep's flags decide it: `-q`, `-qFf`, `-qx`, `-qw` … stop grep at its first match, and
+ * `-m N` / `--max-count N` stop it after N — `seq 1 200000 | grep -m1 1` still ends the
+ * writer with SIGPIPE (exit 141) under pipefail. Both are reported: read the producer whole
+ * first either way. A long `--quiet` / `--silent` is not a short-flag bundle and stays out
+ * of scope (those sites are rewritten deliberately).
  */
 function grepIsRisky(args) {
+  if (/--max-count\b/.test(args)) return true;
   const shorts = args.split(/[\s"'=]+/).filter((token) => /^-[^-]/.test(token));
-  if (shorts.some((token) => token.includes("m"))) return false;
-  return shorts.some((token) => token.includes("q"));
+  return shorts.some((token) => token.includes("q") || token.includes("m"));
+}
+
+/**
+ * sed quits early too: `q` ends the run at that line (`sed q`, `sed 1q`, `sed -n '1{p;q}'`,
+ * `/re/q`) and SIGPIPEs the writer exactly like `head`. A `q` inside an `s///` is data, so
+ * only a command-position `q` (after `;`/`{`/`}`/whitespace/an address) counts.
+ */
+function sedIsRisky(args) {
+  return /(?:^|[;{}\s])[0-9]*q(?=$|[;}\s])/.test(args) || /\/[0-9]*q(?=$|[;}\s])/.test(args);
 }
 
 /** The early-exit reader at the end of this line, or null when there is none. */
@@ -104,22 +164,23 @@ function earlyExitReader(line) {
   const cut = lastSegment.masked.search(/;|&&|\|\|/);
   const last = (cut === -1 ? lastSegment.text : lastSegment.text.slice(0, cut)).trim();
   // `| { grep -q …; }` wraps the reader in a block: accepted (never reported).
-  const m = /^(?:(?:[A-Za-z_]\w*=\S*)\s+)*(?:(?:timeout|nice|sudo|env|command)\s+\S+\s+)*(grep|head|awk)\b(.*)$/.exec(last);
+  const m = /^(?:(?:[A-Za-z_]\w*=\S*)\s+)*(?:(?:timeout|nice|sudo|env|command)\s+\S+\s+)*(grep|head|awk|sed)\b(.*)$/.exec(last);
   if (!m) return null;
   const [, command, args] = m;
   if (command === "grep") return grepIsRisky(args) ? last : null;
   if (command === "head") return last;
   if (command === "awk") return /\bexit\b/.test(args) ? last : null;
+  if (command === "sed") return sedIsRisky(args) ? last : null;
   return null;
 }
 
 /** Every pipeline ending in an early-exit reader in one script: [{line, text}]. */
 function violations(text) {
   const found = [];
-  codeLines(text).forEach((line, index) => {
-    const reader = earlyExitReader(line);
-    if (reader) found.push({ line: index + 1, text: line.trim() });
-  });
+  for (const line of logicalLines(text)) {
+    const reader = earlyExitReader(line.text);
+    if (reader) found.push({ line: line.line, text: reader });
+  }
   return found;
 }
 
@@ -136,6 +197,14 @@ test("the reader/pipe detector sees the shapes this PR fixes and accepts the saf
     "OUTPUT=\"$(wlr-randr 2>/dev/null | awk '/^[^ ]/ {print $1; exit}')\"",
     'docker inspect "$c" --format x 2>/dev/null | grep -qw crow-federation',
     'if join -t"\\t" a b | awk -F"\\t" \'$2!=$3 {print $1}\' | grep -q .; then lost=1; fi',
+    // A bounded reader still exits early: `grep -m1` stops the writer like `-q` does.
+    'printf \'%s\' "$1" | grep -o \'"token":"[^"]*"\' | grep -m 1 \'token\'',
+    'seq 1 200000 | grep -m1 1',
+    'ls "$d"/*.moc3 2>/dev/null | grep --max-count=1 moc3',
+    // …and so does every shape of sed's `q`.
+    'docker logs "$SERVICE" 2>&1 | sed q',
+    'docker ps --format "{{.Names}}" | sed 1q',
+    'git show "$SHA" | sed -n \'1{p;q}\'',
   ]) {
     assert.ok(earlyExitReader(line), "should be reported: " + line);
   }
@@ -148,10 +217,11 @@ test("the reader/pipe detector sees the shapes this PR fixes and accepts the saf
     'nl=$(ss -ltnH | awk \'{print $4}\')',
     'grep -q -- \'--remote-debugging-port\' <<<"$PRE_ENTRYPOINT"',
     'if occ user:list --output=json | python3 -c \'print(1)\'; then',
-    'printf \'%s\' "$1" | grep -o \'"token":"[^"]*"\' | grep -m 1 \'token\'',
+    'printf \'%s\' "$1" | grep -o \'"token":"[^"]*"\'',
     'if "$T" devices | { grep -qi "^Device $MAC"; }; then seen=1; fi',
     'if "$CTL" info "$MAC" | sed -n \'1p\'; then :; fi',
     'tail -5 "$log" | sed \'s/^/    /\'',
+    'cat "$f" | sed \'s|q|x|g\'', // a `q` in an s/// is data, not a quit
     'grep -q "0C0FFEE0" <<<"$(curl -s http://127.0.0.1:3071/plugins.json)"',
     'grep -qE "\\{32,256\\}" "$CDP_TOKEN_SRC" || die "malformed"',
     'for id in $(occ user:list --output=json | python3 -c \'print(1)\'); do :; done',
@@ -172,7 +242,21 @@ test("pipefail is detected in every form the repo uses, including the separate f
   assert.doesNotMatch("#!/bin/bash\nset -eu\n", SETS_PIPEFAIL, "plain `set -eu` is not pipefail");
 });
 
-test("no *.sh that sets pipefail ends a pipeline with an early-exit reader (repo-wide)", (t) => {
+test("a pipeline continued on the next line is read as one pipeline (trailing `|` and `\\`)", () => {
+  // Without the join these are two innocent-looking halves and the reader is never seen.
+  assert.deepEqual(
+    violations('docker logs "$S" 2>&1 |\n  grep -qFf "$TOK" 2>/dev/null\n').map((v) => v.line),
+    [1],
+  );
+  assert.deepEqual(
+    violations('docker logs "$S" 2>&1 \\\n  | head -1\n').map((v) => v.line),
+    [1],
+  );
+  // A comment inside neither runs nor joins.
+  assert.deepEqual(violations('# docker logs | grep -q x\n# head -1\n'), []);
+});
+
+test("no shell script that sets pipefail ends a pipeline with an early-exit reader (repo-wide)", (t) => {
   const files = shellScripts();
   const offenders = [];
   let scanned = 0;
@@ -183,9 +267,13 @@ test("no *.sh that sets pipefail ends a pipeline with an early-exit reader (repo
     for (const v of violations(text)) offenders.push({ file: relOf(file), ...v });
   }
   assert.ok(scanned > 50, `expected many pipefail scripts, found ${scanned} of ${files.length} shell scripts`);
-  // Positive control on the walk itself: it really reaches both halves of the repo.
+  // Positive control on the walk itself: it really reaches both halves of the repo, and the
+  // shebang half of it (extension-less scripts are not `*.sh`).
   assert.ok(files.some((f) => relOf(f).startsWith("bundles/")), "the walk reaches bundles/");
   assert.ok(files.some((f) => relOf(f).startsWith("scripts/")), "and scripts/");
+  for (const name of ["scripts/crow", "scripts/crow-satellite", "scripts/fence/crow-publish-snapshot", "scripts/hooks/pre-push"]) {
+    assert.ok(files.some((f) => relOf(f) === name), "the shebang scan reaches " + name);
+  }
 
   // The sibling PR's files, reported but not failed on (see the header comment).
   const sibling = offenders.filter((o) => SIBLING_OWNED.test(o.file));
@@ -194,6 +282,15 @@ test("no *.sh that sets pipefail ends a pipeline with an early-exit reader (repo
     t.diagnostic(`bundles/<app>/scripts/*.sh (the sibling PR's): ${sibling.length} site(s)`);
     for (const v of sibling) t.diagnostic(`  ${v.file}:${v.line}: ${v.text}`);
   }
+  // The exemption must not outlive its reason: once the sibling PR is on main, its files are
+  // clean here, `sibling` is empty, and SIBLING_OWNED has to go or it would hide the next
+  // offender in bundles/<app>/scripts/*.sh forever.
+  assert.ok(
+    sibling.length > 0,
+    "SIBLING_OWNED exempts bundles/<app>/scripts/*.sh from this guard because the sibling " +
+      "pipefail PR fixes them, and that exemption now covers NO offender: the sibling PR is on " +
+      "main, so delete SIBLING_OWNED (and its comment) instead of leaving it to hide a future one",
+  );
   assert.deepEqual(
     mine.map((o) => `${o.file}:${o.line}: ${o.text}`),
     [],
@@ -203,17 +300,9 @@ test("no *.sh that sets pipefail ends a pipeline with an early-exit reader (repo
   );
 });
 
-test("the extension-less shell scripts this PR touches are clean too", () => {
-  for (const name of EXTRA_SCRIPTS) {
-    const text = readFileSync(join(ROOT, name), "utf8");
-    assert.match(text, SETS_PIPEFAIL, name + " is a pipefail script (that is why it is listed)");
-    assert.deepEqual(violations(text).map((v) => `${name}:${v.line}: ${v.text}`), []);
-  }
-});
-
 test("every pipefail script the guard scans still parses (bash -n)", () => {
   const scanned = shellScripts().filter((file) => SETS_PIPEFAIL.test(readFileSync(file, "utf8")));
-  for (const file of [...scanned, ...EXTRA_SCRIPTS.map((name) => join(ROOT, name))]) {
+  for (const file of scanned) {
     assert.doesNotThrow(() => execFileSync("bash", ["-n", file], { stdio: "pipe" }), "bash -n " + relOf(file));
   }
 });

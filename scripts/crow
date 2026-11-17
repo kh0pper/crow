@@ -179,7 +179,11 @@ cmd_bundle_install() {
   # container runtime env, not compose's YAML-level substitution.
   if [ -f "${dest_dir}/docker-compose.yml" ] && [ ! -e "${dest_dir}/.env" ]; then
     local shared_env
-    shared_env=$(grep -oE '\$\{HOME\}/\.crow/env/[^[:space:]"]+' "${dest_dir}/docker-compose.yml" | sed -n '1p' | sed "s|\${HOME}|$HOME|")
+    # `|| true` matters: grep exits 1 when the compose names no shared env file, and
+    # under `set -euo pipefail` that failure aborted the install right here — before
+    # `docker compose pull` — for every compose bundle with no .env, no .env.example
+    # and no ${HOME}/.crow/env/ reference.
+    shared_env=$(grep -oE '\$\{HOME\}/\.crow/env/[^[:space:]"]+' "${dest_dir}/docker-compose.yml" | sed -n '1p' | sed "s|\${HOME}|$HOME|" || true)
     if [ -n "$shared_env" ] && [ -f "$shared_env" ]; then
       ln -s "$shared_env" "${dest_dir}/.env"
       echo "Linked .env -> $shared_env (for YAML substitution)"

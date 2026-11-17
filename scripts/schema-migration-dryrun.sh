@@ -89,7 +89,7 @@ dryrun_one() { # $1=label  $2=src-db
 
   snapshot "$cp" "$work/post"
   post_uv=$(sqlite3 "$cp" "PRAGMA user_version;")
-# `sed -n 1p`, not `head -1`: head stops reading at the first line and SIGPIPEs sqlite3.
+  # `sed -n 1p`, not `head -1`: head stops reading at the first line and SIGPIPEs sqlite3.
   integ=$(sqlite3 "$cp" "PRAGMA integrity_check;" | sed -n '1p')
 
   echo "════════ $label ════════"
