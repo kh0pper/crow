@@ -759,7 +759,9 @@ export function createVoiceTurnRunner(deps) {
         let vaBot = null;
         try { vaBot = await loadBot(db, botId); } catch (err) { log(`[voice-turn] ${device.id} voice actions: bot not loaded (${err?.message || err})`); }
         if (vaBot) {
-          try { executor = deps.createToolExecutor({ botDef: vaBot }); executorBot = vaBot; } catch (err) { executor = null; log(`[voice-turn] ${device.id} voice actions: no executor (${err?.message || err})`); }
+          // relay is always false on this path (it only runs when !relay); it is passed so an executor is
+          // never made for the wrong kind of turn — a relay executor may not be the operator voice actor.
+          try { executor = deps.createToolExecutor({ botDef: vaBot, relay }); executorBot = vaBot; } catch (err) { executor = null; log(`[voice-turn] ${device.id} voice actions: no executor (${err?.message || err})`); }
         }
         // opts.mediaActive (P21): the surface's "media or a timer is active" flag, for a pronoun "stop it"; absent means unknown.
         const mediaActive = typeof opts.mediaActive === "function" ? opts.mediaActive : null;
@@ -953,8 +955,11 @@ export function createVoiceTurnRunner(deps) {
       const mustX = extra.find((x) => offered.has(x.definition.name) && typeof x.must === "function" && x.must(transcript) === true) || null;
       const mustName = mustX?.definition.name;
       // The voice-actions path may have made one for this bot already (a cached bot is the same object).
+      // Executors are per turn and never shared across turns, so this one carries that turn's relay flag.
       if (executor && executorBot !== bot) { try { await executor.close(); } catch {} executor = null; }
-      if (!executor) executor = deps.createToolExecutor({ botDef: bot });
+      // relay (the relay contract): a relay turn's transcript is not the operator's own speech, so its executor
+      // must not become the frozen operator voice actor — it runs as the plain bound bot, with no sharing exception.
+      if (!executor) executor = deps.createToolExecutor({ botDef: bot, relay });
       // No deviceId: generateSystemPrompt stamps it as a "glasses device_id" for
       // crow_glasses_* tools, and no kiosk tool takes a device_id.
       const system = await deps.generateSystemPrompt({ botDef: bot });

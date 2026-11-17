@@ -234,6 +234,13 @@ function resolveToolCategory(action) {
  *                                        calls' writes belong to (`turn:<threadId>`).
  *                                        Optional; without one a bot's writes carry no
  *                                        job, and the owner's keep the request's.
+ * @param {boolean} [opts.relay]          true when this executor serves a RELAY voice turn — a
+ *                                        turn whose transcript is not the operator's own speech
+ *                                        (the relay contract: opts.relayThreadId on runVoiceTurn).
+ *                                        A bound voice bot then gets the plain bound actor, never
+ *                                        the frozen operator-voice one. Only `=== true` counts, and
+ *                                        it comes from the caller's options alone: never from
+ *                                        botDef (bot-editable data), the model or the transcript.
  */
 export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
@@ -243,16 +250,23 @@ export function createToolExecutor(opts = {}) {
   // only the option this module meant to hand it.
   const inProcessServers = new Map(); // category → McpServer
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
+  // Whether this executor serves a RELAY turn (a transcript that is not the operator's own speech:
+  // the relay contract on the voice turn). Exactly the boolean `true` narrows; a "true" string, a 1
+  // or any botDef field is not a credential and changes nothing.
+  const relay = opts.relay === true;
   // The bound bot's identity, as a construction-time base actor for the in-process project servers.
   //
-  // A bound bot that is the operator's own voice bot gets the frozen operator actor, so EVERY
-  // executor bound to it — including a relay turn whose transcript is not the operator's own
-  // words — has operator scope on projects, memory and storage. The reserved id is the ONLY
-  // thing that grants this: a def is bot-editable data, so its `kind` can never be a credential.
-  // A plain {kind:"bot", id} actor would not be enough for the voice bot, because the
+  // A bound bot that is the operator's own voice bot gets the frozen operator actor, so the
+  // operator's spoken turns have operator scope on projects, memory and storage. The reserved id is
+  // the ONLY thing that grants this: a def is bot-editable data, so its `kind` can never be a
+  // credential. A plain {kind:"bot", id} actor would not be enough for the voice bot, because the
   // frozen actor carries the marker `isOperatorVoice` checks and nothing per call can add it.
-  // Every other bound bot gets the plain actor, which the share rules bind.
-  const boundBotIsVoice = !!(boundBotId && isVoiceBotId(boundBotId));
+  //
+  // A RELAY turn is the exception, and it is decided by opts.relay alone (never by botDef, the model
+  // or the transcript): its words are not the operator's, so even the reserved voice id gets the
+  // plain bound actor, which the share rules bind like any other bot's. Relayed text can therefore
+  // never reach an owner-only tool (crow_send_message, crow_voice_memo) as the operator.
+  const boundBotIsVoice = !!(boundBotId && isVoiceBotId(boundBotId) && !relay);
   const baseActor = boundBotId ? (boundBotIsVoice ? operatorVoiceActor() : { kind: "bot", id: boundBotId }) : undefined;
   /** The base actor an in-process server of `category` is built with (the project servers and the
    *  sharing server build all four the same way; every other category gets none). */

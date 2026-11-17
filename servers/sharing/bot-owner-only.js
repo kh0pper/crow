@@ -17,7 +17,9 @@
  * to a contact. Nothing else — not crow_share, not a group send, not a room invite. Every other bot
  * is refused those two as well, including the voice bot reached any other way (the pi engine's
  * session with that id, a per-call `_meta`/header claiming it, or a copy of the actor that is not
- * the frozen one), because a relayed turn can put words in its mouth.
+ * the frozen one), because a relayed turn can put words in its mouth. A relay voice turn is one of
+ * those other ways by construction: its executor is built as the plain bound bot (tool-executor's
+ * opts.relay), so it never carries the marker this exception reads.
  *
  * The guard wraps `server.tool` BEFORE the register* calls, so it sees every registration whatever
  * its shape (the handler is the LAST function argument) and leaves registration ORDER untouched.
