@@ -33,7 +33,7 @@ class CheckCreateTests(unittest.TestCase):
     def test_switch_off_passes_everything_through(self):
         self.assertEqual(check_create("primary", [GUEST], "all", {}), (None, "all"))
         self.assertEqual(
-            check_create("team@group.calendar.google.com", None, "externalOnly", {}),
+            check_create("team@group.example.net", None, "externalOnly", {}),
             (None, "externalOnly"),
         )
 
@@ -48,7 +48,7 @@ class CheckCreateTests(unittest.TestCase):
 
     def test_switch_on_refuses_any_calendar_but_primary(self):
         for calendar_id in (
-            "team@group.calendar.google.com",
+            "team@group.example.net",
             "someone-else@example.com",
             "Primary",
             "primary ",

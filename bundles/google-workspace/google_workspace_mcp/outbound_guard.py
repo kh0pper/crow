@@ -8,12 +8,17 @@ rather than the owner:
     the organizer);
   - Drive — a share (granting access IS the outbound effect; the "shared with you"
     email only makes it louder), and an ownership transfer's email;
-  - Gmail — a filter's forward address.
+  - Gmail — a filter's forward address;
+  - Calendar again — the calendar itself when it is not `primary`: a shared or
+    secondary calendar's id looks like an address, and its owners are notified.
 
 An assistant that also reads untrusted mail can be talked into using one of them
 as an outbound channel. With the guard on (`GWS_OUTBOUND_GUARD` = 1/true/yes/on),
 an address is allowed only when `GWS_OUTBOUND_ALLOWLIST` lists it, or lists its
 domain; every other recipient is refused, and no request is made to Google at all.
+
+A fourth channel sends no mail at all and has its own module: writing a file INTO
+a folder makes it readable by whoever can read that folder (see folder_guard).
 
 A recipient must be exactly ONE well-formed address — one "@", no whitespace, no
 `, ; < > " ' ( )`, ASCII only, non-empty local part and domain. Anything else is
@@ -59,6 +64,30 @@ def allowlist(env: Mapping[str, str] = os.environ) -> list[str]:
         if value and value not in out:
             out.append(value)
     return out
+
+
+def clean_recipient(
+    address: Optional[str], env: Mapping[str, str] = os.environ
+) -> Optional[str]:
+    """The value to hand to Google for a recipient the guard checked.
+
+    `check_recipients` decides on the TRIMMED value, so the trimmed value is what
+    must reach the request: trailing whitespace or a newline that the check
+    ignored must not travel on into an API body. With the guard off nothing is
+    changed, so an install that upgrades behaves exactly as before.
+    """
+    if not guard_enabled(env):
+        return address
+    return (address or "").strip()
+
+
+def clean_recipients(
+    addresses: Iterable[Optional[str]], env: Mapping[str, str] = os.environ
+) -> list[Optional[str]]:
+    """`clean_recipient` across a list (an event's attendees), order preserved."""
+    if not guard_enabled(env):
+        return list(addresses)
+    return [(address or "").strip() for address in addresses]
 
 
 def is_single_address(value: str) -> bool:

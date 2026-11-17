@@ -23,7 +23,7 @@ import asyncio
 import logging
 import os
 
-from . import outbound_guard
+from . import folder_guard, outbound_guard
 from .auth import get_forms_service, get_script_service
 from .forms_questions import _CHOICE_TYPES, _build_question  # noqa: F401
 from .guardrails import handle_google_errors
@@ -253,7 +253,16 @@ async def forms_create(
     "required"} using forms_add_question's vocabulary, created in list order.
     `check_access`: anonymous-fetch the responder URL and report whether the
     form is restricted to the organization (a Workspace default that no API
-    setting changes; the returned hint says which UI toggle lifts it)."""
+    setting changes; the returned hint says which UI toggle lifts it).
+
+    With GWS_OUTBOUND_GUARD on, `folder_id` is checked before the form is
+    created (see folder_guard): the form is readable by whoever reads that
+    folder, and a refused destination must not leave a stray form behind."""
+    refusal = await folder_guard.check_destination(
+        folder_id, "creating a form inside a Drive folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     svc = get_forms_service()
     info = {"title": title, "documentTitle": document_title or title}
     created = await asyncio.to_thread(lambda: svc.forms().create(body={"info": info}).execute())

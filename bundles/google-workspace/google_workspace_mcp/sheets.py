@@ -8,6 +8,7 @@ import re
 
 from .auth import get_drive_service, get_sheets_service
 from .guardrails import handle_google_errors
+from . import folder_guard
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,15 @@ async def sheets_create(
     the same title in that folder is returned instead of creating a duplicate.
     `tabs` (optional) names the initial tabs: the first replaces the default
     "Sheet1", the rest are appended in order.
+
+    With GWS_OUTBOUND_GUARD on, the folder_id is checked first (see folder_guard):
+    the new spreadsheet is readable by whoever reads that folder.
     """
+    refusal = await folder_guard.check_destination(
+        folder_id, "creating a spreadsheet inside a Drive folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
     svc = get_sheets_service()
 

@@ -15,6 +15,8 @@ from google_workspace_mcp.outbound_guard import (  # noqa: E402
     allowlist,
     allowed_recipient,
     check_recipients,
+    clean_recipient,
+    clean_recipients,
     guard_enabled,
 )
 
@@ -86,9 +88,9 @@ class AllowedRecipientTests(unittest.TestCase):
         # Each of these is listed (or matches a listed domain) and must still fail:
         # the value is not ONE well-formed address, so it is refused before matching.
         for value in (
-            "x@evil.com,y@example.org",
-            "x@evil.com; y@example.org",
-            "x@evil.com@example.org",
+            "x@example.net,y@example.org",
+            "x@example.net; y@example.org",
+            "x@example.net@example.org",
             "Name <x@example.org>",
             "\"x\"@example.org",
             "(x)@example.org",
@@ -146,9 +148,9 @@ class CheckRecipientsTests(unittest.TestCase):
 
     def test_malformed_recipients_are_refused_as_such(self):
         for value in (
-            "x@evil.com,y@example.com",
-            "x@evil.com; y@example.com",
-            "x@evil.com@example.com",
+            "x@example.net,y@example.com",
+            "x@example.net; y@example.com",
+            "x@example.net@example.com",
             "Name <x@example.com>",
             "x@ex\u00e4mple.com",
         ):
@@ -162,8 +164,8 @@ class CheckRecipientsTests(unittest.TestCase):
 
     def test_a_malformed_recipient_is_refused_even_when_its_domain_is_listed(self):
         # The domain example.com IS allowlisted: the malformed value must still fail.
-        error = check_recipients(["x@evil.com,y@example.com"], WHAT, ON_LIST)
-        self.assertIn("x@evil.com,y@example.com", error)
+        error = check_recipients(["x@example.net,y@example.com"], WHAT, ON_LIST)
+        self.assertIn("x@example.net,y@example.com", error)
         self.assertIn("single plain email address", error)
 
     def test_a_good_recipient_beside_a_malformed_one_still_refuses_the_call(self):
@@ -172,6 +174,31 @@ class CheckRecipientsTests(unittest.TestCase):
         )
         self.assertIn("Name <x@example.com>", error)
         self.assertNotIn("alex@example.com is not", error)
+
+
+class CleanRecipientTests(unittest.TestCase):
+    """The value handed to Google must be the one the guard decided on."""
+
+    def test_guard_off_changes_nothing(self):
+        for env in ({}, {"GWS_OUTBOUND_GUARD": "0"}):
+            self.assertEqual(clean_recipient("  a@example.com \n", env), "  a@example.com \n")
+            self.assertEqual(
+                clean_recipients(["  a@example.com \n"], env), ["  a@example.com \n"]
+            )
+
+    def test_guard_on_trims_what_the_check_ignored(self):
+        for value in (" a@example.com", "a@example.com ", "a@example.com\n", "\ta@example.com\r\n"):
+            self.assertEqual(clean_recipient(value, ON), "a@example.com", repr(value))
+
+    def test_a_list_is_trimmed_in_order(self):
+        self.assertEqual(
+            clean_recipients(["a@example.com\n", " b@example.com"], ON),
+            ["a@example.com", "b@example.com"],
+        )
+
+    def test_a_missing_recipient_stays_missing(self):
+        self.assertEqual(clean_recipient(None, ON), "")
+        self.assertIsNone(clean_recipient(None, {}))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from googleapiclient.http import MediaFileUpload
 
 from .auth import get_docs_service, get_drive_service
 from .docs_formatting import (
+    _link_allowed,
     _parse_inline_formatting,
     _utf16_len,
     docs_structure_to_markdown,
@@ -22,6 +23,7 @@ from .docs_formatting import (
     split_markdown_segments,
 )
 from .guardrails import handle_google_errors
+from . import folder_guard, outbound_guard
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +359,20 @@ async def gdocs_format_text(
     visible text, located by `find`. Adds/removes no text — style only. `occurrence`: 0-based match
     index, or -1 for ALL matches. Only the styles you pass are changed.
 
-    This is the only Docs tool that sets a HYPERLINK (find-replace/insert/rewrite cannot)."""
+    This is the only Docs tool that sets a HYPERLINK (find-replace/insert/rewrite cannot).
+
+    `link_url` must be an http, https or mailto URL — the same filter the markdown
+    renderer applies. A `javascript:`, `data:` or `file:` target is refused, because
+    a link in a document someone clicks is a live hazard."""
+    if link_url is not None and not _link_allowed(link_url):
+        return {
+            "success": False,
+            "error": (
+                f"link_url must be an http, https or mailto URL (got {link_url!r}). "
+                f"Nothing was changed: other schemes (javascript:, data:, file:, ...) "
+                f"are refused."
+            ),
+        }
     docs = get_docs_service()
     doc = await asyncio.to_thread(
         lambda: docs.documents().get(documentId=doc_id).execute()
@@ -782,7 +797,15 @@ async def gdocs_create(
 
     With find_existing=True (default), searches for an existing doc with the same
     title in the folder first, returning it instead of creating a duplicate.
+
+    With GWS_OUTBOUND_GUARD on, the folder is checked first (see folder_guard):
+    the doc is readable by whoever reads that folder.
     """
+    refusal = await folder_guard.check_destination(
+        folder_id, "creating a document inside a Drive folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
     docs = get_docs_service()
 
@@ -1044,13 +1067,31 @@ async def gdocs_insert_image(
     stores its own copy in the document. A local image is therefore uploaded to
     Drive, shared anyone-with-link **briefly**, inserted, then un-shared and (unless
     keep_drive_copy) trashed — the embedded copy in the doc is self-contained. The
-    brief public window means: do NOT use this for images containing student PII."""
+    brief public window means: do NOT use this for images containing student PII.
+
+    That window is why a LOCAL image is refused outright while GWS_OUTBOUND_GUARD
+    is on: the guard will not publish a file, however briefly. A Drive-hosted image
+    still works — put it in Drive yourself, share it as you intend, and pass its
+    file id."""
+    # Decided before any client is built, so a refused call touches nothing: a guard-
+    # refused local image must not be uploaded at all.
+    is_local = os.path.exists(image)
+    if is_local and outbound_guard.guard_enabled():
+        return {
+            "success": False,
+            "error": (
+                "gdocs_insert_image with a LOCAL image is disabled on this server "
+                "(GWS_OUTBOUND_GUARD): the Docs API can only fetch an image it can read "
+                "anonymously, so the upload is shared anyone-with-link while the insert "
+                "runs. Nothing was uploaded. Put the image in Drive, share it as you "
+                "intend, and pass its Drive file id as `image` instead."
+            ),
+        }
     docs = get_docs_service()
     drive = get_drive_service()
 
     # 1. resolve `image` -> a Drive file id (upload if it's a local path)
     temp_id = None
-    is_local = os.path.exists(image)
     if is_local:
         media = MediaFileUpload(image, resumable=False)
         up = await asyncio.to_thread(

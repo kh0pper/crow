@@ -12,7 +12,7 @@ from googleapiclient.http import MediaFileUpload
 
 from .auth import get_drive_service
 from .guardrails import handle_google_errors
-from . import outbound_guard
+from . import folder_guard, outbound_guard
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +284,15 @@ async def gdrive_create_folder(
 ) -> dict:
     """Create a Drive folder. Idempotent: if a folder with the same name already
     exists in the same parent, returns that folder instead of creating a duplicate.
-    Returns data.folder_id, data.created (True if newly created, False if reused)."""
+    Returns data.folder_id, data.created (True if newly created, False if reused).
+
+    With GWS_OUTBOUND_GUARD on, a parent folder that is not your own is checked
+    first (see folder_guard): the new folder is readable by whoever reads it."""
+    refusal = await folder_guard.check_destination(
+        parent_id, "creating a folder inside a Drive folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
 
     safe_name = name.replace("\\", "\\\\").replace("'", "\\'")
@@ -339,7 +347,15 @@ async def gdrive_create_folder(
 async def gdrive_move_file(file_id: str, new_parent_id: str) -> dict:
     """Move a file into a new parent folder. Removes all OTHER parents so the
     file ends up only under new_parent_id. No-op (moved=False) if the file is
-    already only in new_parent_id."""
+    already only in new_parent_id.
+
+    With GWS_OUTBOUND_GUARD on, the destination folder is checked first (see
+    folder_guard): the file lands where that folder's readers can open it."""
+    refusal = await folder_guard.check_destination(
+        new_parent_id, "moving a Drive file into a folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
 
     current = await asyncio.to_thread(
@@ -396,7 +412,16 @@ async def gdrive_copy_file(
     Caveat: a copied Sheet keeps its IMPORTRANGE formulas but they need
     re-authorization in the copy, and any add-on configs still point at the
     originals until repointed — fine for a read/logic test copy.
+
+    With GWS_OUTBOUND_GUARD on, a `parent_id` folder that is not your own is
+    checked first (see folder_guard): the copy is readable by that folder's
+    readers.
     """
+    refusal = await folder_guard.check_destination(
+        parent_id, "copying a Drive file into a folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
     body: dict = {}
     if new_title:
@@ -489,6 +514,8 @@ async def gdrive_transfer_ownership(file_id: str, new_owner_email: str) -> dict:
     Google always emails the new owner, so with GWS_OUTBOUND_GUARD on the address must
     be on GWS_OUTBOUND_ALLOWLIST."""
     # The transfer email is Google's, not ours: no allowlisted recipient, no call.
+    # The address sent to Google is the trimmed one the check decided on.
+    new_owner_email = outbound_guard.clean_recipient(new_owner_email)
     refusal = outbound_guard.check_recipients(
         [new_owner_email], "sending an ownership-transfer email"
     )
@@ -522,7 +549,15 @@ async def gdrive_create_shortcut(
 ) -> dict:
     """Create a Drive shortcut (a pointer) to target_id, placed inside parent_id. If
     name is omitted, the shortcut takes the target's name. Works across drives — e.g. a
-    shortcut in a Shared Drive that points at a My Drive folder (supportsAllDrives)."""
+    shortcut in a Shared Drive that points at a My Drive folder (supportsAllDrives).
+
+    With GWS_OUTBOUND_GUARD on, the destination folder is checked first (see
+    folder_guard): the shortcut makes the target reachable from that folder."""
+    refusal = await folder_guard.check_destination(
+        parent_id, "creating a Drive shortcut in a folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     drive = get_drive_service()
     shortcut_name = name
     if not shortcut_name:
@@ -580,7 +615,9 @@ async def gdrive_share(
         }
     # The permission itself is the outbound effect, so it is checked whether or not
     # Google is asked to email the grantee. Refused before the client is built, so a
-    # blocked share touches nothing at all.
+    # blocked share touches nothing at all. The address sent to Google is the trimmed
+    # one the check decided on.
+    email = outbound_guard.clean_recipient(email)
     refusal = outbound_guard.check_recipients([email], "sharing a Drive file")
     if refusal:
         return {"success": False, "error": refusal}
@@ -733,7 +770,15 @@ async def gdrive_upload_file(
     converts the upload (pptx/docx/xlsx) into that native file. To replace the
     content of an existing file while keeping its id and links, use
     gdrive_upload_new_version instead.
+
+    With GWS_OUTBOUND_GUARD on, the destination folder is checked first (see
+    folder_guard): the upload is readable by whoever reads that folder.
     """
+    refusal = await folder_guard.check_destination(
+        folder_id, "uploading a file into a Drive folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
     target_mime: Optional[str] = None
     if convert_to is not None and str(convert_to).strip():
         requested = str(convert_to).strip()
@@ -775,6 +820,10 @@ async def gdrive_upload_new_version(
     The file id, name, sharing, and links all stay stable; Drive keeps the prior
     content in version history. This is the tool for the
     new-version-against-a-ledgered-id workflow.
+
+    Its parents are not touched, so the destination-folder check (folder_guard)
+    does not apply: the file stays exactly where it already is, with exactly the
+    sharing it already has.
     """
     if not os.path.isfile(local_path):
         return {"success": False, "error": f"Local file not found: {local_path}"}

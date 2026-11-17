@@ -586,8 +586,10 @@ async def gmail_create_filter(
 
     # Outbound guard, before any label lookup: a forward address mails a copy of
     # every matching message to someone the caller named. Refused means the filter
-    # is never created, so nothing leaves the mailbox.
+    # is never created, so nothing leaves the mailbox. The trimmed address is what
+    # goes into the filter body.
     if forward:
+        forward = outbound_guard.clean_recipient(forward)
         refusal = outbound_guard.check_recipients([forward], "forwarding matching mail")
         if refusal:
             return {"success": False, "error": refusal}

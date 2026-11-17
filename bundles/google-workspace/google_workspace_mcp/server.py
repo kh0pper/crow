@@ -98,7 +98,8 @@ async def gdocs_insert_image(
     placeholder token); otherwise it inserts at `index` (default: doc start). PNG/GIF size auto-scales to
     max_width_pt (aspect preserved). Mechanism: the image is briefly shared anyone-with-link so the Docs API can
     fetch it, then un-shared + (unless keep_drive_copy) trashed — the doc keeps its own embedded copy. The brief
-    public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA)."""
+    public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA), and with
+    GWS_OUTBOUND_GUARD on a LOCAL image is refused outright (a Drive-hosted file id still works)."""
     return await docs.gdocs_insert_image(
         doc_id, image, anchor_text=anchor_text, index=index,
         max_width_pt=max_width_pt, keep_drive_copy=keep_drive_copy,
@@ -134,6 +135,7 @@ async def gdocs_create(
     """
     Create a new Google Doc in a folder. With find_existing=True (default),
     returns existing doc with same title instead of creating a duplicate.
+    With GWS_OUTBOUND_GUARD on, the folder's owners and sharing are checked first.
     """
     return await docs.gdocs_create(
         folder_id, title, content=content, find_existing=find_existing
@@ -238,13 +240,13 @@ async def gdrive_search(query: str, max_results: int = 20) -> dict:
 async def gdrive_create_folder(
     name: str, parent_id: Optional[str] = None
 ) -> dict:
-    """Create a Drive folder. Idempotent: if a folder with the same name already exists in the same parent, returns that folder's id instead of creating a duplicate. Returns data.folder_id and data.created (True if newly created, False if reused)."""
+    """Create a Drive folder. Idempotent: if a folder with the same name already exists in the same parent, returns that folder's id instead of creating a duplicate. Returns data.folder_id and data.created (True if newly created, False if reused). With GWS_OUTBOUND_GUARD on, parent_id's owners and sharing are checked first."""
     return await drive.gdrive_create_folder(name, parent_id)
 
 
 @mcp.tool()
 async def gdrive_move_file(file_id: str, new_parent_id: str) -> dict:
-    """Move a file into a new parent folder. Removes all OTHER parents so the file ends up only under new_parent_id. No-op (data.moved=False) if the file is already only in new_parent_id."""
+    """Move a file into a new parent folder. Removes all OTHER parents so the file ends up only under new_parent_id. No-op (data.moved=False) if the file is already only in new_parent_id. With GWS_OUTBOUND_GUARD on, the destination's owners and sharing are checked first."""
     return await drive.gdrive_move_file(file_id, new_parent_id)
 
 
@@ -254,7 +256,8 @@ async def gdrive_copy_file(
 ) -> dict:
     """Copy a Drive file (incl. Sheets/Docs + their bound Apps Script); returns the new file id. `new_title` names
     the copy; `parent_id` places it in a folder. Use to make a safe sandbox/test copy before mutating production.
-    Caveat: a copied Sheet's IMPORTRANGE needs re-auth in the copy, and add-on configs still point at the originals."""
+    Caveat: a copied Sheet's IMPORTRANGE needs re-auth in the copy, and add-on configs still point at the originals.
+    With GWS_OUTBOUND_GUARD on, a parent_id folder's owners and sharing are checked first."""
     return await drive.gdrive_copy_file(file_id, new_title=new_title, parent_id=parent_id)
 
 
@@ -292,7 +295,8 @@ async def gdrive_upload_file(
     spreadsheet, or the short alias slides/presentation, docs/document, sheets/spreadsheet) makes
     Drive convert a pptx/docx/xlsx upload into a native Slides/Doc/Sheet; any other convert_to
     value is refused before the upload starts.
-    To replace an existing file's content keeping its id and links, use gdrive_upload_new_version."""
+    To replace an existing file's content keeping its id and links, use gdrive_upload_new_version.
+    With GWS_OUTBOUND_GUARD on, the destination folder's owners and sharing are checked first."""
     return await drive.gdrive_upload_file(
         local_path, folder_id, name=name, mime_type=mime_type, convert_to=convert_to
     )
@@ -321,7 +325,7 @@ async def gdrive_transfer_ownership(file_id: str, new_owner_email: str) -> dict:
 
 @mcp.tool()
 async def gdrive_create_shortcut(target_id: str, parent_id: str, name: str | None = None) -> dict:
-    """Create a Drive shortcut (pointer) to target_id inside parent_id (name defaults to the target's). Works across drives — e.g. a shortcut in a Shared Drive pointing at a My Drive folder."""
+    """Create a Drive shortcut (pointer) to target_id inside parent_id (name defaults to the target's). Works across drives — e.g. a shortcut in a Shared Drive pointing at a My Drive folder. With GWS_OUTBOUND_GUARD on, the destination folder's owners and sharing are checked first."""
     return await drive.gdrive_create_shortcut(target_id, parent_id, name=name)
 
 
@@ -635,7 +639,7 @@ async def gcal_create_event(
     only go on the 'primary' calendar (any other calendar_id is refused, since
     writing there can notify its owner) and attendees are refused, with nothing
     emailed; with GWS_OUTBOUND_GUARD on, every attendee must be on
-    GWS_OUTBOUND_ALLOWLIST.
+    GWS_OUTBOUND_ALLOWLIST, and so must a calendar_id other than 'primary'.
     """
     return await gcal_mod.gcal_create_event(
         summary=summary, start=start, end=end, calendar_id=calendar_id,
@@ -651,7 +655,7 @@ async def gcal_respond_to_event(
     calendar_id: str = "primary",
     comment: Optional[str] = None,
 ) -> dict:
-    """Respond to a calendar invitation. `response` must be accepted/declined/tentative. The reply emails the organizer, so GWS_CALENDAR_NO_INVITES refuses this tool outright and GWS_OUTBOUND_GUARD requires the organizer on GWS_OUTBOUND_ALLOWLIST."""
+    """Respond to a calendar invitation. `response` must be accepted/declined/tentative. The reply emails the organizer, so GWS_CALENDAR_NO_INVITES refuses this tool outright and GWS_OUTBOUND_GUARD requires the organizer on GWS_OUTBOUND_ALLOWLIST (and a calendar_id other than 'primary' on it too)."""
     return await gcal_mod.gcal_respond_to_event(
         event_id, response, calendar_id=calendar_id, comment=comment,
     )
@@ -675,7 +679,8 @@ async def sheets_create(
     """Create a new Google Spreadsheet, optionally inside a Drive folder. With find_existing=True
     (default) and a folder_id, returns an existing same-title spreadsheet in that folder instead of
     creating a duplicate. `tabs` (optional) names the initial tabs: the first replaces the default
-    'Sheet1', the rest are appended in order."""
+    'Sheet1', the rest are appended in order. With GWS_OUTBOUND_GUARD on, the folder's owners and
+    sharing are checked first."""
     return await sheets.sheets_create(
         title, folder_id=folder_id, tabs=tabs, find_existing=find_existing
     )
@@ -803,7 +808,8 @@ async def forms_create(
     `questions` = [{"title", "type": CHECKBOX|RADIO|DROP_DOWN|SHORT_TEXT|PARAGRAPH, "options", "required"}] created in
     order, optional move into `folder_id`. Returns form_id, edit_url, responder_uri, item ids, and an access check:
     a new form is usually restricted to the Workspace organization (no API lifts it); the result says so and names the
-    Settings > Responses toggle to flip before sharing outside the org. Use forms_batch_update for further edits."""
+    Settings > Responses toggle to flip before sharing outside the org. Use forms_batch_update for further edits.
+    With GWS_OUTBOUND_GUARD on, the folder's owners and sharing are checked before the form is created."""
     return await forms.forms_create(
         title,
         document_title=document_title,
@@ -909,7 +915,7 @@ async def gslides_find_replace(
 
 @mcp.tool()
 async def gslides_create(title: str, folder_id: Optional[str] = None) -> dict:
-    """Create a new Google Slides presentation; optionally move it into a Drive folder."""
+    """Create a new Google Slides presentation; optionally move it into a Drive folder (whose owners and sharing are checked first while GWS_OUTBOUND_GUARD is on)."""
     return await slides.gslides_create(title, folder_id=folder_id)
 
 

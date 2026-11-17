@@ -15,7 +15,7 @@ fixtures are scrubbed of personal data — and in a small set of fixes carried o
 top: native Docs/Sheets/Slides conversion on upload, markdown links rendered as
 real hyperlinks (inside table cells too, and only for http/https/mailto — any
 other scheme stays plain text), table-aware Docs edits, a section replacement
-that can end in a table, and the invite/mail guards below.
+that can end in a table, and the invite/mail/folder guards below.
 
 ## What it can do
 
@@ -68,16 +68,28 @@ sending off), `GOOGLE_BIGQUERY_PROJECT`, `GDOCS_DEFAULT_FONT`,
 
 ## What leaves the account
 
-Four channels can make Google deliver something to an address the assistant
-chose rather than you, or run code that can. Two switches decide what may
-happen:
+Five channels can make Google deliver something to an address the assistant
+chose instead of you, leave your content somewhere someone else can read it, or
+run code that can. Two switches decide what may happen:
 
-- **Calendar** — an event's guests, and replying to an invitation (that emails
-  the organizer);
+- **Calendar** — an event's guests and the calendar it is written to, and
+  replying to an invitation (that emails the organizer). A `calendar_id` other
+  than `primary` has its own owners to notify — a calendar id looks like an
+  address (`team@group.example.net`) — so it is checked like one;
 - **Drive** — a share, and an ownership transfer. Granting someone access *is*
   the outbound effect; the "shared with you" email (`notify=true`) only adds
   Google's notification on top, so with the guard on the grantee is checked
   whether or not a mail would be sent;
+- **Drive folders** — what a write lands *in*: `gdrive_upload_file`,
+  `gdrive_copy_file`, `gdrive_move_file`, `gdrive_create_folder`,
+  `gdrive_create_shortcut`, and the `folder_id` of `sheets_create`,
+  `gdocs_create`, `gslides_create` and `forms_create`. Nothing is emailed, but
+  the new file is readable by everyone who can read that folder. With the guard
+  on, the destination folder's owners and permissions are read first (one Drive
+  call) and the write is refused if anyone on them is off the allowlist, if the
+  folder has an anyone-with-the-link or whole-domain permission, or if that check
+  cannot be made at all. Your own address always counts as allowed, and a write
+  with no folder (My Drive root) needs no check;
 - **Gmail** — a filter's forward address;
 - **Apps Script** — `apps_script_update_file`, `apps_script_update_content` and
   `apps_script_run`. Pushed script can send mail (`MailApp`, `GmailApp`), share
@@ -90,8 +102,8 @@ happen:
 | Setting | Default | Effect |
 |---|---|---|
 | `GWS_CALENDAR_NO_INVITES` | off | Events go on the `primary` calendar only: any other `calendar_id` is refused (another calendar has its own owner to notify), guests are refused, Google is never asked to email anyone, and replying to an invitation is refused. |
-| `GWS_OUTBOUND_GUARD` | **off** | When on, every channel above is refused unless its recipient is on `GWS_OUTBOUND_ALLOWLIST`, and no request is made to Google at all. Apps Script's write/run tools are refused regardless of any address. |
-| `GWS_OUTBOUND_ALLOWLIST` | empty | Addresses and domains that may be written to, e.g. `you@example.com,example.org` (a domain covers exactly that domain, no subdomains). Commas separate entries in the Extensions form; a semicolon or a space also works if you set the variable outside it. Only read while the guard is on; empty then means nothing may be sent. |
+| `GWS_OUTBOUND_GUARD` | **off** | When on, every channel above is refused unless its recipient (or, for a folder write, every owner and grantee of the destination folder) is on `GWS_OUTBOUND_ALLOWLIST`, and no request is made to Google at all. A local-image `gdocs_insert_image` is refused, and Apps Script's write/run tools are refused regardless of any address. |
+| `GWS_OUTBOUND_ALLOWLIST` | empty | Addresses and domains that may be written to, e.g. `you@example.com,example.org` (a domain covers exactly that domain, no subdomains). Commas separate entries in the Extensions form; a semicolon or a space also works if you set the variable outside it. Only read while the guard is on; empty then means nothing may be sent (and only folders of your own may be written to). |
 
 A recipient has to be **one** well-formed address: a single `@`, ASCII only, no
 spaces and none of `, ; < > " ' ( )`. A value that is really two addresses
@@ -99,20 +111,42 @@ spaces and none of `, ; < > " ' ( )`. A value that is really two addresses
 `@`s is refused before the allowlist is consulted — it can never be matched by
 the half of it that happens to be allowed.
 
+A folder is the same question asked of a whole list: it is written to only if
+every owner and everyone it is shared with is on the allowlist, and it is
+refused outright when it carries an `anyone` (anyone with the link) or `domain`
+(whole Workspace domain) permission. Your own address is always allowed — a
+folder you own is shared with you — and it is found once through Drive's own
+account endpoint and then remembered; when that lookup cannot answer, only the
+allowlist lets a folder through. A folder whose sharing cannot be read is
+refused rather than assumed safe. Nothing is written in any of these cases, and
+the refusal names the folder and what is wrong with it.
+
+One tool is refused outright while the guard is on: `gdocs_insert_image` with a
+**local** image. The Docs API only fetches an image it can read anonymously, so
+the upload is shared anyone-with-link for the length of the insert — a public
+window the guard will not open. A Drive-hosted image still works: put it in
+Drive yourself, share it exactly as you intend, and pass its file id.
+
 The guard ships **off** so an existing install keeps behaving exactly as before;
 it is meant for an assistant that also reads untrusted mail, where a crafted
 message could otherwise talk it into inviting or forwarding to a stranger.
-Turning it on needs the list filled in (or nothing can be sent at all).
+Turning it on needs the list filled in (or nothing can be sent at all, and only
+folders of your own can be written to).
 
 ### What the guard does not cover
 
-It walls off the channels that *make Google contact someone*; it is not a
-sandbox on the account. In particular it does **not** cover:
+It walls off the channels that *make Google contact someone* or *put a file
+where someone else can read it*; it is not a sandbox on the account. In
+particular it does **not** cover:
 
-- **moving or copying a file into a folder someone else shared with you** — your
-  content lands where they can read it, and no notification is needed for that;
 - **edits and comments on files others own** — a collaborator's file can be
-  changed, or a comment added, with no mail-like call of the kind above.
+  changed, or a comment added, with no mail-like call of the kind above;
+- **who can read the folder later** — the destination is checked at the moment
+  of the write; anyone granted access to that folder afterwards can read what
+  landed there;
+- **membership of a Shared Drive** — a file in a Shared Drive has no owner of
+  its own and the drive's members are not listed in the file's permissions, so a
+  Shared Drive destination is judged on its direct permissions only.
 
 If that matters for an account, narrow what the account can do with
 `GWS_OAUTH_SCOPES` (below) rather than relying on the guard alone.

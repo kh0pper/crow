@@ -3,8 +3,12 @@
 The point of each test: a refused call makes no API call at all, an allowlisted
 (or guard-off) call goes through unchanged, and GWS_CALENDAR_NO_INVITES drops
 invitations and every calendar but `primary`. The Apps Script write/run tools and
-a foreign Forms shim are refused by the outbound guard. The service objects are
-mocks, so nothing leaves the process.
+a foreign Forms shim are refused by the outbound guard, and so is a write into a
+folder that guard does not cover (its owners and permissions are read first — see
+folder_guard), a write on a calendar other than `primary`, a local-image
+`gdocs_insert_image` (it would publish the upload briefly), and a `link_url`
+whose scheme is not http/https/mailto. The service objects are mocks, so nothing
+leaves the process.
 
 Run with:
     python -m unittest discover -s tests -v
@@ -15,6 +19,7 @@ import contextlib
 import copy
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,7 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from google_workspace_mcp import apps_script as apps_script_mod  # noqa: E402
 from google_workspace_mcp import calendar as gcal_mod  # noqa: E402
+from google_workspace_mcp import docs as docs_mod, folder_guard  # noqa: E402
 from google_workspace_mcp import drive, forms as forms_mod, gmail  # noqa: E402
+from google_workspace_mcp import sheets as sheets_mod, slides as slides_mod  # noqa: E402
 
 GUARD_VARS = (
     "GWS_OUTBOUND_GUARD",
@@ -35,6 +42,8 @@ GUARD_VARS = (
 GUEST = "someone@example.com"
 OWNER = "alex@example.com"
 ORGANIZER = "organizer@example.net"
+# A secondary/shared calendar's id: it looks like an address, which is the point.
+GROUP_CALENDAR = "team@group.example.net"
 
 
 @contextlib.contextmanager
@@ -75,9 +84,9 @@ def run_create(service, **kwargs):
         )
 
 
-def run_respond(service, response="accepted"):
+def run_respond(service, response="accepted", **kwargs):
     with mock.patch.object(gcal_mod, "get_calendar_service", return_value=service):
-        return asyncio.run(gcal_mod.gcal_respond_to_event("event-1", response))
+        return asyncio.run(gcal_mod.gcal_respond_to_event("event-1", response, **kwargs))
 
 
 class CalendarCreateGuardTests(unittest.TestCase):
@@ -113,6 +122,41 @@ class CalendarCreateGuardTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(service.events().insert.call_args.kwargs["sendUpdates"], "all")
 
+    def test_guard_on_refuses_a_calendar_other_than_primary(self):
+        # Writing on a shared calendar is visible to that calendar's owners, and the
+        # id looks like an address, so it goes through the same allowlist.
+        service = calendar_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = run_create(service, calendar_id=GROUP_CALENDAR)
+        self.assertFalse(result["success"])
+        self.assertIn(GROUP_CALENDAR, result["error"])
+        self.assertIn("writing to a calendar", result["error"])
+        service.events().insert.assert_not_called()
+
+    def test_guard_on_allows_an_allowlisted_calendar(self):
+        service = calendar_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=GROUP_CALENDAR):
+            result = run_create(service, calendar_id=GROUP_CALENDAR)
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            service.events().insert.call_args.kwargs["calendarId"], GROUP_CALENDAR
+        )
+
+    def test_guard_on_never_refuses_the_primary_calendar(self):
+        service = calendar_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1"):  # empty allowlist
+            result = run_create(service, calendar_id="primary")
+        self.assertTrue(result["success"])
+
+    def test_a_trailing_newline_on_a_recipient_never_reaches_the_api(self):
+        # The guard decides on the trimmed value, so the trimmed value is sent.
+        service = calendar_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST="example.com"):
+            result = run_create(service, attendees=[GUEST + "\n"], send_updates="all")
+        self.assertTrue(result["success"])
+        body = service.events().insert.call_args.kwargs["body"]
+        self.assertEqual(body["attendees"], [{"email": GUEST}])
+
 
 class CalendarNoInvitesTests(unittest.TestCase):
     def test_no_invites_refuses_attendees(self):
@@ -144,10 +188,10 @@ class CalendarNoInvitesTests(unittest.TestCase):
         # event there is an outbound write even with no attendees named.
         service = calendar_service()
         with gws_env(GWS_CALENDAR_NO_INVITES="1"):
-            result = run_create(service, calendar_id="team@group.calendar.google.com")
+            result = run_create(service, calendar_id=GROUP_CALENDAR)
         self.assertFalse(result["success"])
         self.assertIn("primary", result["error"])
-        self.assertIn("team@group.calendar.google.com", result["error"])
+        self.assertIn(GROUP_CALENDAR, result["error"])
         service.events().insert.assert_not_called()
 
     def test_no_invites_is_case_sensitive_about_primary(self):
@@ -204,6 +248,29 @@ class CalendarRespondTests(unittest.TestCase):
         self.assertIn("GWS_CALENDAR_NO_INVITES", result["error"])
         service.events().get.assert_not_called()
         service.events().patch.assert_not_called()
+
+    def test_guard_on_refuses_a_shared_calendar_before_reading_the_event(self):
+        service = calendar_service(self.EVENT)
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = run_respond(service, calendar_id=GROUP_CALENDAR)
+        self.assertFalse(result["success"])
+        self.assertIn(GROUP_CALENDAR, result["error"])
+        service.events().get.assert_not_called()
+        service.events().patch.assert_not_called()
+
+    def test_guard_on_allows_an_allowlisted_shared_calendar(self):
+        service = calendar_service(self.EVENT)
+        # The calendar id and the organizer (the reply's recipient) both have to
+        # be on the list: this call is refused for one, then checked for the other.
+        with gws_env(
+            GWS_OUTBOUND_GUARD="1",
+            GWS_OUTBOUND_ALLOWLIST=f"{GROUP_CALENDAR},example.net",
+        ):
+            result = run_respond(service, calendar_id=GROUP_CALENDAR)
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            service.events().patch.call_args.kwargs["calendarId"], GROUP_CALENDAR
+        )
 
 
 # --- Drive -----------------------------------------------------------------
@@ -263,11 +330,24 @@ class DriveShareGuardTests(unittest.TestCase):
         with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST="example.com"), \
                 mock.patch.object(drive, "get_drive_service", return_value=service):
             result = asyncio.run(
-                drive.gdrive_share("file-1", "x@evil.com,y@example.com")
+                drive.gdrive_share("file-1", "x@example.net,y@example.com")
             )
         self.assertFalse(result["success"])
-        self.assertIn("x@evil.com,y@example.com", result["error"])
+        self.assertIn("x@example.net,y@example.com", result["error"])
         service.permissions().create.assert_not_called()
+
+    def test_a_trailing_newline_on_a_grantee_never_reaches_the_api(self):
+        service = drive_service()
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=GUEST):
+            result = self.run_share_with(service, GUEST + "\n")
+        self.assertTrue(result["success"])
+        body = service.permissions().create.call_args.kwargs["body"]
+        self.assertEqual(body["emailAddress"], GUEST)
+        self.assertEqual(result["data"]["email"], GUEST)
+
+    def run_share_with(self, service, email, **kwargs):
+        with mock.patch.object(drive, "get_drive_service", return_value=service):
+            return asyncio.run(drive.gdrive_share("file-1", email, **kwargs))
 
 
 class DriveTransferGuardTests(unittest.TestCase):
@@ -296,6 +376,319 @@ class DriveTransferGuardTests(unittest.TestCase):
             result = self.run_transfer(service)
         self.assertTrue(result["success"])
         service.permissions().create.assert_called_once()
+
+
+# --- Drive folders ---------------------------------------------------------
+#
+# The guard reads the DESTINATION folder before a write: a file put into a folder
+# someone else can read has been shared without a single mail-like call.
+
+FOLDER = "folder-1"
+STRANGER = "someone@example.net"
+
+
+def folder_metadata(owner=OWNER, shared=(), extra=()):
+    """What files.get returns for a folder: its owners and its permission list."""
+    permissions = [{"type": "user", "role": "owner", "emailAddress": owner}]
+    permissions += [
+        {"type": "user", "role": "reader", "emailAddress": address}
+        for address in shared
+    ]
+    permissions += list(extra)
+    return {
+        "id": FOLDER,
+        "owners": [{"emailAddress": owner}],
+        "permissions": permissions,
+    }
+
+
+def folder_service(metadata=None, error=None, account=OWNER):
+    """A Drive service whose folder read answers with `metadata`, or raises `error`.
+
+    `account` is what Drive's `about` reports as the signed-in address; None means
+    that lookup fails too. Named-attribute stubbing only (see calendar_service).
+    """
+    service = mock.MagicMock()
+    if error is not None:
+        service.files.return_value.get.return_value.execute.side_effect = error
+    else:
+        service.files.return_value.get.return_value.execute.return_value = metadata
+    if account is None:
+        service.about.return_value.get.return_value.execute.side_effect = RuntimeError(
+            "about is unavailable"
+        )
+    else:
+        service.about.return_value.get.return_value.execute.return_value = {
+            "user": {"emailAddress": account}
+        }
+    service.files.return_value.copy.return_value.execute.return_value = {
+        "id": "copy-1",
+        "name": "copy",
+        "parents": [FOLDER],
+        "mimeType": "text/plain",
+    }
+    return service
+
+
+class DriveFolderGuardTests(unittest.TestCase):
+    def setUp(self):
+        # The account's own address is cached per process.
+        folder_guard.reset_cache()
+
+    def run_copy(self, service, parent_id=FOLDER):
+        with mock.patch.object(
+            drive, "get_drive_service", return_value=service
+        ), mock.patch.object(folder_guard, "get_drive_service", return_value=service):
+            return asyncio.run(drive.gdrive_copy_file("file-1", parent_id=parent_id))
+
+    def test_a_folder_shared_with_a_stranger_is_refused(self):
+        service = folder_service(folder_metadata(shared=[STRANGER]))
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn(STRANGER, result["error"])
+        self.assertIn("GWS_OUTBOUND_GUARD", result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_an_anyone_with_the_link_folder_is_refused(self):
+        service = folder_service(
+            folder_metadata(extra=[{"type": "anyone", "role": "reader"}])
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn("anyone with the link", result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_a_whole_domain_permission_is_refused(self):
+        service = folder_service(
+            folder_metadata(
+                extra=[{"type": "domain", "role": "reader", "domain": "example.org"}]
+            )
+        )
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn("example.org", result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_your_own_folder_is_allowed_with_an_empty_allowlist(self):
+        # The account's own address is recognised through Drive's `about`.
+        service = folder_service(folder_metadata())
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_copy(service)
+        self.assertTrue(result["success"])
+        service.files().copy.assert_called_once()
+
+    def test_a_folder_shared_only_with_an_allowlisted_address_is_allowed(self):
+        service = folder_service(folder_metadata(shared=[GUEST]))
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST="example.com"):
+            result = self.run_copy(service)
+        self.assertTrue(result["success"])
+        service.files().copy.assert_called_once()
+
+    def test_the_folder_read_asks_for_owners_and_permissions_and_all_drives(self):
+        service = folder_service(folder_metadata())
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            self.run_copy(service)
+        kwargs = service.files().get.call_args.kwargs
+        self.assertEqual(kwargs["fileId"], FOLDER)
+        self.assertIn("owners", kwargs["fields"])
+        self.assertIn("permissions", kwargs["fields"])
+        self.assertTrue(kwargs["supportsAllDrives"])
+
+    def test_a_folder_whose_sharing_cannot_be_read_is_refused(self):
+        service = folder_service(error=RuntimeError("boom"))
+        with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn("could not be read", result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_an_unknown_own_address_leaves_only_the_allowlist(self):
+        service = folder_service(folder_metadata(), account=None)
+        with gws_env(GWS_OUTBOUND_GUARD="1"):  # empty allowlist
+            result = self.run_copy(service)
+        self.assertFalse(result["success"])
+        self.assertIn(OWNER, result["error"])
+        service.files().copy.assert_not_called()
+
+    def test_no_folder_is_my_drive_root_and_nothing_is_looked_up(self):
+        service = folder_service(folder_metadata())
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_copy(service, parent_id=None)
+        self.assertTrue(result["success"])
+        service.files().get.assert_not_called()
+
+    def test_guard_off_reads_nothing_and_writes_where_it_was_told(self):
+        service = folder_service(error=RuntimeError("must not be read"))
+        with gws_env():
+            result = self.run_copy(service)
+        self.assertTrue(result["success"])
+        service.files().get.assert_not_called()
+        service.files().copy.assert_called_once()
+
+    def test_every_tool_that_writes_into_a_folder_is_refused_first(self):
+        # A refusal happens before the tool builds its own client, so the folder
+        # guard's service is the only one that has to exist here: it proves the
+        # write itself (and every read on the way to it) never runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, "note.txt")
+            with open(local, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            runners = {
+                "gdrive_upload_file": lambda: drive.gdrive_upload_file(local, FOLDER),
+                "gdrive_copy_file": lambda: drive.gdrive_copy_file(
+                    "file-1", parent_id=FOLDER
+                ),
+                "gdrive_move_file": lambda: drive.gdrive_move_file("file-1", FOLDER),
+                "gdrive_create_folder": lambda: drive.gdrive_create_folder("new", FOLDER),
+                "gdrive_create_shortcut": lambda: drive.gdrive_create_shortcut(
+                    "target-1", FOLDER
+                ),
+                "sheets_create": lambda: sheets_mod.sheets_create("t", folder_id=FOLDER),
+                "gdocs_create": lambda: docs_mod.gdocs_create(FOLDER, "t"),
+                "gslides_create": lambda: slides_mod.gslides_create("t", FOLDER),
+                "forms_create": lambda: forms_mod.forms_create("t", folder_id=FOLDER),
+            }
+            for name, runner in runners.items():
+                with self.subTest(tool=name):
+                    folder_guard.reset_cache()
+                    service = folder_service(folder_metadata(shared=[STRANGER]))
+                    with gws_env(
+                        GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER
+                    ), mock.patch.object(
+                        folder_guard, "get_drive_service", return_value=service
+                    ):
+                        result = asyncio.run(runner())
+                    self.assertFalse(result["success"], name)
+                    self.assertIn(STRANGER, result["error"], name)
+
+
+# --- Docs: a local image insert, and the link scheme -----------------------
+
+
+def docs_image_mocks():
+    """Docs + Drive services good enough for one gdocs_insert_image call."""
+    docs_svc = mock.MagicMock()
+    docs_svc.documents.return_value.batchUpdate.return_value.execute.return_value = {}
+    drive_svc = mock.MagicMock()
+    drive_svc.files.return_value.create.return_value.execute.return_value = {
+        "id": "temp-1"
+    }
+    drive_svc.files.return_value.update.return_value.execute.return_value = {}
+    drive_svc.permissions.return_value.create.return_value.execute.return_value = {
+        "id": "perm-1"
+    }
+    drive_svc.permissions.return_value.delete.return_value.execute.return_value = {}
+    return docs_svc, drive_svc
+
+
+def png_bytes():
+    """A PNG header with a readable width/height (16x9)."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + (13).to_bytes(4, "big")
+        + b"IHDR"
+        + (16).to_bytes(4, "big")
+        + (9).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+    )
+
+
+class DocsImageGuardTests(unittest.TestCase):
+    def run_insert(self, docs_svc, drive_svc, image):
+        with mock.patch.object(
+            docs_mod, "get_docs_service", return_value=docs_svc
+        ), mock.patch.object(docs_mod, "get_drive_service", return_value=drive_svc):
+            return asyncio.run(docs_mod.gdocs_insert_image("doc-1", image, index=1))
+
+    def test_a_local_image_is_refused_under_the_guard_and_nothing_is_uploaded(self):
+        docs_svc, drive_svc = docs_image_mocks()
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, "shot.png")
+            with open(local, "wb") as fh:
+                fh.write(png_bytes())
+            with gws_env(GWS_OUTBOUND_GUARD="1"):
+                result = self.run_insert(docs_svc, drive_svc, local)
+        self.assertFalse(result["success"])
+        self.assertIn("LOCAL image", result["error"])
+        self.assertIn("GWS_OUTBOUND_GUARD", result["error"])
+        # Refused before any client is used: no upload, no public grant, no insert.
+        drive_svc.files.return_value.create.assert_not_called()
+        drive_svc.permissions.return_value.create.assert_not_called()
+        docs_svc.documents.return_value.batchUpdate.assert_not_called()
+
+    def test_a_local_image_still_works_with_the_guard_off(self):
+        docs_svc, drive_svc = docs_image_mocks()
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, "shot.png")
+            with open(local, "wb") as fh:
+                fh.write(png_bytes())
+            with gws_env():
+                result = self.run_insert(docs_svc, drive_svc, local)
+        self.assertTrue(result["success"])
+        drive_svc.files.return_value.create.assert_called_once()
+        # The brief anyone-with-link grant is still made, and still revoked.
+        body = drive_svc.permissions.return_value.create.call_args.kwargs["body"]
+        self.assertEqual(body["type"], "anyone")
+        drive_svc.permissions.return_value.delete.assert_called_once()
+
+    def test_a_drive_hosted_image_is_still_allowed_under_the_guard(self):
+        docs_svc, drive_svc = docs_image_mocks()
+        with gws_env(GWS_OUTBOUND_GUARD="1"):
+            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+        self.assertTrue(result["success"])
+        drive_svc.files.return_value.create.assert_not_called()
+        docs_svc.documents.return_value.batchUpdate.assert_called_once()
+
+
+class DocsLinkGuardTests(unittest.TestCase):
+    def test_a_non_web_link_scheme_is_refused_before_any_call(self):
+        for url in (
+            "javascript:alert(1)",
+            "data:text/html,<b>x</b>",
+            "file:///etc/passwd",
+            "ftp://example.net/x",
+        ):
+            with self.subTest(url=url):
+                with mock.patch.object(docs_mod, "get_docs_service") as docs_service:
+                    result = asyncio.run(
+                        docs_mod.gdocs_format_text("doc-1", "text", link_url=url)
+                    )
+                self.assertFalse(result["success"])
+                self.assertIn("http, https or mailto", result["error"])
+                self.assertIn(url, result["error"])
+                docs_service.assert_not_called()
+
+    def test_an_http_link_still_becomes_a_link(self):
+        docs_svc = mock.MagicMock()
+        docs_svc.documents.return_value.get.return_value.execute.return_value = {
+            "body": {
+                "content": [
+                    {
+                        "paragraph": {
+                            "elements": [
+                                {"startIndex": 1, "textRun": {"content": "text\n"}}
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        with mock.patch.object(docs_mod, "get_docs_service", return_value=docs_svc):
+            result = asyncio.run(
+                docs_mod.gdocs_format_text(
+                    "doc-1", "text", link_url="https://example.net/x"
+                )
+            )
+        self.assertTrue(result["success"])
+        requests = docs_svc.documents.return_value.batchUpdate.call_args.kwargs["body"][
+            "requests"
+        ]
+        self.assertEqual(requests[0]["updateTextStyle"]["textStyle"]["link"], {
+            "url": "https://example.net/x"
+        })
 
 
 # --- Gmail -----------------------------------------------------------------

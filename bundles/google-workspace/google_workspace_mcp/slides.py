@@ -24,6 +24,7 @@ from typing import Optional
 
 from .auth import get_slides_service, get_drive_service
 from .guardrails import handle_google_errors
+from . import folder_guard
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +331,17 @@ async def gslides_batch_update(presentation_id: str, requests: list) -> dict:
 
 @handle_google_errors
 async def gslides_create(title: str, folder_id: Optional[str] = None) -> dict:
-    """Create a new presentation; optionally move it into a Drive folder."""
+    """Create a new presentation; optionally move it into a Drive folder.
+
+    With GWS_OUTBOUND_GUARD on, the folder_id is checked first (see folder_guard):
+    the deck is readable by whoever reads that folder.
+    """
+    refusal = await folder_guard.check_destination(
+        folder_id, "creating a presentation inside a Drive folder"
+    )
+    if refusal:
+        return {"success": False, "error": refusal}
+
     def _create():
         return get_slides_service().presentations().create(body={"title": title}).execute()
     pres = await asyncio.to_thread(_create)

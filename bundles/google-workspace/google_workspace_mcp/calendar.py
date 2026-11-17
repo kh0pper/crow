@@ -20,6 +20,19 @@ from . import outbound_guard
 logger = logging.getLogger(__name__)
 
 
+def _calendar_refusal(calendar_id: str) -> Optional[str]:
+    """The refusal for a write on a calendar the outbound guard does not allow, else None.
+
+    An event on a secondary or shared calendar is visible to that calendar's own
+    owners, and a calendar id looks like an address (`team@group.example.net`), so
+    it goes through the same allowlist an attendee does. `primary` is the account's
+    own calendar and needs no check.
+    """
+    if calendar_id == "primary":
+        return None
+    return outbound_guard.check_recipients([calendar_id], "writing to a calendar")
+
+
 @handle_google_errors
 async def gcal_list_calendars() -> dict:
     """List all calendars the user has access to."""
@@ -147,14 +160,23 @@ async def gcal_create_event(
     With GWS_CALENDAR_NO_INVITES on, the event may only go on the 'primary'
     calendar (any other calendar_id is refused) and attendees are refused, with
     nothing emailed; with GWS_OUTBOUND_GUARD on, every attendee must be on
-    GWS_OUTBOUND_ALLOWLIST.
+    GWS_OUTBOUND_ALLOWLIST, and so must a calendar_id other than 'primary'.
     """
     error, send_updates = check_create(calendar_id, attendees, send_updates)
     if error:
         return {"success": False, "error": error}
+    # Checked (and trimmed) after the no-invites switch, which compares the raw id
+    # with `primary` exactly. The calendar id below is what reaches the API.
+    calendar_id = outbound_guard.clean_recipient(calendar_id)
+    refusal = _calendar_refusal(calendar_id)
+    if refusal:
+        return {"success": False, "error": refusal}
     # An invitation emails whoever is named, so the guard reads the attendee list.
     # With no attendees there is nobody for Google to notify (`sendUpdates` alone
-    # has no recipient), so the send_updates value needs no check of its own.
+    # has no recipient), so the send_updates value needs no check of its own. The
+    # trimmed attendee addresses are what reach the request body.
+    if attendees:
+        attendees = outbound_guard.clean_recipients(attendees)
     refusal = outbound_guard.check_recipients(attendees or [], "inviting attendees")
     if refusal:
         return {"success": False, "error": refusal}
@@ -211,7 +233,8 @@ async def gcal_respond_to_event(
 
     Refused outright with GWS_CALENDAR_NO_INVITES on (the reply emails the
     organizer, and the reply is written on whichever calendar_id is given); with
-    GWS_OUTBOUND_GUARD on, the organizer must be allowlisted.
+    GWS_OUTBOUND_GUARD on, the organizer must be allowlisted, and so must a
+    calendar_id other than 'primary'.
     """
     if invites_blocked():
         return {
@@ -221,6 +244,13 @@ async def gcal_respond_to_event(
         }
     if response not in ("accepted", "declined", "tentative"):
         return {"success": False, "error": "response must be accepted / declined / tentative"}
+
+    # The reply is written on this calendar and mailed to its owner, so the calendar
+    # id is checked like an attendee — before the event is even read.
+    calendar_id = outbound_guard.clean_recipient(calendar_id)
+    refusal = _calendar_refusal(calendar_id)
+    if refusal:
+        return {"success": False, "error": refusal}
 
     service = get_calendar_service()
     event = await asyncio.to_thread(
