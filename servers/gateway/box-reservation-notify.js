@@ -4,6 +4,11 @@
  * reservation refused a model start — so a stuck or surprising reservation is
  * visible from the phone without flooding the notification list.
  *
+ * A beside hold (a render/video job sharing the card) is the exception: it
+ * never stops the box, so it sends no "start" notice, only the one refusal
+ * notice if it refuses a start. `sweepReserved` answers the same question for
+ * the Crow Artifacts sweep, which only an exclusive hold pauses.
+ *
  * `reservationNotices` is a pure state machine (no I/O) the orchestrator
  * calls on every residency tick and on every refusal; `sendReservationNotice`
  * is the thin sender that must never throw back into the orchestrator (a
@@ -15,6 +20,20 @@ import { createDbClient } from "../db.js";
 /** @returns {{ seen: Map<string, {refused: boolean}> }} */
 export function createNoticeState() {
   return { seen: new Map() };
+}
+
+/**
+ * Whether a hold pauses the Crow Artifacts sweep: an EXCLUSIVE one does (a
+ * window owns the whole card), a BESIDE one does not (a render/video job
+ * shares it, and the sweep's starts fit beside it or are refused by the gate).
+ * A corrupt hold has no mode and counts as exclusive — fail closed.
+ *
+ * @param {object|null} reservation as `readReservation` returns it
+ * @returns {boolean}
+ */
+export function sweepReserved(reservation) {
+  if (!reservation) return false;
+  return reservation.mode !== "beside";
 }
 
 /**
@@ -33,7 +52,9 @@ export function reservationNotices(state, { reservation, refused } = {}) {
     state.seen.clear();
     entry = { refused: false };
     state.seen.set(key, entry);
-    out.push({ kind: "start", reservation });
+    // A beside hold announces nothing when it appears: it does not stop the
+    // box, and the operator hears about it only if it actually refuses a start.
+    if (reservation.mode !== "beside") out.push({ kind: "start", reservation });
   }
   if (refused && !entry.refused) {
     entry.refused = true;
@@ -45,6 +66,11 @@ export function reservationNotices(state, { reservation, refused } = {}) {
 function shape(notice) {
   const r = notice.reservation || {};
   const until = r.expires_at || "?";
+  // A beside hold (a render/video job sharing the card) only ever produces the
+  // refusal notice — `reservationNotices` suppresses the "start" one — and its
+  // wording says the waiting starts go by themselves: releasing the box is not
+  // something the operator is asked to do for a job that is still running.
+  if (r.mode === "beside") return besideShape(notice);
   if (notice.kind === "refused") {
     const who = notice.refused || {};
     return {
@@ -67,6 +93,26 @@ function shape(notice) {
       : `${r.reason || "(no reason given)"} — non-allowed local model starts are refused until then.`,
     action_url: "/dashboard/model-catalog",
     metadata: { kind: "box_reservation_start", owner: r.owner || null, expires_at: r.expires_at || null, corrupt: !!r.corrupt },
+  };
+}
+
+/** The one notice a beside hold can produce: a start it refused. */
+function besideShape(notice) {
+  const r = notice.reservation || {};
+  const until = r.expires_at || "?";
+  return {
+    type: "system",
+    priority: "high",
+    title: "A render/video job is using part of the GPU",
+    body: `A render/video job is using part of the GPU until about ${until}; large model starts that don't fit wait. They start by themselves when it ends.`,
+    action_url: "/dashboard/model-catalog",
+    metadata: {
+      kind: "box_reservation_refused",
+      owner: r.owner || null,
+      expires_at: r.expires_at || null,
+      provider: (notice.refused && notice.refused.provider) || null,
+      mode: "beside",
+    },
   };
 }
 

@@ -556,12 +556,15 @@ export async function mountMcpServers(app, deps) {
       // servers/gateway/index.js _hasOwnParser).
       app.put(`${uploads.UPLOAD_PATH_PREFIX}/:upload_id`, uploads.handleUploadPut);
       const { readReservation } = await import("../box-reservation.js");
+      const { sweepReserved } = await import("../box-reservation-notify.js");
       const botDefOf = async (botId) => { const r = (await artDb.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0]; try { return r ? JSON.parse(r.definition || "{}") : null; } catch { return null; } };
       // R2-M5/R2-M2: the sweep runs whether or not a Perch engine exists
       // (timeouts and reconciliation need none), once at mount start (off the
       // boot path — it may wait on the write lock, R3-L7), then every 60 s.
       const sweepOnce = async () => {
-        try { await runSweep(artDb, { engine: await engineOrNull(), blobs, notify: notifyOwner, reserved: () => readReservation() !== null, botDefOf }); }
+        // `sweepReserved`: an EXCLUSIVE hold pauses the queued retries, a
+        // beside one (a render/video job sharing the card) does not.
+        try { await runSweep(artDb, { engine: await engineOrNull(), blobs, notify: notifyOwner, reserved: () => sweepReserved(readReservation()), botDefOf }); }
         catch (e) { console.warn(`[gateway] artifacts sweep: ${e.message}`); }
       };
       setImmediate(sweepOnce);

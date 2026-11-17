@@ -101,6 +101,48 @@ test("a failing notification or a missing engine never throws into the MCP call"
   assert.equal(await roundDoneEffects(s.db, null, {}).then((o) => o.stopped), false);
 });
 
+test("a beside hold does not pause the artifacts sweep, an exclusive hold does", async () => {
+  const { runSweep } = await import("../bundles/artifacts/server/sweep.js");
+  const { sweepReserved } = await import("../servers/gateway/box-reservation-notify.js");
+  // The mount's own `reserved` callback shape, over every hold shape.
+  const BESIDE = { owner: "gpujob-7f3a", mode: "beside", kind: "gpu-job", expires_at: "2026-10-05T12:00:00Z", corrupt: false };
+  const EXCLUSIVE = { owner: "win", expires_at: "2026-10-05T12:00:00Z", corrupt: false };
+  const CORRUPT = { owner: "unknown", corrupt: true };
+  assert.equal(sweepReserved(null), false, "no hold: nothing pauses");
+  assert.equal(sweepReserved(BESIDE), false, "a render/video job beside the models does not pause the sweep");
+  assert.equal(sweepReserved(EXCLUSIVE), true);
+  assert.equal(sweepReserved(CORRUPT), true, "fail closed on an unreadable hold");
+
+  // … and through the sweep itself: a queued round is retried under a beside
+  // hold and left alone under an exclusive one.
+  const sweepWith = async (reservation, thread) => {
+    const queued = await makeRound({ untrusted: false });
+    await s.db.execute({ sql: "UPDATE artifact_rounds SET status='queued', session_id=NULL WHERE id=?", args: [queued.round.id] });
+    await s.db.execute({ sql: "UPDATE artifacts SET created_by_bot='bobby' WHERE id=?", args: [queued.artifact.id] });
+    await s.db.execute({ sql: "INSERT INTO bot_sessions (bot_id, gateway_thread_id, narrowed_tools) VALUES ('bobby',?,NULL)", args: [thread] });
+    const sent = [];
+    const engine = {
+      async list() { return [{ sessionId: `sid-${thread}`, botId: "bobby", threadId: thread, state: "idle" }]; },
+      async spawn() { return { sessionId: `s-${thread}`, threadId: thread }; },
+      async message(id, text) { sent.push(text); },
+    };
+    const out = await runSweep(s.db, {
+      engine, notify: async () => {}, botDefOf: async () => ({ tools: { crow_mcp: ["artifacts"] } }),
+      reserved: () => sweepReserved(reservation),
+    });
+    return { out, sent, roundId: Number(queued.round.id) };
+  };
+
+  const beside = await sweepWith(BESIDE, "perchlive-beside");
+  assert.ok(beside.out.retried.includes(beside.roundId), "the queued round was retried beside the job");
+  assert.ok(beside.sent.length >= 1, "the round was delivered while a beside job holds the card");
+
+  const exclusive = await sweepWith(EXCLUSIVE, "perchlive-exclusive");
+  assert.deepEqual(exclusive.out.retried, [], "an exclusive hold still pauses the queued retries");
+  assert.equal(exclusive.sent.length, 0);
+  await s.db.execute({ sql: "UPDATE artifact_rounds SET status='done' WHERE id=?", args: [exclusive.roundId] });
+});
+
 test("a transient engine fault on the stop leg never aborts the tick: queued rounds are still retried (review C2-L1)", async () => {
   const { runSweep } = await import("../bundles/artifacts/server/sweep.js");
   // An ended untrusted round with an unstamped session + a queued trusted round.
