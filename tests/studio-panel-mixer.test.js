@@ -302,6 +302,22 @@ async function mixerSong() {
   };
 }
 
+// ---- the compact strip's fixture (P2a, D3) ---------------------------------
+
+/**
+ * A song for the compact strip cases: the mixer's own fixture, plus a level and
+ * a pan on one track (so a fader has something to show before anyone touches
+ * it) and an audio track (the one kind of track that can be armed).
+ * @returns {Promise<object>} the fixture, its document and its history
+ */
+async function stripSong() {
+  const fixture = await mixerSong();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(fixture.doc, "track.set_mix", { track_id: "bass", gain_db: -4, pan: -0.25 });
+  runCommand(fixture.doc, "track.add", { id: "gtr", name: "Gtr", kind: "audio" });
+  return fixture;
+}
+
 // ---- the fake engine, context and browser ----------------------------------
 
 /** The engine stand-in: it records the songs it was handed and reports back. */
@@ -455,14 +471,19 @@ function fakeTakeStore() {
   };
 }
 
-/** The navigator stand-in: no inputs are ever opened by these tests. */
-function fakeNavigator() {
+/** The navigator stand-in: an input is only ever opened when a case asks for one. */
+function fakeNavigator(options = {}) {
   return {
     mediaDevices: {
       async enumerateDevices() {
         return [];
       },
       async getUserMedia() {
+        if (options.allowInput === true) {
+          // Enough of a stream for the page to keep as its arm: no tracks, so
+          // stopping it has nothing to stop.
+          return { getAudioTracks() { return []; }, getTracks() { return []; } };
+        }
         throw new Error("no input in these tests");
       },
     },
@@ -643,7 +664,7 @@ async function bootMixer(options = {}) {
   run(
     document,
     windowStub,
-    fakeNavigator(),
+    fakeNavigator(options),
     function WebSocketStub() {
       return socket;
     },
@@ -1737,6 +1758,188 @@ test("undo then redo inside a pass keeps the pass whole and A/B includes the red
   assert.equal(before.inserts["ins-eq"], undefined, "the effects the pass added are not in it");
   assert.equal(before.inserts["ins-verb"], undefined);
   assert.equal(before.master.target.lufs, -14, "nor is the target the redone step set");
+});
+
+// ---- the compact strip (P2a, D3) ------------------------------------------
+
+/** The strip's host on the page, as the client draws it. */
+function stripHost(ui) {
+  const host = ui.document.querySelector("[data-role=mixer-strip]");
+  assert.ok(host, "the strip host is on the page");
+  return host;
+}
+
+/** One control of the strip, by its own data attribute. */
+function stripControl(ui, selector) {
+  return stripHost(ui).querySelector(selector);
+}
+
+test("the strip follows view.aimTrackId", async () => {
+  const ui = await bootMixer({ fixture: await stripSong() });
+
+  assert.equal(stripHost(ui).hidden, false, "the strip's frame has something to say before a track is picked");
+  assert.match(String(stripHost(ui).textContent), /Pick a track to see its strip/);
+  assert.equal(stripControl(ui, "[data-mix-strip=gain]"), null, "and no control is drawn for no track");
+
+  ui.click("[data-role=grid] [data-track-id=bass] .st-name");
+  await ui.settle();
+  assert.equal(String(ui.page.__studioTest.view.aimTrackId), "bass", "the tap aims the track");
+  const fader = stripControl(ui, "[data-mix-strip=gain]");
+  assert.ok(fader, "the aimed track's fader is drawn");
+  assert.equal(String(fader.getAttribute("data-owner")), "track:bass", "named the way the mixer names it");
+  assert.match(String(stripHost(ui).textContent), /Bass/, "with the track's own name");
+
+  ui.click("[data-role=grid] [data-track-id=keys] .st-name");
+  await ui.settle();
+  assert.equal(
+    String(stripControl(ui, "[data-mix-strip=gain]").getAttribute("data-owner")),
+    "track:keys",
+    "another aim is another strip",
+  );
+  assert.equal(
+    stripHost(ui).querySelectorAll("[data-role=mixer-strip-body]").length,
+    1,
+    "one strip, never a list of them",
+  );
+  assert.equal(ui.commands("track.set_mix").length, 0, "aiming is view state, never a command");
+
+  // An aim the song no longer holds falls back to the open clip's track, and
+  // with no clip open there is none.
+  ui.page.__studioTest.view.aimTrackId = "ghost";
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  assert.match(String(stripHost(ui).textContent), /Pick a track to see its strip/);
+  assert.equal(stripControl(ui, "[data-mix-strip=gain]"), null, "and its controls go with it");
+});
+
+test("moving the fader sends one mix command on release", async () => {
+  const ui = await bootMixer({ fixture: await stripSong() });
+  ui.click("[data-role=grid] [data-track-id=bass] .st-name");
+  await ui.settle();
+
+  assert.equal(String(stripControl(ui, "[data-mix-strip=gain]").value), "-4", "the song's own level is what it shows");
+
+  // The drag: every move is an input event, and none of them is a command.
+  for (const value of ["-6", "-9", "-12"]) {
+    const moving = stripControl(ui, "[data-mix-strip=gain]");
+    moving.value = value;
+    moving.dispatchEvent(ui.event("input"));
+  }
+  await ui.settle();
+  assert.equal(ui.commands("track.set_mix").length, 0, "a drag sends nothing while it moves");
+
+  // The release is ONE command, carrying the value it came to rest on.
+  stripControl(ui, "[data-mix-strip=gain]").dispatchEvent(ui.event("change"));
+  await ui.settle();
+  const sent = ui.commands("track.set_mix");
+  assert.equal(sent.length, 1, `one command per gesture (${sent.length})`);
+  assert.deepEqual(sent[0].args, { track_id: "bass", gain_db: -12 });
+
+  // The pan beside it is the mixer's own control, so it sends the same command.
+  const pan = stripControl(ui, "[data-mix-strip=pan]");
+  assert.equal(String(pan.getAttribute("data-owner")), "track:bass");
+  pan.value = "0.5";
+  pan.dispatchEvent(ui.event("change"));
+  await ui.settle();
+  const both = ui.commands("track.set_mix");
+  assert.equal(both.length, 2);
+  assert.deepEqual(both[1].args, { track_id: "bass", pan: 0.5 });
+});
+
+test("an external gain change moves the fader, but not while it is being dragged", async () => {
+  const ui = await bootMixer({ fixture: await stripSong() });
+  ui.click("[data-role=grid] [data-track-id=bass] .st-name");
+  await ui.settle();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const elsewhere = async (gain) => {
+    runCommand(ui.doc, "track.set_mix", { track_id: "bass", gain_db: gain });
+    ui.frame(ui.stateFrame());
+    await ui.settle();
+  };
+
+  await elsewhere(-9);
+  assert.equal(String(stripControl(ui, "[data-mix-strip=gain]").value), "-9", "a change made elsewhere moves the fader");
+
+  // A fader the operator is holding keeps its own value: the page holds its
+  // draw until the pointer comes up, which is the full Mixer's own rule.
+  const dragged = stripControl(ui, "[data-mix-strip=gain]");
+  ui.page.dispatchEvent(ui.event("pointerdown", { button: 0, pointerId: 3 }));
+  await elsewhere(-18);
+  assert.equal(String(dragged.value), "-9", "the drag keeps the value it is on");
+  assert.equal(stripControl(ui, "[data-mix-strip=gain]"), dragged, "and the control under the finger is the one that stays");
+
+  ui.windowEvent("pointerup", { pointerId: 3 });
+  await ui.settle();
+  assert.equal(String(stripControl(ui, "[data-mix-strip=gain]").value), "-18", "the release draws what arrived");
+});
+
+test("mute, solo and arm sent as in the full mixer", async () => {
+  const ui = await bootMixer({ fixture: await stripSong(), allowInput: true });
+  ui.click("[data-role=grid] [data-track-id=bass] .st-name");
+  await ui.settle();
+
+  const mute = () => stripControl(ui, "[data-act=mix-mute]");
+  const solo = () => stripControl(ui, "[data-act=mix-solo]");
+  assert.equal(String(mute().getAttribute("data-owner")), "track:bass", "the strip's M is the mixer's M");
+  assert.equal(String(mute().getAttribute("data-track-id")), "bass");
+  assert.equal(String(solo().getAttribute("data-owner")), "track:bass", "and so is its S");
+
+  mute().dispatchEvent(ui.event("click"));
+  await ui.settle();
+  assert.deepEqual(ui.commands("track.set_mix")[0].args, { track_id: "bass", mute: true }, "one command for a mute");
+
+  solo().dispatchEvent(ui.event("click"));
+  await ui.settle();
+  assert.deepEqual(ui.commands("track.set_mix")[1].args, { track_id: "bass", solo: true }, "and one for a solo");
+
+  // The song as those commands would have left it: both controls repaint from
+  // the snapshot, so the strip shows what is really set.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "track.set_mix", { track_id: "bass", mute: true, solo: true });
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  assert.equal(String(mute().getAttribute("aria-pressed")), "true");
+  assert.ok(String(mute().className).includes("st-on"), "the mute shows as on");
+  assert.ok(String(solo().className).includes("st-on"), "and so does the solo");
+
+  // A note track cannot be armed, so the strip keeps the header's own disabled
+  // arm rather than offering a press that would do nothing.
+  assert.ok(stripControl(ui, "[data-act=arm]"), "the note track's arm is drawn");
+  assert.equal(stripControl(ui, "[data-act=arm]").disabled, true, "and it is disabled, as in the header");
+  assert.equal(String(stripControl(ui, "[data-act=arm]").title), "Arming is for audio tracks");
+
+  // An audio track's arm is the record panel's own control: arming is this
+  // page's live state, so it sends no mix command at all.
+  ui.click("[data-role=grid] [data-track-id=gtr] .st-name");
+  await ui.settle();
+  const arm = () => stripControl(ui, "[data-act=arm-audio]");
+  assert.ok(arm(), "the audio track's strip offers the arm control");
+  assert.equal(String(arm().getAttribute("data-track-id")), "gtr");
+  assert.equal(String(arm().textContent), "Arm");
+  const before = ui.commands("track.set_mix").length;
+
+  arm().dispatchEvent(ui.event("click"));
+  await ui.settle();
+  assert.ok(ui.page.__studioTest.view.armed.gtr, "the press arms the track");
+  assert.equal(String(stripControl(ui, "[data-act=arm-audio]").textContent), "Armed", "and the strip says so");
+  assert.equal(ui.commands("track.set_mix").length, before, "arm is never a mix command");
+});
+
+test("hidden on an empty song with its note", async () => {
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
+  const ui = await bootMixer({ fixture: { doc: newSongDoc({ title: "Empty song" }), history: [] } });
+
+  const host = stripHost(ui);
+  assert.equal(host.querySelector("[data-mix-strip=gain]"), null, "a song with no tracks has no fader");
+  assert.equal(host.querySelector("[data-mix-strip=pan]"), null, "and no pan");
+  assert.equal(host.querySelector("[data-act=mix-mute]"), null, "no mute");
+  assert.equal(host.querySelector("[data-act=mix-solo]"), null, "no solo");
+  assert.equal(host.querySelector("[data-act=arm]"), null, "and no arm");
+  assert.equal(host.querySelector("[data-act=arm-audio]"), null);
+
+  const note = host.querySelector("[data-role=mixer-strip-note]");
+  assert.ok(note, "the strip's own note is in its frame");
+  assert.equal(String(note.textContent), "Add a track to see its strip");
 });
 
 // ---- live, in a real browser ----------------------------------------------

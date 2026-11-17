@@ -1473,6 +1473,18 @@ const STYLES = `
   .studio .st-mix-latency { margin: 0; font-size: 11px; color: var(--st-muted); }
   .studio .st-mix-latency[hidden] { display: none; }
   .studio .st-mix-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--st-muted); }
+  /* The compact strip (D3): the aimed track's level, pan, mute, solo and arm in
+     a widget of its own beside the full Mixer. It draws with the mixer's own
+     controls, so the two surfaces send one set of commands; every control is a
+     44 px target and a press on one is never a text selection or a callout. */
+  .studio .st-mix-strip-host {
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-mix-strip { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+  .studio .st-mix-strip-who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .studio .st-mix-strip-note {
+    margin: 0; padding: 10px 12px; font-size: 13px; line-height: 1.45; color: var(--st-muted);
+  }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
@@ -1647,7 +1659,7 @@ function studioPage({ songId, render, res }) {
             <div class="st-grid" data-role="grid"></div>
           </div>
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
-          <section class="st-mixer" data-role="mixer" hidden></section>
+          <section class="st-mixer" data-role="mixer" hidden></section><section class="st-mix-strip-host" data-role="mixer-strip" hidden></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
           <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div><div class="st-sampler-host" data-role="sampler-keyboard" hidden></div></section>
