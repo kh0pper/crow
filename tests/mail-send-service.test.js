@@ -14,14 +14,15 @@ import { MailError } from "../servers/gateway/mail/errors.js";
 import { claimedElsewhereSentence } from "../servers/gateway/mail/claims.js";
 import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
 import {
-  addRevision, createDraft, discardDraft, getDraft, transition,
+  addRevision, createDraft, discardDraft, getDraft,
 } from "../servers/gateway/mail/drafts/store.js";
 import {
   ALREADY_WENT_OUT_SENTENCE, CHANGED_SENTENCE, GRACE_MS, HOLD_MS, KEYCHAIN_KEY_MISSING_SENTENCE,
   RECONCILE_WINDOW_MS, SEND_FAIL_REASONS, STALE_SENDING_MS, UNKNOWN_STATE_SENTENCE,
-  _resetInFlightForTests, deliver, inFlight, isStaleSending, reconcileUnknown, requestSend, settle,
-  undoSend,
+  _resetInFlightForTests, deliver, inFlight, isStaleSending, markStaleUnknown, reconcileUnknown,
+  requestSend, settle, undoSend,
 } from "../servers/gateway/mail/send/send-service.js";
+import { sweepMailSends } from "../servers/gateway/mail/send/schedule-service.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SEND_SOURCE = readFileSync(join(HERE, "..", "servers/gateway/mail/send/send-service.js"), "utf8");
@@ -267,6 +268,39 @@ test("undo within the hold returns the draft to draft and nothing is sent", asyn
   assert.equal(fake.sent.length, 0);
 });
 
+test("a timer that fires early leaves the second tap holding, and the second timer delivers once", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  let clock = T0;
+  const { deps, timers } = makeDeps(fake, { now: () => clock });
+  const draft = await makeDraft(db, account);
+
+  await tap(db, deps, draft, T0);
+  assert.deepEqual(await undoSend(db, deps, { draftId: draft.id, now: T0 + 500 }), { ok: true });
+  await tap(db, deps, draft, T0 + 1000);
+  assert.equal(timers.length, 2, "one timer per tap");
+  const secondHoldUntil = T0 + 1000 + HOLD_MS;
+
+  // The first tap's timer comes due while the second tap's hold is still running.
+  clock = T0 + 5000;
+  const early = await timers[0].fn();
+  assert.equal(early.outcome, "not_due");
+  assert.equal(early.retryInMs, secondHoldUntil - clock);
+  const held = await getDraft(db, draft.id);
+  assert.equal(held.state, "holding", "an early timer sends nothing and moves nothing");
+  assert.ok(held.tapSeal);
+  assert.equal(fake.sent.length, 0);
+  assert.equal(timers.length, 3, "the early timer re-armed itself for the rest of the hold");
+
+  // The second tap's own timer comes due; exactly one message leaves.
+  clock = secondHoldUntil;
+  const done = await timers[1].fn();
+  assert.equal(done.outcome, "sent");
+  assert.equal(fake.sent.length, 1);
+  assert.equal((await getDraft(db, draft.id)).state, "sent");
+});
+
 test("undo racing the claim: exactly one of undo and deliver wins", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
@@ -365,6 +399,97 @@ test("confirmResend reuses the original Message-ID", async () => {
   assert.equal(fake.sent[0].messageId, original);
 });
 
+/* ----------------------------------------------------------------- the claim's writes */
+
+test("a resend from unknown claims a fresh attempt and is never swept while it runs", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  let gateOpen = false;
+  let releaseGate;
+  const gate = new Promise((resolve) => { releaseGate = resolve; });
+  const bytes = Buffer.from("the attachment bytes");
+  const { deps } = makeDeps(fake, {
+    readStorageFile: async () => {
+      if (gateOpen) await gate;
+      return bytes;
+    },
+  });
+  const draft = await makeDraft(db, account, {
+    first: {
+      attachments: [{ source: "storage", fileId: "file-1", filename: "notes.txt", size: bytes.length }],
+    },
+  });
+  await tap(db, deps, draft);
+  fake.handle(() => { throw new MailError("NETWORK", "ECONNRESET"); });
+  assert.equal((await deliver(db, deps, draft.id, { now: DUE })).outcome, "unknown");
+  assert.equal(fake.sent.length, 1);
+
+  // One Sent-folder check has run, so the confirm is accepted; the old attempt is past the cutoff.
+  await db.execute({
+    sql: "UPDATE mail_drafts SET reconcile_count = 1, attempt_at = ?, next_reconcile_at = NULL WHERE id = ?",
+    args: [DUE - STALE_SENDING_MS - 1, draft.id],
+  });
+  const again = await requestSend(db, deps, {
+    draftId: draft.id, hash: draft.headHash, now: DUE + 60_000, confirmUnknown: true,
+  });
+  assert.equal(again.ok, true);
+
+  // The resend's claim clears the earlier attempt and reconcile, so the row is a fresh one.
+  fake.handle(null);
+  gateOpen = true;
+  const pending = deliver(db, deps, draft.id, { now: again.holdUntil });
+  await waitFor(() => inFlight.has(draft.id));
+  const claimed = await getDraft(db, draft.id);
+  assert.equal(claimed.state, "sending");
+  assert.equal(claimed.attemptAt, null, "the claim starts a new attempt");
+  assert.equal(claimed.reconcileCount, 0);
+  assert.equal(claimed.nextReconcileAt, null);
+  assert.equal(claimed.failReason, null);
+  assert.equal(isStaleSending(claimed, again.holdUntil + STALE_SENDING_MS + 60_000), false,
+    "a row this process is sending is never stale");
+
+  const later = again.holdUntil + STALE_SENDING_MS + 60_000;
+  const sweep = await sweepMailSends(db, { ...deps, zone: () => "UTC" }, { now: later });
+  assert.equal(sweep.unknown, 0, "the sweep leaves a send this process is running");
+  assert.equal((await getDraft(db, draft.id)).state, "sending");
+
+  releaseGate();
+  assert.equal((await pending).outcome, "sent");
+  assert.equal(fake.sent.length, 2, "the first attempt and the confirmed resend, and nothing else");
+  assert.equal((await getDraft(db, draft.id)).state, "sent");
+});
+
+test("a row moved after the claim loses the attempt guard, so nothing is sent", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const bytes = Buffer.from("the attachment bytes");
+  let draft = null;
+  const { deps } = makeDeps(fake, {
+    readStorageFile: async () => {
+      const { rows } = await db.execute({ sql: "SELECT state FROM mail_drafts WHERE id = ?", args: [draft.id] });
+      if (rows[0]?.state === "sending") {
+        // Another writer moves the row after the claim, before the socket is opened.
+        await db.execute({ sql: "UPDATE mail_drafts SET state = 'failed' WHERE id = ?", args: [draft.id] });
+      }
+      return bytes;
+    },
+  });
+  draft = await makeDraft(db, account, {
+    first: {
+      attachments: [{ source: "storage", fileId: "file-1", filename: "notes.txt", size: bytes.length }],
+    },
+  });
+  await tap(db, deps, draft);
+
+  const out = await deliver(db, deps, draft.id, { now: DUE });
+  assert.equal(out.outcome, "lost_claim");
+  assert.equal(fake.sent.length, 0, "the adapter is never handed a row that moved");
+  assert.equal((await getDraft(db, draft.id)).state, "failed");
+  assert.equal(inFlight.has(draft.id), false, "the in-flight entry is removed");
+});
+
 /* --------------------------------------------------------------------- the replay */
 
 test("cancel then a direct UPDATE back to scheduled never sends", async () => {
@@ -428,6 +553,73 @@ test("a discarded row set to scheduled never sends", async () => {
 });
 
 /* --------------------------------------------------------------------- the account */
+
+test("no supervisor is no adapter: requestSend and deliver refuse not_sendable and nothing is claimed", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps: withAdapter, timers } = makeDeps(fake);
+  // The same seam without an adapter: the defaults are the real ones, so `withAdapter` would reject.
+  const { withAdapter: _injected, ...bare } = withAdapter;
+
+  const draft = await makeDraft(db, account);
+  const out = await requestSend(db, bare, { draftId: draft.id, hash: draft.headHash, now: T0 });
+  assert.equal(out.ok, false);
+  assert.equal(out.code, "not_sendable");
+  assert.equal(out.reason, "supervisor_missing");
+  assert.equal((await getDraft(db, draft.id)).state, "draft", "the tap is refused, not half taken");
+  assert.equal(timers.length, 0, "no hold timer is armed for a tap that was refused");
+
+  // A row tapped while an adapter was there, delivered after it went: left holding, never unknown.
+  await tap(db, withAdapter, draft);
+  const held = await deliver(db, bare, draft.id, { now: DUE });
+  assert.equal(held.outcome, "not_sendable");
+  assert.equal(held.reason, "supervisor_missing");
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "holding");
+  assert.equal(row.failReason, null);
+  assert.equal(fake.sent.length, 0);
+  assert.equal(typeof SEND_FAIL_REASONS.supervisor_missing, "string");
+});
+
+test("an account removed between tap and deliver fails the row with the account_removed reason", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  await tap(db, deps, draft);
+  await db.execute({ sql: "DELETE FROM mail_accounts WHERE id = ?", args: [account.id] });
+
+  const out = await deliver(db, deps, draft.id, { now: DUE });
+  assert.equal(out.outcome, "failed");
+  assert.equal(out.reason, "account_removed");
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "failed");
+  assert.equal(row.failReason, SEND_FAIL_REASONS.account_removed);
+  assert.equal(row.tapSeal, null);
+  assert.equal(fake.sent.length, 0, "no adapter call for a mailbox that is gone");
+});
+
+test("an account renamed between tap and deliver fails with reason seal and no adapter call", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  await tap(db, deps, draft);
+  // The From a tap seals is the account's address and display name: renaming the account renames it.
+  await db.execute({
+    sql: "UPDATE mail_accounts SET display_name = ? WHERE id = ?",
+    args: ["Alex Other", account.id],
+  });
+
+  const out = await deliver(db, deps, draft.id, { now: DUE });
+  assert.equal(out.outcome, "failed");
+  assert.equal(out.reason, "seal");
+  assert.equal((await getDraft(db, draft.id)).failReason, SEND_FAIL_REASONS.seal);
+  assert.equal(fake.sent.length, 0);
+});
 
 test("an account whose address changed after the draft was made is refused bad_input at preflight", async () => {
   const db = await freshDb();
@@ -579,10 +771,16 @@ test("kill after claim leaves one row in unknown and resends nothing", async () 
   assert.equal(row.state, "sending");
   assert.equal(isStaleSending(row, DUE), true);
 
-  const moved = await transition(db, draft.id, ["sending"], "unknown",
-    { fail_reason: SEND_FAIL_REASONS.network }, { now: DUE });
-  assert.equal(moved, true);
-  assert.equal((await getDraft(db, draft.id)).state, "unknown");
+  const before = await getDraft(db, draft.id);
+  assert.equal(await markStaleUnknown(db, { ...before, claimToken: "not-the-claim" }, DUE), false,
+    "a wrong claim token changes nothing");
+  assert.equal(await markStaleUnknown(db, before, DUE), true);
+  const unknown = await getDraft(db, draft.id);
+  assert.equal(unknown.state, "unknown");
+  assert.equal(unknown.failReason, SEND_FAIL_REASONS.send_failed);
+  assert.equal(unknown.reconcileCount, 0);
+  assert.equal(unknown.nextReconcileAt, before.attemptAt + 60_000,
+    "the first Sent-folder check is a minute after the attempt");
 
   const again = await deliver(db, deps, draft.id, { now: DUE });
   assert.equal(again.outcome, "lost_claim");

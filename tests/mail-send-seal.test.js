@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
 import { createAccount, updateAccount } from "../servers/gateway/mail/store/accounts.js";
-import { createDraft, getDraft } from "../servers/gateway/mail/drafts/store.js";
+import { createDraft, getDraft, listRevisions, revisionToInput, hashOf } from "../servers/gateway/mail/drafts/store.js";
 import {
   TAP_SEAL_DOMAIN, newTapId, sealFor, verifySeal,
 } from "../servers/gateway/mail/drafts/seal.js";
@@ -210,6 +210,13 @@ test("verifySeal refuses a seal of the wrong length or one changed character", (
   assert.equal(verifySeal(payload(), `${seal[0] === "0" ? "1" : "0"}${seal.slice(1)}`, SEED), false);
   assert.equal(verifySeal(payload(), "", SEED), false);
   assert.equal(verifySeal(payload(), null, SEED), false);
+  // One seal has one spelling: a stored seal must be 64 lower-case hex characters before anything is
+  // compared, so an upper-case copy of a real seal is not a seal.
+  const upperCase = seal.replace(/[a-f]/g, (character) => character.toUpperCase());
+  assert.notEqual(upperCase, seal);
+  assert.equal(verifySeal(payload(), upperCase, SEED), false);
+  assert.equal(verifySeal(payload(), ` ${seal.slice(1)}`, SEED), false);
+  assert.equal(verifySeal(payload(), `${seal.slice(0, 63)}g`, SEED), false);
 });
 
 /* -------------------------------------------------------------------- the row's seal */
@@ -286,7 +293,7 @@ test("a direct UPDATE of the revision body under a valid seal fails with reason 
   assert.equal(fake.sent.length, 0);
 });
 
-test("changing account_id on a holding row fails with reason seal and calls no adapter", async () => {
+test("changing account_id on a holding row to an account that is not here fails with account_removed", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
   const fake = makeFake();
@@ -298,9 +305,11 @@ test("changing account_id on a holding row fails with reason seal and calls no a
     args: ["acct-other", draft.id],
   });
 
+  // The row names a mailbox this Crow does not have, so there is no From to send from at all; the
+  // swap to another real account is the seal's own case (see the two-account test below).
   const out = await deliver(db, deps, draft.id, { now: T0 + HOLD_MS });
   assert.equal(out.outcome, "failed");
-  assert.equal(out.reason, "seal");
+  assert.equal(out.reason, "account_removed");
   assert.equal(fake.sent.length, 0);
 });
 
@@ -333,18 +342,22 @@ test("a seal copied from one tap does not verify for a later tap of the same con
   assert.equal(fake.sent.length, 0);
 });
 
-test("deliver refuses a hold time in the future and one older than the grace window", async () => {
+test("deliver leaves a hold time in the future alone and marks one older than the grace window missed", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
   const fake = makeFake();
   const { deps } = makeDeps(fake);
 
+  // A hold that is still running is not a refusal: the seal is good, the row is simply not due yet.
   const early = await makeDraft(db, account);
   await tap(db, deps, early);
   const tooSoon = await deliver(db, deps, early.id, { now: T0 + HOLD_MS - 1 });
-  assert.equal(tooSoon.outcome, "failed");
-  assert.equal(tooSoon.reason, "seal");
-  assert.equal((await getDraft(db, early.id)).state, "failed");
+  assert.equal(tooSoon.outcome, "not_due");
+  assert.equal(tooSoon.retryInMs, 1, "the answer says how long the hold has left");
+  const held = await getDraft(db, early.id);
+  assert.equal(held.state, "holding", "nothing is written for a hold that is still running");
+  assert.ok(held.tapSeal, "the tap is still the live one");
+  assert.equal(held.failReason, null);
 
   const late = await makeDraft(db, account);
   await tap(db, deps, late);
@@ -357,4 +370,28 @@ test("deliver refuses a hold time in the future and one older than the grace win
   assert.equal(row.tapSeal, null);
 
   assert.equal(fake.sent.length, 0);
+});
+
+test("two real accounts: swapping account_id on a holding row is refused by the seal alone", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const other = await makeAccount(db, { label: "Second", address: "alex@second.example.com" });
+  const fake = makeFake();
+  const { deps } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  await tap(db, deps, draft);
+
+  // The head hash is the revision row's own hash, so it passes whichever account the row names: only
+  // the account in the seal can catch a row moved to another real mailbox.
+  const [rev] = await listRevisions(db, draft.id);
+  assert.equal(hashOf(revisionToInput(rev), { mode: draft.mode }), draft.headHash);
+  await db.execute({ sql: "UPDATE mail_drafts SET account_id = ? WHERE id = ?", args: [other.id, draft.id] });
+
+  const out = await deliver(db, deps, draft.id, { now: T0 + HOLD_MS });
+  assert.equal(out.outcome, "failed");
+  assert.equal(out.reason, "seal");
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "failed");
+  assert.equal(row.failReason, SEND_FAIL_REASONS.seal);
+  assert.equal(fake.sent.length, 0, "no adapter call for a mailbox the tap was not taken for");
 });

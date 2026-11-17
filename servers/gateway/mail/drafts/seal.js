@@ -22,8 +22,9 @@
  * cancelled, discarded or sent row has nothing left to revive.
  *
  * `verifySeal` answers false for anything that is not exactly a seal this key made over these fields —
- * a missing seal, a truncated or padded one, one changed character, a field the seal was not made over.
- * Only `sealFor` throws, and only for a caller that has no seed or no field to seal.
+ * a missing seal, a truncated or padded one, one changed character, an upper-case copy of one, a field
+ * the seal was not made over. Only `sealFor` throws, and only for a caller that has no seed or no field
+ * to seal.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { MailError } from "../errors.js";
@@ -42,8 +43,8 @@ const PAYLOAD_VERSION = "v1";
 /** A tap id is 16 random bytes, written as 32 hex characters. */
 const TAP_ID_BYTES = 16;
 
-/** A seal is 32 bytes, written as 64 hex characters. */
-const SEAL_HEX_LENGTH = 64;
+/** A seal is 32 bytes, written as 64 lower-case hex characters: one spelling, one seal. */
+const SEAL_HEX = /^[0-9a-f]{64}$/;
 
 function bad(field) {
   return new MailError("BAD_INPUT", field);
@@ -106,8 +107,9 @@ export function sealFor(fields, seed) {
 }
 
 /**
- * Does `seal` seal exactly these fields under this seed? Constant-time over the two MACs, with the
- * length compared first. Never throws: an unverifiable seal is a refusal, not an error.
+ * Does `seal` seal exactly these fields under this seed? The stored seal must be one lower-case hex
+ * string of 64 characters before anything is compared; then the two MACs are compared in constant
+ * time. Never throws: an unverifiable seal is a refusal, not an error.
  *
  * @param {object} fields the same shape `sealFor` takes
  * @param {string} seal the hex seal stored on the row
@@ -115,9 +117,8 @@ export function sealFor(fields, seed) {
  * @returns {boolean}
  */
 export function verifySeal(fields, seal, seed) {
-  if (typeof seal !== "string" || seal.length !== SEAL_HEX_LENGTH) return false;
+  if (typeof seal !== "string" || !SEAL_HEX.test(seal)) return false;
   const given = Buffer.from(seal, "hex");
-  if (given.length !== SEAL_HEX_LENGTH / 2) return false;
   let expected;
   try {
     expected = Buffer.from(sealFor(fields, seed), "hex");

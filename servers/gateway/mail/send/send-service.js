@@ -32,7 +32,7 @@ import { folderRole } from "../store/messages.js";
 import { claimedElsewhereSentence, makeIsClaimedElsewhere } from "../claims.js";
 import { composeRaw as composeRawMessage } from "../adapter/compose.js";
 import { hashOf, getDraft, listRevisions, revisionToInput, transition } from "../drafts/store.js";
-import { preflight } from "../drafts/preflight.js";
+import { preflight, sealFromAddress } from "../drafts/preflight.js";
 import { newTapId, sealFor, verifySeal } from "../drafts/seal.js";
 import { loadKeychainKey } from "../../keychain/key.js";
 
@@ -77,6 +77,8 @@ export const SEND_FAIL_REASONS = Object.freeze({
   seal: "The tap seal no longer matches the draft, so nothing was sent.",
   attachment_changed: "An attachment changed after the draft was tapped, so nothing was sent.",
   keychain_key_missing: "This Crow has no keychain key, so no tap can be sealed and nothing is sent.",
+  supervisor_missing: "This Crow is not running its mail connection, so nothing was sent.",
+  account_removed: "The account this message was written from is no longer set up, so nothing was sent.",
   auth_failed: "The mail server did not accept the account's sign-in, so nothing was sent.",
   tls: "The mail server's certificate could not be trusted, so nothing was sent.",
   bad_input: "The message could not be built in a form the mail server accepts, so nothing was sent.",
@@ -147,6 +149,15 @@ function defaultWithAdapter(accountId, fn) {
   return supervisor.withAdapter(accountId, fn);
 }
 
+/**
+ * Whether this process has an adapter to borrow: one the caller injected, or the boot supervisor. A
+ * gateway whose supervisor is stopped (or not started yet) has nowhere to send from, so a tap is
+ * refused rather than claimed and recorded as an unknown outcome.
+ */
+function adapterMissing(d) {
+  return d.hasAdapter !== true && supervisor == null;
+}
+
 async function defaultRequestSync(accountId) {
   if (!supervisor) return undefined;
   return supervisor.requestSync(accountId);
@@ -167,8 +178,10 @@ function defaultSchedule(fn, ms) {
 function resolveDeps(db, deps) {
   const given = deps == null ? {} : deps;
   const fn = (key, fallback) => (typeof given[key] === "function" ? given[key] : fallback);
+  const ownWithAdapter = typeof given.withAdapter === "function";
   return {
-    withAdapter: fn("withAdapter", defaultWithAdapter),
+    withAdapter: ownWithAdapter ? given.withAdapter : defaultWithAdapter,
+    hasAdapter: ownWithAdapter,
     isClaimedElsewhere: fn("isClaimedElsewhere", makeIsClaimedElsewhere(db)),
     requestSync: fn("requestSync", defaultRequestSync),
     composeRaw: fn("composeRaw", composeRawMessage),
@@ -304,6 +317,34 @@ async function markUnknown(db, draftId, claimToken, now, reason) {
 }
 
 /**
+ * Mark an interrupted `sending` row `unknown`: the claim token it was written under is the guard, the
+ * reconcile is pointed at its first check one minute after the attempt (`attempt_at`, or `claimed_at`
+ * for a row that died between the claim and the first byte) and `reconcile_count` stays 0, because no
+ * check has run yet. The seal columns are nulled in the same statement.
+ *
+ * This is what the stale sweep (Task 6) does to a row this process is not sending and has not sent for
+ * longer than `STALE_SENDING_MS`; a row in the in-flight map is never handed to it.
+ *
+ * @param {object} db
+ * @param {object} row a draft row (`getDraft`'s shape)
+ * @param {number} now epoch ms
+ * @returns {Promise<boolean>} whether this call moved the row
+ */
+export async function markStaleUnknown(db, row, now) {
+  if (row == null || typeof row.id !== "string" || !row.id) return false;
+  const since = row.attemptAt ?? row.claimedAt ?? now;
+  const at = Math.floor(Number(now));
+  const result = await db.execute({
+    sql: `UPDATE mail_drafts
+             SET state = 'unknown', fail_reason = ?, reconcile_count = 0, next_reconcile_at = ?,
+                 tap_seal = NULL, tap_id = NULL, tap_action = NULL, attach_digest = NULL, updated_at = ?
+           WHERE id = ? AND state = 'sending' AND claim_token = ?`,
+    args: [phraseFor("send_failed"), nextReconcileAt(since, 0), at, row.id, row.claimToken ?? null],
+  });
+  return result.rowsAffected === 1;
+}
+
+/**
  * A `sending` row this process is not sending, and has not been sending for longer than
  * `STALE_SENDING_MS`, was interrupted. A row in the in-flight map is never stale: the map is what
  * separates "slow" from "gone", and the adapter's deadline is what keeps a slow send from needing more
@@ -335,7 +376,8 @@ export function isStaleSending(row, now, map = inFlight) {
  *   `not_found`          no such draft, no such account, no head revision;
  *   `auth_failed`        the account's sign-in is failing;
  *   `claimed_elsewhere`  another instance connects this address (with the fixed sentence);
- *   `not_sendable`       no keychain key, so no seal (`reason: "keychain_key_missing"`);
+ *   `not_sendable`       no keychain key, so no seal (`reason: "keychain_key_missing"`), or no running
+ *                        supervisor to send through (`reason: "supervisor_missing"`);
  *   `preflight`          the draft itself blocks a send (`preflight` carries the code);
  *   `confirm_needed`     from `unknown`: no confirm (`confirm_unknown`), or no Sent-folder check has
  *                        run yet (`reconcile_first`).
@@ -361,6 +403,10 @@ export async function requestSend(db, deps, options = {}) {
   if (!SENDABLE_STATES.includes(row.state) && row.state !== "unknown") {
     return { ok: false, code: "frozen", state: row.state };
   }
+
+  // Nowhere to send from: refuse the tap before anything is claimed or written, so the row is not
+  // left in a tap state a later tick would have to guess about.
+  if (adapterMissing(d)) return { ok: false, code: "not_sendable", reason: "supervisor_missing" };
 
   const account = await getAccount(db, row.accountId);
   if (!account) return { ok: false, code: "not_found" };
@@ -430,15 +476,27 @@ export async function requestSend(db, deps, options = {}) {
   const moved = await transition(db, row.id, from, "holding", fields, { now, expectHash: hash });
   if (!moved) return { ok: false, code: "changed" };
 
-  // The hold's own timer: the tick sweep is the recovery path, not the primary one.
-  try {
-    d.schedule(() => {
-      void deliver(db, deps, row.id, { now: nowOf(d, {}) })
-        .catch((err) => logCode("deliver_failed", codeOf(err)));
-    }, HOLD_MS);
-  } catch (err) {
-    logCode("schedule_failed", codeOf(err));
-  }
+  // The hold's own timer: the tick sweep is the recovery path, not the primary one. A timer that fires
+  // while a later tap's hold is still running answers `not_due` and re-arms itself for the rest of that
+  // longer hold, so an undo followed by a second tap never sends on the first tap's clock.
+  const fire = (delayMs) => {
+    try {
+      return d.schedule(() => deliver(db, deps, row.id, { now: nowOf(d, {}) })
+        .then((outcome) => {
+          const rest = outcome?.outcome === "not_due" ? Math.floor(Number(outcome.retryInMs)) : 0;
+          if (rest > 0) fire(rest);
+          return outcome;
+        })
+        .catch((err) => {
+          logCode("deliver_failed", codeOf(err));
+          return null;
+        }), delayMs);
+    } catch (err) {
+      logCode("schedule_failed", codeOf(err));
+      return null;
+    }
+  };
+  fire(HOLD_MS);
   return { ok: true, holdUntil };
 }
 
@@ -470,16 +528,22 @@ export async function undoSend(db, deps, options = {}) {
 /**
  * Deliver the tap the row carries, exactly once.
  *
- * (0) Read the row; rebuild the head revision's hash with `hashOf` — never from a stored hash column —
- * and require it to equal the sealed head hash; require the row to be due and inside the grace window;
- * resolve the account's current From address; and verify the seal. Any of those failing CASes
- * `holding|scheduled` out of the tap state with `fail_reason` (the grace case becomes `missed`) and no
- * adapter is called.
+ * (0) Read the row and check the tap itself first: rebuild the head revision's hash with `hashOf` —
+ * never from a stored hash column — and require it to equal the sealed head hash; load the account and
+ * require it to still exist; recompute the sealed From text from that account; verify the seal. A bad
+ * seal or hash, a missing account and a missing key each CAS `holding|scheduled` out of the tap state
+ * with a fixed `fail_reason` and no adapter is called. Only a seal that verifies is then looked at for
+ * its time: still in the future answers `{outcome: "not_due"}` and writes nothing (the tap's own timer
+ * re-arms for the rest of the hold), and past the grace window is `missed`.
  * (1) Claim with one guarded UPDATE from `holding|scheduled`, guarded by the seal, the tap id and the
- * head hash, writing a fresh `claim_token`, `claimed_at` and — when the row has none — a message id.
+ * head hash, writing a fresh `claim_token`, `claimed_at`, a fresh attempt (`attempt_at` cleared, the
+ * reconcile reset, the old `fail_reason` gone) and — when the row has none — a message id.
  * Losing that UPDATE is `{outcome: "lost_claim"}` and nothing else happens.
- * (2) Rebuild the message through `preflight`; the attachment digest must be the sealed one.
- * (3) Put the draft in the in-flight map, stamp `attempt_at`, and send through `withAdapter`.
+ * (2) Put the draft in this process's in-flight map right after the claim wins, rebuild the message
+ * through `preflight` (the attachment digest must be the sealed one) and stamp `attempt_at` with a
+ * write guarded by the claim token: a row that moved under the claim is `{outcome: "lost_claim"}` and
+ * no socket is opened.
+ * (3) Send through `withAdapter`.
  * (4) Settle by `claim_token`, and only then — for an account whose Sent copy is appended — compose the
  * copy and append it, then ask for a sync. A failure there never changes the state.
  *
@@ -500,22 +564,24 @@ export async function deliver(db, deps, draftId, options = {}) {
     return { outcome: "lost_claim", state: row.state };
   }
 
-  // ---- (0) the tap itself, checked again in this process.
+  // ---- (0) the tap itself, checked again in this process: the seal and the recomputed hash first.
   const action = actionOf(row);
   const when = whenOf(row);
   const rev = await headRevision(db, row);
-  if (!rev || when == null || row.attachDigest == null || !row.tapSeal || !row.tapId
-    || row.tapAction !== action) {
-    return failPending(db, draftId, now, "seal");
-  }
+  if (!rev) return failPending(db, draftId, now, "seal");
   const recomputed = hashOf(revisionToInput(rev), { mode: row.mode });
   if (recomputed !== row.headHash) return failPending(db, draftId, now, "seal");
-  if (when > now) return failPending(db, draftId, now, "seal");
-  if (now - when > GRACE_MS) return failPending(db, draftId, now, "missed", "missed");
 
+  // The account the tap was taken for, before the seal: a mailbox that is gone says so, and the seal
+  // is checked against the From that account has now.
   const account = await getAccount(db, row.accountId);
+  if (!account) return failPending(db, draftId, now, "account_removed");
+
   const seed = await d.loadKey();
   if (!seed) return failPending(db, draftId, now, "keychain_key_missing");
+  if (when == null || row.attachDigest == null || row.tapId == null || row.tapAction !== action) {
+    return failPending(db, draftId, now, "seal");
+  }
   const verified = verifySeal({
     draftId: row.id,
     headHash: row.headHash,
@@ -523,18 +589,29 @@ export async function deliver(db, deps, draftId, options = {}) {
     when,
     attachDigest: row.attachDigest,
     accountId: row.accountId,
-    fromAddress: String(account?.address ?? "").trim().toLowerCase(),
+    fromAddress: sealFromAddress(account),
     tapId: row.tapId,
   }, row.tapSeal, seed);
   if (!verified) return failPending(db, draftId, now, "seal");
-  if (!account) return failPending(db, draftId, now, "not_found");
 
-  // ---- (1) the claim: one guarded UPDATE, and only this one may start the socket.
+  // The seal is good, so the time it was taken for is the next question: a hold that is still running
+  // is left exactly as it is, for the tap's own timer (or the tick) to come back to.
+  if (when > now) return { outcome: "not_due", when, retryInMs: when - now };
+  if (now - when > GRACE_MS) return failPending(db, draftId, now, "missed", "missed");
+
+  // No supervisor is no adapter: refuse before the claim, and leave the row where it is.
+  if (adapterMissing(d)) {
+    return { outcome: "not_sendable", reason: "supervisor_missing", state: row.state };
+  }
+
+  // ---- (1) the claim: one guarded UPDATE, and only this one may start the socket. The attempt is
+  // fresh: the previous one (and any reconcile pointing at it) belonged to an earlier try.
   const claimToken = String(d.newId());
   const messageId = row.messageId ?? `<${d.newId()}@${domainOf(account.address)}>`;
   const claim = await db.execute({
     sql: `UPDATE mail_drafts
-             SET state = 'sending', claim_token = ?, claimed_at = ?, message_id = ?,
+             SET state = 'sending', claim_token = ?, claimed_at = ?, attempt_at = NULL,
+                 reconcile_count = 0, next_reconcile_at = NULL, fail_reason = NULL, message_id = ?,
                  tap_seal = NULL, tap_id = NULL, tap_action = NULL, attach_digest = NULL, updated_at = ?
            WHERE id = ? AND state IN ('holding', 'scheduled') AND tap_seal = ? AND tap_id = ?
              AND head_hash = ?`,
@@ -544,33 +621,39 @@ export async function deliver(db, deps, draftId, options = {}) {
     return { outcome: "lost_claim", state: (await getDraft(db, draftId))?.state ?? null };
   }
 
-  // ---- (2) the bytes a person agreed to, rebuilt after the claim.
-  const claimed = { ...row, state: "sending", claimToken, messageId };
-  let checked;
-  try {
-    checked = await preflight(db, claimed, rev, { accountId: row.accountId, deps: readerDeps(d) });
-  } catch {
-    await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor("bad_input") });
-    return { outcome: "failed", reason: "bad_input" };
-  }
-  if (!checked.ok) {
-    const reason = checked.code === "too_large" ? "too_large" : "bad_input";
-    await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor(reason) });
-    return { outcome: "failed", reason };
-  }
-  if (checked.attachDigest !== row.attachDigest) {
-    await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor("attachment_changed") });
-    return { outcome: "failed", reason: "attachment_changed" };
-  }
-
-  // ---- (3) send, with the row in this process's in-flight map for as long as it takes.
+  // The row is this process's from here on: in the map before the bytes are rebuilt, so a slow
+  // attachment read is never mistaken for an interrupted send, and out of it in the finally below.
   d.inFlight.set(draftId, { claimToken, at: now });
   try {
-    await db.execute({
+    // ---- (2) the bytes a person agreed to, rebuilt after the claim.
+    const claimed = { ...row, state: "sending", claimToken, messageId };
+    let checked;
+    try {
+      checked = await preflight(db, claimed, rev, { accountId: row.accountId, deps: readerDeps(d) });
+    } catch {
+      await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor("bad_input") });
+      return { outcome: "failed", reason: "bad_input" };
+    }
+    if (!checked.ok) {
+      const reason = checked.code === "too_large" ? "too_large" : "bad_input";
+      await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor(reason) });
+      return { outcome: "failed", reason };
+    }
+    if (checked.attachDigest !== row.attachDigest) {
+      await settle(db, draftId, claimToken, "failed", { now, failReason: phraseFor("attachment_changed") });
+      return { outcome: "failed", reason: "attachment_changed" };
+    }
+
+    // ---- (3) stamp the attempt and send. The stamp is guarded by the claim token: a row that moved
+    // under the claim is never handed to the adapter.
+    const attempt = await db.execute({
       sql: `UPDATE mail_drafts SET attempt_at = ?, updated_at = ?
              WHERE id = ? AND state = 'sending' AND claim_token = ?`,
       args: [now, now, draftId, claimToken],
     });
+    if (attempt.rowsAffected !== 1) {
+      return { outcome: "lost_claim", state: (await getDraft(db, draftId))?.state ?? null };
+    }
     const result = await d.withAdapter(row.accountId, (adapter) => adapter.send(checked.message));
     const accepted = Array.isArray(result?.accepted) ? result.accepted : [];
     const rejected = Array.isArray(result?.rejected) ? result.rejected : [];

@@ -19,7 +19,10 @@
  *
  * The From is the account's, always: its address and its display name, never the revision's. A revision
  * whose `from` names another address is refused rather than reinterpreted, because the account's
- * address is part of what a tap seals.
+ * address is part of what a tap seals. `sealFromAddress` is the exact text a tap seals for From — the
+ * address, a newline, the display name — so it is one value, resolved here and re-resolved the same way
+ * when a tap is delivered: a send tapped under one display name and delivered under another is a
+ * different From, and the seal says so.
  *
  * Attachments are resolved to bytes here rather than at send time, so the digest a tap seals is a
  * digest of what the recipient would actually get. A thread attachment is the part at `index` of the
@@ -35,8 +38,10 @@
  * digest.
  *
  * `toOutgoing` is the one mapping to plan 1's `OutgoingMessage`: `body` becomes `text`, `html` is never
- * set, and the message id is the draft row's. The result always goes through `validateOutgoing`, so an
- * implementation builds its headers from that output and nothing else.
+ * set, and the message id is the draft row's. It builds its fields from `revisionToInput(rev)`, the same
+ * normalised input `hashOf` covers, so the message a tap sealed is the message built here. The result
+ * always goes through `validateOutgoing`, so an implementation builds its headers from that output and
+ * nothing else.
  */
 import { createHash } from "node:crypto";
 import { findPlaceholders, parseAddressListDetailed } from "../../staged/canonical.js";
@@ -45,7 +50,7 @@ import { validateOutgoing } from "../adapter/interface.js";
 import { getAccount } from "../store/accounts.js";
 import { resolveMessageRef } from "../store/reader-queries.js";
 import { extractAttachment, safeAttachmentName } from "../reader/attachments.js";
-import { listRevisions } from "./store.js";
+import { listRevisions, revisionToInput } from "./store.js";
 import { changedRecipients, deriveReply, newRecipients } from "./recipients.js";
 
 /**
@@ -57,6 +62,9 @@ export const MAX_SEND_BYTES = 18 * 1024 * 1024;
 
 /** C0 controls, DEL, C1 controls and the Unicode line and paragraph separators. */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/;
+
+/** The same characters, for stripping a display name instead of refusing it. */
+const CONTROL_CHARS_ALL = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]+/g;
 
 /** A media type as `validateOutgoing` reads one, without parameters: `type/subtype`. */
 const MEDIA_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
@@ -228,12 +236,31 @@ function frame(digest, value) {
   digest.update(bytes);
 }
 
+/**
+ * The From a tap seals: the account's address, a newline, its display name. `requestSend` and
+ * `scheduleDraft` seal `fromAddress`, `deliver` recomputes it from the account row, so the one thing
+ * both sides must agree on lives in one function — and an account renamed between the tap and the
+ * delivery is a different From, which the seal refuses.
+ *
+ * @param {{address?: string, displayName?: string|null}|null} account
+ * @returns {string}
+ */
+export function sealFromAddress(account) {
+  const address = String(account?.address ?? "").trim().toLowerCase();
+  const name = typeof account?.displayName === "string"
+    ? account.displayName.replace(CONTROL_CHARS_ALL, " ").replace(/\s+/g, " ").trim()
+    : "";
+  return `${address}\n${name}`;
+}
+
 /* ---------------------------------------------------------------- the message */
 
 /**
  * One revision as plan 1's `OutgoingMessage`. The From is the account's address and display name —
  * a `from` on the revision is not read — `body` becomes `text`, `html` is never set, and `messageId`
- * is the draft row's when the caller passes one (a revision row has no message id of its own).
+ * is the draft row's when the caller passes one (a revision row has no message id of its own). The
+ * fields come from `revisionToInput(rev)`, the normalised input `hashOf` covers, so what goes out is
+ * what the hash and the seal were made over.
  *
  * @param {object} rev a revision row (listRevisions' shape)
  * @param {{address: string, displayName?: string|null}} account
@@ -242,18 +269,19 @@ function frame(digest, value) {
  * @returns {import("../adapter/interface.js").OutgoingMessage}
  */
 export function toOutgoing(rev, account, attachments = [], options = {}) {
+  const input = revisionToInput(rev);
   return {
     from: {
       name: typeof account?.displayName === "string" && account.displayName !== "" ? account.displayName : null,
       address: String(account?.address ?? "").trim().toLowerCase(),
     },
-    to: outgoingRecipients(rev?.to),
-    cc: outgoingRecipients(rev?.cc),
-    bcc: outgoingRecipients(rev?.bcc),
-    subject: typeof rev?.subject === "string" ? rev.subject : "",
-    text: typeof rev?.body === "string" ? rev.body : "",
-    inReplyTo: typeof rev?.inReplyTo === "string" && rev.inReplyTo !== "" ? rev.inReplyTo : null,
-    references: Array.isArray(rev?.references) ? [...rev.references] : [],
+    to: outgoingRecipients(input.to),
+    cc: outgoingRecipients(input.cc),
+    bcc: outgoingRecipients(input.bcc),
+    subject: input.subject,
+    text: input.body,
+    inReplyTo: input.inReplyTo,
+    references: [...input.references],
     messageId: options?.messageId ?? rev?.messageId ?? null,
     attachments: (Array.isArray(attachments) ? attachments : []).map((attachment) => ({
       filename: attachment.filename,
@@ -296,6 +324,7 @@ async function replyToDiffers(db, draft, account) {
  *   flags: {newRecipients: string[], changedRecipients: string[], replyToDiffers: string|null}}
  *   | {ok: false, code: "placeholders"|"no_recipients"|"bad_address"|"too_large"|"bad_input"
  *      |"attachment_unavailable", detail?: string[]}>}
+ *   `fromAddress` is the From a tap seals (`sealFromAddress`): the account's address and display name.
  */
 export async function preflight(db, draft, rev, options = {}) {
   if (draft == null || typeof draft !== "object" || rev == null || typeof rev !== "object") {
@@ -366,7 +395,7 @@ export async function preflight(db, draft, rev, options = {}) {
     ok: true,
     message,
     attachDigest: digest.digest("hex"),
-    fromAddress: accountAddress,
+    fromAddress: sealFromAddress(account),
     flags,
   };
 }

@@ -286,8 +286,31 @@ test("from is always the account address even if the draft supplies one", async 
   });
   assert.equal(result.ok, true);
   assert.deepEqual(result.message.from, { name: "Alex Rivera", address: ALEX });
-  assert.equal(result.fromAddress, ALEX);
+  // The From a tap seals is the account's address and its display name, resolved in one place.
+  assert.equal(result.fromAddress, `${ALEX}\nAlex Rivera`);
   assert.equal(result.message.html, null, "html is never set");
+});
+
+test("the sealed From carries the account's display name, so a renaming is a different From", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db, { displayName: "Alex Rivera" });
+  const { draft, rev } = await makeDraft(db, account);
+
+  const before = await preflight(db, draft, rev, { accountId: account.id });
+  assert.equal(before.ok, true);
+  assert.equal(before.fromAddress, `${ALEX}\nAlex Rivera`);
+
+  await db.execute({ sql: "UPDATE mail_accounts SET display_name = ? WHERE id = ?", args: ["Alex Other", account.id] });
+  const after = await preflight(db, draft, rev, { accountId: account.id });
+  assert.equal(after.ok, true);
+  assert.equal(after.fromAddress, `${ALEX}\nAlex Other`);
+  assert.notEqual(after.fromAddress, before.fromAddress, "a renamed account is a different From");
+
+  // An account with no display name has one spelling too, so the seal still compares equal to itself.
+  await db.execute({ sql: "UPDATE mail_accounts SET display_name = NULL WHERE id = ?", args: [account.id] });
+  const unnamed = await preflight(db, draft, rev, { accountId: account.id });
+  assert.equal(unnamed.ok, true);
+  assert.equal(unnamed.fromAddress, `${ALEX}\n`);
 });
 
 test("a draft whose account address no longer matches the head revision's from address is refused bad_input", async () => {
