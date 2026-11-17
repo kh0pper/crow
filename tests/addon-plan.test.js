@@ -24,6 +24,7 @@ import { join, dirname } from "node:path";
 
 import { ContainRefused, neverBound } from "../scripts/pi-bots/pi_contain.mjs";
 import { buildAddonPlan } from "../scripts/addon-sandbox/plan.mjs";
+import { ADDON_TOKEN_DIRS } from "../servers/shared/addon-doors.js";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-plan-")));
 after(() => rmSync(T, { recursive: true, force: true }));
@@ -958,8 +959,8 @@ test("a data folder whose real path lands on the checkout is refused for the rea
 // ---- ADDON_TOKEN_DIRS: a repo-sourced profile only -----------------------
 
 test("an ADDON_TOKEN_DIRS entry applies only to a profile whose source is the repo copy", () => {
-  // The shipped table is empty by design, so the lookup is fed the same shape
-  // through the injected table.
+  // The lookup is fed the same shape through the injected table, so this case
+  // stays about the RULE; the shipped google-workspace entry is exercised below.
   const tokenDir = mk(HOME, ".local", "share", "acme");
   const out = join(tokenDir, "out.json");
   writeFileSync(out, "{}");
@@ -986,6 +987,103 @@ test("an ADDON_TOKEN_DIRS entry applies only to a profile whose source is the re
     }
   } finally {
     rmSync(tokenDir, { recursive: true, force: true });
+  }
+});
+
+// ---- the SHIPPED entry: google-workspace's token folder ------------------
+
+/** The real first-party add-on's own install and data folders, and its token folder. */
+const GW_ID = "google-workspace";
+// The app's own config folder name (the table's value), which is NOT the bundle id.
+const GW_HOME_DIR = mk(HOME, ".config", "google-workspace-mcp");
+const GW_TOKEN = join(GW_HOME_DIR, "token.json");
+writeFileSync(GW_TOKEN, "{}");
+writeFileSync(join(GW_HOME_DIR, "credentials.json"), "{}");
+mk(BUNDLES, GW_ID);
+mk(DATA, GW_ID);
+
+/** A plan for the real add-on, built with the SHIPPED table (no test seam). */
+function googleWorkspacePlan(source, over = {}) {
+  return buildAddonPlan({
+    id: GW_ID,
+    profile: profileOf({
+      id: GW_ID,
+      source,
+      files: { read: [], write: [], oauthDir: { from: "GOOGLE_TOKEN_FILE", path: GW_TOKEN, source: "owner" }, state: [] },
+    }),
+    entry: { command: "uv", args: ["run", "--quiet", "--frozen", GW_ID] },
+    home: HOME,
+    crowHome: CROW,
+    appRoot: APP,
+    nodeBin: NODE_BIN,
+    dataDir: DATA,
+    gatewayPort: 3001,
+    otherHomes: [],
+    selfTargets: [],
+    relayDir: RELAY,
+    pathEnv: "",
+    uid: UID,
+    ...over,
+  });
+}
+
+/** The bind op that lands the sign-in FOLDER inside the wall, if any. */
+const oauthDirBind = (plan) => pairs(plan.args).find((q) => q[0] === "--bind-fd" && q[2] === realpathSync(GW_HOME_DIR));
+
+test("the shipped table grants google-workspace its own token folder, read-write, for the repo copy", () => {
+  // The policy itself: one id, one exact home-relative folder, never a pattern.
+  assert.deepEqual(Object.keys(ADDON_TOKEN_DIRS), [GW_ID], "only the reviewed first-party id is listed");
+  assert.deepEqual(ADDON_TOKEN_DIRS[GW_ID], [".config/google-workspace-mcp"]);
+
+  const plan = googleWorkspacePlan("repo");
+  try {
+    assert.deepEqual(plan.refused, [], "nothing about the token folder is refused: " + JSON.stringify(plan.refused));
+    const op = oauthDirBind(plan);
+    assert.ok(op, "the token folder is bound by fd: " + JSON.stringify(fdOps(plan.args)));
+    const spec = plan.fds.find((f) => String(f.childFd) === op[1]);
+    assert.equal(spec?.role, "oauth-dir", "as the sign-in folder, not a plain data bind");
+    assert.equal(readlinkSync("/proc/self/fd/" + spec.fd), realpathSync(GW_HOME_DIR), "the fd really is that folder");
+    // The token refresh needs exactly this: the folder writable, so it can add its
+    // temp file beside token.json and rename it over the old one.
+    assert.equal(op[0], "--bind-fd", "read-write, never --ro-bind-fd");
+  } finally { closePlan(plan); }
+});
+
+test("the token-folder grant is repo-only: an installed copy (or an unknown source) is refused it", () => {
+  for (const source of ["installed", undefined]) {
+    const plan = googleWorkspacePlan(source);
+    try {
+      assert.ok(plan.refused.some((r) => r.path === GW_TOKEN && /hidden entry of the home/.test(r.reason)),
+        "source " + JSON.stringify(source) + ": " + JSON.stringify(plan.refused));
+      assert.equal(oauthDirBind(plan), undefined, "source " + JSON.stringify(source) + " binds no token folder");
+    } finally { closePlan(plan); }
+  }
+});
+
+test("the grant is that one folder, not .config: a sibling dot-config folder stays refused", () => {
+  const other = mk(HOME, ".config", "other-app");
+  const otherFile = join(other, "state.json");
+  writeFileSync(otherFile, "{}");
+  const plan = googleWorkspacePlan("repo", {
+    profile: profileOf({
+      id: GW_ID,
+      source: "repo",
+      files: {
+        read: [],
+        write: [{ from: "GW_STATE", path: otherFile, source: "owner" }],
+        oauthDir: { from: "GOOGLE_TOKEN_FILE", path: GW_TOKEN, source: "owner" },
+        state: [],
+      },
+    }),
+  });
+  try {
+    assert.ok(plan.refused.some((r) => r.path === otherFile && /hidden entry of the home/.test(r.reason)),
+      "a hidden folder this table does not list is still refused: " + JSON.stringify(plan.refused));
+    assert.ok(!fdOps(plan.args).some((q) => q[2] === realpathSync(otherFile)), "and never bound");
+    assert.ok(oauthDirBind(plan), "while its own token folder is still bound");
+  } finally {
+    closePlan(plan);
+    rmSync(other, { recursive: true, force: true });
   }
 });
 

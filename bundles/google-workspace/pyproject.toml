@@ -1,0 +1,27 @@
+[project]
+name = "google-workspace-mcp"
+version = "0.1.0"
+description = "Google Workspace MCP server — unified Drive, Docs, Sheets, Slides, Gmail, and Calendar tools with built-in guardrails"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Maestro Press" }]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "fastmcp>=0.4.0",
+    "google-api-python-client>=2.116.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+    "markdown-it-py>=3.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["google_workspace_mcp"]
+
+[project.scripts]
+google-workspace-mcp = "google_workspace_mcp.server:main"
+google-workspace-mcp-authorize = "google_workspace_mcp.authorize:main"

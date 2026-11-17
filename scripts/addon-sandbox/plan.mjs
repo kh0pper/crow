@@ -214,7 +214,7 @@ export function buildAddonPlan(o = {}) {
     // first-party dirs core lists for it.
     // `o.tokenDirsTable` is a TEST SEAM, never a production input: a plain
     // object replaces the shipped table for this one lookup, so a test can
-    // exercise the rule while `ADDON_TOKEN_DIRS` itself ships empty.
+    // exercise the rule with a table of its own.
     const tokenDirsTable = o.tokenDirsTable && typeof o.tokenDirsTable === "object" && !Array.isArray(o.tokenDirsTable)
       && (Object.getPrototypeOf(o.tokenDirsTable) === Object.prototype || Object.getPrototypeOf(o.tokenDirsTable) === null)
       ? o.tokenDirsTable

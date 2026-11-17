@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Editor/agent state
+.serena/
+.claude/
+CLAUDE.md
+
+# Local backups
+*.bak
+*.PRE-*
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Local MCP client config (user-specific paths)
+.mcp.json
+
+# OAuth credentials, tokens, and auth-flow scratch files — NEVER commit these.
+# They live in ~/.config/google-workspace-mcp/ on your machine, not in the repo.
+credentials.json
+*token*.json
+.auth_*

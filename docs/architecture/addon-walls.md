@@ -51,7 +51,7 @@ A few add-ons keep state directly in the Crow home (browser sessions, downloads,
 - Crow's add-on registry (`mcp-addons.json`) and the wall settings (`addon-walls.json`).
 - Anything under the data dir except this add-on's own folder. Another add-on's data is another add-on's, at either spelling of the path.
 - A `.env` file, except the add-on's own file above.
-- A hidden top-level entry of the owner's home, unless it is one of this add-on's own state folders. (The core table for such folders, `ADDON_TOKEN_DIRS`, is empty today; an entry is added only for a reviewed first-party need.)
+- A hidden top-level entry of the owner's home, unless it is one of this add-on's own state folders (`ADDON_STATE_DIRS`) or one of the reviewed token folders `ADDON_TOKEN_DIRS` lists for that first-party id: today only `google-workspace`'s `~/.config/google-workspace-mcp`, which an OAuth token refresh writes into (a temp file, then a rename).
 - An `autostart` or `systemd` folder inside the owner's home.
 
 ## The network
