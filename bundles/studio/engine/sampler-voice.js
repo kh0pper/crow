@@ -327,10 +327,18 @@
       /** The last post-filter sample, held through that fade. */
       heldLeft: 0,
       heldRight: 0,
-      /** The pad this voice came from, so a live release can find it. */
+      /** The pad whose sample this voice plays, so a live release can find it. */
       trackId: "",
       bankId: "",
       index: 0,
+      /**
+       * The pad that was actually PRESSED, and so the one the page lights and a
+       * lifted finger releases. It equals `index` for an ordinary press; a
+       * chromatic or 16-velocity press sounds the selected pad's sample from
+       * every pad of the grid, so one sample pad can carry several presses at
+       * once and each keeps its own source pad.
+       */
+      source_index: 0,
       /**
        * The sound this voice started with: the sample's id and, when its pad
        * named one, the slice's. The processor sets them at the start (they are
@@ -500,7 +508,7 @@
    *          resonance?: number, gateFrames?: number, choke?: number,
    *          mode?: string, loop?: string, speed?: number, paused?: boolean,
    *          trackId?: string, bankId?: string, index?: number,
-   *          serial?: number, sampleRate: number}} config
+   *          source_index?: number, serial?: number, sampleRate: number}} config
    * @returns {boolean} whether the voice started
    */
   function startVoice(voice, config) {
@@ -588,6 +596,9 @@
     voice.trackId = typeof settings.trackId === "string" ? settings.trackId : "";
     voice.bankId = typeof settings.bankId === "string" ? settings.bankId : "";
     voice.index = Math.trunc(finiteOr(settings.index, 0));
+    // A start that names no source pad is a press on the pad whose sample it
+    // plays, which is exactly what every start was before source pads existed.
+    voice.source_index = Math.trunc(finiteOr(settings.source_index, voice.index));
     voice.serial = Math.trunc(finiteOr(settings.serial, 0));
     return true;
   }

@@ -193,9 +193,16 @@
  *   one-channel input, 2 for a stereo pair) and decides an amp's mono sum.
  *   `onMonitorLatency(listener)` follows `{track_id, ms}`, the delay the chain
  *   itself adds, for the page to add to the round trip it shows.
- * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
+ * - `livePad(track_id, bank, index, v, locks, source_index)` and
+ *   `liveRelease(track_id, bank, index, source_index)`
  *   audition a pad from the panel: straight to the voice, never through a
- *   command or a history step, and never quantized. `holdPad(track_id, bank,
+ *   command or a history step, and never quantized. `index` is the pad whose
+ *   sample plays; `locks` overrides that one voice's fields exactly as a step's
+ *   does (C5b's `pitch`), and `source_index` names the pad the finger is on when
+ *   it is not this one (a chromatic or 16-velocity press sounds one sample pad
+ *   from every pad of the grid). Both are optional and both are appended, so a
+ *   call that names neither is the call it always was; a release that names a
+ *   source pad lets go of that press alone. `holdPad(track_id, bank,
  *   index)` latches the Gate voices that pad is sounding — the HOLD key — and
  *   answers `false` when the song has no Gate pad there, so a HOLD on a pad of
  *   another mode is refused (M15); `releaseHeld(track, bank, index)` lets that
@@ -2547,42 +2554,65 @@
        * through a command or a history step, and is never quantized to the bar.
        * A `oneshot` pad plays to its end; a `gate` pad holds until
        * `liveRelease`.
+       *
+       * `index` is the pad whose sample plays. `locks` overrides that one
+       * voice's fields the way a step's locks do, and `sourceIndex` is the pad
+       * the finger is on when the press sounds another pad's sample (a chromatic
+       * or 16-velocity press). Both are optional and both are appended, so the
+       * four-argument call sends the message it always did.
        * @param {string} trackId
        * @param {string} bankId
-       * @param {number} index the pad, 0-15
+       * @param {number} index the pad whose sample plays, 0-15
        * @param {number} velocity 1-127
+       * @param {object} [locks] one voice's overrides, as a step's
+       * @param {number} [sourceIndex] the pad that was pressed, 0-15
        * @returns {void}
        */
-      livePad(trackId, bankId, index, velocity) {
+      livePad(trackId, bankId, index, velocity, locks, sourceIndex) {
         const v = Number(velocity);
-        post({
+        const message = {
           type: "live",
           track_id: String(trackId),
           bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
           index: Math.trunc(Number(index) || 0),
           v: Number.isFinite(v) ? v : 127,
           on: true,
-        });
+        };
+        if (locks && typeof locks === "object") message.locks = locks;
+        if (sourceIndex !== undefined && sourceIndex !== null) {
+          message.source_index = Math.trunc(Number(sourceIndex) || 0);
+        }
+        post(message);
       },
 
       /**
        * Release the `gate` voices one pad's live presses started. A `oneshot`
        * voice is left alone: a one-shot pad plays to the end of its range, as
        * `livePad` says.
+       *
+       * A `sourceIndex` lets go of only the press on that pad: one sample pad
+       * can carry a chord of chromatic presses, and a lifted finger ends its own
+       * note. A call that names none releases every Gate voice of the pad, which
+       * is what it always did.
        * @param {string} trackId
        * @param {string} bankId
-       * @param {number} index the pad, 0-15
+       * @param {number} index the pad whose sample plays, 0-15
+       * @param {number} [sourceIndex] the pad that was let go of, 0-15
        * @returns {void}
        */
-      liveRelease(trackId, bankId, index) {
-        post({
+      liveRelease(trackId, bankId, index, sourceIndex) {
+        const message = {
           type: "live",
           track_id: String(trackId),
           bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
           index: Math.trunc(Number(index) || 0),
           v: 0,
           on: false,
-        });
+        };
+        if (sourceIndex !== undefined && sourceIndex !== null) {
+          message.source_index = Math.trunc(Number(sourceIndex) || 0);
+        }
+        post(message);
       },
 
       /**

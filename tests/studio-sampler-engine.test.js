@@ -2401,6 +2401,28 @@ function pressPad(engine, index, on = true) {
   engine.post({ type: "live", track_id: "track-1", bank_id: BANK, index, v: on ? 127 : 0, on });
 }
 
+/**
+ * Press or let go of one pad from one finger, which may be on another pad than
+ * the sample pad the press sounds: `sourceIndex` travels with the press, the way
+ * a chromatic or 16-velocity pad's does.
+ * @param {object} engine a processor from `createProcessor`
+ * @param {number} index the pad whose sample plays
+ * @param {number} sourceIndex the pad the finger is on
+ * @param {boolean} [on]
+ * @returns {void}
+ */
+function pressSourcePad(engine, index, sourceIndex, on = true) {
+  engine.post({
+    type: "live",
+    track_id: "track-1",
+    bank_id: BANK,
+    index,
+    v: on ? 127 : 0,
+    on,
+    source_index: sourceIndex,
+  });
+}
+
 test("M1 gate: plays while it is held and the release runs the envelope's release", async () => {
   const song = kitSong({ pads: [pad("track-1", 0, { mode: "gate", release_ms: 5 })] });
   const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
@@ -2668,6 +2690,274 @@ test("M9 reverse+pingpong starts backwards and reflects at each end", async () =
   assertLevel(out.left[9000], (4202 / 100000) * CENTRE, "coming back up the range");
   assertLevel(out.left[9598], (4800 / 100000) * CENTRE, "and it reaches the range's end again");
   assertLevel(out.left[9599], (4799 / 100000) * CENTRE, "reflecting there too");
+});
+
+// --- live press identity: the source pad (C1c) -------------------------------
+
+// A chromatic or 16-velocity pad prints one sample onto every pad of the grid,
+// so each press carries the pad it is ON (`source_index`) beside the sample pad
+// it sounds (`index`). The source pad is what the page lights, what a lifted
+// finger releases and what a chord note is: one sample pad can carry several
+// presses at once.
+
+/**
+ * One voice of a chord: a constant 0.4 sample at velocity 127, panned centre.
+ * Three of them still sum below the master's clip, so a chord's level names how
+ * many notes are sounding.
+ */
+const CHORD_VOICE = 0.4 * CENTRE;
+
+test("a three-finger chord on a Gate pad releases one finger at a time", async () => {
+  const song = kitSong({
+    pads: [
+      pad("track-1", 0, { mode: "gate" }),
+      pad("track-1", 1, { mode: "gate" }),
+      pad("track-1", 2, { mode: "gate" }),
+    ],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.4)] }]);
+
+  // Three fingers on pads 0, 1 and 2, all sounding pad 0's sample: one sample
+  // pad, three presses of its own Gate voice.
+  pressSourcePad(engine, 0, 0);
+  pressSourcePad(engine, 0, 1);
+  pressSourcePad(engine, 0, 2);
+  const chord = await engine.process(128, 512);
+  for (const at of [0, 1, 200, 511]) assertLevel(chord.left[at], 3 * CHORD_VOICE, `frame ${at} holds all three fingers`);
+  assert.equal(soundingOf(recordOf(engine, "track-1")).length, 3, "three presses, three voices");
+
+  // The middle finger lifts: only its own voice is released.
+  pressSourcePad(engine, 0, 1, false);
+  const two = await engine.process(128, 512);
+  for (const at of [0, 1, 200, 511]) assertLevel(two.left[at], 2 * CHORD_VOICE, `frame ${at} holds the two fingers still down`);
+
+  pressSourcePad(engine, 0, 2, false);
+  const one = await engine.process(128, 512);
+  for (const at of [0, 1, 200, 511]) assertLevel(one.left[at], CHORD_VOICE, `frame ${at} holds only the first finger`);
+
+  pressSourcePad(engine, 0, 0, false);
+  const none = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(none.left), 0, "the chord is over once every finger is up");
+});
+
+test("each finger's hit event and light is its own pad", async () => {
+  const song = kitSong({
+    pads: [
+      pad("track-1", 0, { mode: "gate" }),
+      pad("track-1", 1, { mode: "gate" }),
+      pad("track-1", 2, { mode: "gate" }),
+    ],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressSourcePad(engine, 0, 0);
+  pressSourcePad(engine, 0, 1);
+  pressSourcePad(engine, 0, 2);
+  await engine.process(128, 128);
+
+  const hits = allPadEvents(engine.messages).filter((event) => event.kind === "hit");
+  assert.deepEqual(
+    Array.from(hits, (event) => event.index),
+    [0, 1, 2],
+    "each finger's hit names the pad it is on, not the sample pad",
+  );
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [
+      ["track-1", BANK, 0, StudioPadEvents.STATE_ON],
+      ["track-1", BANK, 1, StudioPadEvents.STATE_ON],
+      ["track-1", BANK, 2, StudioPadEvents.STATE_ON],
+    ],
+    "and each of those pads lights, none of them twice",
+  );
+
+  // The lights follow the fingers: lifting the middle one darkens its own pad.
+  pressSourcePad(engine, 0, 1, false);
+  await engine.process(128, 512);
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF)),
+    [["track-1", BANK, 1, StudioPadEvents.STATE_OFF]],
+    "only the lifted finger's pad goes dark",
+  );
+
+  // The panel's own path: the engine client carries the press's locks and the
+  // pad it was pressed on through to the same live message.
+  const frames = 4800;
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: 256,
+    sampleRate: SAMPLE_RATE,
+  });
+  let client = null;
+  let rendered = false;
+  try {
+    client = await studioEngine.create(context, { assetBytes: ASSETS });
+    const reported = [];
+    client.onPadEvent((event) => {
+      if (event.kind === "hit") reported.push(event.index);
+    });
+    await client.loadSample(SAMPLE_ID, [Float32Array.from(ramp(frames))], SAMPLE_RATE);
+    client.setSong(kitSong({ pads: [pad("track-1", 0, { mode: "gate" })], frames }));
+    client.node.connect(context.destination);
+    await client.flush();
+    client.play();
+    // Pressed on pad 5 while playing pad 0's sample, with a pitch lock of an
+    // octave: the hit is pad 5's and the voice reads every other frame.
+    client.livePad("track-1", BANK, 0, 127, { pitch: 12 }, 5);
+    await client.flush();
+    const buffer = await context.startRendering();
+    rendered = true;
+    const left = new Float32Array(buffer.length);
+    buffer.copyFromChannel(left, 0);
+    assert.deepEqual(reported, [5], "the client hands the pressed pad through as the hit's pad");
+    assertLevel(left[1], rampLevel(2), "and the press's locks reach the voice");
+  } finally {
+    if (client) client.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
+test("a Normal pad's chord notes do not restart each other", async () => {
+  const frames = 4800;
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "normal" }), pad("track-1", 1), pad("track-1", 2)],
+    frames,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [ramp(frames)] }]);
+
+  // A ramp names the read position, so three notes that start together read the
+  // same frame: any one of them being faded would show as a lower level.
+  pressSourcePad(engine, 0, 0);
+  pressSourcePad(engine, 0, 1);
+  pressSourcePad(engine, 0, 2);
+  const chord = await engine.process(128, 512);
+  for (const at of [0, 1, 200, 511]) {
+    assertLevel(chord.left[at], 3 * rampLevel(at), `frame ${at} holds three notes on the one sample pad`, 1e-7);
+  }
+
+  // Pressing one note again restarts that note only.
+  pressSourcePad(engine, 0, 1);
+  // Read before rendering: the restarted note is the one fading, and the two
+  // untouched notes are not.
+  const voices = soundingOf(recordOf(engine, "track-1"));
+  assert.deepEqual(
+    Array.from(voices.filter((voice) => voice.fadeRemaining > 0), (voice) => voice.source_index),
+    [1],
+    "the press restarts its own source pad's note and no other",
+  );
+  assert.deepEqual(
+    Array.from(voices, (voice) => voice.source_index).sort(),
+    [0, 1, 1, 2],
+    "and the chord's other two notes still sound beside the restarted one",
+  );
+  const restarted = await engine.process(128, 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // 64 frames later the restarted note is the only one of its pad left, and the
+  // two untouched notes carry on from where they were.
+  assertLevel(
+    restarted.left[64],
+    2 * rampLevel(512 + 64) + rampLevel(64),
+    "the other two notes are still sounding 64 frames later",
+    1e-7,
+  );
+});
+
+test("a mute group does not cut voices of different source_index on one sample pad, and still cuts another pad's voices", async () => {
+  const song = kitSong({
+    pads: [
+      pad("track-1", 0, { mode: "gate", choke: 1 }),
+      pad("track-1", 1, { mode: "gate", choke: 1 }),
+      pad("track-1", 2, { mode: "gate", choke: 1 }),
+    ],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  // Two fingers on pads 0 and 1, both sounding pad 0's sample: the same mute
+  // group and the very same sample pad, so the second press does not cut the
+  // first. A chord is not its own choke.
+  pressSourcePad(engine, 0, 0);
+  pressSourcePad(engine, 0, 1);
+  const chord = await engine.process(128, 512);
+  for (const at of [0, 1, 200, 511]) {
+    assertLevel(chord.left[at], 2 * ONE_VOICE, `frame ${at} holds both notes of the chord`);
+  }
+
+  // A press on another pad of the group still cuts them, both at once.
+  pressPad(engine, 2);
+  // Read before rendering: the chord has begun its fade and the new pad's voice
+  // is the only one that is not fading.
+  assert.deepEqual(
+    Array.from(soundingOf(recordOf(engine, "track-1")), (voice) => [voice.source_index, voice.fadeRemaining > 0]),
+    [
+      [0, true],
+      [1, true],
+      [2, false],
+    ],
+    "another pad's press fades the whole chord and starts its own voice",
+  );
+  const cut = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(cut.left[64], ONE_VOICE, "64 frames later only the pad that cut is left", 1e-7);
+});
+
+test("a press with no source_index behaves exactly as before", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "gate", release_ms: 5 })] });
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
+
+  /** One live message, with a source pad only when the test names one. */
+  const liveMessage = (on, sourceIndex) => {
+    const message = { type: "live", track_id: "track-1", bank_id: BANK, index: 0, v: on ? 127 : 0, on };
+    if (sourceIndex !== undefined) message.source_index = sourceIndex;
+    return message;
+  };
+
+  /** Press, hold a block, let go, hold another: the very same hand, twice. */
+  const renderPress = async (sourceIndex) => {
+    const engine = await createProcessor(song, samples);
+    engine.post({ type: "pad_events_on", on: true });
+    engine.post(liveMessage(true, sourceIndex));
+    const held = await engine.process(128, 512);
+    const voice = soundingOf(recordOf(engine, "track-1"))[0];
+    engine.post(liveMessage(false, sourceIndex));
+    const released = await engine.process(128, 512);
+    assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+    return { held, released, voice, engine };
+  };
+
+  const before = await renderPress(undefined);
+  const named = await renderPress(0);
+  assert.ok(peakOf(before.held.left) > 0.01, "the pad has to sound, so the two renders really are compared");
+  assert.deepEqual(before.held.left, named.held.left, "a press that names no source pad sounds as it did");
+  assert.deepEqual(before.held.right, named.held.right, "and none of the right channel moved");
+  assert.deepEqual(before.released.left, named.released.left, "the release sounds as it did too");
+  assert.equal(before.voice.source_index, 0, "a press on the pad itself records that pad as its source");
+  /** One engine's posts as this realm reads them: frame, pad, kind and value. */
+  const eventsOf = (engine) =>
+    Array.from(allPadEvents(engine.messages), (event) => [
+      event.frame,
+      event.index,
+      event.kind,
+      event.kind === "hit" ? event.v : event.state,
+    ]);
+  assert.deepEqual(eventsOf(before.engine), eventsOf(named.engine), "and reports the same hit and the same light");
+
+  // A release that names no source pad still lets go of every Gate voice of the
+  // pad, which is what a release always did.
+  const all = await createProcessor(song, samples);
+  all.post(liveMessage(true, undefined));
+  all.post(liveMessage(true, 1));
+  await all.process(128, 512);
+  assert.equal(soundingOf(recordOf(all, "track-1")).length, 2, "two presses sound together");
+  all.post(liveMessage(false, undefined));
+  await all.process(128, 512);
+  assert.deepEqual(all.errors, [], "the processor must render without a fault");
+  assert.equal(
+    soundingOf(recordOf(all, "track-1")).length,
+    0,
+    "a release that names no source pad releases the whole pad",
+  );
 });
 
 // --- HOLD: the latch a Gate pad can carry (C1a) ------------------------------

@@ -194,7 +194,13 @@
  *   Neither touches the song, and an ordinary song update never sends one.
  * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
- *   start never goes through history and is never quantized. A release only
+ *   start never goes through history and is never quantized. `index` is the pad
+ *   whose sample plays; an optional `locks` object overrides that one voice's
+ *   fields exactly as a step's does, and an optional `source_index` names the pad
+ *   the finger is on when it is not this one (a chromatic or 16-velocity press
+ *   sounds the selected pad's sample from every pad of the grid). The source pad
+ *   is the one the page lights and the one a release matches, so one sample pad
+ *   can carry a chord. A release only
  *   releases `gate` voices: a `oneshot` pad that was pressed plays to its end,
  *   and a HELD voice is left alone (`{type:"hold"}` below).
  * - **HOLD:** `{type:"hold", track_id, bank_id, index}` latches the `gate`
@@ -8178,7 +8184,8 @@
      * 0.25×..4× (`keep_pitch` is reserved and is not read); and `hold_ms` is the
      * level-1 hold the voice sits in between its attack and its decay.
      * @param {{track_id: string, bank_id: string, index: number, v: number,
-     *          locks?: object, gate_frames?: number, clip_id?: string}} event
+     *          locks?: object, source_index?: number, gate_frames?: number,
+     *          clip_id?: string}} event
      * @param {boolean} live whether this is a live press rather than a step
      * @returns {void}
      */
@@ -8187,6 +8194,13 @@
       if (!record) return;
       const bankId = asId(event.bank_id);
       const index = Math.trunc(Number(event.index) || 0);
+      // The pad the finger is really on. A chromatic or 16-velocity press sounds
+      // the same sample pad from every pad of the grid, so the pressed pad
+      // travels alongside it; a trigger that names none pressed this very pad.
+      const sourceIndex =
+        event.source_index === undefined || event.source_index === null
+          ? index
+          : Math.trunc(Number(event.source_index) || 0);
       const pad = this.pads.get(padKey(event.track_id, bankId, index));
       if (!pad) return;
 
@@ -8279,6 +8293,7 @@
         trackId: asId(event.track_id),
         bankId: bankId,
         index: index,
+        source_index: sourceIndex,
         serial: (this.voiceSerial += 1),
         sampleRate: sampleRate,
       });
@@ -8305,9 +8320,10 @@
       // references, so a start still allocates nothing.
       voice.sample_id = sampleId;
       voice.slice_id = asId(pad.slice_id);
-      // The pad the panel lights for this voice. C1c (chromatic pads) moves this
-      // off the pad's own index; every pad event and every light reads it here.
-      voice.light_index = index;
+      // The pad the panel lights for this voice: the pad that was pressed, which
+      // is the sample pad for an ordinary press and the finger's own pad for a
+      // chromatic one. Every pad event and every light reads it here.
+      voice.light_index = sourceIndex;
       // The clip this voice belongs to: a step's voice is owned by the clip that
       // played the step, so it ends when its track moves to another clip; a
       // live press belongs to no clip and survives a scene launch.
@@ -8351,24 +8367,29 @@
       voice.tuned_resonance = voice.motion_resonance;
 
       // A new voice in choke group n cuts every other voice of that group on
-      // this track, over the crossfade length.
+      // this track, over the crossfade length. A chord on a chromatic pad is
+      // several presses of one sample pad inside one group, and a press must not
+      // cut its own pad's other notes: only another pad's voices go.
       const choke = Math.trunc(Number(pad.choke) || 0);
       if (choke > 0) {
         for (const other of record.voices) {
           if (other === voice) continue;
           if (!other.sounding || other.choke !== choke) continue;
+          if (other.index === index && other.source_index !== sourceIndex) continue;
           StudioSamplerVoice.beginFadeOut(other);
         }
       }
 
-      // Normal without Loop restarts: every other voice of this very pad fades
+      // Normal without Loop restarts: every other voice of this very press fades
       // out over the crossfade length while the new one starts, so a press never
-      // overlaps the one before it. With Loop on the press toggled instead (see
-      // above), so this never runs for a looping pad.
+      // overlaps the one before it. Another source pad of the same sample pad is
+      // another note of the chord, and is left alone. With Loop on the press
+      // toggled instead (see above), so this never runs for a looping pad.
       if (mode === "normal" && !looping) {
         for (const other of record.voices) {
           if (other === voice || !other.sounding) continue;
           if (other.bankId !== bankId || other.index !== index) continue;
+          if (other.source_index !== sourceIndex) continue;
           StudioSamplerVoice.beginFadeOut(other);
         }
       }
@@ -8555,14 +8576,21 @@
 
     /**
      * A live pad message: a press starts the pad's voice (never through
-     * history, never quantized), a release lets the `gate` voices that pad
+     * history, never quantized), a release lets the `gate` voices that press
      * started go. A `oneshot` pad keeps playing to the end of its range: letting
      * go of the key does not cut a one-shot sound short.
+     *
+     * One sample pad can carry several presses at once (a chromatic pad sounds
+     * its sample from every pad of the grid), each with its own `source_index`.
+     * A release that names a source pad lets go of that press's voice only, so a
+     * chord's fingers lift one at a time; a release that names none is the whole
+     * pad's, as every release was before source pads existed.
      *
      * A HELD voice is left alone here: the operator's HOLD outranks letting go of
      * the pad (and the gate countdown that would end it), and only
      * `release_held`, a Stop or a fade lets a held voice go.
-     * @param {{track_id: string, bank_id: string, index: number, v: number, on: boolean}} event
+     * @param {{track_id: string, bank_id: string, index: number, v: number,
+     *          on: boolean, locks?: object, source_index?: number}} event
      * @returns {void}
      */
     live(event) {
@@ -8574,10 +8602,13 @@
       if (!record) return;
       const bankId = asId(event.bank_id);
       const index = Math.trunc(Number(event.index) || 0);
+      const hasSource = event.source_index !== undefined && event.source_index !== null;
+      const sourceIndex = hasSource ? Math.trunc(Number(event.source_index) || 0) : 0;
       for (const voice of record.voices) {
         if (!voice.sounding || voice.held) continue;
         if (voice.mode !== "gate") continue;
         if (voice.bankId !== bankId || voice.index !== index) continue;
+        if (hasSource && voice.source_index !== sourceIndex) continue;
         StudioSamplerVoice.release(voice);
       }
     }
