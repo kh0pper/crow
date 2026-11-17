@@ -61,10 +61,25 @@
 // inline text rule rescans the rest of the space run at every position of its
 // lazy `[\s\S]*?`), which no budget or charge could see and which the bot path
 // never had because its math extension's start() already caps each text-rule
-// scan at 4,096 characters. The owner path now carries the same window; see
+// scan at about 4,096 characters. The owner path now carries the same window; see
 // "--- plain ASCII spaces: a FIFTH inline-lexer quadratic" below for what must
 // stay true (bounds at 64 KB / 128 KB / 1 MiB, and a 3,000-document
 // differential that must be byte-identical with the window on and off).
+//
+// What the window may NOT do, and what most of the boundary tests below are
+// about: marked turns a start() hint into `l = e.substring(0, p + 1)` and hands
+// only that SLICE to the text tokenizer, so an arbitrary cut reads as END OF
+// INPUT to marked's own regexes. A cut inside `https://…` loses the autolink,
+// a cut inside `foobar@example.com` links to `oobar@example.com`, and a cut
+// between the two spaces of `x  \nnext` leaves a stray space before the <br>
+// (the old fixed 4,096 cut did all three; 3 of 200 offsets in a realistic long
+// paragraph with a link near the boundary already differed). Both paths now cut
+// ONLY between two characters of one run of spaces/tabs, never inside a run that
+// ends in a line break, and not at all in a stretch with no such run (which is
+// linear anyway — see textRunCut in servers/blog/renderer.js). That is the
+// invariant the straddle sweep below checks token by token, at offsets -3..+5
+// around the old cut, on both paths (the bot path's window has its own seam,
+// setBotTextWindowEnabled, so the comparison is possible there too).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -73,9 +88,14 @@ import {
   renderMarkdown, renderBotMarkdown, BOT_MD_MAX_INPUT,
   setMdBrScanGuardEnabled, mdBrScanStats, MD_BR_SCAN_MAX,
   setOwnerTextWindowEnabled, mdOwnerTextWindowStats,
+  setBotTextWindowEnabled, mdBotTextWindowStats,
 } from "../servers/blog/renderer.js";
 
 const CAP = BOT_MD_MAX_INPUT; // renderBotMarkdown refuses only ABOVE this
+
+/** The window both paths use (START_WINDOW in servers/blog/renderer.js): the
+ *  largest preferred cut index. The old fixed cut was exactly here. */
+const CUT_WINDOW = 4096;
 
 const OWNER_HEAD = 128 * 1024; // the owner path's markdown-parsed head
 const CHUNKED = 1024 * 1024; // a document the owner path renders in chunks
@@ -448,15 +468,25 @@ test("differential: 2,000 seeded documents mixing normal lines with Unicode-whit
 // pre-existing on the owner path (marked on its own measures the same) and no
 // other guard can see it — spaces are no delimiter, no protocol word, no `@`
 // and no line break — and the BOT path never had it because its math
-// extension's inline start() caps each text-rule scan at 4,096 characters
-// (START_WINDOW). The owner path now carries the same window (see "THE OWNER
-// PATH'S TEXT-RUN WINDOW" in servers/blog/renderer.js), from an extension with
-// a start() and a tokenizer that never matches.
+// extension's inline start() caps each text-rule scan at about 4,096
+// characters (START_WINDOW). The owner path now carries the same window (see
+// "THE OWNER PATH'S TEXT-RUN WINDOW" in servers/blog/renderer.js), from an
+// extension with a start() and a tokenizer that never matches. Both paths cut
+// only between two characters of one run of spaces/tabs — never inside a run
+// that ends in a line break, and not at all when there is no such run — because
+// marked gives the text tokenizer a SLICE of the source, so an arbitrary cut
+// reads as end-of-input (see the straddle sweep below).
 //
-// Measured on this tree, CPU ms of one whole render in a worker (before → after):
+// Measured on this tree, CPU ms of one whole render in a worker (before ->
+// after, the same box):
 //
 //   'a' + ' ' x N + 'b'      64 KB          128 KB
-//   owner path            ~1,735 → 106   ~5,826 → 196
+//   owner path            ~1,366 -> 124   ~5,523 -> 213
+//
+// (each "after" number is one of two runs — 124–167 and 213–252 — because this
+// box varies by up to ~35% between runs) and a line with single spaces only (no
+// cut possible, see below) is linear: ~19 ms at 64 KB on the bot path, ~21 ms
+// at the 128 KB owner head.
 //
 // What must stay true:
 //   - the shape renders the 64 KB and the 128 KB owner head in < 1,000 ms, and
@@ -465,13 +495,20 @@ test("differential: 2,000 seeded documents mixing normal lines with Unicode-whit
 //   - the CHUNKED owner path renders 1 MiB of 120 KB space runs (separated by
 //     the blank lines that make them separate chunks) and one 1 MiB space line
 //     in < 2,500 ms in total;
-//   - the output is unchanged: a cut at the window is not a lexical boundary —
-//     marked's text tokenizer keeps the RAW source and merges the pieces
-//     (`p.raw += o.raw, p.text += o.text`) — so 3,000 seeded documents plus a
-//     set of boundary documents (an HTML entity straddling the cut, mixed
-//     spaces and tabs, math-like `$` text, every container) must render BYTE
-//     IDENTICALLY with the window on and with it off, and the corpus must
-//     really reach the window (the cuts are counted);
+//   - the output is unchanged: the cut sits BETWEEN two characters of one run of
+//     spaces/tabs, where nothing in marked's inline rules can start or stop, so
+//     the pieces merge back into the same raw text (`p.raw += o.raw, p.text +=
+//     o.text`) — 3,000 seeded documents plus a set of boundary documents (an
+//     HTML entity straddling the cut, mixed spaces and tabs, math-like `$` text,
+//     every container) must render BYTE IDENTICALLY with the window on and with
+//     it off, and the corpus must really reach the window (the cuts are
+//     counted);
+//   - a token may never be split by the cut: URLs (https://, http://, www.,
+//     ftp://), an email's local part and its domain, and both halves of a
+//     two-space hard break, swept across the old 4,096 boundary at offsets
+//     -3..+5, render identically with the window on and off on BOTH paths, and
+//     a realistic long paragraph with a link near the cut does too at 200
+//     offsets;
 //   - every other pin in the suite is untouched (they are run alongside this
 //     file, and the pins in this one are checked above).
 /** `prefix` + spaces + `suffix`, exactly `n` characters — every container shape
@@ -530,8 +567,63 @@ test("the CHUNKED owner path renders 1 MiB of plain-space runs in < 2500 ms in t
   t.diagnostic(`1 MiB space runs: ${r.ms.toFixed(0)} ms; one 1 MiB line: ${r2.ms.toFixed(0)} ms`);
 });
 
-// Documents that put something interesting exactly AT the window boundary: the
-// cut is a character count, so whatever sits there must not be able to notice.
+// The other side of the cut rule: a stretch with no two adjacent spaces/tabs has
+// no quadratic space run for the window to break up, so it must be left uncut
+// entirely — and that must stay linear (marked's text rule walks it once, not
+// once per position, because there is no ` *\n` to look for).
+test("a stretch with no double space is left uncut and stays linear (bot 64 KB, owner 128 KB)", async (t) => {
+  const botSrc = rep("word ", CAP);
+  const ownerSrc = rep("word ", OWNER_HEAD);
+  assert.equal(botSrc.length, CAP);
+  assert.equal(ownerSrc.length, OWNER_HEAD);
+  // In-process, so the counters belong to the render under test.
+  const botOnce = renderBotMarkdown(botSrc);
+  assert.equal(mdBotTextWindowStats.cuts, 0, "the bot window does not cut a single-space line");
+  const ownerOnce = renderMarkdown(ownerSrc);
+  assert.equal(mdOwnerTextWindowStats.cuts, 0, "the owner window does not cut a single-space line");
+  assert.ok(botOnce.length > 0 && ownerOnce.length > 0, "both paths still render the words");
+
+  const bot = await renderInWorker("bot", botSrc);
+  assert.ok(bot.ms < 500, `a 64 KB single-space line took ${bot.ms.toFixed(0)} ms on the bot path (bound 500 ms)`);
+  const owner = await renderInWorker("owner", ownerSrc);
+  assert.ok(owner.ms < 1000, `a 128 KB single-space line took ${owner.ms.toFixed(0)} ms on the owner path (bound 1000 ms)`);
+  t.diagnostic(`single-space lines (no cut): bot 64 KB ${bot.ms.toFixed(0)} ms, owner 128 KB ${owner.ms.toFixed(0)} ms`);
+});
+
+/** Every token an arbitrary cut used to be able to split: the four URL
+ *  spellings marked autolinks, an email's local part and its domain, and both
+ *  halves of a two-space hard break. `inner` is how many of the token's
+ *  characters sit before the boundary. */
+const STRADDLE_TOKENS = [
+  ["https:// (first character)", "https://example.com/p tail", 0],
+  ["https:// (inside the protocol)", "https://example.com/p tail", 4],
+  ["http://", "http://example.com/p tail", 2],
+  ["www.", "www.example.com/p tail", 1],
+  ["ftp://", "ftp://example.com/p tail", 3],
+  ["an email (local part)", "foobar@example.com tail", 2],
+  ["an email (domain)", "foobar@example.com tail", 10],
+  ["a hard break (its spaces)", "x  \nnext tail", 1],
+  ["a hard break (its newline)", "x  \nnext tail", 3],
+];
+
+/** `token` placed so that its `inner`th character sits at document index
+ *  CUT_WINDOW + offset — the fixed 4,096 cut landed inside it for offsets
+ *  -3..+5. The filler before it is one long run of spaces, which is where the
+ *  cut may (and must) land instead. */
+function straddlingDoc(token, inner, offset) {
+  const pad = Math.max(1, CUT_WINDOW + offset - inner - 1);
+  return "a" + " ".repeat(pad) + token;
+}
+
+// Documents that put something interesting exactly AT the window boundary. The
+// window is a character count, so whatever sits near it must not be able to
+// notice — and with the fixed 4,096 cut things did: a token that crossed the
+// cut was never matched (the text rule stops at the slice's end, which reads as
+// end-of-input), so a URL became plain text, an email linked to the wrong
+// address and a hard break grew a stray space. The window may now only cut
+// between two characters of one run of spaces/tabs (never inside a run that
+// ends in a line break), so everything below must render exactly as it does
+// with the window off.
 // (`&#123;` is the case worth naming: `&` is the one character whose escaping
 // looks at what follows it — measured identical, because marked's inline text
 // tokenizer keeps the raw source and merges the pieces.)
@@ -544,7 +636,52 @@ const BOUNDARY_DOCS = [
   "    a" + " ".repeat(5000) + "b\n",
   "```\na" + " ".repeat(5000) + "b\n```\n",
   "*a" + " ".repeat(5000) + "b* [link](/blog/x) `code` **strong** _em_\n",
+  // …and every token a cut must never split, at every offset -3..+5.
+  ...STRADDLE_TOKENS.flatMap(([, token, inner]) =>
+    Array.from({ length: 9 }, (_, k) => straddlingDoc(token, inner, k - 3))),
 ];
+
+test("a token straddling the cut renders identically with the text-run window on and off, on BOTH paths (offsets -3..+5)", () => {
+  let compared = 0;
+  let ownerCuts = 0;
+  let botCuts = 0;
+  for (const [name, token, inner] of STRADDLE_TOKENS) {
+    for (let offset = -3; offset <= 5; offset++) {
+      const doc = straddlingDoc(token, inner, offset);
+      const botOn = renderBotMarkdown(doc);
+      const botCut = mdBotTextWindowStats.cuts;
+      const ownerOn = renderMarkdown(doc);
+      const ownerCut = mdOwnerTextWindowStats.cuts;
+      ownerCuts += ownerCut;
+      botCuts += botCut;
+      setBotTextWindowEnabled(false);
+      setOwnerTextWindowEnabled(false);
+      let botOff;
+      let ownerOff;
+      try {
+        botOff = renderBotMarkdown(doc);
+        assert.equal(mdBotTextWindowStats.cuts, 0, `${name} @ ${offset}: the bot window is off`);
+        ownerOff = renderMarkdown(doc);
+        assert.equal(mdOwnerTextWindowStats.cuts, 0, `${name} @ ${offset}: the owner window is off`);
+      } finally {
+        // Always back on: every later render in this file must be windowed.
+        setBotTextWindowEnabled(true);
+        setOwnerTextWindowEnabled(true);
+      }
+      assert.equal(botOn, botOff,
+        `${name} at offset ${offset} (bot path) changed with the window (${botCut} cuts): ${JSON.stringify(doc.slice(-40))}\n`
+        + `  windowed:  ${JSON.stringify(botOn)}\n  unlimited: ${JSON.stringify(botOff)}`);
+      assert.equal(ownerOn, ownerOff,
+        `${name} at offset ${offset} (owner path) changed with the window (${ownerCut} cuts): ${JSON.stringify(doc.slice(-40))}\n`
+        + `  windowed:  ${JSON.stringify(ownerOn)}\n  unlimited: ${JSON.stringify(ownerOff)}`);
+      compared++;
+    }
+  }
+  assert.equal(compared, STRADDLE_TOKENS.length * 9, "every token was checked at every offset");
+  // Not vacuous: the fixtures are long enough that both windows really cut.
+  assert.equal(ownerCuts, compared, `the owner window cut every fixture (${ownerCuts} of ${compared})`);
+  assert.equal(botCuts, compared, `the bot window cut every fixture (${botCuts} of ${compared})`);
+});
 
 test("the owner text-run window is on by default, counts its cuts, and boundary documents render identically with it on and off", () => {
   // On by default: a > 4 KB run is cut without anyone setting a switch.
@@ -568,6 +705,87 @@ test("the owner text-run window is on by default, counts its cuts, and boundary 
       `a window boundary changed the render of ${JSON.stringify(doc.slice(0, 60))} (${cuts} cuts)\n`
       + `  on:  ${JSON.stringify(on)}\n  off: ${JSON.stringify(off)}`);
   }
+});
+
+/** `n` characters of ordinary prose words separated by single spaces (the
+ *  last word may be cut short — that is still prose). */
+function proseFiller(n, separator = " ") {
+  let s = "word";
+  while (s.length < n) s += separator + "word";
+  return s.slice(0, n);
+}
+
+// The shape a real long post has: one long single-line paragraph, a link near
+// the window, and words separated by single spaces — so the window mostly has
+// nothing to cut (where a sliced filler happens to end on a space there is one
+// double space, and that is the whole cut) and must leave the paragraph exactly
+// as marked would. The reported regression was here: with the fixed 4,096 cut,
+// 3 of these 200 offsets put the cut inside `https://example.com/page` and the
+// link came out as plain text.
+test("a realistic long paragraph with a link near the cut renders identically at 200 offsets on both paths", (t) => {
+  const tail = proseFiller(3600);
+  let differed = 0;
+  let cut = 0;
+  for (let offset = -100; offset < 100; offset++) {
+    const doc = proseFiller(4000 + offset) + " see https://example.com/page " + tail + " end.";
+    const botOn = renderBotMarkdown(doc);
+    const ownerOn = renderMarkdown(doc);
+    cut += mdOwnerTextWindowStats.cuts + mdBotTextWindowStats.cuts;
+    setBotTextWindowEnabled(false);
+    setOwnerTextWindowEnabled(false);
+    let botOff;
+    let ownerOff;
+    try {
+      botOff = renderBotMarkdown(doc);
+      ownerOff = renderMarkdown(doc);
+    } finally {
+      setBotTextWindowEnabled(true);
+      setOwnerTextWindowEnabled(true);
+    }
+    if (botOn !== botOff || ownerOn !== ownerOff) differed++;
+    assert.equal(botOn, botOff,
+      `offset ${offset} (bot path) changed with the window: ${JSON.stringify(botOn.slice(3800, 4300))}\n`
+      + `  vs ${JSON.stringify(botOff.slice(3800, 4300))}`);
+    assert.equal(ownerOn, ownerOff,
+      `offset ${offset} (owner path) changed with the window: ${JSON.stringify(ownerOn.slice(3800, 4300))}\n`
+      + `  vs ${JSON.stringify(ownerOff.slice(3800, 4300))}`);
+    // The link really is a link either way (not just "the same plain text").
+    assert.match(ownerOn, /<a href="https:\/\/example\.com\/page"/,
+      `offset ${offset}: the owner path autolinks the URL`);
+    assert.match(botOn, /<a href="https:\/\/example\.com\/page"/,
+      `offset ${offset}: the bot path autolinks the URL`);
+  }
+  assert.equal(differed, 0, "no offset rendered differently with the window on");
+  t.diagnostic(`200 offsets around the cut: ${differed} differences, ${cut} cuts (single spaces only)`);
+
+  // The same 200 offsets written with sentence spacing (two spaces after every
+  // word): now the window really does cut, a few characters from the same link,
+  // and the sentence-spaced prose must still match the unlimited render.
+  let spacedDiffered = 0;
+  let spacedCuts = 0;
+  for (let offset = -100; offset < 100; offset++) {
+    const doc = proseFiller(4000 + offset, "  ") + " see https://example.com/page " + proseFiller(3600, "  ") + " end.";
+    const botOn = renderBotMarkdown(doc);
+    const ownerOn = renderMarkdown(doc);
+    spacedCuts += mdOwnerTextWindowStats.cuts + mdBotTextWindowStats.cuts;
+    setBotTextWindowEnabled(false);
+    setOwnerTextWindowEnabled(false);
+    let botOff;
+    let ownerOff;
+    try {
+      botOff = renderBotMarkdown(doc);
+      ownerOff = renderMarkdown(doc);
+    } finally {
+      setBotTextWindowEnabled(true);
+      setOwnerTextWindowEnabled(true);
+    }
+    if (botOn !== botOff || ownerOn !== ownerOff) spacedDiffered++;
+    assert.equal(botOn, botOff, `sentence-spaced offset ${offset} (bot path) changed with the window`);
+    assert.equal(ownerOn, ownerOff, `sentence-spaced offset ${offset} (owner path) changed with the window`);
+  }
+  assert.equal(spacedDiffered, 0, "no sentence-spaced offset rendered differently with the window on");
+  assert.ok(spacedCuts >= 200, `the window really cut the sentence-spaced paragraphs (${spacedCuts} cuts)`);
+  t.diagnostic(`200 sentence-spaced offsets around the cut: ${spacedDiffered} differences, ${spacedCuts} cuts`);
 });
 
 /** One seeded owner document: ordinary markdown (prose, indentation, hard
@@ -632,8 +850,9 @@ test("differential: 3,000 seeded owner documents render byte-identically with th
     } finally {
       setOwnerTextWindowEnabled(true);
     }
-    // Nothing changes output: a cut is not a lexical boundary at all, so this
-    // holds for EVERY document here, cut or not.
+    // Nothing changes output now: the cut sits between two characters of one
+    // space/tab run, so the pieces merge back into the same raw text. See the
+    // straddle sweep above for the tokens an arbitrary cut used to split.
     if (on !== off) stats.differed++;
     assert.equal(on, off,
       `doc #${n} (owner path) changed with the text-run window (${cuts} cuts): ${JSON.stringify(doc)}\n`
