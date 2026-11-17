@@ -402,7 +402,6 @@ test("routes accept no raw From, no headers and no envelope key", async () => {
     { from: { address: "sam@example.com" } },
     { headers: { "X-Anything": "1" } },
     { envelope: { from: ADDRESS, to: [SAM] } },
-    { bcc: [{ address: SAM }] },
   ]) {
     const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, ...extra } });
     assert.equal(res.status, 400, `${Object.keys(extra)[0]}: ${res.text}`);
@@ -532,6 +531,69 @@ test("a hand edit of a reply keeps the head's Bcc, In-Reply-To and References", 
   assert.deepEqual(head.bcc.map((entry) => entry.address), ["jo@example.com"], "the person's Bcc is carried over");
   assert.equal(head.inReplyTo, "<m-1@mail.example.test>", "the reply stays threaded");
   assert.deepEqual(head.references, ["<m-0@mail.example.test>", "<m-1@mail.example.test>"]);
+});
+
+test("a hand edit writes the Bcc it is given, keeps the head's when it is absent, and clears it when empty", async () => {
+  const s = await setup();
+  const draft = await newDraft(s, { bcc: [{ address: "jo@example.com" }] });
+  const edit = (body) => s.call("POST", `${DRAFTS}/${draft.id}/revisions`, {
+    body: { to: [{ address: SAM }], cc: [], subject: "Weekend", body: "Sunday it is.", attachments: [], ...body },
+  });
+  const headOf = async () => {
+    const row = await getDraft(s.db, draft.id);
+    return (await listRevisions(s.db, draft.id)).find((entry) => entry.rev === row.headRev);
+  };
+
+  const given = await edit({ expectHash: draft.headHash, bcc: [{ name: "Dan", address: "dan@example.com" }] });
+  assert.equal(given.status, 200, given.text);
+  const first = await headOf();
+  assert.deepEqual(first.bcc.map((entry) => entry.address), ["dan@example.com"], "the posted Bcc is stored");
+  assert.deepEqual(first.bcc.map((entry) => entry.name), ["Dan"], "with the name that was posted");
+
+  const carried = await edit({ expectHash: given.json.hash });
+  assert.equal(carried.status, 200, carried.text);
+  const second = await headOf();
+  assert.deepEqual(second.bcc.map((entry) => entry.address), ["dan@example.com"],
+    "a body with no bcc key keeps the head's, never drops it silently");
+
+  const cleared = await edit({ expectHash: carried.json.hash, bcc: [] });
+  assert.equal(cleared.status, 200, cleared.text);
+  const third = await headOf();
+  assert.deepEqual(third.bcc, [], "an explicit empty list clears it");
+});
+
+test("a Bcc is refused for the same reasons a To or a Cc is", async () => {
+  const s = await setup();
+  const draft = await newDraft(s);
+  const base = {
+    expectHash: draft.headHash,
+    to: [{ address: SAM }],
+    cc: [],
+    subject: "Weekend",
+    body: "Are we still on?",
+    attachments: [],
+  };
+  const token = `Sam <${SAM}>`;
+  const answers = [];
+
+  for (const field of ["to", "cc", "bcc"]) {
+    const listed = field === "to" ? [...base.to, { address: token }] : [{ address: token }];
+    const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, [field]: listed } });
+    assert.equal(res.status, 400, `${field}: ${res.text}`);
+    answers.push(res.json);
+  }
+  assert.deepEqual(answers[1], answers[0], "a bad Cc answers exactly what a bad To does");
+  assert.deepEqual(answers[2], answers[0], "and so does a bad Bcc");
+  assert.equal((await getDraft(s.db, draft.id)).headRev, 1, "a refused address wrote no revision");
+
+  // The route's own body cap is the same for every recipient field: the parser refuses the body whole.
+  const wide = (prefix) => Array.from({ length: 4_000 }, (_, index) => ({ address: `${prefix}${index}@example.com` }));
+  for (const field of ["to", "cc", "bcc"]) {
+    const res = await s.call("POST", `${DRAFTS}/${draft.id}/revisions`, { body: { ...base, [field]: wide(field) } });
+    assert.equal(res.status, 413, `${field}: ${res.text}`);
+    assert.equal(res.json?.error, "too_large", field);
+  }
+  assert.equal((await getDraft(s.db, draft.id)).headRev, 1);
 });
 
 test("a hand edit against a stale hash is refused changed", async () => {

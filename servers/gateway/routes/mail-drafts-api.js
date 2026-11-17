@@ -118,7 +118,7 @@ const EDITABLE_STATES = Object.freeze(["draft", "failed", "missed"]);
 /** The keys each body may carry, and nothing else: no `from`, no `headers`, no `envelope`. */
 const CREATE_KEYS = Object.freeze(["accountId", "mode", "replyToMid", "projectId", "botId", "audience"]);
 const REVISION_KEYS = Object.freeze([
-  "expectHash", "to", "cc", "subject", "body", "attachments", "cancelSchedule",
+  "expectHash", "to", "cc", "bcc", "subject", "body", "attachments", "cancelSchedule",
 ]);
 const SEND_KEYS = Object.freeze(["hash", "confirmUnknown"]);
 const SCHEDULE_KEYS = Object.freeze(["hash", "dueAt"]);
@@ -261,16 +261,23 @@ function readCreateBody(body) {
   };
 }
 
-/** The hand-edit body, or null. `cancelSchedule` is accepted and ignored: this route always cancels. */
+/**
+ * The hand-edit body, or null. `cancelSchedule` is accepted and ignored: this route always cancels.
+ * `bcc` is an address list like `to` and `cc`, and absent is not the same as empty: absent leaves the
+ * head revision's Bcc alone (a client that does not carry the field never drops it silently), an
+ * empty list clears it. `null` for `bcc` says the field was not sent at all.
+ */
 function readRevisionBody(body) {
   if (!keysWithin(body, REVISION_KEYS)) return null;
   if (typeof body.expectHash !== "string" || body.expectHash === "") return null;
-  if (!isArrayOrAbsent(body.to) || !isArrayOrAbsent(body.cc) || !isArrayOrAbsent(body.attachments)) return null;
+  if (!isArrayOrAbsent(body.to) || !isArrayOrAbsent(body.cc) || !isArrayOrAbsent(body.bcc)) return null;
+  if (!isArrayOrAbsent(body.attachments)) return null;
   if (!isStringOrAbsent(body.subject) || !isStringOrAbsent(body.body)) return null;
   return {
     expectHash: body.expectHash,
     to: Array.isArray(body.to) ? body.to : [],
     cc: Array.isArray(body.cc) ? body.cc : [],
+    bcc: Array.isArray(body.bcc) ? body.bcc : null,
     subject: typeof body.subject === "string" ? body.subject : "",
     body: typeof body.body === "string" ? body.body : "",
     attachments: Array.isArray(body.attachments) ? body.attachments : [],
@@ -692,9 +699,10 @@ export function registerDraftRoutes(router, ctx) {
   // POST /:id/revisions — the person's own edit. The store's compare-and-set on `expectHash` is the
   // guard, and `cancelSchedule: true` is what returns a scheduled draft to `draft` (so the edit is
   // never silently lost to a frozen row) and clears the tap seal in the same transaction. The body
-  // changes words, recipients and attachments only: the head revision's `bcc`, `inReplyTo` and
-  // `references` are carried over (as `mail_draft_propose` carries them), so a hand-edited reply stays
-  // threaded and keeps the audience the card showed.
+  // changes words, every recipient list (To, Cc and Bcc alike) and attachments only: the head
+  // revision's `inReplyTo` and `references` are carried over (as `mail_draft_propose` carries them),
+  // so a hand-edited reply stays threaded. A body with no `bcc` keeps the head revision's Bcc; an
+  // empty list clears it.
   router.post(`${base}/:id/revisions`, route("POST /drafts/:id/revisions", async (db, req, res) => {
     const draft = await draftFor(db, req);
     if (!draft) return sendError(res, 404, "not_found");
@@ -710,9 +718,8 @@ export function registerDraftRoutes(router, ctx) {
     const outcome = await addRevision(db, draft.id, {
       to: input.to,
       cc: input.cc,
-      // Carried from the head revision, exactly as `mail_draft_propose` does: a hand edit changes the
-      // words, never the audience or the threading. The request body cannot name them (REVISION_KEYS).
-      bcc: head.bcc,
+      // Absent keeps the Bcc the card showed; an empty list is the person clearing it.
+      bcc: input.bcc === null ? head.bcc : input.bcc,
       subject: input.subject,
       body: input.body,
       inReplyTo: head.inReplyTo,

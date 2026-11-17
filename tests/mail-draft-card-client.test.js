@@ -27,8 +27,28 @@ mkdirSync(process.env.CROW_HOME, { recursive: true });
 const REPO = new URL("..", import.meta.url).pathname;
 
 const SID = "perchlive-aaaaaaaa";
+const SECOND = "perchlive-bbbbbbbb";
 const ID = "md-0123456789abcdef";
 const HASH = "a".repeat(64);
+const MID = "<m1@mail.example.test>";
+const READER_LINK =
+  "/dashboard/mail?view=message&a=ma-0123456789abcdef&mid=%3Cm1%40mail.example.test%3E";
+
+/** Two live sessions on one roost: a switch has somewhere to switch to. */
+const TWO_SESSIONS = {
+  birds: [{
+    id: "r4",
+    name: "R4 Assistant",
+    perch_attached: true,
+    state: "working",
+    sessions: [
+      { sessionId: SID, state: "awake", cardId: null, pendingUi: false, projectId: 7 },
+      { sessionId: SECOND, state: "awake", cardId: null, pendingUi: false, projectId: 7 },
+    ],
+  }],
+};
+
+const CHANGED = "The draft just changed. Check it and press Send again.";
 
 let db, server, ownerAllowed = true;
 
@@ -124,6 +144,8 @@ async function mount(state = {}) {
   const impl = (method, path, opts) => {
     const body = opts && opts.body ? JSON.parse(opts.body) : null;
     calls.push({ method, path, body });
+    /* A test that needs a second session scripts the roost itself. */
+    if (path === "/roost" && state.roost) return makeResponse(200, state.roost);
     if (path.endsWith("/mail-drafts") && method === "GET") {
       /* The chat's own drafts. An explicit `list` wins; otherwise it is the drafts this test scripted,
          which is what a chat that made them would list. */
@@ -170,6 +192,15 @@ function transcriptText(hub) {
 }
 const posts = (calls) => calls.filter((c) => c.method !== "GET");
 const reads = (calls) => calls.filter((c) => c.method === "GET" && c.path.indexOf("/dashboard/mail/api/drafts/") === 0);
+
+/** The card's own poll: the 3 s interval it keeps while a draft is still moving. */
+const pollTimerIds = (hub) => [...hub.timerDelays].filter(([, delay]) => delay === 3000).map(([id]) => id);
+function pollTick(hub) {
+  for (const id of pollTimerIds(hub)) {
+    const fn = hub.timers.get(id);
+    if (fn) fn();
+  }
+}
 
 /* -------------------------------------------------------------------- tests */
 
@@ -409,4 +440,341 @@ test("the sid list is owner-only and flag-gated, and answers ids only", async ()
   } finally {
     process.env.CROW_MAIL = "1";
   }
+});
+
+/* ------------------------------------------------- a stale answer keeps its sentence */
+
+test("a 409 changed leaves its sentence on the card that replaces the tapped one", async () => {
+  const changed = "c".repeat(64);
+  let answered = 0;
+  const { hub, calls } = await mount({
+    drafts: {
+      [ID]: () => {
+        answered += 1;
+        if (answered === 1) return payload();
+        /* The refetch lands on a revision the person has not seen: a different head, and its hash. */
+        return payload({
+          draft: { headHash: changed, headRev: 2 },
+          head: { rev: 2, contentHash: changed, body: "Hello Sam,\nTuesday at ten works." },
+          history: [
+            { rev: 1, author: "bot", created_at: 1, note: null },
+            { rev: 2, author: "bot", created_at: 2, note: null },
+          ],
+        });
+      },
+    },
+    reply: { status: 409, json: { error: "changed", message: CHANGED } },
+  });
+  await open(hub);
+  const before = reads(calls).length;
+
+  findByClass(hub.els["perch-transcript"], "mdraft-send").onclick();
+  await settle();
+
+  assert.equal(reads(calls).length, before + 1, "the card reads the draft it no longer matches");
+  assert.equal(all(hub, "mdraft-card").length, 1, "one card: the new one");
+  assert.equal(text(hub, "mdraft-from"), "From alex · Draft 2 · Not checked for voice",
+    "the card on screen is the revision the server holds");
+  assert.equal(text(hub, "mdraft-status"), CHANGED,
+    "the sentence rides to the card that replaces the tapped one");
+  assert.equal(posts(calls).length, 1, "and nothing was posted twice");
+});
+
+test("every other stale answer refetches too, and its sentence rides to the new card", async () => {
+  const cases = [
+    { reply: { error: "frozen", state: "sending" }, notice: "This draft can no longer be changed." },
+    { reply: { error: "too_late", state: "sent", message: "It already went out." }, notice: "It already went out." },
+    { reply: { error: "not_scheduled", state: "draft" }, notice: "This draft has no scheduled send." },
+    { reply: { error: "not_discardable", state: "sent" }, notice: "This draft can no longer be discarded." },
+  ];
+  const sent = payload({
+    draft: { state: "sent", sentAt: 7 },
+    receipt: { sentAt: 7, messageId: MID, accountLabel: "alex", readerLink: null },
+  });
+
+  for (const c of cases) {
+    let answered = 0;
+    const { hub, calls } = await mount({
+      drafts: {
+        [ID]: () => {
+          answered += 1;
+          return answered === 1 ? payload({ draft: { state: "holding", holdUntil: 10 } }) : sent;
+        },
+      },
+      reply: { status: 409, json: c.reply },
+    });
+    await open(hub);
+    const before = reads(calls).length;
+
+    findByClass(hub.els["perch-transcript"], "mdraft-undo").onclick();
+    await settle();
+
+    assert.equal(reads(calls).length, before + 1, `${c.reply.error}: the card reads the draft again`);
+    assert.equal(text(hub, "mdraft-status"), c.notice, `${c.reply.error}: its sentence is on the new card`);
+  }
+
+  /* A refusal with no sentence of its own (the undo lost to a hold that had already ended) still
+     re-reads the draft; the state the card lands on is what explains it. */
+  let answered = 0;
+  const { hub, calls } = await mount({
+    drafts: {
+      [ID]: () => {
+        answered += 1;
+        return answered === 1 ? payload({ draft: { state: "holding", holdUntil: 10 } }) : sent;
+      },
+    },
+    reply: { status: 409, json: { error: "not_holding", state: "sent" } },
+  });
+  await open(hub);
+  const before = reads(calls).length;
+  findByClass(hub.els["perch-transcript"], "mdraft-undo").onclick();
+  await settle();
+  assert.equal(reads(calls).length, before + 1, "not_holding also re-reads the draft");
+  assert.match(text(hub, "mdraft-status"), /^Sent from alex at /, "the receipt is the answer here");
+});
+
+/* ------------------------------------------------------------------- the sending state */
+
+test("a sending draft has its own line and none of the controls", async () => {
+  const { hub, calls } = await mount({ drafts: { [ID]: payload({ draft: { state: "sending" } }) } });
+  await open(hub);
+
+  const status = text(hub, "mdraft-status");
+  assert.equal(status, "Sending...", "the neutral placeholder the card owns");
+  assert.notEqual(status, "Sending in 10 s", "never the hold's line");
+  for (const cls of ["mdraft-send", "mdraft-schedule", "mdraft-more", "mdraft-edit", "mdraft-undo",
+    "mdraft-confirm", "mdraft-audience"]) {
+    assert.equal(findByClass(hub.els["perch-transcript"], cls), null, `a sending draft has no ${cls}`);
+  }
+  assert.equal(posts(calls).length, 0, "and nothing to post");
+});
+
+/* ------------------------------------------------------------------------ the poll */
+
+test("a holding draft polls its own read into the receipt, and stops once it is settled", async () => {
+  let answered = 0;
+  const { hub, calls } = await mount({
+    drafts: {
+      [ID]: () => {
+        answered += 1;
+        if (answered <= 2) return payload({ draft: { state: "holding", holdUntil: 10 } });
+        return payload({
+          draft: { state: "sent", sentAt: 7 },
+          receipt: { sentAt: 7, messageId: MID, accountLabel: "alex", readerLink: null },
+        });
+      },
+    },
+  });
+  await open(hub);
+  assert.equal(text(hub, "mdraft-status"), "Sending in 10 s");
+  const card = findByClass(hub.els["perch-transcript"], "mdraft-card");
+  assert.equal(pollTimerIds(hub).length, 1, "a holding card keeps one poll");
+
+  const before = reads(calls).length;
+  pollTick(hub);
+  await settle();
+  assert.equal(reads(calls).length, before + 1, "the poll reads the draft again with no tap");
+  assert.equal(findByClass(hub.els["perch-transcript"], "mdraft-card"), card,
+    "an answer that changes nothing redraws nothing");
+  assert.equal(text(hub, "mdraft-status"), "Sending in 10 s");
+
+  pollTick(hub);
+  await settle();
+  assert.match(text(hub, "mdraft-status"), /^Sent from alex at /, "the receipt replaced the hold's line");
+  assert.ok(transcriptText(hub).includes("Sent, syncing..."), "and says the Sent copy is on its way");
+  assert.deepEqual(pollTimerIds(hub), [], "a settled draft is not polled");
+  assert.equal(posts(calls).length, 0, "no tap was ever made");
+});
+
+test("a session switch takes the poll with the card it belonged to", async () => {
+  let listNow = [ID];
+  const { hub, calls } = await mount({
+    roost: TWO_SESSIONS,
+    list: () => listNow,
+    drafts: { [ID]: payload({ draft: { state: "holding", holdUntil: 10 } }) },
+  });
+  await open(hub, SID);
+  assert.equal(pollTimerIds(hub).length, 1, "the switch starts one poll");
+
+  listNow = [];
+  await openChatSession(hub, SECOND);
+  await settle();
+  assert.equal(findByClass(hub.els["perch-transcript"], "mdraft-card"), null, "the card is gone");
+  assert.deepEqual(pollTimerIds(hub), [], "and no timer outlives it");
+  const before = reads(calls).length;
+  await settle();
+  assert.equal(reads(calls).length, before, "nothing keeps reading a draft no card shows");
+});
+
+/* ------------------------------------------------------------- the receipt's own fields */
+
+test("a syncing receipt becomes the reader link when the draft read carries one", async () => {
+  let listNow = [];
+  let answered = 0;
+  const syncing = payload({
+    draft: { state: "sent", sentAt: 7 },
+    receipt: { sentAt: 7, messageId: MID, accountLabel: "alex", readerLink: null },
+  });
+  const linked = payload({
+    draft: { state: "sent", sentAt: 7 },
+    receipt: { sentAt: 7, messageId: MID, accountLabel: "alex", readerLink: READER_LINK },
+  });
+  const { hub } = await mount({
+    roost: TWO_SESSIONS,
+    list: () => listNow,
+    drafts: { [ID]: () => { answered += 1; return answered === 1 ? syncing : linked; } },
+  });
+  hub.location.search = "?maildraft=" + ID;
+  await open(hub, SID);
+  assert.ok(transcriptText(hub).includes("Sent, syncing..."), "no Sent copy yet, so it says so");
+  assert.equal(findByClass(hub.els["perch-transcript"], "mdraft-sent"), null, "and links nothing");
+
+  /* The chat's own list reads the same draft again — with the Sent copy now in the store. */
+  listNow = [ID];
+  await openChatSession(hub, SECOND);
+  await settle();
+
+  assert.equal(all(hub, "mdraft-card").length, 1, "one card, redrawn in place");
+  const link = findByClass(hub.els["perch-transcript"], "mdraft-sent");
+  assert.ok(link, "the receipt is a link now");
+  assert.equal(link.href, READER_LINK);
+  assert.equal(transcriptText(hub).includes("Sent, syncing..."), false, "the syncing line is gone");
+});
+
+/* -------------------------------------------------------------------- edit by hand */
+
+/** The one input or textarea a form field wraps. */
+const fieldInput = (wrap) => wrap.children.find((c) => c.tagName === "INPUT" || c.tagName === "TEXTAREA");
+
+function openEditForm(hub) {
+  findByClass(hub.els["perch-transcript"], "mdraft-more").onclick();
+  findByClass(hub.els["perch-transcript"], "mdraft-edit").onclick();
+  return findByClass(hub.els["perch-transcript"], "mdraft-form");
+}
+
+const formFields = (form) => form.children.filter((c) => String(c.className).includes("mdraft-field"));
+
+test("Edit by hand has a Bcc field, prefilled even when it is empty, and posts it", async () => {
+  const { hub, calls } = await mount({
+    drafts: {
+      [ID]: payload({
+        head: {
+          to: [{ name: "Sam Lee", address: "sam@example.com" }],
+          cc: [{ name: "Cara", address: "cara@example.com" }],
+          bcc: [{ name: "Dan", address: "dan@example.com" }],
+        },
+      }),
+    },
+    reply: { status: 200, json: { rev: 2, hash: HASH } },
+  });
+  await open(hub);
+  const form = openEditForm(hub);
+  assert.ok(form, "the form is open");
+  const fields = formFields(form);
+  assert.equal(fields.length, 5, "to, cc, bcc, subject and the body");
+  const labels = fields.map((f) => (f.children[0] && f.children[0].className === "mdraft-label" ? f.children[0].textContent : ""));
+  assert.deepEqual(labels.slice(0, 3), ["To", "Cc", "Bcc"], "the Bcc sits next to Cc");
+  assert.deepEqual(fields.slice(0, 3).map((f) => fieldInput(f).value),
+    ["sam@example.com", "cara@example.com", "dan@example.com"]);
+
+  findByClass(form, "mdraft-save").onclick();
+  await settle();
+  const posted = posts(calls)[0];
+  assert.equal(posted.path, "/dashboard/mail/api/drafts/" + ID + "/revisions");
+  assert.deepEqual(posted.body.bcc, [{ name: "Dan", address: "dan@example.com" }],
+    "the Bcc the card showed is posted, name and all");
+});
+
+test("an edit sends the head's own address entries back for every field it was not asked to change", async () => {
+  const head = {
+    to: [{ name: "Sam Lee", address: "sam@example.com" }],
+    cc: [{ name: "Cara", address: "cara@example.com" }],
+    bcc: [{ name: "Dan", address: "dan@example.com" }],
+  };
+  const { hub, calls } = await mount({
+    drafts: { [ID]: payload({ head }) },
+    reply: { status: 200, json: { rev: 2, hash: HASH } },
+  });
+  await open(hub);
+  const form = openEditForm(hub);
+  const fields = formFields(form);
+  fieldInput(fields[0]).value = "new@example.com";
+  findByClass(form, "mdraft-save").onclick();
+  await settle();
+
+  const body = posts(calls)[0].body;
+  assert.deepEqual(body.to, [{ address: "new@example.com" }], "a typed field is parsed as typed text");
+  assert.deepEqual(body.cc, head.cc, "an untouched Cc keeps its display name");
+  assert.deepEqual(body.bcc, head.bcc, "so does an untouched Bcc");
+  assert.equal(body.subject, "Re: Tuesday", "and the untouched words are what was shown");
+});
+
+test("a draft with no Bcc shows no Bcc row on the card, and its form still offers the field", async () => {
+  const { hub } = await mount({ drafts: { [ID]: payload() } });
+  await open(hub);
+  const labels = all(hub, "mdraft-label").map((n) => n.textContent);
+  assert.equal(labels.includes("Bcc"), false, "nothing to hide, so no row");
+  const form = openEditForm(hub);
+  const fields = formFields(form);
+  assert.equal(fieldInput(fields[2]).value, "", "the field is there, empty");
+});
+
+/* ------------------------------------------------------------- the audience chips */
+
+test("tapping the audience chip that is already on clears the audience", async () => {
+  const { hub, calls } = await mount({
+    drafts: { [ID]: payload({ draft: { audience: "client" } }) },
+    reply: { status: 200, json: { ok: true, audience: null } },
+  });
+  await open(hub);
+  const chips = all(hub, "mdraft-chip");
+  assert.deepEqual(chips.map((c) => c.textContent), ["Colleague", "Client", "Personal"]);
+  assert.ok(String(chips[1].className).includes("mdraft-chip-on"), "the current audience is marked");
+
+  chips[1].onclick();
+  await settle();
+  const patch = calls.find((c) => c.method === "PATCH");
+  assert.equal(patch.path, "/dashboard/mail/api/drafts/" + ID + "/audience");
+  assert.deepEqual(patch.body, { audience: null }, "a second tap on the same chip is the clear");
+});
+
+/* --------------------------------------------------------------------- the header */
+
+test("a new draft's header leaves the reply line out, and a named bot is named", async () => {
+  const reply = await mount({ drafts: { [ID]: payload({ draft: { botName: "R4 Assistant" } }) } });
+  await open(reply.hub);
+  assert.equal(text(reply.hub, "mdraft-head"), "R4 Assistant · Reply to: Re: Tuesday");
+
+  const blank = await mount({
+    drafts: { [ID]: payload({ draft: { mode: "new", botName: "R4 Assistant" }, head: { mode: "new" } }) },
+  });
+  await open(blank.hub);
+  assert.equal(text(blank.hub, "mdraft-head"), "R4 Assistant · Re: Tuesday",
+    "a draft written from nothing has no reply to name");
+  assert.equal(text(blank.hub, "mdraft-head").includes("Reply to:"), false);
+
+  /* Without a display name the read's bot id still names it — no lookup is invented for one. */
+  const byId = await mount({ drafts: { [ID]: payload() } });
+  await open(byId.hub);
+  assert.equal(text(byId.hub, "mdraft-head"), "draft-bot · Reply to: Re: Tuesday");
+});
+
+/* -------------------------------------------------------- the ?maildraft= card */
+
+test("the ?maildraft= card mounts once and stays at the top through a session switch", async () => {
+  const { hub, calls } = await mount({ roost: TWO_SESSIONS, list: [], drafts: { [ID]: payload() } });
+  hub.location.search = "?maildraft=" + ID;
+  await open(hub, SID);
+  const card = findByClass(hub.els["perch-transcript"], "mdraft-card");
+  assert.ok(card, "the query card is on screen");
+  assert.equal(hub.els["perch-transcript"].children[0], card, "mounted at the top of the chat panel");
+  const mountedReads = reads(calls).length;
+
+  await openChatSession(hub, SECOND);
+  await settle();
+  assert.equal(all(hub, "mdraft-card").length, 1, "still one card");
+  assert.equal(findByClass(hub.els["perch-transcript"], "mdraft-card"), card,
+    "the same card, back at the top");
+  assert.equal(hub.els["perch-transcript"].children[0], card, "and still the first thing in the panel");
+  assert.equal(reads(calls).length, mountedReads, "a switch mounts no second card");
 });

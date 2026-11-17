@@ -5852,6 +5852,9 @@ export const translations = {
   // IDENTICAL_OK.
   // TODO(copy): pending operator copy
   "mail.draftHead": { en: "{bot} · Reply to: {subject}", es: "{bot} · Reply to: {subject}" },
+  // A draft written from nothing has no reply to name, so its header is the bot and the subject.
+  // TODO(copy): pending operator copy
+  "mail.draftHeadNew": { en: "{bot} · {subject}", es: "{bot} · {subject}" },
   // TODO(copy): pending operator copy
   "mail.draftTo": { en: "To", es: "To" },
   // TODO(copy): pending operator copy
@@ -5896,6 +5899,10 @@ export const translations = {
   "mail.draftRevising": { en: "Bot is revising this line...", es: "Bot is revising this line..." },
   // TODO(copy): pending operator copy
   "mail.draftSending": { en: "Sending in 10 s", es: "Sending in 10 s" },
+  // The claimed, in-flight state: no hold is left to count down, so the card says nothing it cannot
+  // know. Neutral on purpose, and not the hold's line above.
+  // TODO(copy): pending operator copy
+  "mail.draftSendingState": { en: "Sending...", es: "Sending..." },
   // TODO(copy): pending operator copy
   "mail.draftUndo": { en: "Undo", es: "Undo" },
   // TODO(copy): pending operator copy

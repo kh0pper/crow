@@ -132,12 +132,13 @@ const IDENTICAL_OK = new Set([
   // Crow Mail's draft card in chat (plan 3, Task 10a): the English is the plan's own sentence and the
   // Spanish is pending operator copy; the keys the plan does not fix (refusal states, chip labels,
   // form buttons) carry an English placeholder in both languages for the same reason.
-  "mail.draftHead", "mail.draftTo", "mail.draftCc", "mail.draftBcc", "mail.draftSubject",
+  "mail.draftHead", "mail.draftHeadNew", "mail.draftTo", "mail.draftCc", "mail.draftBcc", "mail.draftSubject",
   "mail.draftNoSubject", "mail.draftFromLine", "mail.draftFollowsRules", "mail.draftNotChecked",
   "mail.draftSend", "mail.draftSchedule", "mail.draftMore", "mail.draftEdit", "mail.draftSaveDraft",
   "mail.draftDiscard", "mail.draftHistory", "mail.draftHistoryRow", "mail.draftNewRecipient",
   "mail.draftChanged", "mail.draftReplyToDiffers", "mail.draftNote", "mail.draftRevising",
-  "mail.draftSending", "mail.draftUndo", "mail.draftScheduled", "mail.draftChangeTime",
+  "mail.draftSending", "mail.draftSendingState", "mail.draftUndo", "mail.draftScheduled",
+  "mail.draftChangeTime",
   "mail.draftCancelSend", "mail.draftMissed", "mail.draftChangedSentence", "mail.draftUnknown",
   "mail.draftSent", "mail.draftSyncing", "mail.draftSize", "mail.draftFailed", "mail.draftDiscarded",
   "mail.draftConfirmSend", "mail.draftEditCancelsSchedule", "mail.draftWritingRules",

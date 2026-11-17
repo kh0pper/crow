@@ -21,8 +21,15 @@ import { tJs } from "../shared/i18n.js";
  *  - Every tap carries `draft.headHash` — the hash of the revision the person is looking at. The
  *    server's guarded update is the compare-and-set that refuses a draft that changed under their
  *    eyes (409 `changed`), and this client then re-reads and says why.
+ *  - A refusal that means "the row moved under you" (`changed`, `frozen`, `not_holding`, `too_late`,
+ *    `not_scheduled`, `not_discardable`) re-reads the draft AND carries its sentence into the status
+ *    node of the card that replaces the tapped one: the sentence has to land where the person is
+ *    now looking, not on a node that is about to be gone.
+ *  - A draft in `holding`, `sending` or `unknown` is still moving on the server's side, so the card
+ *    polls its own read every 3 s until the state leaves those, and a session switch stops the poll
+ *    with the transcript. An answer that changes nothing redraws nothing: the card is keyed.
  *  - Nothing here can send by itself: Send and Schedule are two POSTs a finger makes, and a draft in
- *    any state that is not editable renders no Send at all.
+ *    any state that is not editable renders no Send at all (a claimed `sending` draft renders none).
  *  - The schedule sheet is the module spliced beside this one (panels/mail/schedule-sheet.js,
  *    Task 10b): both the Schedule button and Change time call `mailDraftSheet(draft, dueAtMs, onDone)`
  *    when that module has assigned it, and say so when it has not.
@@ -32,6 +39,7 @@ export function perchMailDraftCardJs(lang = "en") {
   /* ---- the mail draft card (plan 3, task 10a) --------------------------- */
   var MDRAFT_LANG='${String(lang).replace(/[^a-z-]/g, "")}';
   var MDRAFT_HEAD='${tJs("mail.draftHead", lang)}';
+  var MDRAFT_HEAD_NEW='${tJs("mail.draftHeadNew", lang)}';
   var MDRAFT_TO='${tJs("mail.draftTo", lang)}';
   var MDRAFT_CC='${tJs("mail.draftCc", lang)}';
   var MDRAFT_BCC='${tJs("mail.draftBcc", lang)}';
@@ -54,6 +62,7 @@ export function perchMailDraftCardJs(lang = "en") {
   var MDRAFT_NOTE='${tJs("mail.draftNote", lang)}';
   var MDRAFT_REVISING='${tJs("mail.draftRevising", lang)}';
   var MDRAFT_SENDING='${tJs("mail.draftSending", lang)}';
+  var MDRAFT_SENDING_STATE='${tJs("mail.draftSendingState", lang)}';
   var MDRAFT_UNDO='${tJs("mail.draftUndo", lang)}';
   var MDRAFT_SCHEDULED='${tJs("mail.draftScheduled", lang)}';
   var MDRAFT_CHANGE_TIME='${tJs("mail.draftChangeTime", lang)}';
@@ -104,11 +113,24 @@ export function perchMailDraftCardJs(lang = "en") {
   /* The editable states, as the store's addRevision and the audience route define them. */
   var MDRAFT_EDITABLE={'draft':true,'failed':true,'missed':true};
 
-  /* The draft hulls drawn so far: id -> the node, the answer key it was drawn from, and whether it
-     was mounted at the top of the panel (the query card) rather than appended to the chat. */
+  /* The draft hulls drawn so far: id -> the node, the answer key it was drawn from, whether it was
+     mounted at the top of the panel (the query card) rather than appended to the chat, the chat it
+     was read for, and the state it was last drawn in. */
   var mdraftNodes={};
   var mdraftKeys={};
+  var mdraftSid={};
+  var mdraftState={};
+  var mdraftTop={};
   var mdraftQueryId=null;
+  /* The query card is mounted once a page load: a session switch does not mount a second one. */
+  var mdraftQueryMounted=false;
+  /* The states whose server-side work is still going on, and the poll that watches them. */
+  var MDRAFT_POLL_MS=3000;
+  var MDRAFT_POLL_STATES={'holding':true,'sending':true,'unknown':true};
+  var mdraftPollTimer=null;
+  /* The refusals that mean the row moved: the card re-reads and carries the sentence across. */
+  var MDRAFT_STALE={'changed':true,'frozen':true,'not_holding':true,'too_late':true,
+    'not_scheduled':true,'not_discardable':true};
   /* The schedule sheet, assigned by the module spliced beside this one (Task 10b):
      mailDraftSheet(draft, dueAt, onDone). Both schedule controls open it; a build that drops that
      module from the splice says so instead of doing nothing. */
@@ -195,12 +217,34 @@ export function perchMailDraftCardJs(lang = "en") {
     if(j&&typeof j.message==='string'&&j.message) return j.message;
     return MDRAFT_ERROR;
   }
-  /* After a refusal that means "the draft moved under you", read it again so the card shows the
-     revision the server holds. */
+  /* The sentence a stale refusal hands to the card that replaces this one: the server's own message
+     where it sent one, else the fixed sentence for that code. '' means the re-read is the whole
+     answer (a hold that had already ended says nothing it cannot know — the state speaks). */
+  function mdraftNotice(r){
+    var j=(r&&r.j)||null;
+    var code=(j&&typeof j.error==='string')?j.error:'';
+    if(code==='not_holding') return '';
+    if(j&&typeof j.message==='string'&&j.message) return j.message;
+    return mdraftRefusal(r);
+  }
+  /* After a refusal that means "the draft moved under you", read it again — and carry the sentence
+     through to the card that replaces this one, because this node is about to be gone. Answers the
+     text to show in place when nothing is refetched. */
   function mdraftSettleRefusal(r,after){
     var j=(r&&r.j)||null;
-    if(j&&j.error==='changed'&&typeof after==='function') after();
+    var code=(j&&typeof j.error==='string')?j.error:'';
+    if(typeof after==='function'&&MDRAFT_STALE[code]){
+      after(mdraftNotice(r));
+      return '';
+    }
     return mdraftRefusal(r);
+  }
+  /* The status node of a card already on screen, so a notice can land on it without a redraw. */
+  function mdraftNoticeWrite(node,text){
+    var note=mdraftText(text);
+    if(!node||!note) return;
+    var status=mdraftFind(node,'mdraft-status');
+    if(status) status.textContent=note;
   }
 
   /* ---- one draft, one card -------------------------------------------------- */
@@ -289,7 +333,7 @@ export function perchMailDraftCardJs(lang = "en") {
   }
 
   /* The audience chip row: one tap writes the draft's audience column, the hint the drafting turn
-     reads. */
+     reads. The chip that is already on clears it: one word, never none. */
   function mdraftAudience(card,payload,refetch){
     var draft=payload.draft||{};
     var wrap=document.createElement('div'); wrap.className='mdraft-audience';
@@ -299,7 +343,8 @@ export function perchMailDraftCardJs(lang = "en") {
       (function(value,label){
         var on=String(draft.audience||'')===value;
         mdraftBtn(wrap,'mdraft-chip'+(on?' mdraft-chip-on':''),label,function(){
-          mdraftApi('PATCH','/drafts/'+encodeURIComponent(mdraftText(draft.id))+'/audience',{audience:value}).then(function(r){
+          var next=on?null:value;
+          mdraftApi('PATCH','/drafts/'+encodeURIComponent(mdraftText(draft.id))+'/audience',{audience:next}).then(function(r){
             if(!live()) return;
             if(r&&r.ok){ refetch(); return; }
             status.textContent=mdraftSettleRefusal(r,refetch);
@@ -325,46 +370,60 @@ export function perchMailDraftCardJs(lang = "en") {
     return list;
   }
 
-  /* "Edit by hand": the person's own text, posted as the next revision. The Bcc is not offered here
-     (it waits for the operator), and the head revision's attachments ride along so an edit never
-     drops them. */
+  /* "Edit by hand": the person's own words, posted as the next revision. Every recipient field is an
+     input prefilled from the head revision and shown even when it is empty — To, Cc and Bcc alike.
+     A field whose text the person left alone posts the head's own entries back, display names and
+     all, so editing the words never quietly drops a name; only a field whose text changed is read as
+     typed text, one address per comma. */
   function mdraftEditForm(card,actions,payload,refetch,status){
     if(mdraftFind(card,'mdraft-form')) return;
     var head=payload.head||{};
     var draft=payload.draft||{};
     var form=document.createElement('div'); form.className='mdraft-form';
     var fields={};
-    var spec=[['to',MDRAFT_TO,mdraftList(head.to).map(mdraftAddr).join(', '),false],
-      ['cc',MDRAFT_CC,mdraftList(head.cc).map(mdraftAddr).join(', '),false],
-      ['subject',MDRAFT_SUBJECT,mdraftText(head.subject),false],
-      ['body','',mdraftText(head.body),true]];
-    for(var i=0;i<spec.length;i++){
-      var entry=spec[i];
+    var addField=function(key,label,text,multiline){
       var wrap=document.createElement('div'); wrap.className='mdraft-field';
-      if(entry[1]){
-        var label=document.createElement('label'); label.className='mdraft-label';
-        label.textContent=entry[1];
-        wrap.appendChild(label);
+      if(label){
+        var lab=document.createElement('label'); lab.className='mdraft-label';
+        lab.textContent=label;
+        wrap.appendChild(lab);
       }
-      var input=entry[3]?document.createElement('textarea'):document.createElement('input');
-      if(!entry[3]) input.type='text';
-      input.value=entry[2];
+      var input=multiline?document.createElement('textarea'):document.createElement('input');
+      if(!multiline) input.type='text';
+      input.value=text;
       wrap.appendChild(input);
       form.appendChild(wrap);
-      fields[entry[0]]=input;
-    }
+      fields[key]=input;
+    };
+    /* Each address field remembers what was put in it and the entries it stands for. */
+    var shown={};
+    var addrField=function(key,label,list){
+      var entries=mdraftList(list);
+      var text=entries.map(mdraftAddr).join(', ');
+      shown[key]={entries:entries,text:text};
+      addField(key,label,text,false);
+    };
+    addrField('to',MDRAFT_TO,head.to);
+    addrField('cc',MDRAFT_CC,head.cc);
+    addrField('bcc',MDRAFT_BCC,head.bcc);
+    addField('subject',MDRAFT_SUBJECT,mdraftText(head.subject),false);
+    addField('body','',mdraftText(head.body),true);
+    var addrsFor=function(key){
+      var was=shown[key];
+      var typed=String(fields[key].value==null?'':fields[key].value);
+      if(typed===was.text) return was.entries;
+      var parts=typed.split(','), out=[];
+      for(var i=0;i<parts.length;i++){ var p=parts[i].trim(); if(p) out.push({address:p}); }
+      return out;
+    };
     var row=document.createElement('div'); row.className='mdraft-actions';
     mdraftBtn(row,'primary mdraft-save',MDRAFT_SAVE,function(){
       mdraftBusy(row,true);
-      var split=function(v){
-        var parts=String(v==null?'':v).split(','), out=[];
-        for(var i=0;i<parts.length;i++){ var p=parts[i].trim(); if(p) out.push(p); }
-        return out;
-      };
       mdraftApi('POST','/drafts/'+encodeURIComponent(mdraftText(draft.id))+'/revisions',{
         expectHash:mdraftText(draft.headHash),
-        to:split(fields.to.value),
-        cc:split(fields.cc.value),
+        to:addrsFor('to'),
+        cc:addrsFor('cc'),
+        bcc:addrsFor('bcc'),
         subject:String(fields.subject.value==null?'':fields.subject.value),
         body:String(fields.body.value==null?'':fields.body.value),
         attachments:mdraftList(head.attachments)
@@ -450,6 +509,12 @@ export function perchMailDraftCardJs(lang = "en") {
       return;
     }
     if(state==='discarded'){ status.textContent=MDRAFT_DISCARDED; return; }
+    if(state==='sending'){
+      /* Claimed and in flight: the server owns it now, so the card says only that and offers nothing
+         to press. Undo is not a thing here and neither is a second Send. */
+      status.textContent=MDRAFT_SENDING_STATE;
+      return;
+    }
     if(state==='holding'){
       status.textContent=MDRAFT_SENDING;
       mdraftBtn(actions,'mdraft-undo',MDRAFT_UNDO,function(){ post('undo',{}); });
@@ -522,8 +587,10 @@ export function perchMailDraftCardJs(lang = "en") {
     mdraftBtn(actions,'mdraft-more',MDRAFT_MORE,function(){ menu.hidden=!menu.hidden; });
   }
 
-  /* One card, from one answer of the draft route. */
-  function mdraftCard(payload,refetch){
+  /* One card, from one answer of the draft route. The notice is a sentence a refusal handed to the
+     card that replaces the one that was tapped: it is written into this card's status node, so it is
+     read on the card the person is actually looking at. */
+  function mdraftCard(payload,refetch,notice){
     var draft=payload&&payload.draft?payload.draft:null;
     var head=payload&&payload.head?payload.head:null;
     if(!draft||!head) return null;
@@ -531,15 +598,20 @@ export function perchMailDraftCardJs(lang = "en") {
     var subject=mdraftText(head.subject)||MDRAFT_NOSUBJECT;
     var from=head.from||{};
     var account=mdraftText(from.name)||mdraftText(from.address);
-    /* The header names the bot that wrote it; a draft with no bot names the account it is from. */
-    var bot=mdraftText(draft.botId)||account;
+    /* The header names the bot that wrote it — the display name the draft read carries when it has
+       one, else the id it was drafted under; a draft with no bot names the account it is from. A
+       draft written from nothing has no reply to name, so its header drops that part. */
+    var bot=mdraftText(draft.botName)||mdraftText(draft.botId)||account;
+    var heading=String(draft.mode||'')==='new'
+      ? mdraftFill(MDRAFT_HEAD_NEW,{bot:bot,subject:subject})
+      : mdraftFill(MDRAFT_HEAD,{bot:bot,subject:subject});
     var rev=Number(head.rev)||1;
     var card=document.createElement('div');
     card.className='entry mdraft-card';
     card.setAttribute('data-maildraft-id',mdraftText(draft.id));
     card.setAttribute('role','group');
-    card.setAttribute('aria-label',mdraftFill(MDRAFT_HEAD,{bot:bot,subject:subject}));
-    card.appendChild(line('mdraft-head',mdraftFill(MDRAFT_HEAD,{bot:bot,subject:subject})));
+    card.setAttribute('aria-label',heading);
+    card.appendChild(line('mdraft-head',heading));
 
     mdraftRcpts(card,MDRAFT_TO,head.to,flags,rev);
     mdraftRcpts(card,MDRAFT_CC,head.cc,flags,rev);
@@ -562,6 +634,7 @@ export function perchMailDraftCardJs(lang = "en") {
     var status=line('mdraft-status',''); status.setAttribute('role','status');
     card.appendChild(status);
     mdraftActions(card,payload,refetch,status);
+    if(mdraftText(notice)) status.textContent=mdraftText(notice);
 
     /* The queues: one waiting comment means the bot is already on it; several wait for Revise. */
     var waiting=0;
@@ -595,26 +668,37 @@ export function perchMailDraftCardJs(lang = "en") {
   }
 
   /* ---- mounting ------------------------------------------------------------ */
-  /* The key an answer is drawn from: a redraw only when something the card shows moved. */
+  /* The key an answer is drawn from: a redraw only when something the card shows moved. The
+     receipt's own fields are part of it, so "Sent, syncing..." turns into the reader link the moment
+     a read carries one. */
   function mdraftKey(payload){
-    var draft=payload.draft||{}, head=payload.head||{};
+    var draft=payload.draft||{}, head=payload.head||{}, receipt=payload.receipt||{};
     var flags=payload.flags||{};
     return [mdraftText(draft.state),mdraftText(draft.headHash),mdraftText(draft.audience),
       mdraftText(draft.dueAt),mdraftText(draft.failReason),mdraftText(head.rev),
       mdraftText(head.subject),payload.voice?'1':'0',
       mdraftList(flags.newRecipients).join(','),mdraftList(flags.changedRecipients).join(','),
       mdraftText(flags.replyToDiffers),
+      mdraftText(receipt.sentAt),mdraftText(receipt.readerLink),mdraftText(receipt.accountLabel),
       mdraftList(payload.comments).map(function(c){ return mdraftText(c&&c.id)+':'+mdraftText(c&&c.state); }).join(','),
       mdraftList(payload.history).length].join('|');
   }
-  function mdraftDraw(payload,opts){
+  /* Draw one answer, replacing the card that was drawn from a different one. opts.top mounts at the
+     top of the panel (the query card), opts.sid is the chat the read was made for. A notice goes to
+     the new card's status node, so a refusal's sentence survives the redraw. */
+  function mdraftDraw(payload,opts,notice){
     var draft=payload&&payload.draft?payload.draft:null;
     if(!draft) return null;
     var id=mdraftText(draft.id);
     var key=mdraftKey(payload);
+    var note=mdraftText(notice);
     var old=mdraftNodes[id];
-    if(old&&old.parentNode&&mdraftKeys[id]===key) return old;
-    var node=mdraftCard(payload,function(){ mdraftLoad(id,opts); });
+    if(old&&old.parentNode&&mdraftKeys[id]===key){
+      mdraftNoticeWrite(old,note);
+      return old;
+    }
+    var again=function(text){ mdraftLoad(id,opts,text); };
+    var node=mdraftCard(payload,again,note);
     if(!node) return null;
     if(old&&old.parentNode){
       old.parentNode.insertBefore(node,old);
@@ -626,19 +710,23 @@ export function perchMailDraftCardJs(lang = "en") {
       else tr.appendChild(node);
     }
     mdraftNodes[id]=node; mdraftKeys[id]=key;
+    mdraftSid[id]=(opts&&opts.sid)?String(opts.sid):null;
+    mdraftTop[id]=!!(opts&&opts.top);
+    mdraftState[id]=mdraftText(draft.state);
+    mdraftPollKeep();
     return node;
   }
   /* Read one draft and draw it. opts.top mounts it at the top of the panel (the query card);
      opts.sid is the chat the read was made for, so a read that lands after a session switch draws
-     nothing. */
-  function mdraftLoad(id,opts){
+     nothing; the notice is carried through to the card the read produces. */
+  function mdraftLoad(id,opts,notice){
     var myId=mdraftText(id);
     if(!MDRAFT_ID.test(myId)) return null;
     return mdraftApi('GET','/drafts/'+encodeURIComponent(myId)).then(function(r){
       if(!live()) return null;
       if(opts&&opts.sid&&current.sid!==String(opts.sid)) return null;
       if(!r||!r.ok||!r.j||!r.j.draft) return null;
-      return mdraftDraw(r.j,opts);
+      return mdraftDraw(r.j,opts,notice);
     });
   }
   /* The ids this chat's own drafts list returns. The list is ids only: each card is read from the
@@ -666,8 +754,45 @@ export function perchMailDraftCardJs(lang = "en") {
     for(var k in mdraftNodes){
       if(keep[k]) continue;
       mdraftRemove(mdraftNodes[k]);
-      delete mdraftNodes[k]; delete mdraftKeys[k];
+      mdraftForget(k);
     }
+    mdraftPollKeep();
+  }
+  /* One draft's records, gone with its node. */
+  function mdraftForget(id){
+    delete mdraftNodes[id]; delete mdraftKeys[id]; delete mdraftSid[id];
+    delete mdraftState[id]; delete mdraftTop[id];
+  }
+  /* ---- the poll ------------------------------------------------------------ */
+  /* While a draft is holding, in flight or unconfirmed, its state can change with nobody touching the
+     card. One timer covers every such card; it starts when the first one is drawn, reads each on its
+     own turn (with the same current.sid guard the list loads carry), and dies when the last one
+     settles or the transcript does. An unchanged answer redraws nothing: mdraftDraw keys on what
+     the card shows. */
+  function mdraftPollStop(){ if(mdraftPollTimer!==null){ clearInterval(mdraftPollTimer); mdraftPollTimer=null; } }
+  function mdraftPollTick(){
+    if(!live()){ mdraftPollStop(); return; }
+    var ids=Object.keys(mdraftNodes);
+    var watching=0;
+    for(var i=0;i<ids.length;i++){
+      var id=ids[i];
+      var node=mdraftNodes[id];
+      if(!node||!node.parentNode) continue;
+      if(!MDRAFT_POLL_STATES[mdraftText(mdraftState[id])]) continue;
+      watching+=1;
+      /* mdraftLoad carries the session guard itself: a read that lands after a switch draws nothing. */
+      mdraftLoad(id,{sid:mdraftSid[id]||undefined,top:!!mdraftTop[id]});
+    }
+    if(!watching) mdraftPollStop();
+  }
+  function mdraftPollKeep(){
+    var ids=Object.keys(mdraftNodes);
+    for(var i=0;i<ids.length;i++){
+      if(!MDRAFT_POLL_STATES[mdraftText(mdraftState[ids[i]])]) continue;
+      if(mdraftPollTimer===null) mdraftPollTimer=setInterval(mdraftPollTick,MDRAFT_POLL_MS);
+      return;
+    }
+    mdraftPollStop();
   }
   /* The draft id in the page's own query, checked against the store's shape BEFORE any request. */
   function mdraftQuery(){
@@ -678,18 +803,31 @@ export function perchMailDraftCardJs(lang = "en") {
     return MDRAFT_ID.test(m[1])?m[1]:null;
   }
   /* A draft made in the reader has no chat to list it: it rides the page's query and is mounted at
-     the top of the chat panel. The id is validated first; a malformed one asks for nothing. */
+     the top of the chat panel, once per page load. The id is validated first; a malformed one asks
+     for nothing. A session switch keeps it (see resetMailDrafts) and never mounts a second one. */
   function loadMailDraftFromQuery(){
+    if(mdraftQueryMounted) return;
     var id=mdraftQuery();
     if(!id) return;
-    if(mdraftQueryId===id&&mdraftNodes[id]&&mdraftNodes[id].parentNode) return;
     mdraftQueryId=id;
-    mdraftLoad(id,{top:true});
+    var pending=mdraftLoad(id,{top:true});
+    if(pending&&typeof pending.then==='function'){
+      pending.then(function(node){ if(node) mdraftQueryMounted=true; });
+    }
   }
-  /* A session switch: the transcript, and every card in it, is gone. */
+  /* A session switch: the transcript, and every card in it, is gone — except the page's own query
+     card, which belongs to no chat. It goes back to the top, and the poll follows what is left. */
   function resetMailDrafts(){
-    for(var k in mdraftNodes) mdraftRemove(mdraftNodes[k]);
-    mdraftNodes={}; mdraftKeys={}; mdraftQueryId=null;
+    var keep=mdraftQueryId;
+    for(var k in mdraftNodes){
+      if(keep&&k===keep) continue;
+      mdraftRemove(mdraftNodes[k]);
+      mdraftForget(k);
+    }
+    var node=keep?mdraftNodes[keep]:null;
+    var tr=el('perch-transcript');
+    if(node&&tr&&node.parentNode!==tr) tr.insertBefore(node,tr.firstChild);
+    mdraftPollKeep();
   }
 `;
 }
