@@ -243,7 +243,7 @@ Every refused start is logged with the requester tag (`requested-by=…`) and th
 
 ## Other readers
 
-- **Notices** (`box-reservation-notify.js`): one "start" notice per hold and at most one "refused" notice per hold. A beside hold sends no start notice — it never stops the box — and only the refusal one, worded "a render/video job is using part of the GPU until about <time>; large model starts that don't fit wait. They start by themselves when it ends." It never asks for `box-reserve release`.
+- **Notices** (`box-reservation-notify.js`): one "start" notice per hold and at most one "refused" notice per hold. A beside hold sends no start notice — it never stops the box — and only the refusal one, worded "a render/video job is using part of the GPU until about `<time>`; large model starts that don't fit wait. They start by themselves when it ends." It never asks for `box-reserve release`.
 - **Model catalog status**: a provider `startDecision` refuses under a beside hold gets `beside_job` ("Waiting: a render or video job is using the GPU"); one that fits keeps its normal status. An exclusive (or corrupt) hold keeps `blocked_by_reservation`.
 - **Health signal**: the Nest's box reservation card appears while a hold exists (info, never a warn) and uses the beside wording for a beside hold; a corrupt file says it counts as reserved.
 - **The Crow Artifacts sweep** (`sweepReserved`): an **exclusive** hold pauses the queued retries; a beside hold does not, because the sweep's starts fit beside it or are refused by the gate. A corrupt hold has no mode and counts as exclusive.
