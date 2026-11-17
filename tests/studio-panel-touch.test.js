@@ -1104,3 +1104,27 @@ test("a long press on Arm is the press it started, not the browser's menu", asyn
   title.dispatchEvent(onTitle);
   assert.equal(onTitle.defaultPrevented, false, "the name is left alone");
 });
+
+// --- B6: the scene plan's record options row --------------------------------
+
+test("the count-in choices are 44 px targets and the row never selects its text", async () => {
+  const rules = await sheetRules();
+
+  // The four choices are the row's only controls, and a thumb's press on one is
+  // a press: a 44 px target that turns selection off.
+  assert.ok(
+    touchTargetRule(rules, ".studio .st-plan-countin .st-btn"),
+    "a count-in choice carries a 44 px floor in width and height",
+  );
+
+  const locking = rules.filter(
+    (rule) => rule.selectors.includes(".studio .st-plan-options") && locksSelection(rule.body),
+  );
+  assert.ok(locking.length > 0, "the options row turns selection off");
+  const complete = locking.some(
+    (rule) =>
+      /-webkit-user-select\s*:\s*none/.test(rule.body) &&
+      /-webkit-touch-callout\s*:\s*none/.test(rule.body),
+  );
+  assert.ok(complete, "with the webkit pair Android needs, so a hold is not a callout");
+});

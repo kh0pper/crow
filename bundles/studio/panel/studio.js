@@ -1247,6 +1247,27 @@ const STYLES = `
     .studio .st-take { flex-wrap: wrap; }
     .studio .st-take-acts { margin-left: 0; flex: 1 1 100%; }
   }
+  /* The scene plan widget (B6): the record options row — how many bars a take
+     counts in, and where the sampler's own live recording lives. The four
+     choices are this browser's setting, so they are buttons with a pressed
+     state and never a command. Each one is a 44 px target, and a press on one
+     (or on the row around it) is a press, never a text selection. The row
+     wraps, so it fits a phone's one-widget page as well as a column. */
+  .studio .st-scene-plan { display: block; min-width: 0; }
+  .studio .st-plan-options {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    padding: 10px 12px; min-width: 0;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-plan-title { margin: 0; font-size: 13px; font-weight: 700; color: var(--st-text); }
+  .studio .st-plan-countin { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-plan-countin .st-btn { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
+  .studio .st-plan-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted); }
+  .studio .st-plan-sampler {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+    margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
+  }
+  .studio .st-plan-sampler-label { font-weight: 600; color: var(--st-text); }
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
      piano roll. Pads are real buttons, at least 72 px square, and the pad's
@@ -1832,6 +1853,11 @@ function studioPage({ songId, render, res }) {
                one lane per track. The shell moves this host into its widget
                frame. -->
           <section class="st-rec-lanes" data-role="rec-lanes" hidden></section>
+          <!-- The scene plan widget's host (A4a): the client draws the record
+               options row into it — the count-in this browser counts in, and
+               where the sampler's own live recording is — and the shell moves
+               this node into its frame. The plan itself joins it in C2. -->
+          <section class="st-scene-plan" data-role="scene-plan"></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
           <section class="st-sampler" data-role="sampler" hidden><div class="st-sampler-host" data-role="sampler-pads" hidden></div><div class="st-sampler-host" data-role="sampler-steps" hidden></div><div class="st-sampler-host" data-role="sampler-chop" hidden></div><div class="st-sampler-host" data-role="sampler-fx" hidden></div><div class="st-sampler-host" data-role="sampler-keyboard" hidden></div></section>

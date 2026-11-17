@@ -2510,6 +2510,91 @@ test("the count-in defaults to one bar on a device that has never chosen one", a
   assert.equal(countInPlays(ui)[0].countInBars, 1, "one bar of clicks");
 });
 
+// --- the scene plan's record options row (B6) -------------------------------
+
+/** The four count-in choices the options row offers, in the order it draws them. */
+const COUNT_IN_CHOICES = [
+  [0, "Off"],
+  [1, "1 bar"],
+  [2, "2 bars"],
+  [4, "4 bars"],
+];
+
+/** The options row's four buttons, in page order. */
+function countInButtons(ui) {
+  return Array.from(ui.document.querySelectorAll("[data-act=count-in]"));
+}
+
+/** The label of the one choice the row shows pressed. */
+function pressedCountIn(ui) {
+  const pressed = countInButtons(ui).filter((node) => node.getAttribute("aria-pressed") === "true");
+  assert.equal(pressed.length, 1, "exactly one count-in choice reads as pressed");
+  return String(pressed[0].textContent);
+}
+
+/** A localStorage that refuses every read and every write. */
+function refusingStorage() {
+  return {
+    getItem() {
+      throw new Error("this browser keeps nothing");
+    },
+    setItem() {
+      throw new Error("this browser keeps nothing");
+    },
+    removeItem() {
+      throw new Error("this browser keeps nothing");
+    },
+  };
+}
+
+test("the four count-in buttons set view.countIn and storage and show the pressed one", async () => {
+  const ui = await bootPanel({ storage: makeStorage() });
+  assert.deepEqual(
+    countInButtons(ui).map((node) => String(node.textContent)),
+    COUNT_IN_CHOICES.map((choice) => choice[1]),
+    "Off, 1, 2 and 4 bars are offered, in that order",
+  );
+  assert.equal(pressedCountIn(ui), "1 bar", "a device that has never chosen one starts on one bar");
+  assert.equal(
+    String(ui.document.querySelector("[data-role=scene-plan-note]").textContent),
+    "Counts in when you start from Stop or Pause.",
+    "the row says when a count-in applies",
+  );
+  assert.match(
+    String(ui.document.querySelector("[data-role=scene-plan-sampler]").textContent),
+    /Sampler.*Resample records the sampler live/,
+    "and points at the pads widget's own live recording",
+  );
+
+  for (const [bars, label] of [[0, "Off"], [2, "2 bars"], [4, "4 bars"], [1, "1 bar"]]) {
+    ui.click(`[data-act=count-in][data-bars="${bars}"]`);
+    await ui.settle();
+    assert.equal(ui.page.__studioTest.view.countIn, bars, `${label} is the page's count-in now`);
+    assert.equal(
+      ui.storage.getItem("crow.studio.countin.v1"),
+      String(bars),
+      `${label} is what this browser keeps`,
+    );
+    assert.equal(pressedCountIn(ui), label, `and the row shows ${label} pressed`);
+  }
+});
+
+test("a browser with blocked storage still changes the setting for the session", async () => {
+  const ui = await bootPanel({ storage: refusingStorage() });
+  assert.equal(ui.page.__studioTest.view.countIn, 1, "a store that refuses reads as the default");
+
+  ui.click('[data-act=count-in][data-bars="4"]');
+  await ui.settle();
+  assert.equal(ui.page.__studioTest.view.countIn, 4, "the choice is the page's own for this session");
+  assert.equal(pressedCountIn(ui), "4 bars", "and the row shows it");
+
+  // The setting is what a take counts in: the next Record press asks for those
+  // four bars even though this browser kept none of them.
+  await pressRecord(ui);
+  assert.equal(countInPlays(ui).length, 1, "Record asked for a count-in");
+  assert.equal(countInPlays(ui)[0].countInBars, 4, "the four bars the operator just chose");
+});
+
 test("R4: count-in 0 sends exactly the arm and split messages of the characterisation test", async () => {
   // Off is the path recording always had, taken as a golden: the launch report's
   // frame is the take's first frame, one split per pass from there, the same
