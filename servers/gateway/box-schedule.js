@@ -24,7 +24,10 @@
  * writer's hold and occupies `[started_at, expires_at)` in the same checks; a
  * hold that names a booking (or one of a series' occurrences) is represented
  * by that booking, not counted twice. A booking whose approval is declined —
- * stored, or pending past its 12 h TTL — occupies no time at all.
+ * stored, or pending past its 12 h TTL — occupies no time at all; one whose
+ * approval is still pending occupies its slot exactly like an approved one, so
+ * a second booking can never take the same time while the owner is deciding,
+ * and `approveBooking` re-checks the slot under the lock before it clears.
  *
  * A daily booking (`recur: {daily: "HH:MM-HH:MM"}`, optional `until`) is ONE
  * series row: `start` is the first occurrence's start, `end` is null while the
@@ -388,10 +391,16 @@ function bookingForRead(booking, now) {
   return booking;
 }
 
-/** True when the booking's approval keeps it off the calendar (pending or declined). */
+/**
+ * True when the booking's approval keeps it off the calendar. Only a DECLINED
+ * approval withholds time — stored as declined, or pending past its 12 h TTL,
+ * which reads as declined (the private engineering notes §7.10). A pending
+ * booking occupies its slot exactly like an approved one, so nothing can take
+ * the time it is waiting for.
+ */
 function approvalWithholdsTime(booking, now) {
   const state = bookingForRead(booking, now).approval;
-  return !!(state && (state.state === "pending" || state.state === "declined"));
+  return !!(state && state.state === "declined");
 }
 
 /**
@@ -563,15 +572,21 @@ function holdNamesLiveBooking(cal, hold, now) {
 
 /**
  * Everything that occupies box time for queries over [from, to), as sorted
- * `{start, end, conflict}` intervals. Throws `hold_corrupt` when the hold file
- * cannot be read: guessing an interval for it would be worse than refusing.
+ * `{start, end, conflict}` intervals. `ignoreId` leaves one booking out (a
+ * hold that names it is represented by it, not counted separately), which is
+ * what an approval re-check needs: the booking being approved must not be
+ * found in its own way. Throws `hold_corrupt` when the hold file cannot be
+ * read: guessing an interval for it would be worse than refusing.
  */
-function occupiedIntervals(cal, { now = Date.now(), holdPath, from = null, to = null } = {}) {
+function occupiedIntervals(cal, {
+  now = Date.now(), holdPath, from = null, to = null, ignoreId = null,
+} = {}) {
   const expandFrom = from == null ? now - PRUNE_AFTER_MS : from;
   const expandTo = to == null ? now + GAP_HORIZON_MS : to;
   const out = [];
   for (const booking of cal.bookings) {
     if (!booking || typeof booking !== "object") continue;
+    if (ignoreId != null && booking.id === ignoreId) continue;
     if (approvalWithholdsTime(booking, now)) continue;
     const view = bookingForRead(booking, now);
     if (booking.recur) {
@@ -619,6 +634,33 @@ function assertFree(intervals, startMs, endMs) {
   for (const interval of intervals) {
     if (startMs < interval.end && interval.start < endMs) throw new BookingConflictError(interval.conflict);
   }
+}
+
+/**
+ * Defence in depth for approval: the booked slot (or every future occurrence of
+ * a series) must still be free of every OTHER live booking and of the live
+ * hold. The booking being approved is left out of what it is checked against,
+ * and a cancelled or finished occurrence of its own series is not checked. The
+ * same conflict machinery as `book` decides, so a blocker is named the same way
+ * and an empty calendar always passes.
+ */
+function assertApprovalFree(cal, booking, { now = Date.now(), holdPath } = {}) {
+  const firstMs = msOf(booking.start);
+  const lastMs = msOf(booking.end);
+  const fromMs = Math.max(firstMs == null ? now - DAY_MS : firstMs, now - DAY_MS);
+  const toMs = lastMs == null ? now + GAP_HORIZON_MS : lastMs + DAY_MS;
+  const intervals = occupiedIntervals(cal, {
+    now, holdPath, from: fromMs - DAY_MS, to: toMs, ignoreId: booking.id,
+  });
+  if (booking.recur) {
+    for (const occ of expandSeries(bookingForRead(booking, now), fromMs, toMs)) {
+      if (!LIVE_STATUSES.includes(occ.status) || occ.end <= now) continue;
+      assertFree(intervals, occ.start, occ.end);
+    }
+    return;
+  }
+  if (firstMs == null || lastMs == null || lastMs <= firstMs) return;
+  assertFree(intervals, firstMs, lastMs);
 }
 
 /** The start of the first free gap of `minutes`, within 14 days of `after`. */
@@ -812,7 +854,16 @@ export function cancelBooking(id, options = {}) {
   return withReservationLock(() => cancelBookingLocked(id, options), lockOptions(options));
 }
 
-function decideApprovalLocked(id, state, { by = "owner", now = Date.now(), path = schedulePath() } = {}) {
+/**
+ * Clear or refuse a pending approval. Caller holds the lock. An approval is
+ * per series: an occurrence id resolves to its series row. Approving also
+ * re-checks that the slot is still free (see `assertApprovalFree`) and throws
+ * `BookingConflictError` naming the blocker, leaving the request pending, when
+ * it is not.
+ */
+function decideApprovalLocked(id, state, {
+  by = "owner", now = Date.now(), path = schedulePath(), holdPath,
+} = {}) {
   const cal = readCalendar(path);
   const target = resolveTarget(cal, id);
   // Approval is per series: an occurrence id resolves to its series row.
@@ -825,12 +876,19 @@ function decideApprovalLocked(id, state, { by = "owner", now = Date.now(), path 
   if (state === "approved" && approvalExpired(booking, now)) {
     throw codeError("booking_approval_expired", `booking ${id}'s approval is older than 12 h`);
   }
+  // Clearing the approval is what lets the booking take the box, so the time it
+  // names is re-checked under this same lock before anything is written.
+  if (state === "approved") assertApprovalFree(cal, booking, { now, holdPath });
   booking.approval = { ...booking.approval, state, by: String(by), at: iso(now) };
   writeCalendar(cal, path, now);
   return booking;
 }
 
-/** Approve a pending booking. Caller holds the lock. */
+/**
+ * Approve a pending booking. Caller holds the lock. Refuses with
+ * `BookingConflictError` (leaving the approval pending) when another live
+ * booking or the live hold took the slot while the request waited.
+ */
 export function approveBookingLocked(id, options = {}) {
   return decideApprovalLocked(id, "approved", options);
 }

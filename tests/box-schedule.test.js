@@ -633,3 +633,71 @@ test("a declined or expired-pending booking does not block the calendar", () => 
   assert.ok(first.id);
   assert.ok(second.id);
 });
+
+// A pending approval holds its slot: approving it later can never double-book
+// the box, because nothing else could have taken that time in the meantime.
+test("a pending booking occupies its slot: a second overlapping booking conflicts", () => {
+  fresh();
+  const now = at(9);
+  const pending = book({
+    owner: "alex", kind: "gpu-job", mode: "exclusive", start: at(10), minutes: 60,
+    evict: ["crow-chat"], now,
+  });
+  assert.equal(pending.approval.state, "pending");
+  let err;
+  try {
+    book({ owner: "sam", kind: "manual", start: at(10, 30), minutes: 30, now });
+  } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  assert.equal(err.code, "booking_conflict");
+  assert.equal(err.conflict.id, pending.id);
+  assert.equal(err.conflict.owner, "alex");
+  // The gap finder waits for the pending slot to clear as well.
+  assert.equal(findGap({ minutes: 30, after: at(10, 15), now }), at(11));
+});
+
+test("approving the first after another booking took an adjacent-free slot still succeeds", () => {
+  fresh();
+  const now = at(9);
+  const first = book({
+    owner: "alex", kind: "gpu-job", mode: "exclusive", start: at(10), minutes: 60,
+    evict: ["crow-chat"], now,
+  });
+  // [11:00, 12:00) is adjacent, so it is free while the evict request waits.
+  const second = book({ owner: "sam", kind: "manual", start: at(11), minutes: 60, now });
+  assert.ok(second.id);
+  const approved = approveBooking(first.id, { by: "alex", now });
+  assert.equal(approved.approval.state, "approved");
+  assert.equal(calendarRow(first.id).approval.state, "approved");
+});
+
+test("approve re-checks occupancy and refuses a slot that was taken", () => {
+  fresh();
+  const now = at(9);
+  const pending = book({
+    owner: "alex", kind: "gpu-job", mode: "exclusive", start: at(10), minutes: 60,
+    evict: ["crow-chat"], now,
+  });
+  assert.equal(pending.approval.state, "pending");
+  // A row written straight into the calendar file, the way a second writer
+  // that never went through book() would: it overlaps the pending slot.
+  const raw = JSON.parse(readFileSync(SCHEDULE, "utf8"));
+  const intruder = {
+    id: "bk_00000000feed", owner: "sam", kind: "manual", mode: "exclusive",
+    start: iso(at(10, 15)), end: iso(at(10, 45)),
+    reason: "", allow: [], evict: [], approval: { state: "not_needed" },
+    status: "booked", created_by: "sam", created_at: iso(now),
+  };
+  raw.bookings.push(intruder);
+  writeFileSync(SCHEDULE, JSON.stringify(raw, null, 2) + "\n");
+  let err;
+  try { approveBooking(pending.id, { by: "alex", now }); } catch (e) { err = e; }
+  assert.ok(err instanceof BookingConflictError);
+  assert.equal(err.code, "booking_conflict");
+  assert.equal(err.http, 409);
+  assert.equal(err.conflict.id, intruder.id);
+  assert.equal(err.conflict.owner, "sam");
+  // Refused under the lock: nothing was written, so the request is still pending.
+  assert.equal(calendarRow(pending.id).approval.state, "pending");
+  assert.equal(listBookings({ now }).find((b) => b.id === pending.id).approval.state, "pending");
+});
