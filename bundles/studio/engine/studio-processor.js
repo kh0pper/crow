@@ -156,10 +156,13 @@
  *   id ("Sample <id> is not loaded yet."), and is also posted as
  *   `{type:"sample_needed", sample_id}` so the client can load it again.
  * - **Voice stealing:** 16 voices per track, 64 for the whole song. The 17th
- *   voice on a track steals that track's oldest, and a start that would take
- *   the song past 64 steals the song's oldest — a voice that is already fading
- *   out (choked, or already releasing) goes before one that is still held. A
- *   track's own steal fades: the stolen voice is moved into one of the track's
+ *   voice on a track takes that track's best candidate, and a start that would
+ *   take the song past 64 takes the song's. A voice that is already fading out
+ *   (choked, or already releasing) goes first, then an ordinary sounding voice,
+ *   and a voice the operator is holding on to — one that is `looping`, `held`
+ *   or `paused` — goes only when there is nothing else to take (see
+ *   `stealRank`). A track's own steal fades: the stolen voice is moved into one
+ *   of the track's
  *   two fade tails and rung out over 64 frames while the new voice takes its
  *   slot (with both tails in use it is cut instead — the pool stays 16). The
  *   song-wide steal cuts, so a song past its 64-voice cap really is 64 voices.
@@ -274,6 +277,13 @@
  * `gain_db`, `pan` and the envelope's times hold their sub-step value between
  * boundaries (they are written, not ramped); a filter is re-tuned at most once
  * per sub-step even when cutoff and resonance both move.
+ *
+ * A pitch lane moves the voice's `pitch_semis` and asks the voice to work its
+ * step out again (`StudioSamplerVoice.refreshStep`), so it stacks on the pad's
+ * own Speed %, on its tempo sync and on the direction it is reading in, instead
+ * of replacing them: a ping-pong voice a pitch lane sweeps keeps reflecting
+ * where it stands, and clearing the lane puts the pad's own pitch back without
+ * touching the speed or the direction.
  *
  * **Precedence:** a step's lock beats motion, and motion beats the pad's own
  * field. A voice remembers the lock names its step carried, and a lane that
@@ -7799,7 +7809,8 @@
     restoreMotionParam(voice, param) {
       switch (param) {
         case "pitch":
-          voice.step = voice.base_step;
+          voice.pitch_semis = voice.base_pitch;
+          StudioSamplerVoice.refreshStep(voice);
           return;
         case "gain_db":
           voice.gain = voice.base_gain;
@@ -7882,7 +7893,12 @@
       const held = clamp(value, range[0], range[1]);
       switch (param) {
         case "pitch":
-          voice.step = voice.reverse_sign * Math.pow(2, held / 12);
+          // The pitch is one of the three things a voice's step is made of
+          // (`refreshStep`): a lane moves the semitones and the voice works the
+          // product out again, so the pad's Speed %, its tempo sync and the
+          // direction a ping-pong turned in all stand under the sweep.
+          voice.pitch_semis = held;
+          StudioSamplerVoice.refreshStep(voice);
           return;
         case "gain_db":
           voice.gain = StudioSamplerVoice.dbToLinear(held) * voice.velocity_gain;
@@ -8195,10 +8211,12 @@
 
       // What a motion lane needs of this voice: the pad it came from, the lock
       // names its step carried (a lock beats motion), and the values a lane
-      // overrides — the velocity gain, the reverse direction, and the filter the
-      // voice was built with. The `base_*` values are the ones a curve that stops
-      // applying puts back (`restorePadMotion`), so they are captured here, after
-      // the voice has worked them out for itself, never re-derived later.
+      // overrides — the velocity gain, the pitch, and the filter the voice was
+      // built with. The pitch is kept in semitones, apart from the speed and the
+      // direction the voice also works its step out of, so a pitch lane stacks
+      // on both. The `base_*` values are the ones a curve that stops applying
+      // puts back (`restorePadMotion`), so they are captured here, after the
+      // voice has worked them out for itself, never re-derived later.
       // The cutoff and the resonance are kept RAW, exactly as `setFilter` took
       // them from the pad: it is the one place that clamps them, so a restore
       // lands on the very coefficients the start did.
@@ -8219,11 +8237,14 @@
       voice.source_bpm = sourceBpm;
       voice.locked = locks ? Object.keys(locks) : null;
       voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
-      voice.reverse_sign = field("reverse", pad.reverse === true) === true ? -1 : 1;
       voice.motion_filter_type = typeof filterType === "string" ? filterType : "off";
       voice.motion_cutoff = Number.isFinite(cutoff) ? cutoff : 20000;
       voice.motion_resonance = Number.isFinite(resonance) ? resonance : 0;
-      voice.base_step = voice.step;
+      // The pitch, in semitones. It is captured apart from the speed and the
+      // direction (which live on the voice's own `dir`, and which a ping-pong or
+      // a flipped Reverse moves while the pad plays): a pitch lane works the step
+      // out again and must not force either of them back.
+      voice.base_pitch = voice.pitch_semis;
       voice.base_gain = voice.gain;
       voice.base_pan_left = voice.panLeft;
       voice.base_pan_right = voice.panRight;
@@ -8350,6 +8371,13 @@
       tail.gateRemaining = -1;
       tail.fadeRemaining = StudioSamplerVoice.FADE_FRAMES;
       tail.sounding = true;
+      // A tail is a 64-frame ring-out, nothing else: it is not the operator's
+      // live state any more, so it stops looping, stops holding and stays
+      // unpaused — its fade then runs to its end instead of keeping a loop
+      // alive beside the voice that took the slot.
+      tail.looping = false;
+      tail.held = false;
+      tail.paused = false;
       // The tail is on its way out, so no curve is read for it (see
       // `renderSampler`): it keeps the very values it had at the moment it was
       // stolen, instead of jumping back to its pad's own during the 64-frame
@@ -8375,14 +8403,26 @@
 
     /**
      * How good a steal candidate a voice is: the lower the value, the sooner it
-     * goes. A voice already fading out is never heard again in any case, so it
-     * goes before a held one; within a class the oldest goes first.
+     * goes. Three classes, in the order a start takes them:
+     *
+     * 0. a voice already fading out (choked, releasing) is never heard again in
+     *    any case;
+     * 1. an ordinary sounding voice;
+     * 2. a voice the operator is holding on to — `looping`, `held` (HOLD) or
+     *    `paused` (Pause-all) — which a start only takes when every slot of the
+     *    track (or of the song) is one of those.
+     *
+     * Within a class the oldest voice goes first. Both `takeVoice` and
+     * `stealSongWide` read this, so the 16-voice track cap and the 64-voice song
+     * cap steal in the same order.
      * @param {object} voice
      * @returns {number}
      */
     stealRank(voice) {
       const fading = voice.fadeRemaining > 0 || voice.stage === StudioSamplerVoice.STAGE_RELEASE;
-      return (fading ? 0 : 1) * 1000000000 + voice.serial;
+      const protectedVoice =
+        !fading && (voice.looping === true || voice.held === true || voice.paused === true);
+      return (fading ? 0 : protectedVoice ? 2 : 1) * 1000000000 + voice.serial;
     }
 
     /**
