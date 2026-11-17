@@ -653,7 +653,9 @@ function reservationSignal(lang, nowFn) {
   const until = new Date(r.expires_at).toLocaleString(lang === "es" ? "es" : "en-US", {
     month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
-  const base = fill(t("signals.reservation.held", lang), { owner: r.owner, until });
+  const base = r.mode === "beside"
+    ? fill(t("signals.reservation.besideHeld", lang), { until })
+    : fill(t("signals.reservation.held", lang), { owner: r.owner, until });
   return {
     id: "reservation", severity: "info", state: "info", label,
     value: t("signals.reservation.value", lang),

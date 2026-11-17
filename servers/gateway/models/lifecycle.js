@@ -5,7 +5,9 @@
  */
 import { randomUUID } from "node:crypto";
 import { doorKindOf } from "./door-resolve.js";
-import { isStartAllowed } from "../box-reservation.js";
+import { isStartAllowed, startDecision } from "../box-reservation.js";
+import { providerPeak, readHostProfile } from "./gpu-peaks.js";
+import { getLiveSnapshot } from "./live-sampler.js";
 
 export const JOB_STATES = ["queued", "evicting", "starting", "resident", "failed", "blocked_by_reservation"];
 const FINISHED = new Set(["resident", "failed", "blocked_by_reservation"]);
@@ -70,6 +72,27 @@ function firstModelId(p) {
   return typeof m === "string" ? m : m?.id ?? null;
 }
 
+/**
+ * The listing status of a provider the hold is not letting start.
+ *
+ * An exclusive (or corrupt — it has no mode) hold keeps
+ * `blocked_by_reservation`, exactly as before. Under a beside hold only the
+ * providers `startDecision` refuses wait for the job (`beside_job`); one that
+ * fits keeps its normal status, which the caller falls back to when this
+ * returns null. The beside inputs — the provider's declared peak, the live
+ * snapshot — are read only for a beside hold, so an ordinary pass over the
+ * registry touches no file and no sysfs.
+ */
+function besideStatus(reservation, name) {
+  if (reservation.mode !== "beside") return "blocked_by_reservation";
+  const decision = startDecision(reservation, name, {
+    peak: providerPeak(name),
+    live: getLiveSnapshot(),
+    profile: readHostProfile(),
+  });
+  return decision.allowed ? null : "beside_job";
+}
+
 export function buildModelsListing({ providers = {}, ownInstanceId, snapshotOf, jobs, reservation, externalHealth = {}, siblingsOf }) {
   const out = [];
   for (const [name, p] of Object.entries(providers)) {
@@ -95,7 +118,7 @@ export function buildModelsListing({ providers = {}, ownInstanceId, snapshotOf, 
     let status;
     if (snap?.live) status = "resident";
     else if (jobs.activeFor(name)) status = "loading";
-    else if (reservation && !isStartAllowed(reservation, name)) status = "blocked_by_reservation";
+    else if (reservation && !isStartAllowed(reservation, name)) status = besideStatus(reservation, name) || "stopped";
     else status = "stopped";
     out.push({ ...base, status, wouldEvict, argv: snap?.argv ?? null });
   }

@@ -26,6 +26,7 @@ const STATUS_KEYS = {
   stopped: "models.regStatusStopped",
   loading: "models.regStatusLoading",
   blocked_by_reservation: "models.regStatusBlocked",
+  beside_job: "models.regStatusBesideJob",
   external_up: "models.regStatusExternalUp",
   external_down: "models.regStatusExternalDown",
   foreign: "models.regStatusForeign",
@@ -52,7 +53,7 @@ export function registeredStyles() {
 .mcat-reg__status { font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:0.03em; padding:0.12rem 0.45rem; border-radius:999px; background:var(--crow-bg-elevated); color:var(--crow-text-secondary); display:inline-block; }
 .mcat-reg__status--resident, .mcat-reg__status--external_up { color:var(--crow-success); background:rgba(34,197,94,0.14); }
 .mcat-reg__status--loading { color:var(--crow-accent); background:var(--crow-accent-muted); }
-.mcat-reg__status--blocked_by_reservation, .mcat-reg__status--external_down { color:var(--crow-warning); background:rgba(245,158,11,0.14); }
+.mcat-reg__status--blocked_by_reservation, .mcat-reg__status--beside_job, .mcat-reg__status--external_down { color:var(--crow-warning); background:rgba(245,158,11,0.14); }
 .mcat-reg__serving { font-size:0.68rem; font-weight:600; color:var(--crow-warning); }
 .mcat-reg__actions { display:flex; gap:0.35rem; flex-wrap:wrap; align-items:center; }
 .mcat-reg__msg { font-size:0.75rem; color:var(--crow-text-muted); margin-top:0.35rem; width:100%; }

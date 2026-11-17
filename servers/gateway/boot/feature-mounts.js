@@ -357,6 +357,18 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[models] Failed to mount:", err.message);
   }
 
+  // --- Mount Box Schedule API (the one box calendar) ---
+  // Same JSON session gate as the model catalog API, CSRF on every POST, and
+  // its own explicit Funnel refusal before the session check. Never
+  // Funnel-public (see CLAUDE.md's "Network exposure invariant").
+  try {
+    const { default: boxScheduleRouter } = await import("../routes/box-schedule.js");
+    app.use(boxScheduleRouter(dashboardAuth));
+    console.log("Box schedule API mounted at /api/box");
+  } catch (err) {
+    console.warn("[box-schedule] Failed to mount:", err.message);
+  }
+
   // --- Mount project Services API (project services Task 9) ---
   // Same JSON session gate as the model catalog API, CSRF on every POST, 404
   // while CROW_SERVICES_UI is off. Never Funnel-public.

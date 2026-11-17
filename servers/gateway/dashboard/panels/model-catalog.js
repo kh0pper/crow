@@ -51,6 +51,9 @@ import { registeredSnapshot } from "../../models/registered-rows.js";
 import { defaultLifecycleCore } from "../../models/lifecycle-deps.js";
 import { renderRegisteredSection, registeredClientJS } from "./model-catalog-registered.js";
 import { dialogClientJS, roleNamesJs } from "./model-catalog-dialog.js";
+import {
+  renderBoxScheduleSection, boxScheduleClientJS, loadBoxScheduleView,
+} from "./model-catalog-box-schedule.js";
 
 const __filename = fileURLToPath(import.meta.url);
 // dashboard/panels/model-catalog.js -> dashboard -> gateway -> servers -> repo root
@@ -1563,15 +1566,22 @@ export default {
       { id: "browse-hf", label: t("models.tabBrowseHf", lang), content: renderHfTab(data, lang) },
     ]);
 
+    // The one box calendar (the private engineering notes §6.3): the active
+    // hold and the coming 48 hours, above the tabs. A read that fails renders
+    // its own notice — it never takes this page down.
+    const boxSchedule = loadBoxScheduleView();
+
     const content = `
       ${panelStyles()}
       <p class="mcat-intro">${escapeHtml(t("models.pageIntro", lang))}</p>
+      ${renderBoxScheduleSection(boxSchedule, lang)}
       ${renderRegisteredSection(registered, lang)}
       ${renderRuntimeStrip(data, lang)}
       ${tabsHtml}
       ${modelCatalogClientJS(lang)}
       ${registeredClientJS(lang)}
       ${dialogClientJS(lang)}
+      ${boxScheduleClientJS(lang)}
     `;
 
     return layout({ title: t("models.pageTitle", lang), content });

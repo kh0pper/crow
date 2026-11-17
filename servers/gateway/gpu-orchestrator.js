@@ -85,7 +85,9 @@ import { loadState, saveState, reconcileOnBoot, findRegistryEntries, findRegistr
 import { acquireHostLock } from "./models/native-lock.js";
 import { identityProbe, startModel, stopModel, ensureRuntime, nativeReadinessTimeoutMs } from "./models/runtime.js";
 import { getCachedProbe, reprobe } from "./models/probe.js";
-import { readReservation, isStartAllowed, ReservedError } from "./box-reservation.js";
+import { readReservation, isStartAllowed, ReservedError, startDecision } from "./box-reservation.js";
+import { readHostProfile, providerPeak } from "./models/gpu-peaks.js";
+import { getLiveSnapshot } from "./models/live-sampler.js";
 import { createNoticeState, reservationNotices, sendReservationNotice } from "./box-reservation-notify.js";
 import { enqueueDownload } from "./models/manager.js";
 import { listProvidersAll, upsertProvider } from "../shared/providers-db.js";
@@ -644,12 +646,74 @@ export async function isProviderReady(providerName) {
 // tests never touch the real tmpfs file.
 let _reservationReader = null;
 export function _setReservationReaderForTest(fn) { _reservationReader = fn; }
+// The live counters beside-mode admission needs. `startBlockedBy` stays
+// synchronous, so these come from the sampler's last snapshot; a reader that
+// throws (or a missing snapshot) refuses the beside start, never allows it.
+let _liveMemReader = null;
+export function _setLiveMemReaderForTest(fn) { _liveMemReader = fn; }
 let _noticeState = createNoticeState();
 let _noticeSender = sendReservationNotice;
 export function _setReservationNoticeSenderForTest(fn) { _noticeSender = fn ? (n) => fn(n) : sendReservationNotice; }
 const _deferNoticed = new Set();
 const _servingNoticed = new Set();
 export function _resetReservationNoticesForTest() { _noticeState = createNoticeState(); _deferNoticed.clear(); _servingNoticed.clear(); }
+
+// Declared peaks of the providers THIS gateway started beside the live beside
+// hold, keyed by the hold key (`owner@started_at`) and then by provider name.
+// `startDecision` adds their sum back out of the live growth: growth our own
+// admitted providers caused is not the job's own progress, and charging it to
+// the job under-counts what the job still has to take (and can make the job
+// look like it outgrew its booking). Only the live key's map is kept (pruned
+// when the hold key changes), so a new hold starts from an empty tally.
+//
+// The map is per gateway PROCESS: after a restart under a live hold, the
+// providers started earlier are no longer in it, so their growth is read as the
+// job's own. That makes the job's remaining footprint too SMALL — the gate can
+// then admit a start that does not truly fit — and it can make the job look
+// over its booking, so the over-budget refusal can fire wrongly. Both directions
+// are wrong, and neither can be recovered from here: the tally only ever holds
+// what this process itself admitted.
+const _admittedPeaks = new Map();
+// The over-budget line is a report, not an alarm: once per hold key.
+const _overBudgetNoticed = new Set();
+/** Test seam: forget every admitted peak and over-budget report. */
+export function _resetAdmittedForTest() { _admittedPeaks.clear(); _overBudgetNoticed.clear(); }
+
+/** Drop every hold key but `key` (only the live hold's tally is worth keeping). */
+function pruneAdmitted(key) {
+  for (const k of [..._admittedPeaks.keys()]) if (k !== key) _admittedPeaks.delete(k);
+}
+
+/** The declared peaks of the providers admitted under `key`, summed. */
+function admittedPeaks(key) {
+  pruneAdmitted(key);
+  const sum = { gtt_peak_mb: 0, host_ram_peak_mb: 0 };
+  const m = _admittedPeaks.get(key);
+  if (!m) return sum;
+  for (const p of m.values()) {
+    sum.gtt_peak_mb += p.gtt_peak_mb;
+    sum.host_ram_peak_mb += p.host_ram_peak_mb;
+  }
+  return sum;
+}
+
+/**
+ * Record a start the gate just let through under a beside hold, so later
+ * decisions can tell that provider's growth apart from the job's own. Called at
+ * each point where `startBlockedBy(name)` returned null and the start goes
+ * ahead. A provider with no declared peak cannot be sized, so nothing is
+ * recorded for it (an allow-list provider without a peak adds nothing).
+ */
+function noteAdmittedStart(providerName) {
+  const r = currentReservation();
+  if (!r || r.corrupt || r.mode !== "beside") return;
+  const peak = providerPeak(providerName);
+  if (!peak) return;
+  pruneAdmitted(r.key);
+  let m = _admittedPeaks.get(r.key);
+  if (!m) { m = new Map(); _admittedPeaks.set(r.key, m); }
+  m.set(providerName, { gtt_peak_mb: peak.gtt_peak_mb, host_ram_peak_mb: peak.host_ram_peak_mb });
+}
 
 function currentReservation() {
   try { return (_reservationReader || readReservation)(); }
@@ -660,11 +724,43 @@ function currentReservation() {
   }
 }
 
-/** The reservation blocking `providerName` from starting right now, else null. */
+/**
+ * The reservation blocking `providerName` from starting right now, else null.
+ *
+ * SYNC, and free of sysfs/child processes: an exclusive hold is decided from
+ * the record alone, exactly as before. A beside hold (a render/video job
+ * sharing the card) asks `startDecision` with the provider's declared peak,
+ * the sampler's last snapshot and the peaks of the providers this gateway
+ * already admitted beside the hold (see `_admittedPeaks`); a refusal comes back
+ * as a COPY of the record carrying `decisionReason`, so `refuseStart` can
+ * report why. A job that has outgrown its booking is reported once per hold.
+ */
 function startBlockedBy(providerName) {
   const r = currentReservation();
-  if (!r || isStartAllowed(r, providerName)) return null;
-  return r;
+  if (!r) return null;
+  if (r.mode !== "beside") return isStartAllowed(r, providerName) ? null : r;
+  const decision = startDecision(r, providerName, {
+    peak: providerPeak(providerName),
+    live: currentLiveSnapshot(),
+    profile: readHostProfile(),
+    admitted: admittedPeaks(r.key),
+  });
+  if (decision.allowed) return null;
+  if (decision.job_over_budget && !_overBudgetNoticed.has(r.key)) {
+    _overBudgetNoticed.add(r.key);
+    console.log(`[gpu-orchestrator] gpu job exceeded its booked footprint (${r.owner} until ${r.expires_at || "?"}) — starts that are not on the allow list are refused until it is re-booked`);
+  }
+  return { ...r, decisionReason: decision.reason };
+}
+
+/** The sampler's last snapshot, or null (a throwing reader is no reading). */
+function currentLiveSnapshot() {
+  try {
+    return (_liveMemReader || getLiveSnapshot)();
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] live memory read failed (a beside start cannot be sized): ${err.message}`);
+    return null;
+  }
 }
 
 function emitReservationNotices(input) {
@@ -676,9 +772,13 @@ function emitReservationNotices(input) {
 /** Refuse a start: log with the requester, notify once per reservation, return the error to throw. */
 function refuseStart(reservation, providerName, opts = {}) {
   const requester = opts.requester || "-";
-  console.log(`[gpu-orchestrator] refusing to start ${providerName}: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (requested-by=${requester})`);
+  if (reservation.decisionReason === "gpu_job_beside") {
+    console.log(`[gpu-orchestrator] refusing to start ${providerName}: a render/video job is using part of the GPU (${reservation.owner} until ${reservation.expires_at || "?"}) and this start does not fit beside it (requested-by=${requester})`);
+  } else {
+    console.log(`[gpu-orchestrator] refusing to start ${providerName}: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (requested-by=${requester})`);
+  }
   emitReservationNotices({ reservation, refused: { provider: providerName, requester } });
-  return new ReservedError(reservation, providerName);
+  return new ReservedError(reservation, providerName, reservation.decisionReason || null);
 }
 
 /** Residency paths never throw — they announce once per reservation and skip. */
@@ -1309,6 +1409,7 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
   {
     const blocked = startBlockedBy(providerName);
     if (blocked) throw refuseStart(blocked, providerName, opts);
+    noteAdmittedStart(providerName);
   }
 
   const siblings = getMutexSiblings(providerName, cfg);
@@ -1446,6 +1547,7 @@ export async function acquireProvider(providerName, opts = {}) {
     // any sibling is stopped.
     const blocked = startBlockedBy(providerName);
     if (blocked) throw refuseStart(blocked, providerName, opts);
+    noteAdmittedStart(providerName);
 
     const invocation = await preflightFn(p.bundleId);
 
@@ -1657,6 +1759,7 @@ export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
     }
     const blocked = startBlockedBy(name);
     if (blocked) { noteDeferred(blocked, name); return false; }
+    noteAdmittedStart(name);
     console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId}) requested-by=${requester}`);
     await bundleUpFn(p.bundleId);
     const ready = await waitForReadyFn(p.baseUrl);

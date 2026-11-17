@@ -56,6 +56,27 @@ test("a held reservation shows owner, expiry and reason at info severity, and is
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("beside hold shows the beside wording and not the release hint", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "resv-beside-"));
+  try {
+    const path = join(dir, "r.json");
+    writeFileSync(path, JSON.stringify({
+      owner: "gpujob-7f3a", reason: "render batch", kind: "gpu-job", mode: "beside",
+      started_at: new Date(NOW - 60_000).toISOString(),
+      expires_at: new Date(NOW + 3_600_000).toISOString(),
+      gtt_mb: 50000, host_ram_mb: 30000,
+    }));
+    const { detail, issue } = await run((nowMs) => readReservation({ now: nowMs, path }));
+    assert.equal(detail.state, "info");
+    assert.equal(issue.severity, "info");
+    assert.match(issue.label, /render\/video job is using part of the GPU/);
+    assert.doesNotMatch(issue.label, /reserved by/i, "not the exclusive wording");
+    assert.doesNotMatch(issue.label, /release/i, "never the release hint");
+    const es = await run((nowMs) => readReservation({ now: nowMs, path }), "es");
+    assert.match(es.issue.label, /render o v[ií]deo/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("an unreadable reservation file is shown as reserved (fail closed), in es too", async () => {
   const { issue } = await run(() => ({ corrupt: true, owner: "unknown", allow: [] }), "es");
   assert.equal(issue.severity, "info");

@@ -158,6 +158,12 @@ env.CROW_BACKUP_DIR = join(scratch, "backups");
 // benchmark window on the host would otherwise turn every model-start test
 // into a ReservedError (2026-09-04: 25 failures during a real window).
 env.CROW_BOX_RESERVATION_PATH = join(scratch, "box-reservation.json");
+// The persistent calendar (the booking side of the same file family), the GPU
+// host profile and the GPU job store: state, not config — a suite must never
+// read or write the host's own copies either.
+env.CROW_BOX_SCHEDULE_PATH = join(scratch, "box-schedule.json");
+env.CROW_GPU_HOST_PROFILE_PATH = join(scratch, "gpu-host-profile.json");
+env.CROW_GPU_JOBS_DB_PATH = join(scratch, "gpu-jobs.db");
 // The Schedule page's read-only sources (an operator's box ledger, the machines'
 // timer files): a suite never reads the host's real ones.
 delete env.CROW_BOX_LEDGER_PATH;

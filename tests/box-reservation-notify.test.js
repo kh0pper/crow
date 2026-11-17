@@ -13,6 +13,13 @@ import {
 
 const R1 = { owner: "win", reason: "bench", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z", allow: ["crow-embed"], corrupt: false, key: "win@2026-09-04T20:00:00.000Z" };
 const R2 = { ...R1, owner: "casey", started_at: "2026-09-04T23:30:00.000Z", key: "casey@2026-09-04T23:30:00.000Z" };
+// A render/video job sharing the card (the one box calendar's beside hold).
+const BESIDE = {
+  owner: "gpujob-7f3a", reason: "render batch", started_at: "2026-09-04T20:00:00.000Z", expires_at: "2026-09-04T23:00:00.000Z",
+  allow: ["crow-embed"], corrupt: false, key: "gpujob-7f3a@2026-09-04T20:00:00.000Z",
+  mode: "beside", kind: "gpu-job", booking_id: "bk_0123456789ab", job_id: "job_42",
+  gtt_mb: 50000, host_ram_mb: 30000, hip_procs: 4,
+};
 
 test("first sight of a reservation emits 'start' once; later sights emit nothing", () => {
   const st = createNoticeState();
@@ -50,6 +57,56 @@ test("corrupt reservation: 'start' notice names the unreadable file, refused sti
   const n = reservationNotices(st, { reservation: corrupt, refused: { provider: "crow-chat", requester: "-" } });
   assert.deepEqual(n.map((x) => x.kind), ["start", "refused"]);
   assert.deepEqual(reservationNotices(st, { reservation: corrupt, refused: { provider: "crow-chat", requester: "-" } }), []);
+});
+
+test("beside hold sends one refusal notice, no start notice, and never mentions release", async () => {
+  const st = createNoticeState();
+  assert.deepEqual(reservationNotices(st, { reservation: BESIDE }), [], "no start notice for a beside hold");
+  const first = reservationNotices(st, { reservation: BESIDE, refused: { provider: "crow-chat", requester: "-" } });
+  assert.deepEqual(first.map((n) => n.kind), ["refused"]);
+  assert.deepEqual(
+    reservationNotices(st, { reservation: BESIDE, refused: { provider: "crow-voice", requester: "-" } }),
+    [],
+    "at most one notice per hold",
+  );
+  const calls = [];
+  for (const n of first) await sendReservationNotice(n, { notify: async (opts) => { calls.push(opts); } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].title, "A render/video job is using part of the GPU");
+  assert.equal(
+    calls[0].body,
+    "A render/video job is using part of the GPU until about 2026-09-04T23:00:00.000Z; large model starts that don't fit wait. They start by themselves when it ends.",
+  );
+  assert.doesNotMatch(`${calls[0].title} ${calls[0].body}`, /release/i);
+  assert.equal(calls[0].action_url, "/dashboard/model-catalog");
+  assert.equal(calls[0].metadata.kind, "box_reservation_refused");
+  assert.equal(calls[0].metadata.mode, "beside");
+});
+
+test("exclusive notices unchanged", async () => {
+  const calls = [];
+  const notify = async (opts) => { calls.push(opts); };
+  await sendReservationNotice({ kind: "start", reservation: R1 }, { notify });
+  assert.deepEqual(calls[0], {
+    type: "system",
+    priority: "normal",
+    title: "Box reserved by win until 2026-09-04T23:00:00.000Z",
+    body: "bench \u2014 non-allowed local model starts are refused until then.",
+    action_url: "/dashboard/model-catalog",
+    metadata: { kind: "box_reservation_start", owner: "win", expires_at: "2026-09-04T23:00:00.000Z", corrupt: false },
+  });
+  await sendReservationNotice(
+    { kind: "refused", reservation: R1, refused: { provider: "crow-chat", requester: "10.0.0.5 ua=x client=companion" } },
+    { notify },
+  );
+  assert.deepEqual(calls[1], {
+    type: "system",
+    priority: "high",
+    title: "Box reservation refused a model start: crow-chat",
+    body: "Reserved by win until 2026-09-04T23:00:00.000Z. Asked by 10.0.0.5 ua=x client=companion. Escalations degrade to the resident fast model until the reservation ends; run `box-reserve release` if it is stale.",
+    action_url: "/dashboard/model-catalog",
+    metadata: { kind: "box_reservation_refused", owner: "win", expires_at: "2026-09-04T23:00:00.000Z", provider: "crow-chat" },
+  });
 });
 
 test("sendReservationNotice: shapes the notification and swallows sender failures", async () => {
