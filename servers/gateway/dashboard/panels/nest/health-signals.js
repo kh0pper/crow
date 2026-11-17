@@ -1,7 +1,7 @@
 /**
  * Nest Panel — Health Signals
  *
- * collectHealthSignals(db, opts) → { ok, issues, details }
+ * collectHealthSignals(db, opts) → { ok, issues, details, links }
  *
  * Each signal is wrapped in try/catch — a failing signal becomes state 'off'
  * and never throws. Results are cached for 30 s (injectable clock for tests).
@@ -436,6 +436,11 @@ async function botSandboxSignal(db, lang) {
  * The add-on walls (PR D). The status line the Extensions page shows, in the
  * Nest's own words: one sentence from the shared status module plus a link.
  *
+ * Every add-on that is not walled also gets a row of its own — its name and the
+ * shared word for its state, then a link to its Extensions entry. The buttons
+ * live on that entry, so a row is what puts "Wall it again" one click away from
+ * the Nest, whatever the reason the wall is off.
+ *
  * No card when nothing is running and the kill switch is not set — there is
  * nothing to say about add-ons this host does not have. An info card stays
  * strip-only (the health monitor pushes warn only).
@@ -452,6 +457,16 @@ async function addonWallsSignal(lang) {
   const status = addonWallStatus({ env, entries: list, lang });
   const label = langText(NOTICE.label, lang);
   const href = status.severity === "ok" ? null : "/dashboard/extensions";
+  // One row per bundle add-on that is not walled. `?q=<id>` is the Extensions
+  // page's own search (its filter runs on load and matches the add-on id), so the
+  // row lands on that add-on's card and its "Wall it again" button.
+  const links = status.entries
+    .filter((e) => e.kind === "addon" && e.wordKey !== "walled")
+    .map((e) => ({
+      text: `${e.id}: ${e.word}`,
+      label: langText(NOTICE.action, lang),
+      href: `/dashboard/extensions?q=${encodeURIComponent(e.id)}`,
+    }));
   return {
     id: "addonWalls",
     severity: status.severity === "ok" ? null : status.severity,
@@ -461,6 +476,7 @@ async function addonWallsSignal(lang) {
     issueLabel: href ? status.sentence : undefined,
     actionLabel: href ? langText(NOTICE.action, lang) : undefined,
     actionHref: href || undefined,
+    links,
   };
 }
 
@@ -2639,7 +2655,7 @@ async function integritySignal(lang = "en") {
  *   gateway process has been up (otherwise process.uptime())
  * @param {boolean} [opts.noAuth]  test seam for the Updates card: the gateway's
  *   --no-auth flag (otherwise read from process.argv, like exposureSignal)
- * @returns {Promise<{ok: boolean, issues: Array, details: Array}>}
+ * @returns {Promise<{ok: boolean, issues: Array, details: Array, links: Array}>}
  */
 export async function collectHealthSignals(db, opts = {}) {
   const nowFn = opts.now ?? (() => Date.now());
@@ -2710,9 +2726,18 @@ export async function collectHealthSignals(db, opts = {}) {
       ack: s.ack ?? null,
     }));
 
+  // A signal may also carry `links` ({ text, label, href }): plain text plus a link
+  // of its own (the add-on walls card names every add-on that is not walled, each
+  // pointing at its Extensions entry). Kept apart from `issues` so an info row
+  // shows even when every other signal is fine, and never becomes a notification.
+  const links = present
+    .flatMap((s) => (Array.isArray(s.links) ? s.links : []))
+    .filter((l) => l && typeof l === "object" && typeof l.text === "string" && typeof l.href === "string")
+    .map((l) => ({ text: l.text, label: typeof l.label === "string" ? l.label : "", href: l.href }));
+
   const ok = issues.filter(i => i.severity === "warn").length === 0;
 
-  const result = { ok, issues, details };
+  const result = { ok, issues, details, links };
   _cache = result;
   _cacheTs = ts;
   _cacheLang = lang;

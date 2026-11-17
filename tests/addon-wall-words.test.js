@@ -365,16 +365,38 @@ test("the emitted panel client survives its template literal: no backtick, and i
   }
 });
 
+// Walls on for this computer: the one host state where re-arming means anything.
+const WALLED_ENV = Object.freeze({ CROW_ADDON_WALLS_DEFAULT: "walled" });
+
+/** A scratch home whose addon-walls.json holds these modes, plus its mcp-addons.json. */
+function wallsHome(addons, modes) {
+  const home = mkdtempSync(join(tmpdir(), "crow-wall-rearm-"));
+  mkdirSync(join(home, "bundles"), { recursive: true });
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify(addons));
+  writeFileSync(join(home, "addon-walls.json"), JSON.stringify({ modes }), { mode: 0o600 });
+  return home;
+}
+
+// The live browser entry as proxy.js publishes it for a docker+MCP bundle whose
+// wall decision said unwalled: kind "addon" (not "bundle"), and a `wall` snapshot.
+const browserEntry = (wall) => ({ id: "browser", kind: "addon", name: "browser", status: "connected", wall });
+const browserAddons = { browser: { command: "node", args: ["server/index.js"] } };
+
 test("the detail modal's data: the live line, the word, and who chose unwalled", () => {
   const home = mkdtempSync(join(tmpdir(), "crow-wall-details-"));
   try {
     mkdirSync(join(home, "bundles"), { recursive: true });
-    writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({ paperless: { command: "node", args: [] } }));
+    writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+      paperless: { command: "node", args: [] },
+      browser: { command: "node", args: ["server/index.js"] },
+      // An HTTP add-on: no local child, so no wall and no wall controls for it.
+      gmail: { transport: "http", url: "https://gmailmcp.googleapis.com/mcp/v1" },
+    }));
     const entries = [
       { id: "paperless", kind: "addon", name: "paperless", status: "connected", wall: { mode: "unwalled", source: "owner", profile: null, residuals: [] } },
       { id: "no-such-addon", kind: "addon", name: "no-such-addon", status: "connected", wall: null },
     ];
-    const details = addonWallDetails({ crowHome: home, appRoot: REPO, entries });
+    const details = addonWallDetails({ crowHome: home, appRoot: REPO, entries, env: WALLED_ENV });
     assert.equal(details.paperless.wordKey, "owner");
     assert.equal(details.paperless.word.en, WALL_WORDS.owner.en);
     assert.equal(details.paperless.ownerUnwalled, true);
@@ -387,6 +409,82 @@ test("the detail modal's data: the live line, the word, and who chose unwalled",
   }
 });
 
+// ─── "Wall it again" is reachable for a browser-shaped add-on ─────────────
+
+test("the live browser entry (kind 'addon', owner-unwalled) offers Wall it again, with a line", () => {
+  const home = wallsHome(browserAddons, { browser: "unwalled" });
+  try {
+    const details = addonWallDetails({
+      crowHome: home, appRoot: REPO, env: WALLED_ENV,
+      entries: [browserEntry({ mode: "unwalled", source: "owner", reason: "your choice", profile: null, residuals: [] })],
+    });
+    assert.ok(details.browser, "the entry is described, never skipped");
+    assert.equal(details.browser.ownerUnwalled, true);
+    assert.equal(details.browser.wordKey, "owner");
+    assert.match(details.browser.line.en, /^When walled, this add-on can: /);
+  } finally {
+    rmScratch(home);
+  }
+});
+
+test("a mode the file holds but the entry's snapshot missed still offers Wall it again", () => {
+  // The reported bug: modes.browser was set to "unwalled" by hand before walls were
+  // rolled out here, so the add-on connected under the per-host default ("default",
+  // or no wall record at all). The file is the decision every new connect obeys, so
+  // the owner must still be offered the button.
+  const home = wallsHome(browserAddons, { browser: "unwalled" });
+  try {
+    for (const wall of [{ mode: "unwalled", source: "default", reason: "switched off", profile: null, residuals: [] }, null]) {
+      const details = addonWallDetails({ crowHome: home, appRoot: REPO, env: WALLED_ENV, entries: [browserEntry(wall)] });
+      assert.equal(details.browser.ownerUnwalled, true, `wall record ${JSON.stringify(wall)}: the file says unwalled`);
+      assert.ok(details.browser.line, "and its line is still derived from the manifest");
+    }
+  } finally {
+    rmScratch(home);
+  }
+});
+
+test("an add-on the wall cannot govern gets no button, whatever the file says", () => {
+  // An HTTP add-on has no local child to wrap: the wall decision never runs for it.
+  const home = wallsHome({ gmail: { transport: "http", url: "https://gmailmcp.googleapis.com/mcp/v1" } }, { gmail: "unwalled" });
+  try {
+    const details = addonWallDetails({
+      crowHome: home, appRoot: REPO, env: WALLED_ENV,
+      entries: [{ id: "gmail", kind: "addon", name: "gmail", status: "connected", wall: { mode: "unwalled", source: "default" } }],
+    });
+    assert.equal(details.gmail.ownerUnwalled, false, "an add-on that cannot be walled is never offered the button");
+  } finally {
+    rmScratch(home);
+  }
+});
+
+test("a data backend is not an add-on and gets no wall controls", () => {
+  const home = wallsHome(browserAddons, { "backend-1": "unwalled" });
+  try {
+    const details = addonWallDetails({
+      crowHome: home, appRoot: REPO, env: WALLED_ENV,
+      entries: [{ id: "backend-1", kind: "backend", name: "orders-db", status: "connected", wall: { mode: "unwalled", source: "owner" } }],
+    });
+    assert.deepEqual(details, {});
+  } finally {
+    rmScratch(home);
+  }
+});
+
+test("walls off for this computer (or the kill switch): no add-on is offered the button", () => {
+  const home = wallsHome(browserAddons, { browser: "unwalled" });
+  try {
+    const entries = [browserEntry({ mode: "unwalled", source: "owner", profile: null, residuals: [] })];
+    for (const env of [{}, { CROW_ADDON_WALLS_DEFAULT: "off" }, { CROW_ADDON_WALLS: "off", CROW_ADDON_WALLS_DEFAULT: "walled" }]) {
+      const details = addonWallDetails({ crowHome: home, appRoot: REPO, entries, env });
+      assert.equal(details.browser.ownerUnwalled, false, `${JSON.stringify(env)}: with walls off there is nothing to re-arm`);
+      assert.ok(details.browser.line, "the line is still shown: it says what the wall would allow");
+    }
+  } finally {
+    rmScratch(home);
+  }
+});
+
 // ─── the two surfaces, executed ────────────────────────────────────────────
 
 /**
@@ -394,17 +492,17 @@ test("the detail modal's data: the live line, the word, and who chose unwalled",
  * the fetch spy. The fetch stub answers the consent-challenge with the wall
  * fields the router now sends.
  */
-async function bootPanel({ addonWall = {}, consent = {}, installed = { paperless: { version: "1.0.0" } } } = {}) {
+async function bootPanel({ addonWall = {}, consent = {}, installed = { paperless: { version: "1.0.0" } }, addon = null } = {}) {
   const { parseHTML } = await import("linkedom");
   const vm = await import("node:vm");
   const { buildExtensionsHTML } = await import("../servers/gateway/dashboard/panels/extensions/html.js");
-  const addon = { id: "paperless", name: "Paperless-ngx", description: "Documents", type: "bundle", category: "productivity", version: "1.0.0", author: "Crow", tags: [] };
+  const only = addon || { id: "paperless", name: "Paperless-ngx", description: "Documents", type: "bundle", category: "productivity", version: "1.0.0", author: "Crow", tags: [] };
   const clientHtml = extensionsClientJS("en");
   const clientJs = clientHtml.slice(clientHtml.indexOf("<script>") + "<script>".length, clientHtml.lastIndexOf("</script>"));
   const overlayHtml = clientHtml.slice(0, clientHtml.indexOf("<script>"));
   const { viewsHtml, addonRegistryScript } = buildExtensionsHTML({
     installed,
-    available: [addon], collections: [], registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
+    available: [only], collections: [], registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
     addonWall,
   });
   const { window, document } = parseHTML(`<html><body><div class="main-content">${viewsHtml}${addonRegistryScript}${overlayHtml}</div></body></html>`);
@@ -491,4 +589,61 @@ test("an add-on whose word is 'walled' gets no warning style, and no button", as
   assert.equal(word.textContent, WALL_WORDS.walled.en);
   assert.ok(!word.classList.contains("ext-wall-word--warn"));
   assert.equal(document.querySelector("#modal-content .ext-wall-rearm"), null);
+});
+
+// The reported bug: the owner could not find "Wall it again" for Browser, a docker
+// bundle whose MCP server runs on the host (kind "addon" in the entries snapshot).
+const BROWSER_ADDON = {
+  id: "browser", name: "Browser Automation", description: "Stealth browser automation",
+  type: "bundle", category: "automation", version: "1.7.0", author: "Crow", tags: ["browser"],
+};
+const BROWSER_LINE = "When walled, this add-on can: talk to Crow's browser door; keep files in its own folder";
+
+test("Browser's detail modal shows its sandbox line and the Wall it again button", async () => {
+  const { document, click, settle, flushTimers, calls, reloads } = await bootPanel({
+    addon: BROWSER_ADDON,
+    installed: { browser: { version: "1.7.0" } },
+    addonWall: {
+      browser: {
+        line: { en: BROWSER_LINE, es: "Cuando esté aislado, este complemento puede: hablar con la puerta browser de Crow" },
+        word: { en: WALL_WORDS.owner.en, es: WALL_WORDS.owner.es },
+        wordKey: "owner",
+        ownerUnwalled: true,
+      },
+    },
+  });
+  const item = document.querySelector('.ext-installed__item[data-addon-id="browser"]');
+  assert.ok(item, "Browser is in the Installed list");
+  click(item);
+
+  const modal = document.getElementById("modal-content");
+  assert.equal(modal.querySelector(".ext-wall-line").textContent, BROWSER_LINE, "the sandbox section is there");
+  const btn = modal.querySelector(".ext-wall-rearm");
+  assert.ok(btn, "Wall it again is offered for Browser");
+  assert.equal(btn.textContent, "Wall it again");
+  click(btn);
+  await settle();
+  const post = calls.find((c) => c.url.includes("/bundles/api/addon-wall/"));
+  assert.ok(post, "the click POSTs to the wall route");
+  assert.ok(post.url.endsWith("/bundles/api/addon-wall/browser"));
+  assert.deepEqual(post.body, { mode: "walled" });
+  flushTimers();
+  assert.equal(reloads.count, 1);
+});
+
+test("a wall record with no buildable profile still offers the button (never hides the controls)", async () => {
+  // profileFor can fail (an add-on whose manifest the server copy cannot read).
+  // The line is then honestly absent, but the wall controls must not disappear
+  // with it: they are what the owner came for.
+  const { document, click } = await bootPanel({
+    addon: BROWSER_ADDON,
+    installed: { browser: { version: "1.7.0" } },
+    addonWall: { browser: { line: null, word: null, wordKey: null, ownerUnwalled: true } },
+  });
+  click(document.querySelector('.ext-installed__item[data-addon-id="browser"]'));
+  const modal = document.getElementById("modal-content");
+  assert.equal(modal.querySelector(".ext-wall-line"), null, "no sentence is invented");
+  const btn = modal.querySelector(".ext-wall-rearm");
+  assert.ok(btn, "the button is still there");
+  assert.equal(btn.textContent, "Wall it again");
 });

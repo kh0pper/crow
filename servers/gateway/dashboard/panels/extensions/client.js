@@ -1273,7 +1273,11 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
         }
 
         function cardMatches(card, q) {
-          return (card.dataset.addonName || "").indexOf(q) !== -1
+          // The id is matched too: a link can arrive as ?q=<id> (the Nest's per-add-on
+          // wall rows and a skill's "Go to <extension>"), and an add-on's name need
+          // not contain its id.
+          return (card.dataset.addonId || "").indexOf(q) !== -1
+            || (card.dataset.addonName || "").indexOf(q) !== -1
             || (card.dataset.addonDesc || "").indexOf(q) !== -1
             || (card.dataset.addonTags || "").indexOf(q) !== -1;
         }
@@ -1490,7 +1494,10 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
 
           // What this add-on can reach, from its live profile, and how its wall
           // stands. Both are server-computed text: this only writes textContent.
-          if (addon._sandboxLine) {
+          // The section also appears when only the button is offered (no profile
+          // could be built for a truthful line): the wall controls are what the
+          // owner came for, and hiding them behind a missing sentence is the bug.
+          if (addon._sandboxLine || addon._wallOwnerUnwalled) {
             var wallSection = document.createElement("div");
             wallSection.className = "ext-detail__section";
             var wallTitle = document.createElement("div");
@@ -1498,10 +1505,12 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
             wallTitle.textContent = '${tJs("extensions.wallTitle", lang)}';
             wallSection.appendChild(wallTitle);
 
-            var wallLine = document.createElement("p");
-            wallLine.className = "ext-wall-line";
-            wallLine.textContent = addon._sandboxLine;
-            wallSection.appendChild(wallLine);
+            if (addon._sandboxLine) {
+              var wallLine = document.createElement("p");
+              wallLine.className = "ext-wall-line";
+              wallLine.textContent = addon._sandboxLine;
+              wallSection.appendChild(wallLine);
+            }
 
             if (addon._wallWord) {
               var wallWordEl = document.createElement("span");
