@@ -866,6 +866,25 @@ test("rejected-all recipients is failed, partial rejection is sent with a note",
   assert.equal((await getDraft(db, partial.id)).state, "sent");
 });
 
+test("a server that refuses every recipient fails the row all_rejected, never unknown", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  const { deps } = makeDeps(fake);
+  const draft = await makeDraft(db, account);
+  await tap(db, deps, draft);
+  // What the adapter throws when the server refused the envelope: nothing was transmitted.
+  fake.handle(() => { throw new MailError("BAD_INPUT", "EENVELOPE"); });
+
+  const out = await deliver(db, deps, draft.id, { now: DUE });
+  assert.equal(out.outcome, "failed", "a refused envelope did not go out and is not unknowable");
+  assert.equal(out.reason, "all_rejected");
+  const row = await getDraft(db, draft.id);
+  assert.equal(row.state, "failed");
+  assert.equal(row.failReason, SEND_FAIL_REASONS.all_rejected);
+  assert.equal(fake.sent.length, 1, "exactly one adapter call, and no retry");
+});
+
 /* ---------------------------------------------------------------- the Sent copy */
 
 test("appendToSent failure does not change sent", async () => {
