@@ -30,6 +30,7 @@ import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
+import { emptyNote } from "../bundles/studio/panel/shell.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 /** The audio track the takes belong to. */
@@ -55,6 +56,8 @@ const BUNDLE_DIR = new URL("../bundles/studio", import.meta.url).pathname.replac
 const T1 = "0a1b2c3d-0000-4000-8000-000000000001";
 const T2 = "0a1b2c3d-0000-4000-8000-000000000002";
 const T3 = "0a1b2c3d-0000-4000-8000-000000000003";
+/** A fourth take, added while the page is open. */
+const T4 = "0a1b2c3d-0000-4000-8000-000000000004";
 
 /** The sentence "Remove from this device" asks first (plan Task 8). */
 const CLEAR_AUDIO_TEXT =
@@ -441,14 +444,21 @@ async function bootTakesPanel(options = {}) {
   const fireWindow = (name, made) => {
     for (const handler of [...(windowListeners[name] || [])]) handler(made);
   };
-
-  await settle();
-  frame({
+  const stateMessage = () => ({
     type: "state",
     update: Buffer.from(encodeDocState(doc)).toString("base64"),
     history: [],
     presence: [],
   });
+  // The hub's own state frame: what a change that already landed in the song
+  // looks like to the page, without the page asking for it.
+  const pushState = async () => {
+    frame(stateMessage());
+    await settle();
+  };
+
+  await settle();
+  frame(stateMessage());
   await settle();
 
   const page = document.querySelector(".studio");
@@ -474,6 +484,7 @@ async function bootTakesPanel(options = {}) {
     event,
     settle,
     frame,
+    pushState,
     fireWindow,
     timers,
   };
@@ -711,6 +722,150 @@ test("discarded takes are listed after live ones and dimmed", async () => {
   assert.ok(discarded.querySelector("[data-act=take-restore]"), "it offers Restore");
   assert.equal(discarded.querySelector("[data-act=take-discard]"), null, "and not Discard again");
   assert.equal(discarded.querySelector("[data-act=take-keep]"), null, "nor Keep");
+});
+
+// ---- the takes widget: the clip a take lands in ---------------------------
+
+/** The shell's mode switch, put where the shell mounts it, in Record mode. */
+function recordMode(ui) {
+  const group = ui.document.createElement("div");
+  group.setAttribute("data-role", "mode-switch");
+  const pressed = ui.document.createElement("button");
+  pressed.setAttribute("data-mode", "record");
+  pressed.setAttribute("aria-pressed", "true");
+  group.appendChild(pressed);
+  ui.page.appendChild(group);
+}
+
+/** The takes widget's own host. */
+function takesWidget(ui) {
+  const host = ui.document.querySelector("[data-role=recordings]");
+  assert.ok(host, "the takes widget's host is on the page");
+  return host;
+}
+
+/**
+ * Put the page where a take lands: the fixture's audio track armed, and the
+ * scene holding its clip the one that launched. Both are this page's own view
+ * state, and both are what decides which clip the takes widget follows.
+ */
+async function armRecordClip(ui) {
+  const view = ui.page.__studioTest.view;
+  view.armed[AUDIO_TRACK] = { device_id: "in-1", label: "Input 1", channels: 2, stream: null };
+  view.lastScene = SCENE;
+  await ui.pushState();
+}
+
+test("the takes widget lists the record clip's takes newest first in Record mode", async () => {
+  const ui = await bootTakesPanel();
+  recordMode(ui);
+  await armRecordClip(ui);
+
+  const host = takesWidget(ui);
+  assert.equal(host.hidden, false, "the widget has takes to show");
+  assert.equal(
+    ui.document.querySelector("[data-role=editor] [data-role=takes-lane]"),
+    null,
+    "with no editor widget showing a clip",
+  );
+
+  const lanes = ui.document.querySelectorAll(`[data-role=takes-lane][data-clip-id=${CLIP}]`);
+  assert.equal(lanes.length, 1, "the page carries one lane for the record clip");
+  assert.ok(
+    host.querySelector(`[data-role=takes-lane][data-clip-id=${CLIP}]`),
+    "and the takes widget is what draws it: the armed track's clip in the scene that launched",
+  );
+
+  const rows = Array.from(host.querySelectorAll("[data-role=take]"));
+  assert.deepEqual(
+    rows.map((row) => row.getAttribute("data-take-n")),
+    ["3", "2", "1"],
+    "the clip's takes, newest first",
+  );
+  assert.ok(rows[0].querySelector("[data-act=take-keep]"), "a take offers Keep");
+  assert.ok(rows[0].querySelector("[data-act=take-discard]"), "and Discard");
+  const bar = host.querySelector(`[data-role=comp-bar][data-clip-id=${CLIP}]`);
+  assert.ok(bar, "with the clip's comp bar");
+  assert.ok(bar.querySelector("[data-role=comp-seg]"), "drawn from the comp that plays");
+});
+
+test("with the editor showing the same clip the takes widget leaves it alone", async () => {
+  const ui = await bootTakesPanel();
+  recordMode(ui);
+  await armRecordClip(ui);
+  ui.click(`[data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  assert.ok(
+    ui.document.querySelector("[data-role=editor] [data-role=takes-lane]"),
+    "the editor shows the clip's lane",
+  );
+  assert.equal(
+    ui.document.querySelectorAll(`[data-role=takes-lane][data-clip-id=${CLIP}]`).length,
+    1,
+    "the page carries one takes lane per clip",
+  );
+  assert.equal(
+    ui.document.querySelectorAll("[data-role=comp-bar]").length,
+    1,
+    "and one comp bar, so one comp-drag target",
+  );
+  assert.equal(
+    takesWidget(ui).querySelector("[data-role=takes-lane]"),
+    null,
+    "the takes widget draws no second lane while the editor has the clip",
+  );
+
+  // Closing the editor hands the clip's takes back to the widget.
+  ui.click("[data-act=close-clip]");
+  await ui.settle();
+  assert.ok(
+    takesWidget(ui).querySelector(`[data-role=takes-lane][data-clip-id=${CLIP}]`),
+    "the widget carries the clip's takes again",
+  );
+  assert.equal(ui.document.querySelectorAll("[data-role=comp-bar]").length, 1, "still one comp bar on the page");
+});
+
+test("a take that lands appears in the takes widget without a manual refresh", async () => {
+  const ui = await bootTakesPanel();
+  recordMode(ui);
+  await armRecordClip(ui);
+  assert.equal(takesWidget(ui).querySelectorAll("[data-role=take]").length, 3, "the clip's three takes");
+
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "take.add", takeArgs({ id: T4, at: "2026-01-01T10:15:00.000Z", frames: 96000 }));
+  await ui.pushState();
+
+  const rows = Array.from(takesWidget(ui).querySelectorAll("[data-role=take]"));
+  assert.equal(rows.length, 4, "the landed take is listed");
+  assert.equal(rows[0].getAttribute("data-take-n"), "4", "newest first");
+  assert.equal(rows[0].querySelector(".st-take-name").textContent, "Take 4", "named the way the lane numbers takes");
+});
+
+test("with no audio clip the takes widget keeps the shell's note", async () => {
+  await import("../bundles/studio/server/commands/core.js");
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const doc = newSongDoc({ title: "Notes only", bpm: 120 });
+  runCommand(doc, "track.add", { id: "keys", name: "Keys" });
+  runCommand(doc, "scene.add", { id: SCENE, name: "Verse" });
+  runCommand(doc, "clip.write", {
+    clip_id: "c-keys",
+    track_id: "keys",
+    scene_id: SCENE,
+    name: "Keys",
+    length_bars: 1,
+    notes: [{ t: 0, d: 1, p: 60, v: 100 }],
+  });
+
+  const ui = await bootTakesPanel({ doc });
+  recordMode(ui);
+  await ui.settle();
+
+  const host = takesWidget(ui);
+  assert.equal(host.hidden, true, "the widget has no audio clip to draw");
+  assert.equal(String(host.textContent), "", "and draws nothing at all");
+  assert.equal(emptyNote("takes"), "Arm a track to record.", "so the shell's own note is the widget's words");
 });
 
 // ---- the same lane against a real hub, in a real browser -------------------

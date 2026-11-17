@@ -934,6 +934,14 @@ const STYLES = `
   }
   .studio .st-take-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
   .studio .st-takes-foot { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* The takes lane and its rows: a press on one is a press, never a text
+     selection or the browser's Copy/Share menu. The keep, discard and play
+     buttons are 44 px targets, and so is a lane's own header. */
+  .studio .st-takes,
+  .studio .st-take {
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-take-acts .st-btn { min-width: 44px; min-height: 44px; }
   .studio .st-modes { display: flex; border: 1px solid var(--st-edge); border-radius: 8px; overflow: hidden; }
   .studio .st-mode {
     min-height: 44px; padding: 0 14px; border: none; background: #24282D; color: var(--st-text);
@@ -1149,6 +1157,12 @@ const STYLES = `
   }
   .studio .st-rec-acts { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 100%; }
   .studio .st-rec-acts .st-toggle { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
+  /* Every control of the lanes is a 44 px target: the arm button, the meter's
+     CLIP chip, the lane's header and a take row's own buttons. */
+  .studio .st-rec-arm,
+  .studio .st-rec-lane-head,
+  .studio .st-rec-clip,
+  .studio .st-take-acts .st-btn { min-width: 44px; min-height: 44px; }
   .studio .st-rec-lane-body { position: relative; height: 42px; }
   .studio .st-rec-lane-armed .st-rec-lane-body { background: #1E1512; }
   /* The record target: taller, so A4b's meter and live waveform have the room,
@@ -1205,10 +1219,17 @@ const STYLES = `
     position: absolute; left: 0; right: 0; top: 0; display: block;
     width: 100%; height: 68px; pointer-events: none;
   }
-  /* A phone keeps the lane headers narrow enough to leave a usable bar axis. */
+  /* A phone keeps the lane headers narrow enough to leave a usable bar axis,
+     and stacks a lane's header over its own bar row so each lane is one row
+     across the page, its meter and controls with it. A take row wraps its
+     buttons under the name, so nothing has to be scrolled sideways. */
   @media (max-width: 639px) {
-    .studio .st-rec-row { grid-template-columns: 116px minmax(0, 1fr); }
+    .studio .st-rec-ruler { grid-template-columns: 116px minmax(0, 1fr); }
+    .studio .st-rec-lane { grid-template-columns: minmax(0, 1fr); }
+    .studio .st-rec-lane .st-rec-side { border-right: 0; border-bottom: 1px solid var(--st-line); }
     .studio .st-rec-meter-track { width: 72px; }
+    .studio .st-take { flex-wrap: wrap; }
+    .studio .st-take-acts { margin-left: 0; flex: 1 1 100%; }
   }
   /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
      track's clip is a pattern, so opening one shows the kit instead of the
