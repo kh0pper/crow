@@ -22,7 +22,7 @@ import {
   _resetInFlightForTests, deliver, inFlight, isStaleSending, markStaleUnknown, reconcileUnknown,
   requestSend, settle, undoSend,
 } from "../servers/gateway/mail/send/send-service.js";
-import { sweepMailSends } from "../servers/gateway/mail/send/schedule-service.js";
+import { scheduleDraft, sweepMailSends } from "../servers/gateway/mail/send/schedule-service.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SEND_SOURCE = readFileSync(join(HERE, "..", "servers/gateway/mail/send/send-service.js"), "utf8");
@@ -299,6 +299,43 @@ test("a timer that fires early leaves the second tap holding, and the second tim
   assert.equal(done.outcome, "sent");
   assert.equal(fake.sent.length, 1);
   assert.equal((await getDraft(db, draft.id)).state, "sent");
+});
+
+test("a timer left over from an undone tap never arms again for a scheduled draft and never sends", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db);
+  const fake = makeFake();
+  let clock = T0;
+  const { deps, timers } = makeDeps(fake, { now: () => clock, zone: () => "UTC" });
+  const draft = await makeDraft(db, account);
+
+  await tap(db, deps, draft, T0);
+  assert.equal(timers.length, 1);
+  assert.deepEqual(await undoSend(db, deps, { draftId: draft.id, now: T0 + 1000 }), { ok: true });
+
+  // Thirty days out: a delay longer than the one a timer can hold.
+  const dueAt = T0 + 30 * 24 * 60 * 60 * 1000;
+  const scheduled = await scheduleDraft(db, deps, {
+    draftId: draft.id, hash: draft.headHash, dueAt, now: T0 + 2000,
+  });
+  assert.equal(scheduled.ok, true, JSON.stringify(scheduled));
+  const before = await rawRow(db, draft.id);
+  assert.equal(before.state, "scheduled");
+
+  // The undone tap's timer comes due long before the schedule's own time.
+  clock = T0 + HOLD_MS;
+  const early = await timers[0].fn();
+  assert.equal(early.outcome, "not_due");
+  assert.equal(early.state, "scheduled", "the answer names the state the row is really in");
+  assert.equal(early.retryInMs, dueAt - clock);
+  assert.equal(timers.length, 1, "a scheduled draft arms no timer of its own");
+  assert.equal(fake.sent.length, 0);
+
+  const after = await rawRow(db, draft.id);
+  assert.deepEqual(after, before, "nothing about the row moved");
+  assert.equal(after.state, "scheduled");
+  assert.ok(after.tap_seal, "the schedule's own tap is still the live one");
+  assert.equal(after.due_at, dueAt);
 });
 
 test("undo racing the claim: exactly one of undo and deliver wins", async () => {

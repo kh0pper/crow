@@ -76,6 +76,21 @@ function refuse(code, detail) {
   return detail === undefined ? { ok: false, code } : { ok: false, code, detail };
 }
 
+/* --------------------------------------------------------------------- the name */
+
+/**
+ * The one spelling of an account's display name: each control character becomes a space, every run of
+ * whitespace becomes one space, and the ends are trimmed. `sealFromAddress` seals this text and
+ * `toOutgoing` sends it, so no other spelling of the same name can be sealed and a different one sent.
+ *
+ * @param {unknown} value
+ * @returns {string} the name, or an empty string when the account has none
+ */
+export function normaliseDisplayName(value) {
+  if (typeof value !== "string") return "";
+  return value.replace(CONTROL_CHARS_ALL, " ").replace(/\s+/g, " ").trim();
+}
+
 /* ------------------------------------------------------------------- addresses */
 
 /** The address text of one entry, or null when the entry names no address at all. */
@@ -247,10 +262,7 @@ function frame(digest, value) {
  */
 export function sealFromAddress(account) {
   const address = String(account?.address ?? "").trim().toLowerCase();
-  const name = typeof account?.displayName === "string"
-    ? account.displayName.replace(CONTROL_CHARS_ALL, " ").replace(/\s+/g, " ").trim()
-    : "";
-  return `${address}\n${name}`;
+  return `${address}\n${normaliseDisplayName(account?.displayName)}`;
 }
 
 /* ---------------------------------------------------------------- the message */
@@ -270,9 +282,11 @@ export function sealFromAddress(account) {
  */
 export function toOutgoing(rev, account, attachments = [], options = {}) {
   const input = revisionToInput(rev);
+  // The name is the one `sealFromAddress` sealed, spelled the same way: the text a tap was taken over.
+  const name = normaliseDisplayName(account?.displayName);
   return {
     from: {
-      name: typeof account?.displayName === "string" && account.displayName !== "" ? account.displayName : null,
+      name: name === "" ? null : name,
       address: String(account?.address ?? "").trim().toLowerCase(),
     },
     to: outgoingRecipients(input.to),

@@ -48,6 +48,9 @@ export const STALE_SENDING_MS = 10 * 60 * 1000;
 /** How long an `unknown` row is looked for in the Sent folder, counted from its `attempt_at`. */
 export const RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** The longest delay a platform timer holds; anything above it fires at once, so nothing asks for one. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /** The first three Sent-folder checks, from `attempt_at`; every later one is an hour on. */
 const RECONCILE_STEPS_MS = Object.freeze([60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000]);
 const RECONCILE_HOURLY_MS = 60 * 60 * 1000;
@@ -489,13 +492,17 @@ export async function requestSend(db, deps, options = {}) {
 
   // The hold's own timer: the tick sweep is the recovery path, not the primary one. A timer that fires
   // while a later tap's hold is still running answers `not_due` and re-arms itself for the rest of that
-  // longer hold, so an undo followed by a second tap never sends on the first tap's clock.
+  // longer hold, so an undo followed by a second tap never sends on the first tap's clock. It re-arms
+  // for a `holding` row only: a row that has since been scheduled, discarded or sent has no hold to
+  // wait out — a schedule can be months away — and the tick is what delivers it.
   const fire = (delayMs) => {
     try {
       return d.schedule(() => deliver(db, deps, row.id, { now: nowOf(d, {}) })
         .then((outcome) => {
-          const rest = outcome?.outcome === "not_due" ? Math.floor(Number(outcome.retryInMs)) : 0;
-          if (rest > 0) fire(rest);
+          if (outcome?.outcome === "not_due" && outcome.state === "holding") {
+            const rest = Math.floor(Number(outcome.retryInMs));
+            if (Number.isFinite(rest) && rest > 0) fire(Math.min(rest, HOLD_MS, MAX_TIMER_MS));
+          }
           return outcome;
         })
         .catch((err) => {
@@ -544,8 +551,9 @@ export async function undoSend(db, deps, options = {}) {
  * require it to still exist; recompute the sealed From text from that account; verify the seal. A bad
  * seal or hash, a missing account and a missing key each CAS `holding|scheduled` out of the tap state
  * with a fixed `fail_reason` and no adapter is called. Only a seal that verifies is then looked at for
- * its time: still in the future answers `{outcome: "not_due"}` and writes nothing (the tap's own timer
- * re-arms for the rest of the hold), and past the grace window is `missed`.
+ * its time: still in the future answers `{outcome: "not_due", state}` and writes nothing (the tap's own
+ * timer re-arms for the rest of the hold when the row is still `holding`, and a `scheduled` row is left
+ * to the tick), and past the grace window is `missed`.
  * (1) Claim with one guarded UPDATE from `holding|scheduled`, guarded by the seal, the tap id and the
  * head hash, writing a fresh `claim_token`, `claimed_at`, a fresh attempt (`attempt_at` cleared, the
  * reconcile reset, the old `fail_reason` gone) and — when the row has none — a message id.
@@ -606,8 +614,9 @@ export async function deliver(db, deps, draftId, options = {}) {
   if (!verified) return failPending(db, draftId, now, "seal");
 
   // The seal is good, so the time it was taken for is the next question: a hold that is still running
-  // is left exactly as it is, for the tap's own timer (or the tick) to come back to.
-  if (when > now) return { outcome: "not_due", when, retryInMs: when - now };
+  // is left exactly as it is, for the tap's own timer (or the tick) to come back to. The state travels
+  // with the answer, so a timer knows whether there is a hold left to wait out at all.
+  if (when > now) return { outcome: "not_due", state: row.state, when, retryInMs: when - now };
   if (now - when > GRACE_MS) return failPending(db, draftId, now, "missed", "missed");
 
   // No supervisor is no adapter: refuse before the claim, and leave the row where it is.

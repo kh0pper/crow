@@ -313,6 +313,32 @@ test("the sealed From carries the account's display name, so a renaming is a dif
   assert.equal(unnamed.fromAddress, `${ALEX}\n`);
 });
 
+test("a rename that only adds a control character or spacing seals and sends the same name", async () => {
+  const db = await freshDb();
+  const account = await makeAccount(db, { displayName: "Alex Rivera" });
+  const { draft, rev } = await makeDraft(db, account);
+
+  // The sealed name is the part of the sealed From after the address, and the name on the message has
+  // to be that same text: one normaliser spells both, so they can never disagree.
+  const read = async () => {
+    const result = await preflight(db, draft, rev, { accountId: account.id });
+    assert.equal(result.ok, true);
+    const name = result.fromAddress.slice(result.fromAddress.indexOf("\n") + 1);
+    assert.equal(result.message.from.name, name === "" ? null : name);
+    return { sealed: result.fromAddress, sent: result.message.from.name };
+  };
+
+  const base = await read();
+  assert.deepEqual(base, { sealed: `${ALEX}\nAlex Rivera`, sent: "Alex Rivera" });
+
+  // Each of these is the same name carrying a control character or a second run of spaces. Written
+  // straight to the account row, so it is the store's own normalising that is not in the way here.
+  for (const displayName of ["Alex  Rivera", "Alex\tRivera", "Alex\nRivera", "Alex\u0000Rivera", " Alex Rivera "]) {
+    await db.execute({ sql: "UPDATE mail_accounts SET display_name = ? WHERE id = ?", args: [displayName, account.id] });
+    assert.deepEqual(await read(), base, JSON.stringify(displayName));
+  }
+});
+
 test("a draft whose account address no longer matches the head revision's from address is refused bad_input", async () => {
   const db = await freshDb();
   const account = await makeAccount(db);
