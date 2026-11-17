@@ -88,12 +88,13 @@ marked.setOptions({ gfm: true, breaks: true });
  *     chunk of a real document — those render exactly as they did before.
  *   - the TOTAL-TIME BUDGET: a document whose chunks are EACH pathological is
  *     still bounded, because the render stops once it has spent
- *     OWNER_MD_RENDER_BUDGET_MS (1500 ms) of CPU and every remaining chunk
- *     becomes the old plain-text tail — the notice, then the WHOLE remainder as
- *     escaped text in one <pre> (tailHtml). Nothing is ever dropped. Under that
- *     sits a hard ceiling too: nothing past OWNER_MD_MAX_TOTAL_INPUT (8 MiB, the
- *     file viewer's own read cap) is parsed at all — it is the plain-text tail —
- *     so this function is safe on its own even if a caller forgets that cap.
+ *     OWNER_MD_RENDER_BUDGET_MS (1000 ms) of CPU on chunks and every remaining
+ *     chunk becomes the old plain-text tail — the notice, then the WHOLE
+ *     remainder as escaped text in one <pre> (tailHtml). Nothing is ever
+ *     dropped. Under that sits a hard ceiling too: nothing past
+ *     OWNER_MD_MAX_TOTAL_INPUT (8 MiB, the file viewer's own read cap) is parsed
+ *     at all — it is the plain-text tail — so this function is safe on its own
+ *     even if a caller forgets that cap.
  *
  * Real content is far below all of it (every stored blog post, KB article and
  * memory is < 60 KB); the file viewer's lab documents are what the chunks are
@@ -139,10 +140,11 @@ export function renderMarkdown(markdown, options) {
  * @returns {string} Safe HTML
  */
 function renderOwnerLongDocument(src, storageOrigin) {
-  // The budget is measured from HERE, in process CPU time: rendering is
-  // synchronous and single-threaded, so this is the render's own cost whatever
-  // load the box carries elsewhere.
-  const started = process.cpuUsage();
+  // The budget is measured from HERE, in CPU time — this thread's own where Node
+  // exposes process.threadCpuUsage (see cpuNow). Rendering is synchronous and
+  // single-threaded, so this is the render's own cost whatever load the box
+  // carries elsewhere.
+  const started = cpuNow();
   // The whole document's link definitions, first: marked resolves `[x][y]`
   // against the ONE lexer's `tokens.links`, so without this map a link in chunk
   // 3 whose `[y]: …` line sits in chunk 1 renders as its literal text.
@@ -172,9 +174,23 @@ function renderOwnerLongDocument(src, storageOrigin) {
   return html;
 }
 
-/** CPU milliseconds spent since `start` (a `process.cpuUsage()` reading). */
+/**
+ * A CPU-time reading for the render budget: `process.threadCpuUsage()` (Node 24)
+ * measures THIS thread, which is exactly what the budget means — the render runs
+ * synchronously on the thread that started it, so nothing else can spend on its
+ * behalf and no other thread's work can spend its budget. Where that API is not
+ * available, fall back to the whole process's `process.cpuUsage()`: still CPU
+ * time, just a coarser measure.
+ * @returns {{thread: boolean, reading: object}}
+ */
+function cpuNow() {
+  const thread = typeof process.threadCpuUsage === "function";
+  return { thread, reading: thread ? process.threadCpuUsage() : process.cpuUsage() };
+}
+
+/** CPU milliseconds spent since `start` (a cpuNow() reading). */
 function elapsedCpuMs(start) {
-  const spent = process.cpuUsage(start);
+  const spent = start.thread ? process.threadCpuUsage(start.reading) : process.cpuUsage(start.reading);
   return (spent.user + spent.system) / 1000;
 }
 
@@ -244,8 +260,16 @@ export const OWNER_MD_MAX_TOTAL_INPUT = 8 * 1024 * 1024;
  * table-shaped lines spends it after a few chunks and shows the remainder as
  * text instead of making a public page wait. Exported so the tests share the
  * number.
+ *
+ * The budget never covers the LAST chunk it started, because it is checked
+ * before each chunk rather than inside one: the worst total is therefore this
+ * budget plus one worst-case chunk. The worst chunk measured today is a 128 KB
+ * chunk of Unicode-whitespace-only lines, ≈2.75 s — marked's inline `br` rule is
+ * quadratic on it — so that shape is a follow-up guard of its own; every shape
+ * under the existing block guards costs tens of milliseconds per chunk. Hence the
+ * number: 1000 ms of budget, not the 1500 it used to be.
  */
-export const OWNER_MD_RENDER_BUDGET_MS = 1500;
+export const OWNER_MD_RENDER_BUDGET_MS = 1000;
 
 /** The notice that introduces the plain-text tail of a long document. */
 const TAIL_NOTICE = '<p class="md-tail-notice">Long document: the rest is shown as plain text.</p>';
@@ -269,11 +293,18 @@ function tailHtml(tail) {
 
 /**
  * Where renderMarkdown splits a document: the end of the last blank line at or
- * before the cap that is NOT inside a fenced code block, else the last newline
- * before the cap, else the cap itself. Called once per chunk, with `from` at the
- * previous cut (see ownerMarkdownChunks), so a long document is split into
- * consecutive chunks by the SAME rule — and with `from` at 0 for a document that
- * fits in one chunk, which is the path that has to stay byte-identical.
+ * before the cap that is NOT inside a fenced code block or a raw-HTML block,
+ * else the last newline before the cap, else the cap itself. Called once per
+ * chunk, with `from` at the previous cut (see ownerMarkdownChunks), so a long
+ * document is split into consecutive chunks by the SAME rule — and with `from`
+ * at 0 for a document that fits in one chunk, which is the path that has to stay
+ * byte-identical.
+ *
+ * A window whose REMAINDER FITS is not cut at all: the answer is the end of the
+ * document. Cutting at the last blank line there would put the document's final
+ * lines in a chunk of their own, and a setext heading's underline (or a table's
+ * last row) reads as a paragraph when it is parsed alone — `Heading\n=======`
+ * with no trailing newline became `<p>Heading</p><p>=======</p>`.
  *
  * "\n\n" is a block boundary to marked, so a chunk usually parses cleanly
  * instead of starting (or ending) mid-paragraph, and a fence is skipped as a cut
@@ -289,6 +320,15 @@ function tailHtml(tail) {
  * code, not a fence: read as one it never closes, every later blank line is
  * skipped and the cut collapses to a few characters (the head of a 200 KB
  * document became 7).
+ *
+ * A raw-HTML block is tracked the same way (see htmlBlockOpener): a comment and
+ * a `<script>`/`<style>`/`<textarea>`/`<pre>` body (CommonMark's html block types
+ * 2 and 1) run ACROSS blank lines and end only at the line carrying their
+ * closing marker. Their text is meant to be invisible — the sanitizer drops the
+ * whole block — so a cut inside one would put the hidden second half on the page
+ * as an ordinary paragraph, and the last line break before the cap is taken from
+ * outside such a block for the same reason. (A cut inside a FENCE is still
+ * allowed: splitting code is cosmetic, its text is visible either way.)
  *
  * That state machine is an approximation of marked, so a cut is never allowed to
  * cost a chunk more than half the cap: when the last usable blank line sits
@@ -311,9 +351,19 @@ export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT, from = 0) {
   const length = String(src).length;
   const base = from > 0 ? Math.min(from, length) : 0;
   const limit = Math.min(base + cap, length);
+  // The whole remainder fits in this window: there is nothing to cut. The end of
+  // the document is a real character boundary of the input (no surrogate to step
+  // back over), and cutting anywhere before it would split the last block.
+  if (limit === length) return length;
   let lastBlank = -1;
   /** The open fence: its character and its run length, or null. */
   let fence = null;
+  /** The open raw-HTML block (a comment, or a <script>/<style>/<textarea>/<pre>
+   *  body): the test that ENDS it, or null. */
+  let htmlBlock = null;
+  /** The index of the last `\n` at or before the cap that is NOT inside one of
+   *  those blocks (`lineBreak` below). */
+  let lastHtmlFreeBreak = -1;
   for (let start = base; start < limit;) {
     const nl = src.indexOf("\n", start);
     const end = nl === -1 ? length : nl;
@@ -322,6 +372,10 @@ export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT, from = 0) {
       // A closing fence: same character, at least as long, then spaces only.
       const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
       if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+    } else if (htmlBlock) {
+      // Inside a raw-HTML block: its blank lines are its CONTENT, and only the
+      // line carrying the closing marker ends it.
+      if (htmlBlock.end.test(line)) htmlBlock = null;
     } else if (/^[ \t]*$/.test(line)) {
       // A blank line: the cut is its end, so the head keeps the "\n\n" that
       // tells marked the block is over. Only one that ENDS at or before the cap
@@ -335,13 +389,19 @@ export function ownerMarkdownCut(src, cap = OWNER_MD_MAX_INPUT, from = 0) {
       // misjudged opener from swallowing the document (see above).
       const open = /^ {0,3}(`{3,}(?=[^`\n]*$)|~{3,})/.exec(line);
       if (open) fence = { char: open[1][0], length: open[1].length };
+      else htmlBlock = htmlBlockOpener(line);
     }
+    // A line break that is not inside a raw-HTML block is a safe cut point even
+    // when it is inside a fence (see above). Its index is the `\n` itself, so
+    // the answer is the same one `lastIndexOf("\n", limit - 1)` gave.
+    if (nl !== -1 && nl < limit && !htmlBlock) lastHtmlFreeBreak = nl;
     if (nl === -1) break;
     start = end + 1;
   }
-  // The last line break before the cap; a blank line counted above always has
-  // one at lastBlank - 1, so this is never before the blank line's newline.
-  const lineBreak = src.lastIndexOf("\n", limit - 1);
+  // The last line break before the cap that is not inside a raw-HTML block; a
+  // blank line counted above always has one at lastBlank - 1, so this is never
+  // before the blank line's newline.
+  const lineBreak = lastHtmlFreeBreak;
   let cut;
   if (lastBlank > base && ((lastBlank - base) * 2 >= limit - base || lineBreak + 1 <= lastBlank)) {
     cut = lastBlank;
@@ -369,13 +429,42 @@ function isHighSurrogate(code) {
 }
 
 /**
+ * The raw-HTML block `line` opens, if any, as the test that ENDS it (or null):
+ * the two CommonMark HTML block types that run ACROSS blank lines — type 1, a
+ * `<script>`, `<style>`, `<textarea>` or `<pre>` start tag, and type 2, a
+ * comment. Both start at the beginning of a line with at most three spaces of
+ * indent (CommonMark's rule, the one marked applies) and end at the line that
+ * carries their closing marker; every other HTML block ends at a blank line,
+ * which ownerMarkdownCut already treats as a cut point.
+ *
+ * The opening line is checked for the closing marker too, so a one-line
+ * `<!-- a note -->` (or `<script>…</script>`) opens nothing.
+ * @param {string} line
+ * @returns {{end: RegExp}|null}
+ */
+function htmlBlockOpener(line) {
+  // One cheap scan first: the opener is a `<` at the very start or after at most
+  // three spaces, which most lines do not have at all.
+  const lt = line.indexOf("<");
+  if (lt < 0 || lt > 3) return null;
+  const m = /^ {0,3}(?:<(script|pre|style|textarea)(?=[\s>]|$)|<!--)/i.exec(line);
+  if (!m) return null;
+  if (m[1]) {
+    const end = new RegExp("</" + m[1].toLowerCase() + ">", "i");
+    return end.test(line.slice(m[0].length)) ? null : { end };
+  }
+  return line.includes("-->", m[0].length) ? null : { end: /-->/ };
+}
+
+/**
  * The chunks renderMarkdown hands to marked, in order, as `[start, end)` pairs
  * into `src`: consecutive, non-overlapping, each at most `cap` characters, and
  * together exactly `[0, min(src.length, limit))`.
  *
  * Every boundary comes from ownerMarkdownCut (the end of a blank line outside a
- * fence, else the last line break, else the cap on a character boundary), so a
- * chunk almost always ends where marked sees a block boundary. Slicing at those
+ * fence and outside a raw-HTML block, else the last line break, else the cap on
+ * a character boundary — and the document's own end whenever the remainder
+ * fits), so a chunk almost always ends where marked sees a block boundary. Slicing at those
  * ends and rendering each slice on its own is what makes a 500 KB-1 MB document
  * fully formatted while every span marked parses stays bounded: nothing is
  * dropped, nothing is rewritten, and joining the chunks reproduces the input
@@ -443,41 +532,67 @@ const LINK_DEF_CANDIDATE = /^ {0,3}\[/;
  * a chunked render can resolve a reference a single whole-document parse would
  * not; it can never do the reverse (a real definition is always collected), and
  * it is what appending the definition block to each chunk would do as well.
+ *
+ * A line longer than OWNER_MD_MAX_INPUT is skipped, and the whole scan is wrapped
+ * in a try/catch. Both are needed: marked's def tokenizer runs its label/href/
+ * title patterns over the WHOLE line, and on a multi-megabyte one (a lone `[`, or
+ * an unclosed `[x]: u "` title) its regex recursion overflows the stack and
+ * throws RangeError. That throw used to escape renderMarkdown — this scan runs
+ * OUTSIDE renderOwnerHead's try/catch — so such a document was a 500. Skipping
+ * the line cannot lose a definition, either: chunking splits a line that long,
+ * so marked itself can never read one as a definition.
+ *
+ * The map has NO prototype (`Object.create(null)`), exactly like marked's own
+ * `tokens.links`: with a plain `{}`, a definition labelled `constructor` looks
+ * already present (the inherited function is truthy) and one labelled
+ * `__proto__` becomes a prototype assignment instead of an entry.
  * @param {string} src line-ending-normalised document
  * @param {object} instance the Marked instance whose syntax is in force
  * @returns {Record<string, {href: string, title: string|undefined}>}
  */
 function collectLinkDefinitions(src, instance) {
-  const links = {};
+  const links = Object.create(null);
   let found = 0;
-  // A Lexer of its own, on a COPY of the options: marked's Lexer caches a
-  // Tokenizer on the options object it is given, and it must never be the shared
-  // defaults (see boundedLexer). Only `tokenizer.def` is used — no lexing.
-  const lexer = new Lexer({ ...instance.defaults });
-  const tokenizer = lexer.tokenizer;
-  tokenizer.lexer = lexer;
-  const length = Math.min(src.length, OWNER_MD_MAX_TOTAL_INPUT);
-  /** The open fence: its character and its run length, or null. */
-  let fence = null;
-  for (let start = 0; start < length;) {
-    const nl = src.indexOf("\n", start);
-    const end = nl === -1 || nl > length ? length : nl;
-    const line = src.slice(start, end);
-    if (fence) {
-      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-      if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
-    } else if (LINK_DEF_CANDIDATE.test(line)) {
-      const def = tokenizer.def(line);
-      if (def && !links[def.tag]) {
-        links[def.tag] = { href: def.href, title: def.title };
-        if (++found >= BOT_MD_MAX_LINK_DEFS) break;
+  try {
+    // A Lexer of its own, on a COPY of the options: marked's Lexer caches a
+    // Tokenizer on the options object it is given, and it must never be the
+    // shared defaults (see boundedLexer). Only `tokenizer.def` is used — no
+    // lexing.
+    const lexer = new Lexer({ ...instance.defaults });
+    const tokenizer = lexer.tokenizer;
+    tokenizer.lexer = lexer;
+    const length = Math.min(src.length, OWNER_MD_MAX_TOTAL_INPUT);
+    /** The open fence: its character and its run length, or null. */
+    let fence = null;
+    for (let start = 0; start < length;) {
+      const nl = src.indexOf("\n", start);
+      const end = nl === -1 || nl > length ? length : nl;
+      const line = src.slice(start, end);
+      // A line this long cannot be a definition marked could have read, and its
+      // def rule overflows the stack on one: skip it outright.
+      if (line.length <= OWNER_MD_MAX_INPUT) {
+        if (fence) {
+          const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+          if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+        } else if (LINK_DEF_CANDIDATE.test(line)) {
+          const def = tokenizer.def(line);
+          if (def && !links[def.tag]) {
+            links[def.tag] = { href: def.href, title: def.title };
+            if (++found >= BOT_MD_MAX_LINK_DEFS) break;
+          }
+        } else {
+          const open = /^ {0,3}(`{3,}(?=[^`\n]*$)|~{3,})/.exec(line);
+          if (open) fence = { char: open[1][0], length: open[1].length };
+        }
       }
-    } else {
-      const open = /^ {0,3}(`{3,}(?=[^`\n]*$)|~{3,})/.exec(line);
-      if (open) fence = { char: open[1][0], length: open[1].length };
+      if (nl === -1) break;
+      start = end + 1;
     }
-    if (nl === -1) break;
-    start = end + 1;
+  } catch {
+    // Anything marked's own tokenizer throws on is unknowable here, so the map is
+    // simply empty: every reference link renders as its literal text, exactly as
+    // it would with no definitions at all, and never as a 500.
+    return Object.create(null);
   }
   return links;
 }

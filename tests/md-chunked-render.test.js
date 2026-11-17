@@ -30,6 +30,16 @@
 //     parse and is byte-identical to what it always rendered (the sha256 pins in
 //     tests/md-nesting-depth.test.js, tests/owner-markdown-guard.test.js and
 //     tests/md-block-guard.test.js, run alongside this file, are unchanged);
+//   - a window whose remainder FITS is not cut at all, so a document with no
+//     trailing newline keeps its last block whole (a setext heading stays a
+//     heading, a table keeps its last row) instead of losing its last line into
+//     a chunk of its own;
+//   - the cut never lands inside a raw-HTML block that runs across blank lines
+//     (a comment, a <script>/<style>/<textarea>/<pre>), whose text is meant to be
+//     INVISIBLE — a cut inside one would show the rest of it as a paragraph;
+//   - the whole-document definition scan never throws, whatever a single line
+//     looks like: marked's own def tokenizer overflows the stack on a
+//     multi-megabyte line, and that scan runs before any chunk's try/catch;
 //   - the file viewer renders a 600 KB .md fully formatted through its route.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -184,7 +194,7 @@ for (const size of [600 * 1024, 1024 * 1024]) {
 test("the owner cap and the hard ceiling are the chunker's two bounds", () => {
   assert.equal(OWNER_MD_MAX_INPUT, 128 * 1024);
   assert.equal(OWNER_MD_MAX_TOTAL_INPUT, 8 * 1024 * 1024);
-  assert.equal(OWNER_MD_RENDER_BUDGET_MS, 1500);
+  assert.equal(OWNER_MD_RENDER_BUDGET_MS, 1000);
   // Under the chunk size there is nothing to split.
   const small = "# Small\n\nsome *text*\n";
   assert.deepEqual(ownerMarkdownChunks(small), [[0, small.length]]);
@@ -300,9 +310,9 @@ test("budget: 1 MiB of every pathological shape renders in < 3 s CPU and drops n
 // the most expensive shape measured (a one-cell table every three lines —
 // ~250 ms of CPU per 128 KB chunk on the dev box) repeated to just past the
 // 8 MiB parse ceiling, i.e. ~16 s of unbudgeted work, which still spends the
-// 1.5 s budget on a runner an order of magnitude faster. (Whether a 1 MiB
-// document reaches 1500 ms depends on the box: the four shapes above measure
-// 0.02-1.1 s for 1 MiB here.) The blank line after each table is what the chunk
+// OWNER_MD_RENDER_BUDGET_MS (1 s) budget on a runner an order of magnitude
+// faster. (Whether a 1 MiB document reaches it depends on the box: the four
+// shapes above measure 0.02-1.1 s for 1 MiB here.) The blank line after each table is what the chunk
 // cut lands on, so the tail starts at a table, not inside one — and because the
 // document is over the hard ceiling, a failure to spend the budget would show up
 // as a tail of a few hundred characters instead of a real remainder.
@@ -377,6 +387,123 @@ test("cross-chunk references: the document's FIRST definition wins, and one in a
   assert.ok(html.includes("[two][fenced]"),
     "a definition inside a fence is code, so that link stays literal text: " + html.slice(-400));
   assert.ok(!html.includes('href="/blog/fenced"'), "and never becomes a link");
+});
+
+test('definitions labelled like Object properties ("constructor", "__proto__") resolve', () => {
+  // marked's own links map is prototype-less (Object.create(null)), so both of
+  // these are ordinary labels there. A plain `{}` in the whole-document scan made
+  // `constructor` look already defined (it is inherited, and truthy) and turned
+  // `__proto__` into a PROTOTYPE assignment, so neither link ever resolved.
+  const src = [
+    "# Odd labels",
+    "",
+    "[constructor]: /blog/ctor",
+    "",
+    "[__proto__]: /blog/proto",
+    "",
+    fillerTo(200_000).trimEnd(),
+    "",
+    "Links: [one][constructor] and [two][__proto__].",
+  ].join("\n");
+  assert.ok(src.length > OWNER_MD_MAX_INPUT, `the uses land in a later chunk than the definitions (${src.length})`);
+  const html = renderMarkdown(src);
+  assert.match(html, /<a href="\/blog\/ctor"[^>]*>one<\/a>/, "constructor resolves: " + html.slice(-300));
+  assert.match(html, /<a href="\/blog\/proto"[^>]*>two<\/a>/, "__proto__ resolves: " + html.slice(-300));
+});
+
+// --- shapes the whole-document def scan and the cut rule have to survive ----
+
+/** Filler text of at most `length` characters, in whole paragraphs, so it ends
+ *  on a blank line (the cut point chunk 1 lands on). */
+function fillerTo(length) {
+  const unit = "A paragraph of ordinary filler prose, one line of it, and never\n"
+    + "more than a few words wide, so that the cut has plenty of blank\n"
+    + "lines to choose from.\n\n";
+  let out = "";
+  while (out.length + unit.length <= length) out += unit;
+  return out;
+}
+
+test("a multi-megabyte line that looks like a link definition renders, and quickly", (t) => {
+  // marked's def tokenizer overflows the stack (RangeError) on a line this long,
+  // and the whole-document definition scan runs BEFORE any chunk's try/catch — so
+  // an unguarded scan let such a document throw out of renderMarkdown, i.e. a 500
+  // on the file viewer. Chunking splits a line this long anyway, so marked could
+  // never read it as a definition in the first place.
+  const inputs = {
+    "an unclosed [ label": "[" + "a".repeat(8388600),
+    "an unclosed def title": '[x]: u "' + rep("\\a", 7.5 * 1024 * 1024),
+  };
+  for (const [name, src] of Object.entries(inputs)) {
+    assert.ok(src.length > 2 * OWNER_MD_MAX_INPUT, `${name}: reaches the chunked path`);
+    let html = "";
+    const t0 = cpuMs();
+    assert.doesNotThrow(() => { html = renderMarkdown(src); }, `${name}: rendered, not thrown`);
+    const ms = cpuMs() - t0;
+    t.diagnostic(`${name}: ${(src.length / 1048576).toFixed(1)} MB in ${ms.toFixed(0)} ms CPU`);
+    assert.ok(html.length > 0, `${name}: and the page is not empty`);
+    assert.ok(ms < 2000, `${name}: quick (${ms.toFixed(0)} ms CPU, bound 2000 ms)`);
+  }
+});
+
+test("the last block of a document with no trailing newline is not cut off", (t) => {
+  // Chunk 1 ends on the filler's own blank line, so chunk 2's window IS the
+  // document's last block — which fits. The old rule cut it at its last line
+  // break anyway, so the final line landed in a chunk of its own: a setext
+  // heading's underline, or a table's last row, rendered as a paragraph.
+  const head = fillerTo(100_000);
+  const code = rep("code line\n", 60_000);
+
+  // A fenced block (no blank line inside it, so nothing to cut on) ending in a
+  // setext heading, with no newline after the underline.
+  const setext = head + "```text\n" + code + "```\nHeading\n=======";
+  assert.ok(setext.length > OWNER_MD_MAX_INPUT, `the fixture reaches the chunked path (${setext.length})`);
+  assert.equal(setext.at(-1), "=", "and it does NOT end with a newline");
+  const setextHtml = renderMarkdown(setext);
+  t.diagnostic(`setext tail: ${setextHtml.slice(-160)}`);
+  assert.match(setextHtml, /<h1>Heading<\/h1>/, "the setext heading is a heading, not two paragraphs");
+  assert.ok(!setextHtml.includes("======="), "and its underline is not shown as text");
+
+  // A table as the final block: its rows have no blank lines between them.
+  const rows = rep("| key | value |\n", 56_000);
+  const rowCount = (rows.match(/\n/g) || []).length;
+  const table = head + "| k | v |\n| - | - |\n" + rows + "| last | LAST-CELL |";
+  assert.ok(table.length > OWNER_MD_MAX_INPUT, `the table fixture reaches the chunked path (${table.length})`);
+  assert.ok(rowCount > 3_000, `and it has many rows (${rowCount})`);
+  assert.equal(table.at(-1), "|", "and it does NOT end with a newline");
+  // The same shape in ONE parse is the reference: marked reads an un-terminated
+  // final row as a row of the table.
+  assert.match(renderMarkdown("| k | v |\n| - | - |\n| a | b |\n| last | LAST-CELL |"),
+    /<td>LAST-CELL<\/td>/, "the reference parse keeps the last row");
+  const tableHtml = renderMarkdown(table);
+  t.diagnostic(`table tail: ${tableHtml.slice(-200)}`);
+  assert.match(tableHtml, /<td>LAST-CELL<\/td>/, "the last row is still a row of the table");
+  assert.equal((tableHtml.match(/<tr>/g) || []).length, rowCount + 2, "header + every row, none torn off");
+  assert.ok(!/<p>\| last/.test(tableHtml), "and never a paragraph of its own");
+});
+
+test("a raw-HTML block straddling the chunk point is never cut open", (t) => {
+  // A comment and a <script> (CommonMark html block types 2 and 1) run across
+  // blank lines, and the sanitizer drops the whole block, so its text stays
+  // INVISIBLE. A cut inside one shows the rest of it as an ordinary paragraph in
+  // the next chunk — which is exactly how hidden text reaches the page.
+  const head = fillerTo(110_000);
+  const cases = {
+    "an HTML comment": ["<!--\n", "-->"],
+    "a script block": ["<script>\n", "</script>"],
+  };
+  for (const [name, [open, close]] of Object.entries(cases)) {
+    const marker = "SECRET-" + name.replace(/[^A-Za-z]+/g, "-").toUpperCase();
+    // Blank lines INSIDE the block, so the old rule saw a cut point inside it.
+    const hidden = rep(`${marker} hidden line\n\n`, 40_000);
+    const src = head + open + hidden + close + "\nAFTER-THE-BLOCK\n";
+    assert.ok(src.length > OWNER_MD_MAX_INPUT, `${name}: reaches the chunked path (${src.length})`);
+    const html = renderMarkdown(src);
+    t.diagnostic(`${name}: ${(html.length / 1024).toFixed(0)} KB of HTML, `
+      + (html.includes(marker) ? "hidden text LEAKED" : "no leak"));
+    assert.ok(!html.includes(marker), `${name}: its hidden text never reaches the page`);
+    assert.ok(html.includes("AFTER-THE-BLOCK"), `${name}: and what follows it still renders`);
+  }
 });
 
 // --- the file viewer -------------------------------------------------------
