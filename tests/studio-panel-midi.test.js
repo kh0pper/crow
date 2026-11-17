@@ -276,7 +276,7 @@ function fakeEngine() {
     rollStops: [],
     rollStopsAll: 0,
     fx: [],
-    looper: [],
+    looperSteps: [],
     plays: 0,
     stops: 0,
     stopAlls: 0,
@@ -340,7 +340,7 @@ function fakeEngine() {
     },
     fxHold(name, amount) { engine.fx.push({ name: String(name), amount: Number(amount), on: true }); },
     fxRelease(name) { engine.fx.push({ name: String(name), amount: 0, on: false }); },
-    looper(action) { engine.looper.push(String(action)); },
+    looper(action) { engine.looperSteps.push(String(action)); },
     loadSample() { return Promise.resolve(); },
     unloadSample() {},
     loadAudio() {},
@@ -1398,6 +1398,65 @@ test("a mapped trigger fires on the press, not on the release", async () => {
   ui.pedal(DEVICE, [0xb0, 20, 64]);
   await ui.settle();
   assert.deepEqual(ui.engine.clips, [CLIP], "a CC at 64 launches the clip it names");
+});
+
+test("a toggle on a knob fires only where it crosses 64, not on every value above it", async () => {
+  const doc = await midiDoc();
+  const toggles = [
+    ["m-knob-pause", 20, { kind: "pad.pause_all" }],
+    ["m-knob-stop", 21, { kind: "stop_all" }],
+    ["m-knob-loop", 22, { kind: "looper.cycle" }],
+    ["m-knob-hold", 23, { kind: "pad.hold" }],
+  ];
+  for (const [id, number, action] of toggles) {
+    await writeMapping(doc, {
+      id,
+      device_name: DEVICE,
+      message: { type: "cc", channel: 1, number },
+      action,
+    });
+  }
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  /** Turn one knob through these values, one message at a time. */
+  const turn = async (number, values) => {
+    for (const value of values) {
+      ui.pedal(DEVICE, [0xb0, number, value]);
+      await ui.settle();
+    }
+  };
+  const rise = [0, 10, 63, 64, 80, 100, 127];
+  const again = [63, 40, 0, 64, 100, 127];
+
+  // HOLD: one rise arms it once, however many values above 64 the knob reports.
+  await turn(23, rise);
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "true",
+    "HOLD armed once for the whole rise");
+  await turn(23, again);
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false",
+    "dropping below 64 armed it, and the next rise disarmed it once");
+
+  // Pause: one press for the rise, and one more for the next crossing.
+  await turn(20, rise);
+  assert.deepEqual(ui.engine.pauses, [true], "Pause fired once for the whole rise");
+  await turn(20, again);
+  assert.deepEqual(ui.engine.pauses, [true, false], "Pause's next crossing paused again");
+
+  // The looper walks one step per crossing, not one per value.
+  await turn(22, rise);
+  assert.deepEqual(ui.engine.looperSteps, ["record"], "the looper stepped once for the whole rise");
+  await turn(22, again);
+  assert.deepEqual(ui.engine.looperSteps, ["record", "play"], "the looper stepped on once more");
+
+  // Stop-all: one stop for the rise, and one more for the next crossing.
+  await turn(21, rise);
+  assert.equal(ui.engine.stopAlls, 1, "Stop-all fired once for the whole rise");
+  await turn(21, again);
+  assert.equal(ui.engine.stopAlls, 2, "Stop-all's next crossing stopped once more");
 });
 
 test("a knob's Learn waits for a control change", async () => {

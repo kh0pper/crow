@@ -399,7 +399,7 @@ function actionText(action, snap, message = null) {
     case "pad.roll":
       return "hold ROLL on the pads";
     case "pad.pause_all":
-      return "pause everything, and resume it";
+      return "pause the pads, and resume them";
     case "fx.hold":
       return `hold the ${fxName(action.name)} effect`;
     case "looper.cycle":

@@ -1471,7 +1471,7 @@ test("studio_midi lists mappings with who set them", async (t) => {
 test("actionWords gives the three pad performance kinds plain words", () => {
   assert.equal(actionWords({ kind: "pad.hold" }, {}), "press HOLD on the pads");
   assert.equal(actionWords({ kind: "pad.roll" }, {}), "hold ROLL on the pads");
-  assert.equal(actionWords({ kind: "pad.pause_all" }, {}), "pause everything, and resume it");
+  assert.equal(actionWords({ kind: "pad.pause_all" }, {}), "pause the pads, and resume them");
 });
 
 test("a long motion lane is read as a spread of at most 256 points", () => {

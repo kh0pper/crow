@@ -3255,6 +3255,34 @@ test("M16 a setSong that removes the pad's sample ends a held voice", async () =
   );
 });
 
+test("M16 holdPad never latches a clip-bound step voice", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "gate" }), pad("track-1", 1, { mode: "gate" })],
+    frames: 48000,
+    clips: [patternClip("clip-1", "track-1")],
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  await engine.process(128, 128);
+
+  const record = recordOf(engine, "track-1");
+  const stepped = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  assert.ok(stepped, "the step started a Gate voice");
+  assert.equal(stepped.clip_id, "clip-1", "the voice belongs to the clip that played the step");
+
+  // HOLD is the operator's, and this voice is the clip's: a scene launch is what
+  // ends it (M16), so HOLD leaves it alone rather than raising a latch the launch
+  // would then break.
+  assert.equal(holdPadOf(engine, 0), false, "a clip-bound step voice is not HOLD's to latch");
+  assert.equal(stepped.held, false, "and it carries no latch");
+
+  // A live press of a pad is the operator's own voice, and that one is held.
+  pressPad(engine, 1);
+  assert.equal(holdPadOf(engine, 1), true, "a live press's voice is what HOLD latches");
+  const live = soundingOf(record).filter((voice) => voice.index === 1)[0];
+  assert.equal(live.held, true, "and it really is latched");
+});
+
 // --- HOLD and voice stealing (B4b) ------------------------------------------
 
 test("a stolen held voice leaves a tail that is not held and emits exactly one off", async () => {
@@ -4447,6 +4475,61 @@ test("steal a paused voice, then resume: the tail finishes and nothing stays fro
   }
 });
 
+test("a tail stolen mid-pause ramp fades from the level the ramp stood on", async () => {
+  const pads = [];
+  for (let index = 0; index < 16; index += 1) pads.push(pad("track-1", index));
+  const song = kitSong({ pads, frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  for (let index = 0; index < 16; index += 1) pressPad(engine, index);
+  await engine.process(128, 128);
+
+  // Pause-all ramps the voices down over 64 frames; half of that ramp is walked
+  // here, so every voice stands at half level with half its ramp still to run.
+  engine.post({ type: "pause_voices", on: true });
+  await engine.process(128, 32);
+  const record = recordOf(engine, "track-1");
+  const ramping = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  assertLevel(ramping.pauseLevel, 0.5, "the ramp has brought pad 0's voice halfway down", 1e-12);
+  assert.ok(ramping.pauseFrames > 0, "and its ramp is still running");
+
+  // Every slot sounds, so this press steals the oldest voice — pad 0's, taken
+  // with its pause ramp half done.
+  pressPad(engine, 0);
+  const tails = tailsOf(record);
+  assert.equal(tails.length, 1, "the stolen voice rings out in one fade tail");
+  assert.equal(tails[0].index, 0, "it is pad 0's voice");
+  assert.equal(tails[0].paused, false, "the tail carries no pause, so its fade runs to its end");
+  assert.equal(tails[0].pauseFrames, 0, "with no ramp left to run");
+  assertLevel(
+    tails[0].pauseLevel,
+    0.5,
+    "the level the ramp stood on is kept, so the fade starts where the ramp was, not at full level or silence",
+    1e-12,
+  );
+
+  // The other fifteen voices finish their own pause ramp over the next 32
+  // frames, so the fade's second half is where the tail is the only sound left
+  // and its level can be read on its own. The new pad 0 voice started paused, so
+  // it is silent throughout.
+  await engine.process(128, 32);
+  const fading = await engine.process(128, 32);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  const fadeFrames = engine.scope.StudioSamplerVoice.FADE_FRAMES;
+  for (const at of [0, 1, 16, 31]) {
+    const frame = 32 + at;
+    assertLevel(
+      fading.left[at],
+      ONE_VOICE * 0.5 * ((fadeFrames - frame) / fadeFrames),
+      `frame ${frame} of the tail's fade is heard at the half level the ramp stood on`,
+      1e-6,
+    );
+  }
+  assert.equal(tailsOf(record).length, 0, "and the tail is over within that fade");
+  const quiet = await engine.process(128, 256);
+  assert.equal(peakOf(quiet.left), 0, "nothing is left sounding or frozen at a level that leaks");
+});
+
 test("M22 a live press, a step and a roll-style start while paused make no sound until resume, then ramp up", async () => {
   // Pad 0 is started by a step at beat 2 (frame 48000 at 120 bpm), pad 1 by the
   // operator's own presses — the very start a ROLL repeat is.
@@ -4778,19 +4861,21 @@ test("rollStart repeats the pad at the interval and rollStop ends it on the next
   const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
   engine.post({ type: "pad_events_on", on: true });
 
-  // The press is the roll's first hit; the first REPEAT is one interval later.
-  pressPad(engine, 0);
+  // No press of the pad at all: `rollStart` is the whole gesture, so the engine
+  // starts the roll's first hit itself on the block's first frame, and the first
+  // REPEAT is one interval after it.
   rollPad(engine, 0, "1/16");
   const rolling = await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
 
   assert.deepEqual(
     hitFrames(engine.messages),
     [0, FRAMES_PER_SIXTEENTH],
-    "one repeat, a 16th (6000 frames at 120 bpm) after the press",
+    "the roll's first hit sounds at once, and one repeat a 16th (6000 frames at 120 bpm) later",
   );
-  // The pad is a one-shot, so its repeat overlaps the press's voice: both sound
-  // from the repeat's own frame on.
-  assertLevel(rolling.left[FRAMES_PER_SIXTEENTH - 1], ONE_VOICE, "the press's voice alone until the repeat", 1e-7);
+  assertLevel(rolling.left[0], ONE_VOICE, "the first hit is heard on the roll's own first frame", 1e-7);
+  // The pad is a one-shot, so its repeat overlaps the first hit's voice: both
+  // sound from the repeat's own frame on.
+  assertLevel(rolling.left[FRAMES_PER_SIXTEENTH - 1], ONE_VOICE, "the first hit alone until the repeat", 1e-7);
   assertLevel(rolling.left[FRAMES_PER_SIXTEENTH], 2 * ONE_VOICE, "the repeat's own frame holds both voices", 1e-7);
 
   // rollStop ends the repeats: the one that would have landed at 12000 never
@@ -4802,6 +4887,27 @@ test("rollStart repeats the pad at the interval and rollStop ends it on the next
     hitFrames(engine.messages),
     [0, FRAMES_PER_SIXTEENTH],
     "the repeat that would have landed at 12000 is not started after rollStop",
+  );
+});
+
+test("an interval change on a pad that already rolls does not fire a second first hit", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0)], frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  rollPad(engine, 0, "1/16");
+  await engine.process(128, 128);
+  assert.deepEqual(hitFrames(engine.messages), [0], "the roll's first hit sounds at once, and nothing else");
+
+  // The same pad rolls on at a new pace: it keeps its one roll, so it is not
+  // pressed again — the new pace is measured from the frame it was asked for.
+  rollPad(engine, 0, "1/8");
+  await engine.process(128, FRAMES_PER_BEAT / 2 + 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [0, 128 + FRAMES_PER_BEAT / 2],
+    "only the repeats follow the new interval: no second first hit at the re-start",
   );
 });
 
@@ -4976,9 +5082,9 @@ test("M18 a Gate pad rolled at 1/16 never has more than 2 voices sounding at onc
   }
 
   assert.deepEqual(engine.errors, [], "the processor must render without a fault");
-  // Two repeats inside the 12800 frames walked (at 6000 and 12000), and each
-  // one's gate is exactly the interval: a repeat releases itself on the frame the
-  // next one starts, so no two of them pile up.
+  // The first hit and two repeats inside the 12800 frames walked (at 0, 6000 and
+  // 12000), and each one's gate is exactly the interval: a repeat releases itself
+  // on the frame the next one starts, so no two of them pile up.
   assert.ok(hitFrames(engine.messages).length >= 2, "the roll has to have repeated, and it did not");
   assert.ok(most <= 2, `a Gate pad's repeats must never hold more than 2 voices at once, saw ${most}`);
   assert.ok(loudest > 0.1, `the repeats have to be audible, peak was ${loudest}`);
@@ -4988,7 +5094,8 @@ test("M20 a Normal pad restarts on each repeat and a One-shot pad overlaps", asy
   const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }];
 
   // A Normal pad's repeat takes the voice before it over the 64-frame crossfade,
-  // so the roll's SECOND repeat (at 12000) is the one that meets a sounding voice.
+  // so the roll's repeat at 12000 is the one that meets a sounding voice — the
+  // one the repeat at 6000 started.
   const normalSong = kitSong({ pads: [pad("track-1", 0, { mode: "normal" })], frames: 48000 });
   const normal = await createProcessor(normalSong, samples);
   rollPad(normal, 0, "1/16");
@@ -4997,7 +5104,7 @@ test("M20 a Normal pad restarts on each repeat and a One-shot pad overlaps", asy
   assertLevel(
     restarted.left[2 * FRAMES_PER_SIXTEENTH - 1],
     ONE_VOICE,
-    "the first repeat's voice sounds alone until the second repeat",
+    "the repeat at 6000's voice sounds alone until the repeat at 12000",
   );
   assertLevel(restarted.left[2 * FRAMES_PER_SIXTEENTH], 2 * ONE_VOICE, "the repeat's own frame still holds both");
   assertLevel(
@@ -5006,8 +5113,13 @@ test("M20 a Normal pad restarts on each repeat and a One-shot pad overlaps", asy
     "and the earlier one has faded 64 frames later",
   );
 
-  // A One-shot pad's repeat overlaps instead: both voices go on sounding.
-  const oneshot = await createProcessor(kitSong({ pads: [pad("track-1", 0)], frames: 48000 }), samples);
+  // A One-shot pad's repeats overlap instead: the first hit's voice and both
+  // repeats go on sounding together. The sample is quieter than half scale, so
+  // the three voices sum below the output's hard clip.
+  const quiet = 0.2;
+  const oneshot = await createProcessor(kitSong({ pads: [pad("track-1", 0)], frames: 48000 }), [
+    { id: SAMPLE_ID, channels: [constant(48000, quiet)] },
+  ]);
   rollPad(oneshot, 0, "1/16");
   const overlapped = await oneshot.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
   assert.deepEqual(oneshot.errors, [], "the processor must render without a fault");
@@ -5017,7 +5129,12 @@ test("M20 a Normal pad restarts on each repeat and a One-shot pad overlaps", asy
     2 * FRAMES_PER_SIXTEENTH + 64,
     2 * FRAMES_PER_SIXTEENTH + 127,
   ]) {
-    assertLevel(overlapped.left[at], 2 * ONE_VOICE, `frame ${at} holds both one-shot voices`);
+    assertLevel(
+      overlapped.left[at],
+      3 * quiet * CENTRE,
+      `frame ${at} holds the first hit and both repeats`,
+      1e-6,
+    );
   }
 });
 
@@ -5027,9 +5144,14 @@ test("a tempo change mid-roll changes spacing from the next repeat and double-fi
   engine.post({ type: "pad_events_on", on: true });
   rollPad(engine, 0, "1/16");
 
-  // The first repeat stands a 16th into the song: 6000 frames at 120 bpm.
+  // The first repeat stands a 16th in, after the first hit on frame 0: 6000
+  // frames at 120 bpm.
   await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
-  assert.deepEqual(hitFrames(engine.messages), [FRAMES_PER_SIXTEENTH], "the first repeat is a 16th in");
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [0, FRAMES_PER_SIXTEENTH],
+    "the roll's first hit sounds at once, and its first repeat a 16th in",
+  );
 
   // 140 bpm rounds a 16th to 5143 frames. The repeat the clock had already
   // placed (12000, from the step it took at 6000) keeps its slot — a tempo change
@@ -5045,11 +5167,11 @@ test("a tempo change mid-roll changes spacing from the next repeat and double-fi
   const frames = hitFrames(engine.messages);
   assert.deepEqual(
     frames,
-    [6000, 12000, 17143],
-    "the repeats after the change follow the new interval, and none is doubled or dropped",
+    [0, 6000, 12000, 17143],
+    "the repeat already placed keeps its slot and the ones after the change follow the new interval, none doubled or dropped",
   );
-  assert.equal(frames[1] - frames[0], FRAMES_PER_SIXTEENTH, "the hit already placed keeps its spacing");
-  assert.equal(frames[2] - frames[1], 5143, "the next repeat is spaced at the new tempo's 1/16");
+  assert.equal(frames[2] - frames[1], FRAMES_PER_SIXTEENTH, "the hit already placed keeps its spacing");
+  assert.equal(frames[3] - frames[2], 5143, "the next repeat is spaced at the new tempo's 1/16");
 });
 
 test("Stop and resetLive clear all rolls", async () => {
@@ -5063,8 +5185,8 @@ test("Stop and resetLive clear all rolls", async () => {
   await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
   assert.deepEqual(
     hitFrames(engine.messages),
-    [FRAMES_PER_SIXTEENTH, FRAMES_PER_SIXTEENTH],
-    "both rolls repeat a 16th in",
+    [0, 0, FRAMES_PER_SIXTEENTH, FRAMES_PER_SIXTEENTH],
+    "both rolls start at once and repeat a 16th in",
   );
 
   engine.post({ type: "stop" });
@@ -5072,17 +5194,17 @@ test("Stop and resetLive clear all rolls", async () => {
   assert.deepEqual(engine.errors, [], "the processor must render without a fault");
   assert.equal(
     hitFrames(engine.messages).length,
-    2,
+    4,
     "Stop clears both rolls: nothing more is repeated while 7680 frames of blocks go on",
   );
 
   // The same for opening a DIFFERENT song: resetLive releases the live state.
   rollPad(engine, 0, "1/16");
   await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
-  assert.equal(hitFrames(engine.messages).length, 3, "a fresh roll repeats once more");
+  assert.equal(hitFrames(engine.messages).length, 6, "a fresh roll starts at once and repeats once more");
   engine.post({ type: "reset_live" });
   await engine.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
-  assert.equal(hitFrames(engine.messages).length, 3, "resetLive clears the roll too");
+  assert.equal(hitFrames(engine.messages).length, 6, "resetLive clears the roll too");
 });
 
 test("an unrelated setSong leaves a roll running", async () => {
@@ -5092,7 +5214,11 @@ test("an unrelated setSong leaves a roll running", async () => {
 
   rollPad(engine, 0, "1/16");
   await engine.process(128, FRAMES_PER_SIXTEENTH + 128);
-  assert.deepEqual(hitFrames(engine.messages), [FRAMES_PER_SIXTEENTH], "the roll repeats once a 16th in");
+  assert.deepEqual(
+    hitFrames(engine.messages),
+    [0, FRAMES_PER_SIXTEENTH],
+    "the roll starts at once and repeats once a 16th in",
+  );
 
   // An edit that touches ANOTHER pad is no business of the roll's: `setSong` runs
   // on every edit, so it must not stop what still exists.
@@ -5104,7 +5230,7 @@ test("an unrelated setSong leaves a roll running", async () => {
   assert.deepEqual(engine.errors, [], "the processor must render without a fault");
   assert.deepEqual(
     hitFrames(engine.messages),
-    [FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
+    [0, FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
     "the roll plays on through an unrelated edit",
   );
 
@@ -5117,32 +5243,34 @@ test("an unrelated setSong leaves a roll running", async () => {
   await engine.process(128, 2 * FRAMES_PER_SIXTEENTH);
   assert.deepEqual(
     hitFrames(engine.messages),
-    [FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
+    [0, FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
     "a pad the new song no longer has takes its roll with it",
   );
 });
 
 test("M21 rolls under Pause-all keep their clock and every repeat starts paused, heard on resume", async () => {
+  const quiet = 0.2;
   const song = kitSong({ pads: [pad("track-1", 0)], frames: 48000 });
-  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, quiet)] }]);
   engine.post({ type: "pad_events_on", on: true });
   engine.post({ type: "pause_voices", on: true });
   rollPad(engine, 0, "1/16");
 
   // The clock keeps running: the repeats still land on their own frames, and each
-  // one starts a voice that is paused from its own first frame.
+  // one starts a voice that is paused from its own first frame — the first hit
+  // of the roll included.
   const paused = await engine.process(128, 2 * FRAMES_PER_SIXTEENTH + 128);
   assert.deepEqual(
     hitFrames(engine.messages),
-    [FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
-    "a paused roll keeps its clock: both repeats land on their own frames",
+    [0, FRAMES_PER_SIXTEENTH, 2 * FRAMES_PER_SIXTEENTH],
+    "a paused roll starts at once and keeps its clock: every repeat lands on its own frame",
   );
-  assert.equal(peakOf(paused.left), 0, "every repeat made under Pause-all is silent");
+  assert.equal(peakOf(paused.left), 0, "every start made under Pause-all is silent");
   const record = recordOf(engine, "track-1");
   const voices = soundingOf(record).filter((voice) => voice.index === 0);
-  assert.equal(voices.length, 2, "both repeats started a voice");
+  assert.equal(voices.length, 3, "the first hit and both repeats started a voice");
   for (const voice of voices) {
-    assert.equal(voice.paused, true, "each repeat's voice is created paused");
+    assert.equal(voice.paused, true, "each of them is created paused");
     assert.equal(voice.position, voice.start, "and has not read one frame of its sample");
   }
 
@@ -5152,8 +5280,8 @@ test("M21 rolls under Pause-all keep their clock and every repeat starts paused,
   assert.deepEqual(engine.errors, [], "the processor must render without a fault");
   assertLevel(
     lifted.left[lifted.left.length - 1],
-    2 * ONE_VOICE,
-    "both paused repeats are heard after the resume",
+    3 * quiet * CENTRE,
+    "the first hit and both repeats are heard after the resume",
     1e-6,
   );
 });

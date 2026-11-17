@@ -898,8 +898,10 @@
     for (let frame = 0; frame < frames; frame += 1) {
       if (!voice.sounding) break;
       // A voice Pause-all has ramped down and frozen stands exactly where it is:
-      // nothing advances and nothing is heard until it is resumed (M17).
-      if (frozenByPause(voice)) continue;
+      // nothing advances and nothing is heard until it is resumed (M17). It
+      // stands still for the whole block, so the render leaves early rather than
+      // walking the rest of the frames for nothing.
+      if (frozenByPause(voice)) break;
       countdown(voice);
       if (voice.stage === STAGE_DONE) {
         voice.sounding = false;

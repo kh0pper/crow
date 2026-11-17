@@ -148,6 +148,24 @@ async function firstBankId(doc) {
 }
 
 /**
+ * Put a sound on some of the fixture's pads. A roll reads the song's own pad to
+ * know whether there is anything there to repeat.
+ * @returns {Promise<string>} the id of the bank the pads belong to
+ */
+async function givePadsSamples(doc, indexes) {
+  const bankId = await firstBankId(doc);
+  const pads = doc.getMap("song").get("pads");
+  doc.transact(() => {
+    for (const index of indexes) {
+      const pad = pads.get(`${TRACK}/${bankId}/${index}`);
+      assert.ok(pad, `the fixture has pad ${index + 1}`);
+      pad.set("sample_id", `sample-${index}`);
+    }
+  });
+  return bankId;
+}
+
+/**
  * One live fx.hold mapping on a note of the fixture controller: the pedal a
  * MIDI press arrives from.
  * @param {object} doc
@@ -302,6 +320,9 @@ function fakeStudioEngine() {
       const key = `${trackId}/${bankId}/${index}`;
       const pad = engine.song && engine.song.pads ? engine.song.pads[key] : null;
       if (pad && (pad.loop === "loop" || pad.loop === "pingpong")) return false;
+      // A pad with no sound on it has nothing to repeat, exactly as the real
+      // engine answers.
+      if (pad && !pad.sample_id) return false;
       if (!engine.rollPads.includes(key) && engine.rollPads.length >= 4) return false;
       if (!engine.rollPads.includes(key)) engine.rollPads.push(key);
       engine.rolls.push({
@@ -1890,6 +1911,37 @@ test("tapping a held pad lets it go and plays nothing", async () => {
   assert.equal(ui.engine.engine.live.length, played + 1, "a pad that is no longer held plays again");
 });
 
+test("chromatic: tapping the pressed pad lets the latched sample go", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const bankId = await firstBankId(doc);
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+  await pickMode(ui, "chromatic");
+  ui.engine.engine.gate(TRACK, bankId, 0);
+
+  ui.click("[data-role=sampler-pads] [data-act=pad-hold]");
+  await ui.settle();
+  pressPad(ui, 5);
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.holds,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }],
+    "the chromatic press latched the selected sample pad, not the pad under the finger");
+  assert.equal(ui.engine.engine.live[0].index, 0, "and the selected sample is what sounded");
+
+  // The engine reports the pad under the finger as held. The latch the page
+  // already made names the sample pad, and that is the one a tap must release.
+  ui.padEvent({ frame: 0, track_id: TRACK, bank_id: bankId, index: 5, kind: "state", state: 3 });
+
+  const played = ui.engine.engine.live.length;
+  pressPad(ui, 5);
+  await ui.settle();
+  assert.equal(ui.engine.engine.live.length, played, "tapping the held pad plays nothing");
+  assert.deepEqual(ui.engine.engine.heldReleases, [[TRACK, bankId, 0]],
+    "and it lets the sample pad go, which is the voice the engine holds");
+});
+
 test("600 ms on HOLD releases every held pad with no arguments; a 200 ms tap does not", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
   const bankId = await firstBankId(doc);
@@ -2149,9 +2201,9 @@ function rollInterval(ui) {
 }
 
 /** Put a finger on ROLL and leave it there: the key is held, not clicked. */
-function holdRoll(ui) {
+function holdRoll(ui, pointerId = 1) {
   const node = rollButton(ui);
-  node.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  node.dispatchEvent(ui.event("pointerdown", { button: 0, pointerId }));
   return node;
 }
 
@@ -2170,9 +2222,9 @@ function blurWindow(ui) {
   for (const handler of [...(ui.windowListeners.blur || [])]) handler(ui.event("blur", {}));
 }
 
-test("holding ROLL and pressing a pad calls rollStart with the chosen interval; lifting calls rollStop", async () => {
+test("holding ROLL and pressing a pad calls rollStart with the chosen interval; only ROLL's own lift ends it", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
-  const bankId = await firstBankId(doc);
+  const bankId = await givePadsSamples(doc, [0, 1]);
   const ui = await bootSong({ doc, engine: true });
   await ui.openSampler();
 
@@ -2191,23 +2243,46 @@ test("holding ROLL and pressing a pad calls rollStart with the chosen interval; 
   await ui.settle();
   assert.equal(button.getAttribute("aria-pressed"), "true", "the key says it is held");
 
-  pressPad(ui, 0);
+  // A second finger on a pad starts a roll of its own.
+  padAt(ui, 0).dispatchEvent(ui.event("pointerdown", { button: 0, pointerId: 2 }));
   await ui.settle();
   assert.deepEqual(ui.engine.engine.rolls,
     [{ track_id: TRACK, bank_id: bankId, index: 0, interval: "1/8", v: 100 }],
     "the press started a roll at the chosen interval and the press's velocity");
   assert.deepEqual(ui.engine.engine.live, [], "a roll is the engine's own clock, not one voice a press");
 
-  ui.release();
+  // That pad's own lift ends its roll, and does NOT end the key: another finger
+  // is still on it.
+  ui.release({ pointerId: 2 });
   await ui.settle();
   assert.deepEqual(ui.engine.engine.rollStops,
     [{ track_id: TRACK, bank_id: bankId, index: 0 }], "the lift stopped that pad's roll, once");
   assert.deepEqual(ui.engine.engine.releases, [], "and released no voice of its own");
-  assert.equal(rollButton(ui).getAttribute("aria-pressed"), "false", "the key came up with the pad");
+  assert.equal(rollButton(ui).getAttribute("aria-pressed"), "true",
+    "the ROLL key stayed down while another finger lifted");
+
+  // The key is still held, so another pad still rolls.
+  padAt(ui, 1).dispatchEvent(ui.event("pointerdown", { button: 0, pointerId: 3 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rolls.map((one) => one.index), [0, 1],
+    "a second pad rolls under the same held key");
+  assert.deepEqual(ui.engine.engine.live, [], "and it plays no voice of its own either");
+
+  ui.release({ pointerId: 3 });
+  await ui.settle();
+  assert.deepEqual(ui.engine.engine.rollStops.map((one) => one.index), [0, 1],
+    "the second pad's lift stopped its own roll, once");
+
+  // The key's own finger coming up is what lets ROLL go.
+  ui.release({ pointerId: 1 });
+  await ui.settle();
+  assert.equal(rollButton(ui).getAttribute("aria-pressed"), "false",
+    "the key came up with its own finger");
 });
 
-test("a fifth pad shows the toast and starts nothing", async () => {
+test("a fifth pad shows the max toast and starts nothing", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await givePadsSamples(doc, [0, 1, 2, 3, 4]);
   const ui = await bootSong({ doc, engine: true });
   await ui.openSampler();
 
@@ -2226,9 +2301,25 @@ test("a fifth pad shows the toast and starts nothing", async () => {
   assert.deepEqual(ui.engine.engine.live, [], "nothing was played in its place either");
 });
 
+test("a pad with no sound shows the nothing-to-roll toast and starts nothing", async () => {
+  const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  const ui = await bootSong({ doc, engine: true });
+  await ui.openSampler();
+
+  holdRoll(ui);
+  await ui.settle();
+  pressPad(ui, 1);
+  await ui.settle();
+
+  assert.equal(ui.engine.engine.rolls.length, 0, "a pad with no sample rolls nothing");
+  assert.equal(toastText(ui), "Nothing to roll on this pad",
+    "and the page names that refusal, not the four-pad one");
+  assert.deepEqual(ui.engine.engine.live, [], "nothing was played in its place either");
+});
+
 test("a looping pad shows the loop toast and starts nothing", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
-  const bankId = await firstBankId(doc);
+  const bankId = await givePadsSamples(doc, [1, 2]);
   const ui = await bootSong({ doc, engine: true });
   await ui.openSampler();
 
@@ -2255,7 +2346,7 @@ test("a looping pad shows the loop toast and starts nothing", async () => {
 
 test("leaving the ROLL key and a window blur stop every roll", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
-  const bankId = await firstBankId(doc);
+  const bankId = await givePadsSamples(doc, [0, 1, 2]);
   const ui = await bootSong({ doc, engine: true });
   await ui.openSampler();
 
@@ -2295,6 +2386,7 @@ test("leaving the ROLL key and a window blur stop every roll", async () => {
 
 test("the ROLL key is not a command: the song is never written by it", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
+  await givePadsSamples(doc, [0]);
   const ui = await bootSong({ doc, engine: true });
   await ui.openSampler();
   const before = ui.sent.filter((message) => message.type === "command").length;
@@ -2403,12 +2495,20 @@ test("chromatic three-finger chord: each lift releases its own voice only", asyn
     "and the other two fingers lifted their own");
 });
 
-test("16-velocity: the sixteen pads send sixteen distinct rising velocities", async () => {
+test("16-velocity: the sixteen pads play the selected sample at sixteen rising levels", async () => {
   const doc = await samplerDoc({ scenes: [SCENE], pattern: true });
   const ui = await bootSong({ doc, engine: true });
   await ui.openSampler();
-  await pickMode(ui, "velocity");
 
+  // Pick pad 4 as the sound first, in Normal mode, where a press is also the
+  // selection. The velocity grid then plays THAT sample from every pad.
+  pressPad(ui, 3);
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+  assert.equal(ui.engine.engine.live[0].index, 3, "Normal played the pad that was pressed");
+
+  await pickMode(ui, "velocity");
   for (let index = 0; index < 16; index += 1) {
     pressPad(ui, index);
     await ui.settle();
@@ -2416,16 +2516,16 @@ test("16-velocity: the sixteen pads send sixteen distinct rising velocities", as
     await ui.settle();
   }
 
-  const levels = ui.engine.engine.live.map((one) => one.v);
+  const played = ui.engine.engine.live.slice(1);
+  const levels = played.map((one) => one.v);
   assert.deepEqual(levels,
     [8, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95, 103, 111, 119, 127],
     "the first pad is the softest and the last the loudest");
   assert.equal(new Set(levels).size, 16, "no two pads share a level");
   for (let index = 0; index < 16; index += 1) {
-    const played = ui.engine.engine.live[index];
-    assert.equal(played.index, index, `pad ${index + 1} plays its own sample`);
-    assert.equal(played.source_index, index, "from its own pad");
-    assert.equal(played.locks, null, "with no pitch lock");
+    assert.equal(played[index].index, 3, `pad ${index + 1} plays the selected sample, not its own`);
+    assert.equal(played[index].source_index, index, "from its own pad");
+    assert.equal(played[index].locks, null, "with no pitch lock");
   }
 });
 

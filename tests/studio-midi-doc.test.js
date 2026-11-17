@@ -264,6 +264,50 @@ test("the agent proposes but cannot apply a mapping", (t) => {
   assert.equal(routed(s.doc, { device_name: "FCB1010", ...pedal }), null);
 });
 
+test("an agent's pad.hold, pad.roll and pad.pause_all are proposals; the operator's yes makes them route", (t) => {
+  const s = studio(t);
+  const cases = [
+    { kind: "pad.hold", device: "Pad kit", message: message("note", 10, 36) },
+    { kind: "pad.roll", device: "Pad kit", message: message("cc", 10, 20) },
+    { kind: "pad.pause_all", device: "FCB1010", message: message("pc", 1, 3) },
+  ];
+
+  for (const [at, one] of cases.entries()) {
+    const id = `perf-${at}`;
+    const action = { kind: one.kind };
+    const incoming = { device_name: one.device, ...one.message };
+
+    // The agent proposes: the mapping is stored, and nothing routes.
+    s.run("midi.map", { id, device_name: one.device, message: one.message, action }, AGENT);
+    const proposal = snapshot(s.doc).midi_maps[id];
+    assert.equal(proposal.proposed, true, `${one.kind} from an agent is only a proposal`);
+    assert.equal(proposal.set_by, "agent", `${one.kind} still says who proposed it`);
+    assert.equal(proposal.accepted_action, null, `${one.kind} has nothing accepted yet`);
+    assert.equal(routed(s.doc, incoming), null, `${one.kind} routes nothing while it is a proposal`);
+
+    // The agent cannot say yes for the operator.
+    const refuseAccept = refuses(
+      () =>
+        s.run(
+          "midi.accept",
+          { id, expect: { device_name: one.device, message: one.message, action } },
+          AGENT,
+        ),
+      "human_only",
+    );
+    assert.equal(refuseAccept.message, MIDI_NEEDS_A_YES, `${one.kind}: ${MIDI_NEEDS_A_YES}`);
+
+    // The operator's yes is what makes it live, and then it routes.
+    s.run("midi.accept", { id, expect: { device_name: one.device, message: one.message, action } }, HUMAN);
+    assert.deepEqual(routed(s.doc, incoming), { id, action }, `${one.kind} routes once accepted`);
+
+    // And once live it is the operator's: the agent cannot remove it.
+    const refuseRemove = refuses(() => s.run("midi.remove", { id }, AGENT), "human_only");
+    assert.equal(refuseRemove.message, MIDI_NEEDS_A_YES, `${one.kind} stays live: ${MIDI_NEEDS_A_YES}`);
+    assert.ok(snapshot(s.doc).midi_maps[id], `the refused removal left ${one.kind} in the song`);
+  }
+});
+
 test("an FCB1010 profile proposes one pedal per scene in order", (t) => {
   const s = studio(t);
   const verse = addScene(s.doc, "Verse");

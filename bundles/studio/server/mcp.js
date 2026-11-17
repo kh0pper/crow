@@ -836,7 +836,7 @@ export function actionWords(action, snapshot) {
     case "pad.roll":
       return "hold ROLL on the pads";
     case "pad.pause_all":
-      return "pause everything, and resume it";
+      return "pause the pads, and resume them";
     case "fx.hold":
       return `hold the ${String(action.name).split("_").join(" ")} effect`;
     case "looper.cycle":

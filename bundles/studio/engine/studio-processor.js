@@ -197,10 +197,11 @@
  *   and follows the pad's own mode: a Normal pad restarts on every repeat and a
  *   One-shot pad overlaps them (M20). A Gate pad's repeat carries
  *   `gate_frames` = one interval, so each repeat releases itself on the frame
- *   the next one starts and its repeats never pile up (M18). The first hit of a
- *   roll is the press itself. Three things are refused, and the page keeps its
- *   own count so it knows without asking: a pad with no playable sample, a pad
- *   whose Loop setting is
+ *   the next one starts and its repeats never pile up (M18). The first hit
+ *   sounds at once: `rollStart` starts it itself on the block's first frame,
+ *   and the first repeat is one interval after it. Three things are refused,
+ *   and the page keeps its own count so it knows without asking: a pad with no
+ *   playable sample, a pad whose Loop setting is
  *   on (its loop is what the operator hears, M19), and a fifth pad while four
  *   roll. The clock (`roll-clock.js`) is stepped off `this.bpm` at every
  *   repeat, so a tempo change moves only the repeats after it. While Pause-all
@@ -228,12 +229,15 @@
  *   the voice and it then ignores the operator letting go and its own gate
  *   countdown, so a Gate pad keeps sounding on its own and a Gate+Loop pad's
  *   loop keeps turning. HOLD is for Gate pads ONLY (M15): a `oneshot` or
- *   `normal` pad is refused, and the page says so. `{type:"release_held"}` with
- *   no ids lets every latch go, and with a track (and, or just, a pad) only
- *   those; both clear the flag and run the voice's ORDINARY release from where
- *   it stands. A held voice is the last one a steal takes (see `stealRank`), a
- *   mute group's choke and a fade tail drop the flag, and a start clears it, so
- *   a latched light always ends through the same scan as any other.
+ *   `normal` pad is refused, and the page says so. Only a live press's voice
+ *   can be latched: a voice a step started belongs to its clip, and a scene
+ *   launch is what ends it (M16), so `holdPad` leaves it alone.
+ *   `{type:"release_held"}` with no ids lets every latch go, and with a track
+ *   (and, or just, a pad) only those; both clear the flag and run the voice's
+ *   ORDINARY release from where it stands. A held voice is the last one a steal
+ *   takes (see `stealRank`), a mute group's choke and a fade tail drop the
+ *   flag, and a start clears it, so a latched light always ends through the same
+ *   scan as any other.
  * - **Pause-all:** `{type:"pause_voices", on:true}` ramps every sounding pad
  *   voice down to silence over 64 frames and then freezes it — the read
  *   position, the envelope and the gate countdown stop with it — and
@@ -8533,7 +8537,9 @@
     }
 
     /**
-     * One ROLL repeat: a step-like start of the rolling pad.
+     * One ROLL repeat: a step-like start of the rolling pad. `rollStart` starts
+     * the roll's first hit through this too (offset 0), so the first sound and
+     * every repeat are the same kind of start.
      *
      * `live` is false, so the start is a step's in every way that matters here:
      * it flashes on the page, it obeys the mute group, its Normal or One-shot pad
@@ -8633,7 +8639,9 @@
       tail.held = false;
       // A paused voice's tail is silent and over within its fade: the flag goes
       // and no ramp keeps running, so nothing is left frozen beside the voice
-      // that took the slot.
+      // that took the slot. `pauseLevel` itself is kept: a voice taken mid-ramp
+      // fades from the level it stood on, so nothing jumps, and with no ramp
+      // left to run it is a plain multiplier that cannot freeze the tail.
       tail.paused = false;
       tail.pauseFrames = 0;
       tail.pauseStep = 0;
@@ -8771,6 +8779,11 @@
      * HOLD is for Gate pads ONLY (M15): every other pad is refused here, so a
      * page that asks anyway changes nothing. A pad the song does not have, or a
      * track that is not a sampler, is refused the same way.
+     *
+     * Only a LIVE press's voice can be latched (M16): a voice a step started is
+     * owned by the clip that played it, so a scene launch ends it, and a HOLD on
+     * it would claim a latch that a launch then breaks. A clip-bound voice is
+     * skipped, exactly as if it were not sounding.
      * @param {unknown} trackId
      * @param {unknown} bankId
      * @param {unknown} index the pad, 0-15
@@ -8789,6 +8802,9 @@
         if (!voice.sounding) continue;
         if (voice.mode !== "gate") continue;
         if (voice.bankId !== bankIdValue || voice.index !== padIndex) continue;
+        // A step's voice belongs to its clip: a scene launch releases it, so it
+        // is not the operator's to hold (M16).
+        if (voice.clip_id !== "") continue;
         latched = true;
         if (voice.held) continue;
         StudioSamplerVoice.hold(voice);
@@ -8873,8 +8889,10 @@
      * group and follows the pad's own mode: a Normal pad restarts on every repeat
      * and a One-shot pad overlaps them (M20). A Gate pad's repeat carries
      * `gate_frames` = one interval, so it releases itself on the frame the next
-     * repeat starts and its repeats never pile up (M18). The first hit of a roll
-     * is the press itself, so the first repeat is one interval after this lands.
+     * repeat starts and its repeats never pile up (M18). The first hit is
+     * started here, on the block's first frame, so a roll begins with the
+     * operator's press instead of one interval after it; the first repeat is one
+     * interval later.
      *
      * Three things are refused, and the answer says so: a pad the song has no
      * playable sample for (there is nothing to repeat), a pad whose Loop setting
@@ -8917,7 +8935,10 @@
       const velocity = Number(v);
       const pace = typeof interval === "string" ? interval : "";
       let roll = this.findRoll(key);
-      if (!roll) {
+      // A pad that is already rolling keeps its one roll: it takes the new pace
+      // below and is not pressed a second time (M16).
+      const first = roll === null;
+      if (first) {
         if (this.rolls.length >= MAX_ROLLS) return false;
         roll = {
           key: key,
@@ -8925,7 +8946,7 @@
           bank_id: bankIdValue,
           index: padIndex,
           // The clock is placed below, one interval past this block's first
-          // frame: the press that started the roll is its first hit.
+          // frame; the first hit is started below, on that very frame.
           clock: clock.create(0),
           interval: pace,
           v: Number.isFinite(velocity) ? clamp(velocity, 1, 127) : 127,
@@ -8943,6 +8964,12 @@
       // The next repeat is one interval from here, whether the pad was already
       // rolling or not: a new pace is measured from the frame it was asked for.
       clock.reanchor(roll.clock, this.frame, clock.intervalFrames(this.bpm, sampleRate, roll.interval));
+      // The first hit is the operator's press itself, so the engine starts it
+      // here instead of waiting an interval for the first repeat: a Gate pad
+      // then carries the same one-interval gate a repeat does, and no voice is
+      // left for the lift of ROLL to release. A pad that was already rolling is
+      // NOT pressed again — only its pace moved.
+      if (first) this.startRollRepeat(roll, 0);
       return true;
     }
 

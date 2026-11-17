@@ -241,7 +241,7 @@ A song can be played from the floor: a pedal launches a scene, a pad plays a pad
 | `pad.play {track_id, bank_id, index}` | Play a sampler pad, at the note's velocity |
 | `pad.hold` | Press HOLD on the pads |
 | `pad.roll` | Hold ROLL, the pads' repeat, for as long as the control is down |
-| `pad.pause_all` | Pause everything (the next press resumes it) |
+| `pad.pause_all` | Pause the pads, and resume them |
 | `pad.param {track_id, param, min, max}` | Sweep one pad field on the selected pad, from `min` to `max` |
 | `track.macro {track_id, index}` | Turn one of that track's eight macro knobs |
 | `macro.set {index}` | Turn macro knob n on the selected track |
