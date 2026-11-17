@@ -16,7 +16,7 @@ import { createNotification } from "../shared/notifications.js";
 import { parseChordPro, transposeAst, renderChordProHtml, extractChords, isChordPro, parseSongMeta } from "./chordpro.js";
 import { getChordDiagram } from "./chord-diagrams.js";
 import { actorFromEnv } from "../research/actor.js";
-import { guardBlogServer } from "./bot-owner-only.js";
+import { guardBlogServer, draftOnlyEditRefusal } from "./bot-owner-only.js";
 
 export function createBlogServer(dbPath, options = {}) {
   const server = new McpServer(
@@ -33,11 +33,19 @@ export function createBlogServer(dbPath, options = {}) {
   // Read by tests (and the callers that build this server): who is calling.
   server.blog = { actor: baseActor };
 
-  // Every post, song and setting tool of this server is owner-only for a bot (servers/blog/
-  // bot-owner-only.js): the wrapper is installed on `server.tool` BEFORE the registrations below, so
-  // each handler checks the call's actor first and a bot never reaches one. It does not move a
-  // registration, so the order below stays the contract it is.
+  // A bot may reach four of these tools — create, edit, list and get — but only ever on DRAFTS
+  // (servers/blog/bot-owner-only.js, class `bot_draft`). The wrapper is installed on `server.tool`
+  // BEFORE the registrations below, so each handler checks the call's actor first, a bot never
+  // reaches an owner-only tool, and a draft-only call is told so by the guard's third argument (a
+  // frozen per-call context, never a field the model can send). It does not move a registration, so
+  // the order below stays the contract it is.
   guardBlogServer(server, { baseActor, onCallActor: options.onCallActor });
+
+  /**
+   * Is this call from a bot held to the draft-only rule? The guard resolves the actor and passes
+   * this per-call context (never the call's own arguments); a handler that ignores it is unaffected.
+   */
+  const draftOnly = (call) => !!(call && call.draftOnly);
 
   /**
    * Ensure slug is unique, appending -2, -3, etc. if needed.
@@ -71,7 +79,7 @@ export function createBlogServer(dbPath, options = {}) {
       cover_image_key: z.string().max(500).optional().describe("S3 key for cover image"),
       visibility: z.enum(["private", "public", "peers"]).optional().describe("Post visibility (default: private)"),
     },
-    async ({ title, content, slug, excerpt, author, tags, cover_image_key, visibility }) => {
+    async ({ title, content, slug, excerpt, author, tags, cover_image_key, visibility }, _extra, call) => {
       const baseSlug = slug || generateSlug(title);
       const finalSlug = await uniqueSlug(baseSlug);
       const finalExcerpt = excerpt || generateExcerpt(content);
@@ -88,11 +96,32 @@ export function createBlogServer(dbPath, options = {}) {
         }
       }
 
+      // A draft-only bot's post is ALWAYS a draft: the status is written explicitly (rather than
+      // left to the column default) and then read back, so a later default change, or a change
+      // here, cannot put a bot's words on the public site. Visibility is still recorded — it only
+      // means anything at publish time, and a bot cannot publish.
+      const botDraft = draftOnly(call);
+      const insertSql = botDraft
+        ? `INSERT INTO blog_posts (slug, title, content, excerpt, author, tags, cover_image_key, visibility, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')`
+        : `INSERT INTO blog_posts (slug, title, content, excerpt, author, tags, cover_image_key, visibility)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
       const result = await db.execute({
-        sql: `INSERT INTO blog_posts (slug, title, content, excerpt, author, tags, cover_image_key, visibility)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: insertSql,
         args: [finalSlug, title, content, finalExcerpt, finalAuthor, tags || null, cover_image_key || null, visibility || "private"],
       });
+
+      if (botDraft) {
+        const written = await db.execute({
+          sql: "SELECT status FROM blog_posts WHERE id = ?",
+          args: [result.lastInsertRowid],
+        });
+        if (written.rows[0]?.status !== "draft") {
+          // Never expected: the INSERT above pins the status. Refusing loudly beats leaving a live
+          // post behind that this tool promised would be a draft.
+          throw new Error("blog: a bot's new post is not a draft");
+        }
+      }
 
       return {
         content: [{
@@ -118,9 +147,13 @@ export function createBlogServer(dbPath, options = {}) {
       cover_image_key: z.string().max(500).optional().describe("S3 key for cover image"),
       visibility: z.enum(["private", "public", "peers"]).optional(),
     },
-    async ({ id, title, content, slug, excerpt, author, tags, cover_image_key, visibility }) => {
+    async ({ id, title, content, slug, excerpt, author, tags, cover_image_key, visibility }, _extra, call) => {
+      const botDraft = draftOnly(call);
       const existing = await db.execute({ sql: "SELECT * FROM blog_posts WHERE id = ?", args: [id] });
       if (existing.rows.length === 0) {
+        // A draft-only bot gets the one draft refusal here too: a missing id and a post it may not
+        // touch must read the same, so neither reveals that a row exists.
+        if (botDraft) return draftOnlyEditRefusal();
         return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
 
@@ -148,16 +181,27 @@ export function createBlogServer(dbPath, options = {}) {
       if (visibility !== undefined) { updates.push("visibility = ?"); args.push(visibility); }
 
       if (updates.length === 0) {
+        // Nothing to write — but for a draft-only bot the draft rule is still applied, so "no changes
+        // provided" is never an oracle telling it that a live post with that id exists.
+        if (botDraft && existing.rows[0].status !== "draft") return draftOnlyEditRefusal();
         return { content: [{ type: "text", text: "No changes provided. Pass at least one field to update (title, content, tags, slug, excerpt, author, visibility, cover_image_key)." }] };
       }
 
       updates.push("updated_at = datetime('now')");
       args.push(id);
 
-      await db.execute({
-        sql: `UPDATE blog_posts SET ${updates.join(", ")} WHERE id = ?`,
+      // crow_edit_post has no status field at all (see the schema above), so no argument can change
+      // a post's status here. For a draft-only bot the draft rule is enforced by the UPDATE itself
+      // — `AND status = 'draft'` — never by a check followed by a write: a post that goes live
+      // between the two stays untouched. A non-draft row and a missing id both change nothing and
+      // get the same one refusal.
+      const result = await db.execute({
+        sql: botDraft
+          ? `UPDATE blog_posts SET ${updates.join(", ")} WHERE id = ? AND status = 'draft'`
+          : `UPDATE blog_posts SET ${updates.join(", ")} WHERE id = ?`,
         args,
       });
+      if (botDraft && result.rowsAffected === 0) return draftOnlyEditRefusal();
 
       const changedFields = [];
       if (title !== undefined) changedFields.push("title");
@@ -253,7 +297,10 @@ export function createBlogServer(dbPath, options = {}) {
       search: z.string().max(500).optional().describe("Full-text search"),
       limit: z.number().min(1).max(100).optional().describe("Max results (default 20)"),
     },
-    async ({ status, tag, search, limit }) => {
+    async ({ status, tag, search, limit }, _extra, call) => {
+      // A draft-only bot sees drafts and nothing else: the status filter is forced, whatever the
+      // call asked for, on the plain path and on the tag/FTS join path alike.
+      const filterStatus = draftOnly(call) ? "draft" : status;
       let sql, args;
 
       if (search) {
@@ -265,11 +312,11 @@ export function createBlogServer(dbPath, options = {}) {
                FROM blog_posts p JOIN blog_posts_fts fts ON p.id = fts.rowid
                WHERE fts.blog_posts_fts MATCH ?`;
         args = [safeQuery];
-        if (status) { sql += " AND p.status = ?"; args.push(status); }
+        if (filterStatus) { sql += " AND p.status = ?"; args.push(filterStatus); }
       } else {
         sql = "SELECT id, slug, title, status, visibility, tags, published_at, created_at FROM blog_posts WHERE 1=1";
         args = [];
-        if (status) { sql += " AND status = ?"; args.push(status); }
+        if (filterStatus) { sql += " AND status = ?"; args.push(filterStatus); }
       }
 
       if (tag) {
@@ -306,13 +353,17 @@ export function createBlogServer(dbPath, options = {}) {
       id: z.number().optional().describe("Post ID"),
       slug: z.string().max(100).optional().describe("Post slug"),
     },
-    async ({ id, slug }) => {
+    async ({ id, slug }, _extra, call) => {
       if (!id && !slug) {
         return { content: [{ type: "text", text: "Provide either id or slug." }], isError: true };
       }
 
+      // A draft-only bot reads a draft and nothing else. The predicate is in the query, so a
+      // published post (or a published-private one) falls through to the very same "not found" an
+      // unknown id or slug gets — nothing here reveals that the post exists.
       const result = await db.execute({
-        sql: id ? "SELECT * FROM blog_posts WHERE id = ?" : "SELECT * FROM blog_posts WHERE slug = ?",
+        sql: `${id ? "SELECT * FROM blog_posts WHERE id = ?" : "SELECT * FROM blog_posts WHERE slug = ?"}`
+          + (draftOnly(call) ? " AND status = 'draft'" : ""),
         args: [id || slug],
       });
 

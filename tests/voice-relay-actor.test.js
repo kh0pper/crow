@@ -14,6 +14,8 @@
  *       operator-voice actor;
  *   (b) that executor is refused crow_send_message and crow_voice_memo — the fixed owner-only refusal, and the
  *       handlers never run (no peer call, no nostr send);
+ *   (b2) on the blog server it may create a DRAFT (the blog's bot_draft rule) but not publish it, while the
+ *       operator's own turn both creates and publishes;
  *   (c) the control: no `relay` keeps the frozen operator voice actor (for the sharing server and all four project
  *       servers) and its crow_send_message really reaches the handler; only the boolean option `relay === true`
  *       narrows ("true", 1 and botDef fields change nothing, and a botDef field never grants the frozen actor to
@@ -234,33 +236,53 @@ test("a relay executor is refused crow_send_message and crow_voice_memo, and not
   }
 });
 
-// --- (b2) the blog surface is refused a relay executor the same way ------------------------
+// --- (b2) the blog surface gives a relay executor a DRAFT and refuses it the publish ---------
 
-test("a relay executor is refused crow_blog create_post (no row); the operator's own turn creates the post", async () => {
+test("a relay executor's crow_blog create_post lands as a DRAFT and its publish is refused; the operator's own turn publishes", async () => {
   const blogDb = createDbClient(DB_FILE);
   openDbs.push(blogDb);
   const posts = async (title) => Number((await blogDb.execute({
     sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [title],
   })).rows[0].n);
+  const statusOf = async (title) => (await blogDb.execute({
+    sql: "SELECT status FROM blog_posts WHERE title = ?", args: [title],
+  })).rows[0]?.status;
+  const idOf = (result) => Number(/ID: (\d+)/.exec(result)?.[1]);
   const title = "A relayed turn's post " + Date.now().toString(36);
 
-  // The relay turn: the blog server is the plain bound bot, so the create is refused and no row exists.
+  // The relay turn: the blog server is the plain bound bot, so the create is a DRAFT (the blog's
+  // bot_draft rule) and the publish is refused — words a relay carried never reach the site.
   const relay = track(createToolExecutor({ botDef: voiceBotDef(), relay: true }));
   const blog = await blogServerOf(relay);
   assert.deepEqual(blog.blog.actor, { kind: "bot", id: CROW_VOICE_BOT_ID }, "the relay turn's blog server is the plain bound bot");
-  const refused = await relay.executeTool("crow_blog", { action: "create_post", params: { title, content: "Relayed words." } });
-  assert.equal(refused.isError, true, refused.result);
-  assert.equal(refused.result, OWNER_ONLY_TEXT, "the fixed owner-only refusal");
-  assert.equal(await posts(title), 0, "no post was written");
+  const created = await relay.executeTool("crow_blog", { action: "create_post", params: { title, content: "Relayed words." } });
+  assert.equal(created.isError, false, created.result);
+  assert.match(created.result, /Created draft/, created.result);
+  assert.equal(await posts(title), 1, "exactly one row was written");
+  assert.equal(await statusOf(title), "draft", "and it is a draft: a bot never puts a post live");
 
-  // The control: the operator's own spoken turn (no relay) really creates it.
+  const publish = await relay.executeTool("crow_blog", { action: "publish_post", params: { id: idOf(created.result), confirm_token: "" } });
+  assert.equal(publish.isError, true, publish.result);
+  assert.equal(publish.result, OWNER_ONLY_TEXT, "the fixed owner-only refusal");
+  assert.equal(await statusOf(title), "draft", "the post is still a draft after the refused publish");
+
+  // The control: the operator's own spoken turn (no relay) really creates it — and publishes it.
   const own = track(createToolExecutor({ botDef: voiceBotDef() }));
   const ownBlog = await blogServerOf(own);
   assert.equal(ownBlog.blog.actor, scope.operatorVoiceActor(), "the operator's own turn keeps the frozen actor");
-  const created = await own.executeTool("crow_blog", { action: "create_post", params: { title, content: "The operator's words." } });
-  assert.equal(created.isError, false, created.result);
-  assert.match(created.result, /Created draft/, created.result);
-  assert.equal(await posts(title), 1, "the post was written");
+  const ownTitle = "The operator's own post " + Date.now().toString(36);
+  const ownCreated = await own.executeTool("crow_blog", { action: "create_post", params: { title: ownTitle, content: "The operator's words." } });
+  assert.equal(ownCreated.isError, false, ownCreated.result);
+  assert.match(ownCreated.result, /Created draft/, ownCreated.result);
+  assert.equal(await posts(ownTitle), 1, "the post was written");
+
+  const preview = await own.executeTool("crow_blog", { action: "publish_post", params: { id: idOf(ownCreated.result), confirm_token: "" } });
+  assert.equal(preview.isError, false, preview.result);
+  const token = /confirm_token: "([^"]+)"/.exec(preview.result)?.[1];
+  assert.ok(token, `the preview carries a confirm token: ${preview.result}`);
+  const published = await own.executeTool("crow_blog", { action: "publish_post", params: { id: idOf(ownCreated.result), confirm_token: token } });
+  assert.equal(published.isError, false, published.result);
+  assert.equal(await statusOf(ownTitle), "published", "the operator's own turn still publishes");
 });
 
 // --- (c) the control: no relay keeps the operator voice actor ------------------------------

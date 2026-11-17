@@ -836,7 +836,7 @@ test("a router gives the memory and storage servers the same base actor it gives
 // built now. A call carrying no `_meta` at all (the ordinary case for a local MCP client) is still
 // that bot's call, so the blog server must be constructed with the bot as its base actor: without it
 // the base actor is whatever the process env says, which for the gateway is nobody in particular.
-test("a router built for a bot actor refuses crow_blog create_post with no per-call _meta", async () => {
+test("a router built for a bot actor gives crow_blog create_post a DRAFT and no publish, with no per-call _meta", async () => {
   const { createRouterServer } = await import("../servers/gateway/router.js");
   const { OWNER } = actorMod;
   const OWNER_ONLY = "Error: That tool is for the operator only.";
@@ -846,15 +846,25 @@ test("a router built for a bot actor refuses crow_blog create_post with no per-c
   const bot = await connect(botRouter);
   const call = (name, args) => bot.callTool({ name, arguments: args });
   try {
-    const refused = await call("crow_blog", { action: "create_post", params: { title, content: "Bot words." } });
-    assert.equal(refused.isError, true, text(refused));
-    assert.equal(text(refused), OWNER_ONLY, "the fixed owner-only refusal");
-    const listed = await call("crow_blog", { action: "list_posts", params: {} });
-    assert.equal(text(listed), OWNER_ONLY, "and the read tools are refused too");
+    // The bot creates a DRAFT (the mount's actor is the bot, so the blog's bot_draft rule binds).
+    const created = await call("crow_blog", { action: "create_post", params: { title, content: "Bot words.", visibility: "public" } });
+    assert.equal(created.isError || false, false, text(created));
+    assert.match(text(created), /Created draft/, text(created));
+    const written = await db.execute({ sql: "SELECT status FROM blog_posts WHERE title = ?", args: [title] });
+    assert.equal(written.rows[0]?.status, "draft", "the bot's post is a draft, whatever visibility it asked for");
+    const id = Number(/ID: (\d+)/.exec(text(created))?.[1]);
 
-    // Nothing was written: the refusal is the guard, not a failed insert.
-    const written = await db.execute({ sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [title] });
-    assert.equal(Number(written.rows[0].n), 0, "no post row");
+    // The listing is drafts only: the status argument cannot widen it.
+    const listed = await call("crow_blog", { action: "list_posts", params: { status: "published" } });
+    assert.equal(listed.isError || false, false, text(listed));
+    assert.ok(!text(listed).includes("[published]"), `a bot's listing carries no published post: ${text(listed)}`);
+
+    // Nothing a bot can reach puts that post live: the publish is the owner-only refusal.
+    const publish = await call("crow_blog", { action: "publish_post", params: { id, confirm_token: "" } });
+    assert.equal(publish.isError, true, text(publish));
+    assert.equal(text(publish), OWNER_ONLY, "the fixed owner-only refusal");
+    const stillDraft = await db.execute({ sql: "SELECT status FROM blog_posts WHERE id = ?", args: [id] });
+    assert.equal(stillDraft.rows[0]?.status, "draft", "the post is still a draft");
 
     const harmless = await call("crow_blog", { action: "get_chord_diagram", params: { chord: "Am7" } });
     assert.equal(harmless.isError || false, false, text(harmless));
@@ -871,11 +881,12 @@ test("a router built for a bot actor refuses crow_blog create_post with no per-c
   // And an owner-built router is unchanged: no `_meta` still reaches the blog server as the owner.
   const ownerRouter = createRouterServer({ actor: OWNER });
   const owner = await connect(ownerRouter);
+  const ownerTitle = "An owner's router post " + Date.now().toString(36);
   try {
-    const created = await owner.callTool({ name: "crow_blog", arguments: { action: "create_post", params: { title, content: "The operator's words." } } });
+    const created = await owner.callTool({ name: "crow_blog", arguments: { action: "create_post", params: { title: ownerTitle, content: "The operator's words." } } });
     assert.equal(created.isError || false, false, text(created));
     assert.match(text(created), /Created draft/, text(created));
-    const written = await db.execute({ sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [title] });
+    const written = await db.execute({ sql: "SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", args: [ownerTitle] });
     assert.equal(Number(written.rows[0].n), 1, "the owner's post exists");
     assert.equal(ownerRouter._inProcessServers.get("blog").blog.actor, OWNER,
       "the owner's router hands the blog server the owner");

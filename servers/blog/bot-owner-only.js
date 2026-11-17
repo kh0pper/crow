@@ -2,14 +2,35 @@
  * Crow Blog — the owner-only class map for the blog server's tools, and the guard that enforces it
  * on every path.
  *
- * Every tool the blog server registers is placed in exactly one of two classes:
+ * Every tool the blog server registers is placed in exactly one of three classes:
  *
  *   owner_only  refused for any bot actor (see below)
+ *   bot_draft   allowed for a bot, but only on DRAFTS: create a draft, edit a draft, list drafts,
+ *               read a draft. The handler is told so per call (the guard's third argument, never a
+ *               model-supplied field), and applies the draft-only rule itself.
  *   harmless    allowed for a bot: a static lookup that reads nothing of the operator's
  *
- * The rule is the operator's: a bot never publishes, edits, deletes, shares or configures the
- * operator's blog. Each tool here either writes what the public site says, changes who can reach a
- * post, or reveals the operator's drafts, settings and songs.
+ * The rule is the operator's: a bot never publishes, unpublishes, deletes, shares or configures the
+ * operator's blog, and never touches the songbook. Each owner_only tool here either writes what the
+ * public site says, changes who can reach a post, rewrites the blog's identity or theme, or reveals
+ * the operator's settings and songs.
+ *
+ * The draft allowance is the operator's decision, and its trade-off is stated plainly because it is
+ * real: `blog_posts` has NO author column, so nothing on a post row says who wrote it. A bot that is
+ * allowed to reach drafts therefore sees and edits every DRAFT on this instance — the operator's own
+ * drafts included, not just the ones the bot wrote. That is accepted: drafts are not on the public
+ * site, the bot still cannot publish one, and the alternative (an author column) would be a schema
+ * change. It also means a bot can read a draft SONG's body through crow_get_post (songs are blog
+ * posts tagged "songbook"); the songbook tools themselves stay owner_only, so it cannot list, write,
+ * transpose, publish or delete one.
+ *
+ * Exactly four tools are bot_draft — crow_create_post, crow_edit_post, crow_list_posts and
+ * crow_get_post — and everything they do for a bot is pinned to `status = 'draft'` in the handler:
+ * a bot's new post is inserted as a draft explicitly (and read back to prove it), an edit is one
+ * UPDATE carrying `AND status = 'draft'` so it can never land on a post that went live, a listing
+ * forces the status filter to 'draft' whatever the call asked for, and a read adds the same
+ * predicate so a live post is exactly as invisible as a missing one. A bot can never change a
+ * post's status through any of them: crow_edit_post has no status field at all.
  *
  * ONE exception, the operator's own spoken turn: the frozen operator-voice actor (isOperatorVoice —
  * the reserved crow.voice id with the frozen marker, never an id or a def field a caller can send)
@@ -18,9 +39,10 @@
  * actor that is not the frozen one), because a relayed turn can put words in its mouth. A relay
  * voice turn is one of those other ways by construction: its executor is built as the plain bound
  * bot (tool-executor's opts.relay), so it never carries the marker this exception reads. A call
- * that only CLAIMS to be a bot is refused too — a `crow/actor` header or `_meta` of kind "bot"
- * with no usable id resolves to "unknown", the actor an unmarked local client gets, so the claim
- * is read again here (claimsBot) rather than letting an unverifiable bot write the blog.
+ * that only CLAIMS to be a bot is treated as one too — a `crow/actor` header or `_meta` of kind
+ * "bot" with no usable id resolves to "unknown", the actor an unmarked local client gets, so the
+ * claim is read again here (claimsBot) rather than letting an unverifiable bot act as the operator
+ * (it is refused an owner_only tool and held to the draft-only rule on a bot_draft one).
  *
  * The guard wraps `server.tool` BEFORE the register calls, so it sees every registration whatever
  * its shape (the handler is the LAST function argument) and leaves registration ORDER untouched.
@@ -40,22 +62,39 @@ import { UNKNOWN, resolveCallActor } from "../research/actor.js";
 import { ShareRefusal, refusalResult, isOperatorVoice } from "../shared/project-share-scope.js";
 
 const OWNER_ONLY = "owner_only";
+const BOT_DRAFT = "bot_draft";
 const HARMLESS = "harmless";
 
 /**
+ * The one refusal a draft-only bot gets for a post it may not edit, whether the post is not a draft
+ * or does not exist at all: the two must be indistinguishable. The handler enforces it in the UPDATE
+ * itself (`AND status = 'draft'`), so nothing changes on the refused path.
+ */
+export const DRAFT_ONLY_EDIT_REFUSAL = "A bot can only edit draft posts.";
+
+/** The tool result for that refusal, in the shape every ACL refusal on these servers uses. */
+export function draftOnlyEditRefusal() {
+  return refusalResult(DRAFT_ONLY_EDIT_REFUSAL);
+}
+
+/**
  * Every blog tool name → its class. One line per tool says why.
+ *
+ * `bot_draft` is exactly the four post tools a bot needs to write a draft: create, edit, list and
+ * read. Each handler pins those to drafts (servers/blog/server.js), so the class is the permission
+ * to reach the tool, not the permission to reach a live post.
  *
  * `harmless` is exactly one entry: the chord diagram is a pure function of a chord name (a static
  * shape table), with no post, no setting and no song row.
  */
 export const BLOG_TOOL_CLASS = Object.freeze({
   // --- posts ---
-  crow_create_post: OWNER_ONLY, // writes a draft into the operator's blog
-  crow_edit_post: OWNER_ONLY, // rewrites the title/content of an existing post, draft or live
+  crow_create_post: BOT_DRAFT, // a bot writes a draft; the handler always inserts status 'draft'
+  crow_edit_post: BOT_DRAFT, // a bot edits a DRAFT only: the UPDATE carries `AND status = 'draft'`
   crow_publish_post: OWNER_ONLY, // puts a post on the public site (a confirmation token is not a credential)
   crow_unpublish_post: OWNER_ONLY, // takes the operator's published post off the site
-  crow_list_posts: OWNER_ONLY, // reveals every post, unpublished drafts included
-  crow_get_post: OWNER_ONLY, // reads back a post row, unpublished drafts included
+  crow_list_posts: BOT_DRAFT, // a bot lists drafts only; the status filter is forced to 'draft'
+  crow_get_post: BOT_DRAFT, // a bot reads a draft only; a live post reads as not found
   crow_delete_post: OWNER_ONLY, // deletes a post: content the operator wrote, gone
   crow_share_post: OWNER_ONLY, // exports a post to a peer instance
 
@@ -81,18 +120,19 @@ export const BLOG_TOOL_CLASS = Object.freeze({
 
 const isBot = (actor) => !!(actor && actor.kind === "bot");
 
-/** Is this tool name classed harmless? An unknown name is not (fail closed). */
-function isHarmless(name) {
-  return (
-    Object.prototype.hasOwnProperty.call(BLOG_TOOL_CLASS, name) &&
-    BLOG_TOOL_CLASS[name] === HARMLESS
-  );
+/** This tool name's class, or undefined for a name the map does not class (fail closed). */
+function classOf(name) {
+  return Object.prototype.hasOwnProperty.call(BLOG_TOOL_CLASS, name)
+    ? BLOG_TOOL_CLASS[name]
+    : undefined;
 }
 
-/** May this actor call this tool? A bot may reach a harmless tool; the frozen operator-voice actor
- *  (and only it) may reach the rest. Everything else is refused. */
+/** May this actor call this tool? A bot may reach a harmless tool and a bot_draft one (the handler
+ *  then pins it to drafts); the frozen operator-voice actor (and only it) may reach the rest.
+ *  Everything else is refused. */
 function allowedFor(actor, name) {
-  if (isHarmless(name)) return true;
+  const cls = classOf(name);
+  if (cls === HARMLESS || cls === BOT_DRAFT) return true;
   return isOperatorVoice(actor);
 }
 
@@ -127,14 +167,24 @@ function claimsBot(extra) {
  * Per call the guard resolves the actor from the construction-time `baseActor` and the call's
  * `extra` (a `crow/actor` `_meta`, an `x-crow-actor-*` header, a peer token — `resolveCallActor`
  * owns that logic, so a fixed bot base actor is never narrowed back to the owner). A bot calling a
- * tool that is not `harmless`, or a tool name the map does not class, gets the fixed owner-only
- * refusal and the handler does not run — unless the actor is the frozen operator-voice actor. A
- * call that CLAIMS to be a bot but resolved to something else (an id-less bot claim arrives as
- * "unknown") is refused the same way, never treated as the operator's own client.
- * Owner/unknown/peer actors that claim nothing pass through untouched.
+ * tool that is `owner_only` (or a name the map does not class) gets the fixed owner-only refusal
+ * and the handler does not run — unless the actor is the frozen operator-voice actor. A call that
+ * CLAIMS to be a bot but resolved to something else (an id-less bot claim arrives as "unknown") is
+ * treated as a bot here, never as the operator's own client: refused an owner_only tool, and given
+ * the draft-only rule on a bot_draft one. Owner/unknown/peer actors that claim nothing pass through
+ * untouched.
+ *
+ * A bot that reaches a `bot_draft` tool is told so: the real handler is called with a third
+ * argument, a frozen per-call context `{ draftOnly }` derived from the actor the guard RESOLVED (and
+ * from the claim it read, with the same fail-closed reading as the refusal). That context is never
+ * built from the call's arguments and never from `_meta` beyond what `resolveCallActor`/`claimsBot`
+ * already read, so a model cannot ask for it and a handler cannot be talked out of it. It is `true`
+ * only for a bot-bound caller on a bot_draft tool — the frozen operator-voice actor's own turn is
+ * `false`, so that path is byte-identical to before. Handlers that do not read it are unaffected.
  *
  * `onCallActor(actor, toolName)` is a test seam that sees every resolution, like the storage
- * server's: the guard's decision is otherwise only visible through the refusal.
+ * server's: the guard's decision is otherwise only visible through the refusal or the handler's
+ * own draft-only behaviour.
  *
  * @param {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer} server
  * @param {{baseActor?: object, onCallActor?: (actor: object, toolName: string) => void}} [options]
@@ -166,10 +216,17 @@ export function guardBlogServer(server, { baseActor, onCallActor } = {}) {
       if (typeof onCallActor === "function") onCallActor(actor, name);
       // A bot actor, or a call that CLAIMS to be one and did not resolve to a usable bot: either
       // way only the frozen operator-voice actor goes on (a claim can never produce that marker).
-      if ((isBot(actor) || claimsBot(extra)) && !allowedFor(actor, name)) {
+      const botCall = isBot(actor) || claimsBot(extra);
+      if (botCall && !allowedFor(actor, name)) {
         return refusalResult(new ShareRefusal(OWNER_ONLY).message);
       }
-      return handler(callArgs, extra);
+      // The draft-only rule reaches the handler for a bot-bound caller only. The frozen
+      // operator-voice actor is a bot too, so it is excluded explicitly: its own turn keeps every
+      // tool exactly as before. Frozen, so a handler cannot widen it for the rest of its call.
+      const context = Object.freeze({
+        draftOnly: botCall && !isOperatorVoice(actor) && classOf(name) === BOT_DRAFT,
+      });
+      return handler(callArgs, extra, context);
     };
 
     const next = args.slice();

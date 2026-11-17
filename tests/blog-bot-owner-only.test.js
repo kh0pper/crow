@@ -1,27 +1,44 @@
 /**
- * The blog server's tools are OWNER-ONLY for bots, on every path — with one harmless exception.
+ * The blog server's tools are OWNER-ONLY for bots, except the four post tools a bot may use on
+ * DRAFTS, and one harmless exception.
  *
- * The decision: a bot never publishes, edits, deletes, shares or configures the operator's blog, and
- * never reads back the drafts, settings or songbook rows — including the operator's own voice bot
- * when that bot is anything but the frozen executor actor (a relayed turn can put words in its
- * mouth). The frozen operator-voice actor keeps every tool, exactly as today. Exactly one tool is
- * harmless for every bot: the chord diagram, a pure function of a chord name.
+ * The decision: a bot may create a draft post, edit a draft, list drafts and read a draft — and
+ * nothing else. It never publishes, unpublishes, deletes, shares or configures the operator's blog,
+ * never touches the songbook, and never sees a live post, the settings or the songbook rows —
+ * including the operator's own voice bot when that bot is anything but the frozen executor actor (a
+ * relayed turn can put words in its mouth). The frozen operator-voice actor keeps every tool,
+ * exactly as today. Exactly one tool is harmless for every bot: the chord diagram, a pure function
+ * of a chord name.
+ *
+ * The accepted trade-off of the draft allowance is in the guard's own header and is asserted here
+ * only as behaviour: `blog_posts` has no author column, so a bot's drafts are every draft on the
+ * instance, the operator's own included.
  *
  * What this file drives, all against a real `createBlogServer` on a scratch crow.db:
  *
- *   (a) the classification has no drift: the map and the server's registered tools are the same set;
+ *   (a) the classification has no drift: the map and the server's registered tools are the same set,
+ *       and exactly the four post tools are classed bot_draft;
  *   (b) a bot is refused every owner_only tool and the handler never runs — the seeded draft is
  *       still a draft, no post/setting/setlist/share row changed, and the read tools hand back no
  *       post data (token-less, forged-token and plain calls alike), on each path a bot can take:
  *       the constructed base actor, a per-call `_meta` actor (including one claiming the reserved
- *       voice id and the operator-voice flag), and a stdio env actor built under the engine marker;
+ *       voice id and the operator-voice flag), a bot claim over an unknown base, and a stdio env
+ *       actor built under the engine marker;
+ *   (b2) on every one of those paths a bot reaches create/edit/list/get and is held to drafts: its
+ *       new post is a draft whatever visibility it asked for, it can edit that draft, a published
+ *       post (public or private) is refused with the one fixed draft text and left byte-identical,
+ *       a missing id reads exactly the same, listings are drafts only on the plain, tag and FTS
+ *       paths, and a live post reads exactly like a missing one;
  *   (c) the one harmless tool still works for a bot;
- *   (d) the frozen operator-voice actor really publishes (create → publish token round-trip), and
- *       the owner and an unidentified caller are unchanged (create + publish);
- *   (e) the gateway's router path: an `x-crow-actor-kind` header marking a bot refuses the write
- *       (with or without an id), and a header claiming the owner is ignored either way;
+ *   (d) the frozen operator-voice actor, the owner and an unidentified caller are unchanged: create
+ *       → publish token round-trip, an edit of a PUBLISHED post, every post listed and read — and
+ *       the three callers' read output is byte-identical, while a bot's read of the same rows is
+ *       drafts only;
+ *   (e) the gateway's router path: an `x-crow-actor-kind` header marking a bot gives it drafts only
+ *       (create a draft, list drafts) and refuses a publish, with or without an id, and a header
+ *       claiming the owner is ignored either way;
  *   (f) a registration the guard cannot see the call's actor through is refused at registration.
- *
+ * *
  * No network: nothing here opens a peer connection. Scratch CROW_HOME/data dir, a real crow.db from
  * scripts/init-db.js; nothing here touches ~/.crow.
  */
@@ -57,7 +74,15 @@ const BOT = "blog-gate-bot";
 const META_BOT = "blog-meta-bot";
 const CONTACT_CROW_ID = "crowblogcontact001";
 const OWNER_ONLY_TEXT = "Error: That tool is for the operator only.";
+const DRAFT_ONLY_EDIT_TEXT = "Error: A bot can only edit draft posts.";
+const NOT_FOUND_TEXT = "Post not found. Use crow_list_posts to see available posts.";
 const DRAFT_TITLE = "A heron draft the bot must not touch";
+const LIVE_TITLE = "A gull the bot must never see";
+const PRIVATE_LIVE_TITLE = "A tern posted to nobody in particular";
+const TAGGED_DRAFT_TITLE = "A kestrel draft with a shared tag";
+const TAGGED_DRAFT_CONTENT = "The kestrel hovers over the sharedtag field.";
+const SHARED_TAG = "sharedtag";
+const SEARCH_WORD = "kestrel";
 
 let db = null;
 let createBlogServer = null;
@@ -67,6 +92,9 @@ let actor = null;
 let scope = null;
 let BLOG_TOOL_CLASS = null;
 let DRAFT_ID = null;
+let LIVE_ID = null;
+let PRIVATE_LIVE_ID = null;
+let TAGGED_DRAFT_ID = null;
 const openServers = []; // every { client, server } this file built, closed in after()
 
 before(async () => {
@@ -87,14 +115,38 @@ before(async () => {
     args: [CONTACT_CROW_ID, "a".repeat(64), "b".repeat(66)],
   });
 
-  // The draft every bot path below is pointed at: a real row the read tools would reveal and the
-  // write tools would change.
+  // The draft every bot path below is pointed at: a real row the owner-only tools could reveal or
+  // change, and the one the draft tools must refuse to publish.
   const seeded = await db.execute({
     sql: `INSERT INTO blog_posts (slug, title, content, excerpt, status, visibility)
           VALUES ('heron-draft', ?, 'The heron stands in the shallows.', 'A draft.', 'draft', 'private')`,
     args: [DRAFT_TITLE],
   });
   DRAFT_ID = Number(seeded.lastInsertRowid);
+
+  // A PUBLISHED post (public) and a PUBLISHED one that is private: a bot must not see, edit or be
+  // told about either, while an owner/unknown/operator-voice caller is unchanged for both.
+  const live = await db.execute({
+    sql: `INSERT INTO blog_posts (slug, title, content, excerpt, status, visibility, tags, published_at)
+          VALUES ('gull-live', ?, 'The gull patrols the kestrel line.', 'Live.', 'published', 'public', ?, datetime('now'))`,
+    args: [LIVE_TITLE, SHARED_TAG],
+  });
+  LIVE_ID = Number(live.lastInsertRowid);
+  const privateLive = await db.execute({
+    sql: `INSERT INTO blog_posts (slug, title, content, excerpt, status, visibility, tags, published_at)
+          VALUES ('tern-live-private', ?, 'The tern also hunts the kestrel line.', 'Live and private.', 'published', 'private', ?, datetime('now'))`,
+    args: [PRIVATE_LIVE_TITLE, SHARED_TAG],
+  });
+  PRIVATE_LIVE_ID = Number(privateLive.lastInsertRowid);
+
+  // A DRAFT with the same tag and the same searchable word, so the tag and FTS paths below prove the
+  // status filter rather than an empty result.
+  const taggedDraft = await db.execute({
+    sql: `INSERT INTO blog_posts (slug, title, content, excerpt, status, visibility, tags)
+          VALUES ('kestrel-draft', ?, ?, 'A tagged draft.', 'draft', 'private', ?)`,
+    args: [TAGGED_DRAFT_TITLE, TAGGED_DRAFT_CONTENT, SHARED_TAG],
+  });
+  TAGGED_DRAFT_ID = Number(taggedDraft.lastInsertRowid);
 });
 
 after(async () => {
@@ -184,15 +236,12 @@ async function expectOwnerOnly(call, label, tool, args, sentinel) {
   assert.ok(sentinel === undefined || !r.text.includes(sentinel), `${label} ${tool}: never reaches the handler`);
 }
 
-/** One plausible call per owner-only tool, against the seeded draft. */
+/** One plausible call per owner-only tool, against the seeded draft. The four bot_draft tools are
+ *  NOT here: they are driven in (b2), where a bot reaches them and is held to drafts. */
 const BOT_CALLS = (postId) => [
-  ["crow_create_post", { title: "A post a bot wrote", content: "body" }, "Created draft:"],
-  ["crow_edit_post", { id: postId, title: "A bot edit" }, "Updated post"],
   ["crow_publish_post", { id: postId, confirm_token: "" }, "This will publish"],
   ["crow_publish_post", { id: postId, confirm_token: "forged-token" }, "Invalid or expired"],
   ["crow_unpublish_post", { id: postId }, "reverted to draft"],
-  ["crow_list_posts", {}, "post(s):"],
-  ["crow_get_post", { id: postId }, "Status:"],
   ["crow_delete_post", { id: postId, confirm_token: "" }, "This will permanently delete"],
   ["crow_delete_post", { id: postId, confirm_token: "forged-token" }, "Invalid or expired"],
   ["crow_share_post", { id: postId, contact: CONTACT_CROW_ID }, "Delivery: pending"],
@@ -213,31 +262,11 @@ const BOT_CALLS = (postId) => [
   ["crow_delete_setlist", { id: 1, confirm_token: "" }, "This will permanently delete"],
 ];
 
-// --- (a) the classification has no drift ----------------------------------------------------
-
-test("every registered blog tool is classed, and every class entry is registered", async () => {
-  const entry = await open({ baseActor: actor.OWNER });
-  const registered = Object.keys(entry.server._registeredTools);
-  const classed = Object.keys(BLOG_TOOL_CLASS).sort();
-
-  assert.deepEqual(registered.slice().sort(), classed, "the map and the tool surface are the same set");
-  assert.equal(registered.length, 23, "the blog surface has 23 tools");
-  assert.equal(classed.length, 23, "the classification has 23 entries");
-  // The guard must not have moved a registration: both ends of the order still hold.
-  assert.equal(registered[0], "crow_create_post");
-  assert.equal(registered.at(-1), "crow_delete_setlist");
-  for (const [name, cls] of Object.entries(BLOG_TOOL_CLASS)) {
-    assert.ok(cls === "owner_only" || cls === "harmless", `${name}: ${cls}`);
-  }
-  const harmless = Object.entries(BLOG_TOOL_CLASS).filter(([, cls]) => cls === "harmless").map(([n]) => n);
-  assert.deepEqual(harmless, ["crow_get_chord_diagram"], "exactly one harmless tool");
-  assert.equal(Object.isFrozen(BLOG_TOOL_CLASS), true, "the map is frozen");
-});
-
-// --- (b) every bot path is refused, and the handler never runs ------------------------------
-
-test("a bot is refused every owner-only blog tool on every path, and no handler runs", { timeout: 180_000 }, async () => {
-  /** The paths, each built so the bot actor is the one that path really produces. */
+/**
+ * The five paths a bot really reaches this server by, each built so the resolved actor is the one
+ * that path produces. Used by (b), (b2) and (b3) so every rule below is proven on every path.
+ */
+async function botPaths() {
   const paths = [];
 
   // 1. the constructed base actor (what the tool executor hands the in-process server).
@@ -253,8 +282,15 @@ test("a bot is refused every owner-only blog tool on every path, and no handler 
     paths.push({ label: "_meta actor", call: (t, a) => e.call(t, a, { kind: "bot", id: META_BOT }) });
   }
 
-  // 3. a per-call _meta actor claiming the reserved voice id, with the operator-voice flag: the id
-  //    is not a credential and resolveCallActor copies kind and id alone, so it is a plain bot.
+  // 3. a per-call bot CLAIM with no usable id over an unknown base: it resolves to "unknown", the
+  //    actor an unmarked local client gets, so the draft rule has to come from the claim.
+  {
+    const e = await open({ baseActor: actor.UNKNOWN });
+    paths.push({ label: "_meta bot claim on an unknown base", call: (t, a) => e.call(t, a, { kind: "bot" }) });
+  }
+
+  // 4. a per-call _meta actor claiming the reserved voice id, with the operator-voice flag: the id is
+  //    not a credential and resolveCallActor copies kind and id alone, so it is a plain bot.
   {
     const e = await open({ baseActor: actor.OWNER });
     paths.push({
@@ -263,15 +299,63 @@ test("a bot is refused every owner-only blog tool on every path, and no handler 
     });
   }
 
-  // 4. the stdio env actor: the process env a bot's MCP child gets, with the engine's session marker.
+  // 5. the stdio env actor: the process env a bot's MCP child gets, with the engine's session marker.
   {
     const e = await openUnderEnv({ CROW_ACTOR_KIND: "bot", CROW_ACTOR_BOT_ID: BOT, CROW_BOT_SESSION: BOT });
     assert.deepEqual(e.server.blog.actor, { kind: "bot", id: BOT, botSession: true }, "the base actor is the env bot");
     assert.equal(scope.isOperatorVoice(e.server.blog.actor), false, "an env actor never carries the marker");
-    paths.push({ label: "stdio env actor", call: e.call });
+    paths.push({ label: "stdio env actor (pi bot session)", call: e.call });
   }
 
-  for (const path of paths) {
+  return paths;
+}
+
+// --- (a) the classification has no drift ----------------------------------------------------
+
+test("every registered blog tool is classed, and every class entry is registered", async () => {
+  const entry = await open({ baseActor: actor.OWNER });
+  const registered = Object.keys(entry.server._registeredTools);
+  const classed = Object.keys(BLOG_TOOL_CLASS).sort();
+
+  assert.deepEqual(registered.slice().sort(), classed, "the map and the tool surface are the same set");
+  assert.equal(registered.length, 23, "the blog surface has 23 tools");
+  assert.equal(classed.length, 23, "the classification has 23 entries");
+  // The guard must not have moved a registration: both ends of the order still hold.
+  assert.equal(registered[0], "crow_create_post");
+  assert.equal(registered.at(-1), "crow_delete_setlist");
+  for (const [name, cls] of Object.entries(BLOG_TOOL_CLASS)) {
+    assert.ok(cls === "owner_only" || cls === "bot_draft" || cls === "harmless", `${name}: ${cls}`);
+  }
+
+  // Exactly the four post tools a bot needs to write a draft are bot_draft — no more.
+  const botDraft = Object.entries(BLOG_TOOL_CLASS).filter(([, cls]) => cls === "bot_draft").map(([n]) => n).sort();
+  assert.deepEqual(botDraft,
+    ["crow_create_post", "crow_edit_post", "crow_get_post", "crow_list_posts"],
+    "exactly the four draft tools are bot_draft");
+
+  const harmless = Object.entries(BLOG_TOOL_CLASS).filter(([, cls]) => cls === "harmless").map(([n]) => n);
+  assert.deepEqual(harmless, ["crow_get_chord_diagram"], "exactly one harmless tool");
+
+  // Everything else — publish, unpublish, delete, share, export, settings, theme, stats and the whole
+  // songbook — is owner_only.
+  const ownerOnly = Object.entries(BLOG_TOOL_CLASS).filter(([, cls]) => cls === "owner_only").map(([n]) => n);
+  assert.equal(ownerOnly.length, 18, "18 owner-only tools");
+  for (const name of [
+    "crow_publish_post", "crow_unpublish_post", "crow_delete_post", "crow_share_post",
+    "crow_export_blog", "crow_blog_settings", "crow_blog_customize_theme", "crow_blog_stats",
+    "crow_create_song", "crow_transpose_song", "crow_list_songs", "crow_create_setlist",
+    "crow_add_to_setlist", "crow_remove_from_setlist", "crow_update_setlist", "crow_list_setlists",
+    "crow_get_setlist", "crow_delete_setlist",
+  ]) {
+    assert.equal(BLOG_TOOL_CLASS[name], "owner_only", `${name}: still owner_only`);
+  }
+  assert.equal(Object.isFrozen(BLOG_TOOL_CLASS), true, "the map is frozen");
+});
+
+// --- (b) every bot path is refused, and the handler never runs ------------------------------
+
+test("a bot is refused every owner-only blog tool on every path, and no handler runs", { timeout: 180_000 }, async () => {
+  for (const path of await botPaths()) {
     for (const [tool, args, sentinel] of BOT_CALLS(DRAFT_ID)) {
       await expectOwnerOnly(path.call, path.label, tool, args, sentinel);
     }
@@ -281,11 +365,135 @@ test("a bot is refused every owner-only blog tool on every path, and no handler 
   const after = await rows("SELECT status, title FROM blog_posts WHERE id = ?", [DRAFT_ID]);
   assert.deepEqual(after.map((r) => ({ status: r.status, title: r.title })),
     [{ status: "draft", title: DRAFT_TITLE }], "the draft was never published, edited or deleted");
+
+  // Nor was the published post touched, and no published post reached a bot's read.
+  const live = await rows("SELECT title, status, content FROM blog_posts WHERE id = ?", [LIVE_ID]);
+  assert.deepEqual(live.map((r) => ({ title: r.title, status: r.status })),
+    [{ title: LIVE_TITLE, status: "published" }], "the published post is untouched");
+});
+
+// --- (b2) a bot reaches the four draft tools, and only ever on drafts -----------------------
+
+/**
+ * Drive the four draft tools as a bot on one path: create a draft, edit it, and be refused every
+ * post that is not a draft — with the one fixed refusal, changing nothing.
+ */
+async function expectDraftTools(call, label) {
+  // create → a real row that is a draft, even though the call asked for public visibility (which is
+  // recorded, and only means anything at publish time — and a bot cannot publish).
+  const title = `A bot draft (${label}) ${Date.now().toString(36)}`;
+  const created = await call("crow_create_post", { title, content: "First words.", visibility: "public" });
+  assert.equal(created.isError, false, `${label} create: ${created.text}`);
+  assert.match(created.text, /^Created draft: /, `${label} create: the same response an owner gets`);
+  const id = Number(/ID: (\d+)/.exec(created.text)?.[1]);
+  assert.ok(Number.isFinite(id), `${label} create: the response carries the id: ${created.text}`);
+
+  const row = async () => (await rows("SELECT title, content, status, visibility, published_at FROM blog_posts WHERE id = ?", [id]))[0];
+  assert.equal((await row()).status, "draft", `${label}: a bot's post is a draft whatever visibility it asked for`);
+  assert.equal((await row()).visibility, "public", `${label}: the visibility it asked for is recorded`);
+
+  // edit that draft → it changes, and stays a draft (there is no status field to send, either).
+  const edited = await call("crow_edit_post", { id, content: "Second words, still a draft." });
+  assert.equal(edited.isError, false, `${label} edit draft: ${edited.text}`);
+  assert.match(edited.text, /^Updated post \d+: content\.$/, `${label} edit draft: the usual response`);
+  assert.equal((await row()).content, "Second words, still a draft.", `${label}: the draft really changed`);
+  assert.equal((await row()).status, "draft", `${label}: an edit never changes the status`);
+
+  // There is no status field on crow_edit_post, and an argument the schema does not declare is
+  // dropped before the handler — so "publish it with an edit" is not a path either.
+  const sneaky = await call("crow_edit_post", { id, status: "published" });
+  assert.equal((await row()).status, "draft", `${label}: a status argument changes nothing: ${sneaky.text}`);
+  assert.equal((await row()).content, "Second words, still a draft.", `${label}: and nothing else changed`);
+
+  // edit a PUBLISHED post → the one draft refusal, and the row byte-identical.
+  const liveBefore = await rows("SELECT * FROM blog_posts WHERE id = ?", [LIVE_ID]);
+  const refusedLive = await call("crow_edit_post", { id: LIVE_ID, title: "A bot rewrote a live post" });
+  assert.equal(refusedLive.isError, true, `${label} edit live: ${refusedLive.text}`);
+  assert.equal(refusedLive.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit live: the fixed draft refusal`);
+  assert.deepEqual(await rows("SELECT * FROM blog_posts WHERE id = ?", [LIVE_ID]), liveBefore,
+    `${label} edit live: nothing changed`);
+
+  // edit a PUBLISHED-private post → the very same refusal (the rule is about status, not reach).
+  const privateBefore = await rows("SELECT * FROM blog_posts WHERE id = ?", [PRIVATE_LIVE_ID]);
+  const refusedPrivate = await call("crow_edit_post", { id: PRIVATE_LIVE_ID, content: "A bot's words." });
+  assert.equal(refusedPrivate.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit published-private: the same refusal`);
+  assert.deepEqual(await rows("SELECT * FROM blog_posts WHERE id = ?", [PRIVATE_LIVE_ID]), privateBefore,
+    `${label} edit published-private: nothing changed`);
+
+  // edit a MISSING id → the identical refusal: a live post and a missing one must read the same.
+  const refusedMissing = await call("crow_edit_post", { id: 999999, content: "A bot's words." });
+  assert.equal(refusedMissing.isError, true, `${label} edit missing: ${refusedMissing.text}`);
+  assert.equal(refusedMissing.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit missing: the same refusal again`);
+  assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts WHERE id = 999999"), 0,
+    `${label} edit missing: and of course nothing was created`);
+}
+
+test("a bot creates and edits drafts, and only drafts, on every bot path", { timeout: 180_000 }, async () => {
+  for (const path of await botPaths()) await expectDraftTools(path.call, path.label);
+});
+
+// --- (b3) a bot lists and reads drafts only -------------------------------------------------
+
+async function expectDraftReads(call, label) {
+  // list: drafts and nothing else, on the plain path …
+  const all = await call("crow_list_posts", {});
+  assert.equal(all.isError, false, `${label} list: ${all.text}`);
+  assert.ok(all.text.includes(TAGGED_DRAFT_TITLE), `${label} list: a draft is listed`);
+  assert.ok(!all.text.includes(LIVE_TITLE), `${label} list: a published post is not`);
+  assert.ok(!all.text.includes(PRIVATE_LIVE_TITLE), `${label} list: nor a published-private one`);
+  const listedRows = all.text.split("\n").filter((l) => l.startsWith("- #"));
+  assert.ok(listedRows.length > 0, `${label} list: something was listed`);
+  for (const line of listedRows) assert.match(line, /\[draft\]/, `${label} list: every row is a draft: ${line}`);
+
+  // … with the status argument forced to draft, whatever the call asks for …
+  const askedPublished = await call("crow_list_posts", { status: "published" });
+  assert.equal(askedPublished.text, all.text, `${label} list status=published: no wider than the plain listing`);
+  const askedArchived = await call("crow_list_posts", { status: "archived" });
+  assert.equal(askedArchived.text, all.text, `${label} list status=archived: the same drafts`);
+
+  // … on the tag path …
+  const byTag = await call("crow_list_posts", { tag: SHARED_TAG });
+  assert.equal(byTag.isError, false, `${label} list tag: ${byTag.text}`);
+  assert.ok(byTag.text.includes(TAGGED_DRAFT_TITLE), `${label} list tag: the tagged draft is listed`);
+  assert.ok(!byTag.text.includes(LIVE_TITLE), `${label} list tag: the tagged PUBLISHED post is not`);
+  assert.ok(!byTag.text.includes(PRIVATE_LIVE_TITLE), `${label} list tag: nor the tagged published-private one`);
+
+  // … and on the FTS join path.
+  const bySearch = await call("crow_list_posts", { search: SEARCH_WORD });
+  assert.equal(bySearch.isError, false, `${label} list search: ${bySearch.text}`);
+  assert.ok(bySearch.text.includes(TAGGED_DRAFT_TITLE), `${label} list search: the draft matches`);
+  assert.ok(!bySearch.text.includes(LIVE_TITLE), `${label} list search: the matching PUBLISHED post does not`);
+  assert.ok(!bySearch.text.includes(PRIVATE_LIVE_TITLE), `${label} list search: nor the matching published-private one`);
+
+  // get: a draft answers with its content …
+  const draft = await call("crow_get_post", { id: TAGGED_DRAFT_ID });
+  assert.equal(draft.isError, false, `${label} get draft: ${draft.text}`);
+  assert.ok(draft.text.includes(TAGGED_DRAFT_CONTENT), `${label} get draft: the body is returned`);
+  assert.match(draft.text, /Status: draft/, label);
+
+  // … while a published post, a published-private one, and an id that does not exist are the same
+  // one "not found" (by id and by slug), so nothing reveals that a live post exists.
+  const missing = await call("crow_get_post", { id: 999999 });
+  assert.equal(missing.isError, true, `${label} get missing: ${missing.text}`);
+  assert.equal(missing.text, NOT_FOUND_TEXT, `${label} get missing: the ordinary not-found text`);
+  for (const [what, args] of [
+    ["live by id", { id: LIVE_ID }],
+    ["live by slug", { slug: "gull-live" }],
+    ["published-private by id", { id: PRIVATE_LIVE_ID }],
+  ]) {
+    const hidden = await call("crow_get_post", args);
+    assert.equal(hidden.isError, true, `${label} get ${what}: ${hidden.text}`);
+    assert.equal(hidden.text, missing.text, `${label} get ${what}: identical to a missing post`);
+  }
+}
+
+test("a bot lists and reads drafts only, on every bot path", { timeout: 180_000 }, async () => {
+  for (const path of await botPaths()) await expectDraftReads(path.call, path.label);
 });
 
 // --- (c) the one harmless tool still works for a bot ---------------------------------------
 
-test("crow_get_chord_diagram is the one blog tool a bot still reaches", async () => {
+test("crow_get_chord_diagram is the one harmless blog tool a bot reaches", async () => {
   for (const [label, base, meta] of [
     ["bot base actor", { kind: "bot", id: BOT }, undefined],
     ["_meta actor", actor.OWNER, { kind: "bot", id: META_BOT }],
@@ -319,6 +527,8 @@ async function createAndPublish(call, title) {
   assert.equal(created.isError, false, created.text);
   const id = Number(/ID: (\d+)/.exec(created.text)?.[1]);
   assert.ok(Number.isFinite(id), `the create response carries the id: ${created.text}`);
+  assert.equal((await rows("SELECT status FROM blog_posts WHERE id = ?", [id]))[0].status, "draft",
+    "a new post starts as a draft");
 
   const preview = await call("crow_publish_post", { id, confirm_token: "" });
   assert.equal(preview.isError, false, preview.text);
@@ -335,42 +545,94 @@ async function createAndPublish(call, title) {
   return id;
 }
 
-test("the frozen operator-voice actor publishes for real (create → publish token round-trip)", { timeout: 120_000 }, async () => {
-  const frozen = scope.operatorVoiceActor();
-  const e = await open({ baseActor: frozen });
-  assert.equal(e.server.blog.actor, frozen, "the frozen operator-voice actor is the base");
-  assert.equal(scope.isOperatorVoice(e.server.blog.actor), true);
+/** The three callers whose behaviour must be byte-identical to before: neither is bound by the
+ *  draft rule, and the operator's own spoken turn is the frozen operator-voice actor. */
+const OPERATOR_CALLERS = () => [
+  ["owner", actor.OWNER],
+  ["unknown", actor.UNKNOWN],
+  ["operator voice", scope.operatorVoiceActor()],
+];
 
-  await createAndPublish(e.call, "The operator's own spoken turn");
-
-  // The guard's exception is about the ACTOR: a bot base actor is refused the same tools the
-  // operator-voice one reaches.
-  const botE = await open({ baseActor: { kind: "bot", id: BOT } });
-  assert.equal((await botE.call("crow_list_posts", {})).text, OWNER_ONLY_TEXT);
-
-  // An un-frozen copy carrying the flag is not the frozen actor, so it is refused.
-  const copy = await open({ baseActor: { kind: "bot", id: "crow.voice", operatorVoice: true } });
-  assert.equal(scope.isOperatorVoice(copy.server.blog.actor), false, "a copy is not the frozen actor");
-  assert.equal((await copy.call("crow_list_posts", {})).text, OWNER_ONLY_TEXT);
-});
-
-test("the owner and an unidentified caller create and publish as before", { timeout: 120_000 }, async () => {
-  for (const [label, base] of [["owner", actor.OWNER], ["unknown", actor.UNKNOWN]]) {
+test("the operator-voice actor, the owner and an unidentified caller create, publish and edit live posts as before", { timeout: 120_000 }, async () => {
+  for (const [label, base] of OPERATOR_CALLERS()) {
     const e = await open({ baseActor: base });
     assert.equal(e.server.blog.actor, base, `${label}: the base actor is the mount's`);
+    if (label === "operator voice") assert.equal(scope.isOperatorVoice(e.server.blog.actor), true);
+
+    // create → draft → publish, with the real token round-trip.
     const id = await createAndPublish(e.call, `A post from the ${label}`);
 
-    // And the read tools answer with the real row.
-    const listed = await e.call("crow_list_posts", { status: "published" });
-    assert.equal(listed.isError, false, `${label} list: ${listed.text}`);
-    assert.ok(listed.text.includes(`A post from the ${label}`), `${label} sees its own post`);
-    const got = await e.call("crow_get_post", { id });
-    assert.equal(got.isError, false, `${label} get: ${got.text}`);
-    assert.match(got.text, /Status: published/, label);
+    // An edit of a PUBLISHED post still lands — the draft rule narrows a bot, not these callers.
+    const liveEdit = await e.call("crow_edit_post", { id, title: `Edited live by the ${label}` });
+    assert.equal(liveEdit.isError, false, `${label} edit live: ${liveEdit.text}`);
+    const afterEdit = (await rows("SELECT title, status FROM blog_posts WHERE id = ?", [id]))[0];
+    assert.equal(afterEdit.title, `Edited live by the ${label}`, `${label}: the live post really changed`);
+    assert.equal(afterEdit.status, "published", `${label}: and an edit never changes the status`);
+  }
+
+  // The guard's exception is about the ACTOR, not the tool: a bot base actor is held to drafts on the
+  // very tools the operator-voice actor reaches in full.
+  const botE = await open({ baseActor: { kind: "bot", id: BOT } });
+  const botList = await botE.call("crow_list_posts", { status: "published" });
+  assert.equal(botList.isError, false, botList.text);
+  assert.ok(!botList.text.includes(LIVE_TITLE), "the bot's listing carries no published post");
+  assert.equal((await botE.call("crow_blog_stats", {})).text, OWNER_ONLY_TEXT, "and the owner-only tools are refused");
+
+  // An un-frozen copy carrying the flag is not the frozen actor: it is an ordinary bot.
+  const copy = await open({ baseActor: { kind: "bot", id: "crow.voice", operatorVoice: true } });
+  assert.equal(scope.isOperatorVoice(copy.server.blog.actor), false, "a copy is not the frozen actor");
+  assert.equal((await copy.call("crow_blog_stats", {})).text, OWNER_ONLY_TEXT, "so it is refused owner-only tools");
+  assert.ok(!(await copy.call("crow_list_posts", {})).text.includes(LIVE_TITLE),
+    "and its listing is drafts only, unlike the operator's own turn");
+});
+
+test("the read tools answer identically for the owner, an unidentified caller and the operator's own voice turn", async () => {
+  // No writes in this test: the three callers read the same rows, so their answers must be equal —
+  // that is what "unchanged" means here. Called in the order OPERATOR_CALLERS lists them.
+  const outputs = [];
+  for (const [label, base] of OPERATOR_CALLERS()) {
+    const e = await open({ baseActor: base });
+    const all = await e.call("crow_list_posts", {});
+    const publishedOnly = await e.call("crow_list_posts", { status: "published" });
+    const byTag = await e.call("crow_list_posts", { tag: SHARED_TAG });
+    const bySearch = await e.call("crow_list_posts", { search: SEARCH_WORD });
+    const draft = await e.call("crow_get_post", { id: TAGGED_DRAFT_ID });
+    const live = await e.call("crow_get_post", { id: LIVE_ID });
+    const privateLive = await e.call("crow_get_post", { id: PRIVATE_LIVE_ID });
+
+    // The behaviour itself, first: every post listed, published included, drafts included.
+    assert.equal(all.isError, false, `${label} list: ${all.text}`);
+    assert.ok(all.text.includes(LIVE_TITLE), `${label} list: the published post is listed`);
+    assert.ok(all.text.includes(PRIVATE_LIVE_TITLE), `${label} list: the published-private post too`);
+    assert.ok(all.text.includes(TAGGED_DRAFT_TITLE), `${label} list: and the drafts`);
+    assert.ok(publishedOnly.text.includes(LIVE_TITLE), `${label} list status=published: the status filter still filters`);
+    assert.ok(!publishedOnly.text.includes(TAGGED_DRAFT_TITLE), `${label} list status=published: drafts excluded`);
+    assert.ok(byTag.text.includes(LIVE_TITLE), `${label} list tag: a published post with the tag`);
+    assert.ok(byTag.text.includes(TAGGED_DRAFT_TITLE), `${label} list tag: and a draft with it`);
+    assert.ok(bySearch.text.includes(LIVE_TITLE), `${label} list search: a matching published post`);
+    assert.ok(bySearch.text.includes(TAGGED_DRAFT_TITLE), `${label} list search: and a matching draft`);
+    assert.equal(draft.isError, false, `${label} get draft: ${draft.text}`);
+    assert.equal(live.isError, false, `${label} get published: ${live.text}`);
+    assert.match(live.text, /Status: published/, label);
+    assert.equal(privateLive.isError, false, `${label} get published-private: ${privateLive.text}`);
+
+    outputs.push({
+      label,
+      all: all.text, publishedOnly: publishedOnly.text, byTag: byTag.text, bySearch: bySearch.text,
+      draft: draft.text, live: live.text, privateLive: privateLive.text,
+    });
+  }
+
+  // And then the byte-for-byte part: three callers, one answer each.
+  const [first, ...rest] = outputs;
+  for (const other of rest) {
+    for (const key of ["all", "publishedOnly", "byTag", "bySearch", "draft", "live", "privateLive"]) {
+      assert.equal(other[key], first[key], `${key}: ${other.label} reads exactly what ${first.label} reads`);
+    }
   }
 });
 
-// --- (e) the gateway path: an actor header marking a bot is refused ---------------------------
+// --- (e) the gateway path: an actor header marking a bot gets drafts only ---------------------
 
 /**
  * A router (`/router/mcp`, the gateway's consolidated endpoint) wired to an in-process client whose
@@ -406,35 +668,68 @@ const BOT_HEADER = { "x-crow-actor-kind": "bot" };
 const BOT_ID_HEADER = { "x-crow-actor-kind": "bot", "x-crow-actor-id": META_BOT };
 const OWNER_HEADER = { "x-crow-actor-kind": "owner" };
 
-const routerWrite = (title) => ["crow_create_post", { title, content: "words" }, "Created draft:"];
+/** A bot-marked caller through the router: it gets a DRAFT, and nothing wider. */
+async function expectRouterDraftOnly(call, label, title) {
+  const created = await call("crow_create_post", { title, content: "words", visibility: "public" });
+  assert.equal(created.isError, false, `${label} create: ${created.text}`);
+  assert.match(created.text, /^Created draft/, label);
+  const id = Number(/ID: (\d+)/.exec(created.text)?.[1]);
+  assert.ok(Number.isFinite(id), `${label} create: the id travels back: ${created.text}`);
+  assert.equal((await rows("SELECT status FROM blog_posts WHERE id = ?", [id]))[0].status, "draft",
+    `${label}: the row is a draft even though the call asked for public visibility`);
 
-test("the gateway path refuses a bot-marked create_post, and an owner header is ignored", async () => {
-  // A caller marking itself a bot: refused with an id and refused without one. The id-less claim
-  // resolves to the same actor an unmarked client gets, so the guard reads the CLAIM, not only the
-  // resolved actor — an unverifiable bot is never treated as the operator's own client.
+  // A live post is refused the one draft refusal and left alone.
+  const liveBefore = await rows("SELECT * FROM blog_posts WHERE id = ?", [LIVE_ID]);
+  const liveEdit = await call("crow_edit_post", { id: LIVE_ID, title: "A router bot rewrote a live post" });
+  assert.equal(liveEdit.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit live: the fixed draft refusal`);
+  assert.deepEqual(await rows("SELECT * FROM blog_posts WHERE id = ?", [LIVE_ID]), liveBefore,
+    `${label} edit live: nothing changed`);
+
+  // The listing is drafts only, and a read of a live post is the ordinary not-found text.
+  const listed = await call("crow_list_posts", { status: "published" });
+  assert.equal(listed.isError, false, `${label} list: ${listed.text}`);
+  assert.ok(!listed.text.includes(LIVE_TITLE), `${label} list: no published post`);
+  const live = await call("crow_get_post", { id: LIVE_ID });
+  assert.equal(live.text, NOT_FOUND_TEXT, `${label} get live: identical to a missing post`);
+
+  // And a publish is still refused, which is the whole point of the draft allowance.
+  await expectOwnerOnly(call, label, "crow_publish_post", { id, confirm_token: "" }, "This will publish");
+  await expectOwnerOnly(call, label, "crow_unpublish_post", { id }, "reverted to draft");
+}
+
+test("the gateway path gives a bot-marked caller drafts only, and an owner header is ignored", async () => {
+  // A caller marking itself a bot: drafts only with an id and without one. The id-less claim resolves
+  // to the same actor an unmarked client gets, so the draft rule has to come from the CLAIM — an
+  // unverifiable bot is never treated as the operator's own client.
   for (const [label, headers] of [
     ["bot, no id", BOT_HEADER],
     ["bot, with id", BOT_ID_HEADER],
   ]) {
-    const [tool, args, sentinel] = routerWrite(`A router post from a ${label} caller`);
     const e = await openRouter(actor.OWNER, headers);
-    await expectOwnerOnly(e.call, `router ${label}`, tool, args, sentinel);
+    await expectRouterDraftOnly(e.call, `router ${label}`, `A router draft from a ${label} caller`);
   }
 
   // A header cannot upgrade either: on a router built for a bot, `x-crow-actor-kind: owner` is
-  // ignored and the mount's own actor still decides (the bot is refused).
+  // ignored and the mount's own actor still decides (drafts only, no publish).
   const botRouter = await openRouter({ kind: "bot", id: BOT }, OWNER_HEADER);
-  const [tool, args, sentinel] = routerWrite("A router post claiming to be the owner");
-  await expectOwnerOnly(botRouter.call, "router owner header on a bot mount", tool, args, sentinel);
+  await expectRouterDraftOnly(botRouter.call, "router owner header on a bot mount",
+    "A router draft claiming to be the owner");
 
   // And on an owner-built router the same header is ignored the other way: it is no credential,
-  // and no downgrade — the mount's actor, the owner, still creates the post.
+  // and no downgrade — the mount's actor, the owner, still creates and publishes the post.
   const ownerRouter = await openRouter(actor.OWNER, OWNER_HEADER);
   const title = "A router post from the owner with an owner header";
   const created = await ownerRouter.call("crow_create_post", { title, content: "The operator's words." });
   assert.equal(created.isError, false, created.text);
   assert.match(created.text, /Created draft/);
   assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts WHERE title = ?", [title]), 1, "the owner's post exists");
+  const id = Number(/ID: (\d+)/.exec(created.text)?.[1]);
+  const preview = await ownerRouter.call("crow_publish_post", { id, confirm_token: "" });
+  assert.equal(preview.isError, false, preview.text);
+  const token = /confirm_token: "([^"]+)"/.exec(preview.text)?.[1];
+  const published = await ownerRouter.call("crow_publish_post", { id, confirm_token: token });
+  assert.equal(published.isError, false, published.text);
+  assert.match(published.text, /^Published!/, "the owner's own turn still publishes through the router");
 });
 
 // --- (f) a registration the guard could not guard is refused at registration ---------------
