@@ -120,6 +120,13 @@
  * - `nextBarFrame()` asks for the next bar boundary on the same clock and
  *   resolves `{frame, bar}` (0-based bar; while the transport is stopped, the
  *   frame bar 0 would start at).
+ * - `nextLoopFrame(track_id, clip_id)` asks for the next LOOP boundary of that
+ *   track's playing clip — the frame the next pass of a take starts on — and
+ *   resolves `{frame, bar, looping}`. `looping` is false when the track is not
+ *   playing that clip (an empty slot, another clip, a stopped transport), and
+ *   the answer is then the next bar line. It is at least `MIN_ARM_LEAD` frames
+ *   ahead whenever `looping` is true, so a recorder armed there arms on a frame
+ *   the engine has not rendered yet.
  * - `setMode("session" | "arrangement")` and `seek(bar)` choose what the
  *   transport plays: the session grid, where launches arm clips, or the song's
  *   arrangement, where its placements sound on their bars. Switching mode
@@ -461,6 +468,16 @@
 
   /** How many bars the looper's buffers hold: the longest take it records. */
   const LOOPER_BARS = 8;
+
+  /**
+   * How far ahead of the engine's next block a take's arm frame has to be, in
+   * frames: about 170 ms at 48 kHz. A take is armed for the next loop boundary
+   * of its clip, and the page has to get the recorder armed before that frame is
+   * rendered: the audio thread never replays a late plan, so the boundary asked
+   * for is always at least this far ahead. The recorder's own replay of a late
+   * arm is only the safety net for a stalled page.
+   */
+  const MIN_ARM_LEAD = 8192;
 
   /**
    * How many pads may ROLL at once: the engine's own limit, worked out here too so
@@ -1119,6 +1136,8 @@
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
+   *                    nextLoopFrame: function(string, string): Promise<{frame: number,
+   *                      bar: number, looping: boolean}>,
    *                    onTap: function(function): function,
    *                    onPadEvent: function(function): function,
  *                    onMeter: function(function): function,
@@ -1819,6 +1838,9 @@
     let flushSeq = 0;
     const barRequests = new Map();
     let barSeq = 0;
+    /** request id → the resolver waiting for the processor's `nextLoopFrame`. */
+    const loopRequests = new Map();
+    let loopSeq = 0;
     /** take id → resolvers waiting for the processor's `audio_loaded`. */
     const pendingAudio = new Map();
     /** sample id → resolvers waiting for the processor's `sample_loaded`. */
@@ -2008,6 +2030,14 @@
         if (resolveFrame) {
           barRequests.delete(message.id);
           resolveFrame({ frame: message.frame, bar: message.bar });
+        }
+        return;
+      }
+      if (message.type === "nextLoopFrame") {
+        const resolveLoop = loopRequests.get(message.id);
+        if (resolveLoop) {
+          loopRequests.delete(message.id);
+          resolveLoop({ frame: message.frame, bar: message.bar, looping: message.looping === true });
         }
         return;
       }
@@ -2582,6 +2612,44 @@
         return new Promise((resolve) => {
           barRequests.set(id, resolve);
           post({ type: "nextBarFrame", id: id });
+        });
+      },
+
+      /**
+       * The next LOOP boundary of a track's playing clip, on the engine's clock:
+       * `frame` is an AudioContext frame, `bar` the 0-based transport bar that
+       * loop start sits on, and `looping` whether the answer really is the armed
+       * clip's own grid.
+       *
+       * A take is one whole loop pass of its clip, so every pass of it starts on
+       * a loop boundary of that clip: this is where a recorder arms a take it
+       * starts while the transport already runs, so a Record pressed mid-loop
+       * gives a whole take at the next loop start instead of a partial one. The
+       * answer is at least MIN_ARM_LEAD frames ahead whenever `looping` is true,
+       * so the recorder is always armed on a frame the engine has not rendered.
+       *
+       * `looping: false` means the track has no loop of that clip to follow: an
+       * empty slot, a different clip playing on it, or a stopped or paused
+       * transport. The answer is then the next bar line, which is the frame a
+       * take armed on before takes had a grid of their own.
+       *
+       * Resolves when the processor answers; a processor that has failed never
+       * does, exactly like `nextBarFrame()`.
+       * @param {string} trackId
+       * @param {string|null} armedClipId the clip the take belongs to
+       * @returns {Promise<{frame: number, bar: number, looping: boolean}>}
+       */
+      nextLoopFrame(trackId, armedClipId) {
+        const id = ++loopSeq;
+        return new Promise((resolve) => {
+          loopRequests.set(id, resolve);
+          post({
+            type: "nextLoopFrame",
+            id: id,
+            track_id: trackId,
+            clip_id: armedClipId === null || armedClipId === undefined ? null : String(armedClipId),
+            min_lead: MIN_ARM_LEAD,
+          });
         });
       },
 

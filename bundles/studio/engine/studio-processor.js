@@ -683,7 +683,10 @@
  * sent when a DIFFERENT song opens), `{type:"setMode", mode}`,
  * `{type:"seek", bar}` (a bar at beat resolution), `{type:"metronome", on}`,
  * `{type:"flush", id}`,
- * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
+ * `{type:"nextBarFrame", id}`, `{type:"nextLoopFrame", id, track_id, clip_id,
+ * min_lead}` (the next loop boundary of that track's playing clip, for a take to
+ * arm on: see the sequencer's `nextLoopFrame`), `{type:"audio", take_id,
+ * channels}`,
  * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
  * `{type:"sample_unload", sample_id}`, `{type:"library", library_id, kind,
  * bytes}` (kind `"font"` with a bank's bytes, `"nam"` with a capture's bytes,
@@ -710,7 +713,10 @@
  * see `reportPosition`), `{type:"launched",
  * track_id, clip_id, scene_id, bar, frame}` (one
  * per launch the sequencer applied in that block; see below),
- * `{type:"nextBarFrame", id, frame, bar}`, `{type:"audio_loaded", take_id}`
+ * `{type:"nextBarFrame", id, frame, bar}`, `{type:"nextLoopFrame", id, frame,
+ * bar, looping}` (the same clock; `looping` is false when the answer is the next
+ * bar line because that track is not playing the clip),
+ * `{type:"audio_loaded", take_id}`
  * (one ack per `audio` message, so the client knows the PCM is in),
  * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
  * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
@@ -2769,6 +2775,23 @@
             id: message.id,
             frame: this.contextOffset() + boundary.frame,
             bar: boundary.bar,
+          });
+          break;
+        }
+        case "nextLoopFrame": {
+          // The next pass of the take's own grid, in the same two steps: the
+          // sequencer answers on its own clock and the answer moves onto the
+          // context's, so a recorder arms on the very frame a launch would name.
+          // `looping: false` says the track is not playing that clip (an empty
+          // slot, another clip, a stopped transport) and the frame is then the
+          // next bar line instead.
+          const loop = this.sequencer.nextLoopFrame(message.track_id, message.clip_id, message.min_lead);
+          this.port.postMessage({
+            type: "nextLoopFrame",
+            id: message.id,
+            frame: this.contextOffset() + loop.frame,
+            bar: loop.bar,
+            looping: loop.looping,
           });
           break;
         }

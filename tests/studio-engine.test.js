@@ -697,6 +697,79 @@ test("launch report carries the context frame of the bar it took effect", async 
   }
 });
 
+test("nextLoopFrame answers on the recorder's clock, and says when there is no loop to follow", async () => {
+  // 120 bpm at 48 kHz: one beat is 24,000 frames and one bar is 96,000.
+  const FRAMES_PER_BEAT = (SAMPLE_RATE * 60) / 120;
+  const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4;
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(2 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    engine.setSong(makeSong({ length_bars: 2 }));
+
+    // Nothing has played yet, so the track has no clip of its own to follow: the
+    // bar line is the answer and `looping` says so. The round trip works before
+    // a single block has been rendered, exactly like `nextBarFrame`.
+    await engine.flush();
+    assert.deepEqual(await engine.nextLoopFrame("track-1", "clip-1"), { frame: 0, bar: 0, looping: false });
+
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
+
+    // Asked half way through the first bar of a two-bar clip: the take's next
+    // pass starts on bar 2, which is far more than the arm lead away. The
+    // question is posted while the render stands still and answered by the
+    // processor on the context's clock, like a launch report.
+    const midBar = FRAMES_PER_BAR / 2;
+    let asked = null;
+    const suspended = context.suspend(midBar / SAMPLE_RATE).then(async () => {
+      asked = engine.nextLoopFrame("track-1", "clip-1");
+      await context.resume();
+    });
+    await context.startRendering();
+    rendered = true;
+    await suspended;
+    assert.deepEqual(await asked, { frame: FRAMES_PER_BAR * 2, bar: 2, looping: true });
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
+test("a nextLoopFrame asked after dispose is never answered, like nextBarFrame", async () => {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(0.1 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    engine.setSong(makeSong());
+    await engine.flush();
+    engine.dispose();
+    // Dispose drops the port handler without settling what is waiting on it, so
+    // a request left pending is never answered: nothing may depend on one after
+    // an error or a dispose.
+    const outcome = await Promise.race([
+      engine.nextLoopFrame("track-1", "clip-1").then(() => "answered"),
+      delay(50).then(() => "silent"),
+    ]);
+    assert.equal(outcome, "silent");
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
 // --- the browser side -------------------------------------------------------
 
 /** The engine page: render the song, hash it, hand the hash back. */
