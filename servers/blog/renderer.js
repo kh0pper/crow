@@ -1073,9 +1073,11 @@ const RELEX_BUDGET_FACTOR = 8;
 // documents honestly need (32,000 paragraph tokens at 64 KB). Ordinary content
 // pays nothing: a 58 KB post of headings, prose, tables and fences renders in
 // 15 ms with the shape-1 guard on and 14 ms with it off. tests/md-block-guard.test.js
-// holds every number above to 300 ms / 600 ms inside a worker with a 5 s kill,
-// and its differential test requires the guard to be byte-transparent on 2,000
-// seeded table-shaped documents.
+// holds every number above to 1,000 ms / 2,000 ms inside a worker with a 5 s kill
+// (the bounds leave room for CI runners ~3.5x slower than the box these were
+// measured on, and still sit far below the 4-27 s cliffs), and its differential
+// test requires the guard to be byte-transparent on 2,000 seeded table-shaped
+// documents.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -1108,49 +1110,68 @@ const RELEX_BUDGET_FACTOR = 8;
 // why the test pins every listed unit at 16, 32 and 64 KB rather than testing
 // one size. Profiled at 32 KB, `lheading` is 556 of the render's 586 ms.
 //
-// The fix is a PRECHECK, like shape 1's: `setextPossible` answers “can a setext
+// The fix is a PRECHECK, like shape 1's: `setextRunAnswer` answers “can a setext
 // underline end the paragraph run that starts here?” by walking lines only
 // until the run would end, and the tokenizer is not called at all when the
 // answer is no. Two things make it cheap enough to be quadratic no more:
 //
-//   * the walk is per LINE and allocation-free (`isSetextUnderline`,
-//     `setextRunEnds` do character tests), where marked's rule is a backtracking
-//     scan over the whole run per call; and
+//   * the walk is per LINE and allocation-free (isSetextUnderline and marked's
+//     own stop alternation, extracted once per rule source —
+//     lheadingStopPattern), where marked's rule is a backtracking scan over the
+//     whole run per call; and
 //   * it is MEMOIZED by distance-from-end (makeSetextMemo, sameDoc): every later
 //     call in a frame is on a shorter suffix of the source the answer was
 //     computed on, where a line at distance d from the end is still at distance
 //     d — so a document of nothing but `  -\t` lines is scanned ONCE, and a
 //     paragraph run that keeps being interrupted costs one scan per
 //     interruption, each starting where the last one stopped: linear per frame.
+//     The memo belongs to the FRAME (it is pushed and popped around
+//     blockTokens), because a nested block's source is not a suffix of the
+//     block containing it: one set of shared slots let a list item's answer be
+//     reused for a quote 30 characters away and changed the quote's heading
+//     into a paragraph plus an `<hr>`.
 //
-// It cannot reject a heading marked would make: FALSE is only returned when the
-// walk reaches a line that ends the run (marked's run cannot pass it) and no
-// line before it was an underline, and `setextRunEnds` recognizes a SUBSET of
-// marked's run ends, so the walk can only run further than marked's, never
-// stop earlier. TRUE just means “ask marked”, which still decides. The guard
-// also installs nothing at all unless the installed rule still opens its run
-// with the stop lookahead the walk reproduces (LHEADING_RUN_SOURCE), so a
-// future marked that reworks the rule keeps its own behavior. Tests: 2,000
-// seeded documents — short lines mixing `-`/`*`/`+`/`=`, digits with `.`/`)`,
-// tabs, 0-4 spaces, text, blank lines, list items, quotes and code — must
-// render BYTE-IDENTICALLY with the guard on and off on both paths
-// (setMdLheadingGuardEnabled is the seam), and every unit in the table above
-// must stay under 300 ms at 16/32/64 KB on the bot path and under 600 ms for
-// the 128 KB owner head.
+// It cannot reject a heading marked would make: the walk's stop set is marked's
+// OWN (the alternation is lifted out of the installed rule, so it is neither a
+// subset — which let the walk re-scan runs marked had abandoned, the 4-27 s
+// bypass — nor a superset, which would stop the walk on a line marked reads as
+// text and reject a heading it makes), and a line holding U+2028 or U+2029 ends
+// it because the rule's `.` cannot consume them. FALSE is only returned when the
+// walk reaches a line that ends the run and no line before it was an underline;
+// TRUE just means “ask marked”, which still decides. The guard also installs
+// nothing at all unless the installed rule still has the run shape this was
+// verified against (lheadingStopPattern), so a future marked that reworks the
+// rule keeps its own behavior. Tests: 2,000 seeded documents — short lines
+// mixing `-`/`*`/`+`/`=`, digits with `.`/`)`, tabs, 0-4 spaces, text, blank
+// lines, list items, quotes and code — must render BYTE-IDENTICALLY with the
+// guard on and off on both paths (setMdLheadingGuardEnabled is the seam), a
+// 5,000-document fuzz mixing nested quotes and lists with every run end above
+// must as well, and every unit in the table above must stay under 1,000 ms at
+// 16/32/64 KB on the bot path and under 2,000 ms for the 128 KB owner head.
 //
 // Measured WITH the guard (same shapes, CPU ms, one whole render; 16/32/64 KB on
-// the bot path, 128 KB owner head):
+// the bot path, 128 KB owner head, on the box the 1,000/2,000 ms bounds in the
+// test were set for):
 //
 //   shape (repeated to fill)     16 KB   32 KB   64 KB   128 KB (owner)
-//   "  -\t\n"                      2       2       2        2
-//   "\t\n  -"                     68     103     181      204
-//   "   *\t\n"                     2       2       2        2
-//   "*\t\n"                        2       2       2        3
-//   "-\t\n"                        2       2       2        2
-//   "+\t\n"                       18      29      61      118
-//   "1.\t\n"                      16      25      41       68
-//   "1)\t\n"                      16      22      39       62
-//   "a\n*\t\n"                    77     121     217      354
+//   "  -\t\n"                     0.8     0.1     0.1        0.3
+//   "\t\n  -"                    33      37      69       126
+//   "   *\t\n"                    0.6     0.1     0.2        1
+//   "*\t\n"                       0       0.1     0.1        2
+//   "-\t\n"                       0.3     0.2     0.3        0.7
+//   "+\t\n"                      16      18      24        52
+//   "1.\t\n"                      5      10      16        31
+//   "1)\t\n"                      4       8      17        35
+//   "a\n*\t\n"                    42      83      99       165
+//
+// …plus the run ends the walk used to miss: 64 KB of each bad unit as LINES
+// followed by an HTML line, a `|-|-|` row, a U+00A0 line, a U+000B line or a
+// line holding U+2028, then `a\n---`. Guarded, the worst of those 30 fixtures
+// measured 148 ms on the bot path and 217 ms for the 128 KB owner head; with the
+// run end missed (marked's own rules, which is what the guard answered with) the
+// same fixtures measured 100-280 ms at 16 KB and 5.2-15.6 s at the owner head —
+// quadratic (the review measured 7.1 s / 27 s), because every filler line is its
+// own block position and paid for the whole run scan.
 // ---------------------------------------------------------------------------
 
 /**
@@ -1291,20 +1312,80 @@ function paragraphWithoutTableScan(blockRules) {
 // --- the setext-heading precheck (see "A THIRD QUADRATIC BLOCK-LEXER SHAPE") --
 
 /**
- * The head of marked 17.0.6's `lheading` rule as installed: the paragraph-run
- * group opens with this stop lookahead (`\n(?!\s*?\n| {0,3}(?:[*+-]|\d{1,9}[.)])
- * | …`), and its alternatives ARE the lines that end the run `setextRunEnds`
- * reproduces. A future marked that reworks the rule fails this test and the
- * precheck installs NOTHING — marked's own rule then runs as before, which is a
- * slow parse of the shapes above, never a wrong one.
+ * The opening of marked 17.0.6's `lheading` paragraph run — the LAZY
+ * `(?:.|\n(?!STOP))+?` group — and the tail that follows it. `STOP` is what
+ * decides where a paragraph run ends, and the precheck below does NOT re-type
+ * it: a hand-written version recognized only PART of it (an HTML line, a GFM
+ * table delimiter row and a line of Unicode whitespace were read as run text),
+ * so the walk ran past a run marked had already abandoned and marked's
+ * quadratic lheading scan came straight back — measured 7.1 s on the bot path
+ * at 64 KB and 27 s on the owner's at 128 KB, for a fill of the bad units below
+ * (`  -\t`, `-\t`, `*\t`, `+\t`, `1.\t`, `a\n*\t` as lines), one such run end
+ * and a trailing `a\n---`. The installed rule's own alternation is EXTRACTED instead and
+ * the walk applies it, sticky, at every line start, so the two stop at exactly
+ * the same lines. A future marked whose rule no longer opens its run here, or
+ * whose tail changed, extracts nothing and the precheck installs NOTHING —
+ * marked's own rule then runs as before, which is a slow parse of the shapes
+ * above, never a wrong one.
  */
-const LHEADING_RUN_SOURCE = "\\n(?!\\s*?\\n| {0,3}(?:[*+-]|\\d{1,9}[.)]) ";
+const LHEADING_RUN_OPEN = "((?:.|\\n";
+const LHEADING_STOP_OPEN = "(?!";
+const LHEADING_RUN_TAIL = ")+?)\\n {0,3}(=+|-+) *(?:\\n+|$)";
 
-/** How many setext-scan answers one parse remembers: marked asks once per block
- *  position, and every ask inside a frame is on a suffix of the previous one,
- *  while nested frames interleave — a few slots keep the frame being walked and
- *  the frames it came from. */
-const SETEXT_MEMO_SLOTS = 4;
+/**
+ * The index of the `)` closing the group opened at `open`, in a regex SOURCE,
+ * or -1. Escapes are skipped and character classes tracked, so the `[^\n>]` and
+ * `[:\- ]` classes inside marked's alternatives cannot be mistaken for a group.
+ * @param {string} source
+ * @param {number} open index of the `(`
+ * @returns {number}
+ */
+function regexGroupEnd(source, open) {
+  let depth = 0;
+  let inClass = false;
+  for (let i = open; i < source.length; i++) {
+    const c = source.charCodeAt(i);
+    if (c === 92 /* backslash */) { i++; continue; }
+    if (inClass) { if (c === 93 /* ] */) inClass = false; continue; }
+    if (c === 91 /* [ */) { inClass = true; continue; }
+    if (c === 40 /* ( */) { depth++; continue; }
+    if (c === 41 /* ) */ && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** Extracted stop alternations, keyed by the installed rule source: there is one
+ *  per parse mode (gfm and non-gfm), so a couple for the process — the Lexer,
+ *  and with it the rule source, is rebuilt on every render. */
+const lheadingStops = new Map();
+
+/**
+ * marked's `lheading` run-stop alternation as a STICKY regex that answers, at a
+ * line start, "does the paragraph run end here?", or `null` when the installed
+ * rule no longer has the shape this extraction was verified against.
+ * @param {string} source the installed `block.lheading` rule source
+ * @returns {RegExp|null}
+ */
+function lheadingStopPattern(source) {
+  const cached = lheadingStops.get(source);
+  if (cached !== undefined) return cached;
+  let stop = null;
+  const open = source.indexOf(LHEADING_RUN_OPEN);
+  if (open >= 0) {
+    const groupOpen = open + LHEADING_RUN_OPEN.length;
+    const groupEnd = source.startsWith(LHEADING_STOP_OPEN, groupOpen)
+      ? regexGroupEnd(source, groupOpen)
+      : -1;
+    if (groupEnd > groupOpen && source.startsWith(LHEADING_RUN_TAIL, groupEnd + 1)) {
+      // Sticky, never global: every alternative is a prefix test on ONE line and
+      // must be tried at the line start the walk is at, not at a later one.
+      // The lookahead's own `(?!` is dropped with the group it belongs to.
+      stop = new RegExp(source.slice(groupOpen + LHEADING_STOP_OPEN.length, groupEnd), "y");
+    }
+  }
+  lheadingStops.set(source, stop);
+  return stop;
+}
 
 /**
  * Is the line `src[from, to)` — the line break is NOT in that range — a setext
@@ -1329,60 +1410,50 @@ function isSetextUnderline(src, from, to) {
 
 /**
  * Does the line `src[from, to)` END the paragraph run marked's `lheading` rule
- * scans? The rule's run is `(?:.|\n(?!STOP))+?`, so it ends where `STOP`
- * matches: a blank line, indented code, a fence, a quote, an ATX heading, a
- * list item, an HTML line or a table delimiter row. This recognizes the cheap,
- * unambiguous half of that set (blank line, indented code, fence, quote, ATX
- * heading, list item, and nothing else), which is the safe direction: a line
- * this does not recognize is treated as paragraph text, so the walk only ever
- * runs FURTHER than marked's own — it can cost a call, never reject a heading
- * marked would make.
+ * scans? The rule's run is `(?:.|\n(?!STOP))+?`, so it ends exactly where
+ * `STOP` matches at the line start. `stop` is marked's OWN alternation
+ * (lheadingStopPattern), so this answer is exactly the rule's: an alternative
+ * this missed let the walk re-scan runs marked had already abandoned (the
+ * 4-27 s bypasses above), and an alternative it added would reject a heading
+ * marked makes.
  * @param {string} src
  * @param {number} from line start
  * @param {number} to line end (exclusive)
+ * @param {RegExp} stop marked's run-stop alternation, sticky
  * @returns {boolean}
  */
-function setextRunEnds(src, from, to) {
-  let at = from;
-  let spaces = 0;
-  while (spaces < 4 && at < to && src.charCodeAt(at) === 32) { at++; spaces++; }
-  if (spaces === 4) return true; // four spaces: indented code
-  // A blank line — spaces and tabs only — ends the run too (marked's `\s*?\n`).
-  let blank = from;
-  while (blank < to) {
-    const c = src.charCodeAt(blank);
-    if (c !== 32 && c !== 9) break;
-    blank++;
+function lineEndsSetextRun(src, from, to, stop) {
+  // `.` matches neither U+2028 nor U+2029, so a line HOLDING one ends the run
+  // where no stop alternative can see it: the rule cannot reach anything past
+  // that character, so no underline after it is reachable either. (Line endings
+  // are normalised to `\n` before block lexing on every path through here, so a
+  // bare `\r`, the third character `.` refuses, cannot occur.)
+  for (let at = from; at < to; at++) {
+    const c = src.charCodeAt(at);
+    if (c === 0x2028 || c === 0x2029) return true;
   }
-  if (blank >= to) return true;
-  const mark = src.charCodeAt(at);
-  if (mark === 9 /* tab */) return true; // 0-3 spaces then a tab: indented code
-  if (mark === 62 /* > */) return true; // blockquote
-  if (mark === 35 /* # */) return true; // ATX heading
-  if (mark === 96 /* ` */ || mark === 126 /* ~ */) { // fence
-    let run = 0;
-    for (let i = at; i < to && src.charCodeAt(i) === mark; i++) run++;
-    if (run >= 3) return true;
-  }
-  if (mark === 42 /* * */ || mark === 43 /* + */ || mark === 45 /* - */) {
-    return at + 1 < to && src.charCodeAt(at + 1) === 32; // list item
-  }
-  if (mark >= 48 && mark <= 57) { // 1-9 digits, `.` or `)`, then a space
-    let i = at;
-    while (i < to && i - at < 9 && src.charCodeAt(i) >= 48 && src.charCodeAt(i) <= 57) i++;
-    const dot = src.charCodeAt(i);
-    return i + 1 < to && (dot === 46 || dot === 41) && src.charCodeAt(i + 1) === 32;
-  }
-  return false;
+  stop.lastIndex = from;
+  return stop.test(src);
 }
 
 /**
- * One setext-scan answer: `hit` is the distance from the END of `src` to the
- * first line after the first that ends the paragraph run (`-1`: none — the run
- * goes to the end of the source) and `underline` whether that line is a setext
+ * One setext-scan answer, owned by ONE block-lexing frame (see the memo frames
+ * in boundedLexer). `hit` is the distance from the END of `src` to the first
+ * line after the first that ends the paragraph run (`-1`: none — the run goes to
+ * the end of the source) and `underline` whether that line is a setext
  * underline. Distances are from the END because every later call in a frame is
  * on a shorter SUFFIX of the same source, where a line at distance d is still
  * at distance d (the trick sameDoc and the start memos use).
+ *
+ * One memo per FRAME, not one per parse: `sameDoc` compares a 32-character
+ * window, which a nested block's source can share with a suffix of an outer
+ * one, so a memo inherited across frames answered for blocks it had never seen
+ * — `- start\n  Q…\n  zzz\n\n> Q…\n> ---\n` rendered the quote's setext
+ * heading as a paragraph and an `<hr>` (a wrong render, and a bypass: the stale
+ * answer is TRUE, so marked's scan runs anyway). Frames nest strictly, they are
+ * pushed/popped around blockTokens, and inside one frame the sources asked about
+ * are strictly shorter suffixes of that frame's input, so ONE memo per frame is
+ * both safe and enough.
  * @returns {{src: string|null, len: number, hit: number, underline: boolean}}
  */
 function makeSetextMemo() {
@@ -1390,27 +1461,8 @@ function makeSetextMemo() {
 }
 
 /**
- * Can a setext underline end the paragraph run that starts at the head of
- * `src`? FALSE means "marked cannot match here" and is only ever returned by
- * the walk in setextRunAnswer: it visits lines in the order the rule does and
- * returns FALSE at the first line that ends the run (no earlier line was an
- * underline — the walk checked each one) and TRUE at the first underline (which
- * the rule itself still has to accept, so a TRUE can only cost a call).
- * @param {string} src
- * @param {{slots: object[], next: number}} memos
- * @returns {boolean}
- */
-function setextPossible(src, memos) {
-  for (const memo of memos.slots) {
-    if (sameDoc(memo, src)) return setextRunAnswer(src, memo);
-  }
-  const memo = memos.slots[memos.next];
-  memos.next = (memos.next + 1) % memos.slots.length;
-  return setextRunAnswer(src, memo);
-}
-
-/**
- * The walk behind setextPossible, memoized in `memo` (see makeSetextMemo):
+ * The walk behind the lheading precheck, memoized in `memo` (see
+ * makeSetextMemo):
  * lines are visited from the second of `src` (a run needs a line of text before
  * its underline), each is asked "underline?" and then "does the run end
  * here?", and the first line that answers either gives the answer for this
@@ -1420,10 +1472,11 @@ function setextPossible(src, memos) {
  * never earlier than line 1 of the source) — so a document of nothing but
  * paragraph text is scanned once, not once per line.
  * @param {string} src
- * @param {object} memo
+ * @param {object} memo the current frame's memo
+ * @param {RegExp} stop marked's run-stop alternation, sticky
  * @returns {boolean}
  */
-function setextRunAnswer(src, memo) {
+function setextRunAnswer(src, memo, stop) {
   if (sameDoc(memo, src)) {
     if (memo.hit < 0) return false;
     if (src.length > memo.hit) return memo.underline;
@@ -1443,7 +1496,7 @@ function setextRunAnswer(src, memo) {
       memo.underline = true;
       return true;
     }
-    if (setextRunEnds(src, at, lineEnd)) {
+    if (lineEndsSetextRun(src, at, lineEnd, stop)) {
       memo.hit = end - at;
       return false;
     }
@@ -1704,21 +1757,28 @@ function boundedLexer(options, inputLength = 0) {
 
   // The lheading (setext heading) tokenizer: asked at every block position,
   // where a FAILED attempt has already scanned the whole remaining paragraph
-  // run. `setextPossible` answers "can a setext underline end the run that
-  // starts here?" by walking only as far as the run itself, and its memo makes
-  // that walk amortized linear over the frame's successive suffixes (see "A
-  // THIRD QUADRATIC BLOCK-LEXER SHAPE" above). Installed only when the
-  // installed rule still opens its run with the stop lookahead the walk
-  // reproduces: a future marked that changes it keeps its own rule instead.
-  if (mdLheadingGuard && rules && rules.block && rules.block.lheading
-    && rules.block.lheading.source.includes(LHEADING_RUN_SOURCE)) {
+  // run. `setextRunAnswer` answers "can a setext underline end the run that
+  // starts here?" by walking only as far as the run itself, over marked's own
+  // stop alternation, and each block-lexing frame's memo makes that walk
+  // amortized linear over the frame's successive suffixes (see "A THIRD
+  // QUADRATIC BLOCK-LEXER SHAPE" above). Installed only when the installed rule
+  // still has the run shape this was verified against: a future marked that
+  // changes it keeps its own rule instead.
+  const lheadingRule = mdLheadingGuard && rules && rules.block ? rules.block.lheading : null;
+  const setextStop = lheadingRule ? lheadingStopPattern(lheadingRule.source) : null;
+  /** The memo of every block-lexing frame currently open, innermost last
+   *  (empty — or null — when the precheck is not installed). Pushed and popped
+   *  by the `blockTokens` wrapper below: a nested block's sources are NOT
+   *  suffixes of the block that contains it, so it must never inherit that
+   *  block's answer (see makeSetextMemo). */
+  const setextMemos = setextStop ? [] : null;
+  if (setextStop) {
     const lheading = tokenizer.lheading;
-    const memos = {
-      slots: Array.from({ length: SETEXT_MEMO_SLOTS }, makeSetextMemo),
-      next: 0,
-    };
     tokenizer.lheading = function (src) {
-      if (!setextPossible(src, memos)) return undefined;
+      // Outside any block-lexing frame there is nothing to memoize safely: a
+      // fresh memo, i.e. one plain walk.
+      const memo = setextMemos.length ? setextMemos[setextMemos.length - 1] : makeSetextMemo();
+      if (!setextRunAnswer(src, memo, setextStop)) return undefined;
       return lheading.call(this, src);
     };
   }
@@ -1768,9 +1828,11 @@ function boundedLexer(options, inputLength = 0) {
     // (`false`) applies when it is undefined, and its blockquote tokenizer
     // passes `true`.
     lexFrames++;
+    if (setextMemos) setextMemos.push(makeSetextMemo());
     try {
       return blockTokens.call(this, src, tokens || [], lastParagraphClipped);
     } finally {
+      if (setextMemos) setextMemos.pop();
       lexFrames--;
     }
   };

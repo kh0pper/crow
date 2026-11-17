@@ -22,10 +22,27 @@
 // SHAPE" in servers/blog/renderer.js).
 //
 // What must stay true:
-//   - every shape above renders 64 KB in < 300 ms of CPU on the bot path and the
-//     128 KB owner head in < 600 ms. Each render runs in a WORKER with a 5 s
-//     kill, so the pre-guard cost (1 s to 17 s per render, minutes at the owner
-//     cap for the table shapes) fails the test instead of hanging the suite;
+//   - every shape above renders 64 KB in < 1,000 ms of CPU on the bot path and
+//     the 128 KB owner head in < 2,000 ms. The bounds were 300/600 ms; the box
+//     and the CI runners are slower than the measurements below (CI ran ~3.5x
+//     slower than the dev box on the same work), so they are set to leave that
+//     room while staying far below the cliffs they guard (4 s to 27 s). Each
+//     render runs in a WORKER with a 5 s kill, so the pre-guard cost (1 s to
+//     17 s per render, minutes at the owner cap for the table shapes) fails the
+//     test instead of hanging the suite;
+//   - the setext precheck stops the walk at EXACTLY the lines marked's own run
+//     stops at. It used to re-type only part of that set (an HTML line, a table
+//     delimiter row, a line of Unicode whitespace and a line holding U+2028 were
+//     read as run text), so a run that ended at one of them kept the walk
+//     answering TRUE and marked's lheading scan came back: measured bypasses of
+//     7.1 s on the bot path and 27 s on the owner's. Every missed run end, over
+//     every bad unit, is timed at both caps below;
+//   - the setext memo belongs to ONE block-lexing frame: shared slots compared a
+//     32-character window, so a list item's answer was reused for a quote whose
+//     source shared that window (`- start / Q… / zzz` then `> Q… / > ---`
+//     rendered the quote's `<h2>` as a paragraph plus an `<hr>`, 128 of 16,000
+//     fuzzed renders differed). The collision repro and the fuzz differential
+//     below pin it;
 //   - the table precheck can NEVER reject a table marked accepts: 2,000 seeded
 //     random table-shaped documents — 2-6 lines of pipes, dashes, colons, spaces
 //     and letters, plus real tables of 1-6 columns with alignment — render
@@ -43,9 +60,10 @@
 //     2,000 seeded documents of short lines — `-`/`*`/`+`/`=`, digits with `.`
 //     or `)`, tabs, 0-4 spaces, text, blank lines, list items, quotes, code —
 //     render BYTE-IDENTICALLY with it on and off (setMdLheadingGuardEnabled) on
-//     both paths, and every listed unit stays under the 300/600 ms bounds at 16,
-//     32 and 64 KB on the bot path (the cost is not monotone in size) plus the
-//     128 KB owner head;
+//     both paths, a 5,000-document fuzz repeats long lines across nested quotes
+//     and lists while mixing in every missed run end above, and every listed
+//     unit stays under the 1,000/2,000 ms bounds at 16, 32 and 64 KB on the bot
+//     path (the cost is not monotone in size) plus the 128 KB owner head;
 //   - a FLATTENED block keeps its line breaks as `<br>` instead of running its
 //     lines together (see plainTextTokens in the renderer);
 //   - ordinary content is untouched: the pinned document below (several real
@@ -117,7 +135,7 @@ function renderInWorker(kind, src) {
   });
 }
 
-test("each pathological shape renders in < 300 ms at 64 KB and < 600 ms at the 128 KB owner head", async (t) => {
+test("each pathological shape renders in < 1000 ms at 64 KB and < 2000 ms at the 128 KB owner head", async (t) => {
   let worstBot = { ms: 0, what: "" };
   let worstOwner = { ms: 0, what: "" };
   for (const [name, make] of Object.entries(SHAPES)) {
@@ -127,14 +145,14 @@ test("each pathological shape renders in < 300 ms at 64 KB and < 600 ms at the 1
     const bot = await renderInWorker("bot", src);
     if (bot.ms > worstBot.ms) worstBot = { ms: bot.ms, what: name };
     assert.ok(bot.length > 0, `${name}: the bot path still renders (an over-cap answer would be "")`);
-    assert.ok(bot.ms < 300, `${name}: 64 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 300 ms)`);
+    assert.ok(bot.ms < 1000, `${name}: 64 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 1000 ms)`);
 
     const ownerSrc = rep(make(), OWNER_HEAD);
     assert.equal(ownerSrc.length, OWNER_HEAD, `${name}: the fixture fills the owner head`);
     const owner = await renderInWorker("owner", ownerSrc);
     if (owner.ms > worstOwner.ms) worstOwner = { ms: owner.ms, what: name };
     assert.ok(owner.length > 0, `${name}: the owner path still renders`);
-    assert.ok(owner.ms < 600, `${name}: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 600 ms)`);
+    assert.ok(owner.ms < 2000, `${name}: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 2000 ms)`);
   }
   t.diagnostic(`worst 64 KB bot render: ${worstBot.ms.toFixed(0)} ms — ${worstBot.what}`);
   t.diagnostic(`worst 128 KB owner render: ${worstOwner.ms.toFixed(0)} ms — ${worstOwner.what}`);
@@ -244,7 +262,7 @@ const SETEXT_UNITS = {
 };
 const SETEXT_SIZES = [16, 32, 64];
 
-test("every empty-marker+TAB unit renders in < 300 ms at 16/32/64 KB and < 600 ms at the 128 KB owner head", async (t) => {
+test("every empty-marker+TAB unit renders in < 1000 ms at 16/32/64 KB and < 2000 ms at the 128 KB owner head", async (t) => {
   let worstBot = { ms: 0, what: "" };
   let worstOwner = { ms: 0, what: "" };
   for (const [name, unit] of Object.entries(SETEXT_UNITS)) {
@@ -253,16 +271,120 @@ test("every empty-marker+TAB unit renders in < 300 ms at 16/32/64 KB and < 600 m
       const bot = await renderInWorker("bot", src);
       if (bot.ms > worstBot.ms) worstBot = { ms: bot.ms, what: `${name} @${kb} KB` };
       assert.ok(bot.length > 0, `${name} @${kb} KB: the bot path still renders`);
-      assert.ok(bot.ms < 300, `${name} @${kb} KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 300 ms)`);
+      assert.ok(bot.ms < 1000, `${name} @${kb} KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 1000 ms)`);
     }
     const ownerSrc = rep(unit, OWNER_HEAD);
     const owner = await renderInWorker("owner", ownerSrc);
     if (owner.ms > worstOwner.ms) worstOwner = { ms: owner.ms, what: `${name} @128 KB owner` };
     assert.ok(owner.length > 0, `${name} @128 KB: the owner path still renders`);
-    assert.ok(owner.ms < 600, `${name} @the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 600 ms)`);
+    assert.ok(owner.ms < 2000, `${name} @the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 2000 ms)`);
   }
   t.diagnostic(`worst bot render of a setext unit: ${worstBot.ms.toFixed(1)} ms — ${worstBot.what}`);
   t.diagnostic(`worst owner render of a setext unit: ${worstOwner.ms.toFixed(1)} ms — ${worstOwner.what}`);
+});
+
+// --- shape 3, second finding: the run ends the walk used to miss ----------
+// The precheck's stop set was re-typed by hand and recognized only PART of the
+// lines where marked's paragraph run actually stops. A line it read as text let
+// the walk continue past the run marked had abandoned, find an underline further
+// down, and keep answering TRUE — so marked's lheading scanned the whole run at
+// every filler line again. These are the kinds of line it missed (the
+// Unicode-whitespace one covers U+00A0 and U+000B, both of which marked's
+// `\s*?\n` and the hand-written `' '`/`'\t'` test disagree about), each behind
+// every bad unit from the report. Measured bypasses before the fix: 7.1 s on the
+// bot path (64 KB) and 27 s on the owner's (128 KB).
+const MISSED_RUN_ENDS = {
+  "an HTML line": "<x>",
+  "a table delimiter row": "|-|-|",
+  "a U+00A0 line": "\u00a0",
+  "a U+000B line": "\u000b",
+  "a line holding U+2028": "x\u2028x",
+};
+const RUN_END_UNITS = {
+  "  -\\t": "  -\t",
+  "-\\t": "-\t",
+  "*\\t": "*\t",
+  "+\\t": "+\t",
+  "1.\\t": "1.\t",
+  "a\\n*\\t": "a\n*\t",
+};
+
+/** `size` characters of the bad unit as LINES (`unit` + `\n`, so every filler
+ *  line is its own one-line paragraph and therefore its own block position —
+ *  which is what makes marked pay the run scan once per line), then the run end,
+ *  a blank line and `a` over a `---` underline. With the run end unrecognized
+ *  the walk read it as paragraph text, reached that trailing underline and
+ *  answered TRUE at every filler line; marked's lheading was then asked per line
+ *  and scanned the whole remaining run — measured with the run end missed (i.e.
+ *  marked's own rules, the precheck letting everything through): 100-280 ms at
+ *  16 KB and 5.2-15.6 s for the 128 KB owner head, quadratic. */
+function runEndFixture(unit, end, size) {
+  const tail = `${end}\n\na\n---\n`;
+  return rep(`${unit}\n`, size - tail.length) + tail;
+}
+
+test("a run ended by an HTML line, a table delimiter row, a Unicode-whitespace line or U+2028 renders in < 1000 ms at 64 KB and < 2000 ms at the 128 KB owner head", async (t) => {
+  let worstBot = { ms: 0, what: "" };
+  let worstOwner = { ms: 0, what: "" };
+  for (const [endName, end] of Object.entries(MISSED_RUN_ENDS)) {
+    for (const [unitName, unit] of Object.entries(RUN_END_UNITS)) {
+      const what = `${unitName} then ${endName}`;
+      const src = runEndFixture(unit, end, CAP);
+      assert.equal(src.length, CAP, `${what}: the fixture fills the bot cap (${src.length})`);
+
+      const bot = await renderInWorker("bot", src);
+      if (bot.ms > worstBot.ms) worstBot = { ms: bot.ms, what };
+      assert.ok(bot.html.includes("<h2>a</h2>"),
+        `${what}: the trailing setext heading is still rendered, got ${JSON.stringify(bot.html.slice(-160))}`);
+      assert.ok(bot.ms < 1000, `${what}: 64 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 1000 ms)`);
+
+      const ownerSrc = runEndFixture(unit, end, OWNER_HEAD);
+      assert.equal(ownerSrc.length, OWNER_HEAD, `${what}: the fixture fills the owner head`);
+      const owner = await renderInWorker("owner", ownerSrc);
+      if (owner.ms > worstOwner.ms) worstOwner = { ms: owner.ms, what };
+      assert.ok(owner.html.includes("<h2>a</h2>"),
+        `${what}: the trailing setext heading is still rendered on the owner path`);
+      assert.ok(owner.ms < 2000, `${what}: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 2000 ms)`);
+    }
+  }
+  t.diagnostic(`worst 64 KB bot render of a missed run end: ${worstBot.ms.toFixed(0)} ms — ${worstBot.what}`);
+  t.diagnostic(`worst 128 KB owner render of a missed run end: ${worstOwner.ms.toFixed(0)} ms — ${worstOwner.what}`);
+});
+
+// --- shape 3, first finding: the memo belongs to ONE block-lexing frame -----
+// The four memo slots were shared by every nested quote/list in a parse, and
+// sameDoc compares only a 32-character window, so a memo from one block could
+// answer for another block: this document (Q any 32-character line) rendered the
+// quote's `<h2>` as a paragraph plus an `<hr>` with the guard on. It is also a
+// bypass — the stale answer was TRUE, so marked's scan still ran.
+function collisionDoc(Q) {
+  return `- start\n  ${Q}\n  zzz\n\n> ${Q}\n> ---\n`;
+}
+
+test("a setext memo from one block never answers for another (list item vs nested quote)", () => {
+  for (const Q of ["Q".repeat(32), "Q".repeat(40)]) {
+    const doc = collisionDoc(Q);
+    const guardedBot = renderBotMarkdown(doc);
+    const guardedOwner = renderMarkdown(doc);
+    setMdLheadingGuardEnabled(false);
+    let plainBot;
+    let plainOwner;
+    try {
+      plainBot = renderBotMarkdown(doc);
+      plainOwner = renderMarkdown(doc);
+    } finally {
+      setMdLheadingGuardEnabled(true);
+    }
+    // The unguarded render really is what the guard must reproduce: the quote's
+    // line of text sits over a `---`, so it is a setext heading.
+    assert.match(plainBot, /<blockquote>\s*<h2>Q+<\/h2>/, `the collision document is the reported shape: ${JSON.stringify(plainBot)}`);
+    assert.equal(guardedBot, plainBot,
+      `the setext memo answered across blocks (bot path): ${JSON.stringify(doc)}\n`
+      + `  guarded: ${JSON.stringify(guardedBot)}\n  plain:   ${JSON.stringify(plainBot)}`);
+    assert.equal(guardedOwner, plainOwner,
+      `the setext memo answered across blocks (owner path): ${JSON.stringify(doc)}\n`
+      + `  guarded: ${JSON.stringify(guardedOwner)}\n  plain:   ${JSON.stringify(plainOwner)}`);
+  }
 });
 
 // --- the flat token meets marked's paragraph-CLIPPING branch -----------------
@@ -461,6 +583,99 @@ test("differential: 2,000 seeded setext-shaped documents render the same with th
   // did render a heading.
   assert.ok(candidates > 200, `the corpus contains setext-underline shapes (${candidates} documents)`);
   assert.ok(headings > 50, `the corpus rendered real setext headings (${headings} documents)`);
+});
+
+// --- the fuzz differential: long lines across containers, missed run ends ---
+// The two findings behind this file's newest fix are the same bug from two
+// sides — WHICH lines end a paragraph run, and WHOSE answer a memo is — so this
+// corpus mixes them: long lines that share the 32-character window sameDoc
+// compares, repeated in a list item and then inside a quote or a nested quote
+// (the cross-block collision), and every missed run end in every position a run
+// can end in, with and without an underline behind it. Deterministic
+// (mulberry32), so a failure is reproducible.
+const FUZZ_LONG_LINES = [
+  "Q".repeat(32), "Q".repeat(33), "Q".repeat(40), "R".repeat(32) + "tail", "long-line-".repeat(8),
+];
+const FUZZ_RUN_ENDS = ["<x>", "<div>", "|-|-|", "| - | - |", "\u00a0", "\u000b", "x\u2028x", "y\u2029y"];
+const FUZZ_LINES = [
+  "---", "===", " ---- ", "-", "=", "--", "*\t", "-\t", "  -\t", "+\t", "1.\t", "1)\t",
+  "text", "a", "", "  ", "\t", "# heading", "> quote", "- item", "1. item", "   * item",
+  "```", "    code", "Q".repeat(32),
+];
+const FUZZ_PREFIXES = ["", "", "", "> ", "> > ", "> > > ", "- ", "  - ", "  1) ", "    "];
+const FUZZ_UNDERLINES = ["---", "===", " -", "  =="];
+
+/** One document plus its kind, so the test can report whether the corpus is
+ *  vacuous in either direction: "collision" documents repeat one long line in a
+ *  list item and in a quote (the stale-memo shape), "run-end" documents put a
+ *  missed run end over a `---`/`===` that a walk without it would keep scanning
+ *  past, "mixed" ones interleave both with ordinary container lines. */
+function randomFuzzDoc(rnd) {
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  const lines = [];
+  const blocks = 1 + Math.floor(rnd() * 6);
+  let kind = "mixed";
+  for (let i = 0; i < blocks; i++) {
+    const roll = rnd();
+    if (roll < 0.35) {
+      kind = "collision";
+      const Q = pick(FUZZ_LONG_LINES);
+      lines.push(rnd() < 0.5 ? "- start" : "* start");
+      lines.push(`  ${Q}`);
+      if (rnd() < 0.5) lines.push("  zzz");
+      if (rnd() < 0.5) lines.push("");
+      const quote = rnd() < 0.3 ? "> > " : "> ";
+      lines.push(`${quote}${Q}`);
+      lines.push(`${quote}${rnd() < 0.6 ? pick(["---", "==="]) : pick(FUZZ_LINES)}`);
+    } else if (roll < 0.6) {
+      if (kind !== "collision") kind = "run-end";
+      lines.push(pick(FUZZ_LONG_LINES));
+      lines.push(pick(FUZZ_RUN_ENDS));
+      if (rnd() < 0.5) lines.push("");
+      lines.push(pick(["a", "text", pick(FUZZ_LONG_LINES)]));
+      lines.push(pick(FUZZ_UNDERLINES));
+    } else {
+      const prefix = pick(FUZZ_PREFIXES);
+      const pool = rnd() < 0.35 ? FUZZ_LONG_LINES : rnd() < 0.5 ? FUZZ_RUN_ENDS : FUZZ_LINES;
+      lines.push(prefix + pick(pool));
+    }
+    if (rnd() < 0.2) lines.push(pick(["", "  "]));
+  }
+  return { doc: lines.join("\n"), kind };
+}
+
+test("fuzz differential: 5,000 seeded documents mixing long lines across nested quotes and lists with every missed run end render the same with the setext precheck on and off", () => {
+  const rnd = mulberry32(0x5e7e28);
+  const kinds = { collision: 0, "run-end": 0, mixed: 0 };
+  let headings = 0;
+  for (let n = 0; n < 5000; n++) {
+    const { doc, kind } = randomFuzzDoc(rnd);
+    kinds[kind]++;
+    const guardedBot = renderBotMarkdown(doc);
+    const guardedOwner = renderMarkdown(doc);
+    setMdLheadingGuardEnabled(false);
+    let plainBot;
+    let plainOwner;
+    try {
+      plainBot = renderBotMarkdown(doc);
+      plainOwner = renderMarkdown(doc);
+    } finally {
+      // Always back on: every later render in this file must be guarded.
+      setMdLheadingGuardEnabled(true);
+    }
+    assert.equal(guardedBot, plainBot,
+      `fuzz doc #${n} (${kind}, bot path) changed with the setext precheck: ${JSON.stringify(doc)}\n`
+      + `  guarded: ${JSON.stringify(guardedBot)}\n  plain:   ${JSON.stringify(plainBot)}`);
+    assert.equal(guardedOwner, plainOwner,
+      `fuzz doc #${n} (${kind}, owner path) changed with the setext precheck: ${JSON.stringify(doc)}\n`
+      + `  guarded: ${JSON.stringify(guardedOwner)}\n  plain:   ${JSON.stringify(plainOwner)}`);
+    if (/<h[12]>/.test(guardedBot)) headings++;
+  }
+  // Not vacuous: the corpus really builds the collision shape and really ends
+  // runs at the missed lines, and real setext headings came out of it.
+  assert.ok(kinds.collision > 500, `the corpus contains the collision shape (${kinds.collision} documents)`);
+  assert.ok(kinds["run-end"] > 500, `the corpus contains missed run ends (${kinds["run-end"]} documents)`);
+  assert.ok(headings > 100, `the corpus rendered real setext headings (${headings} documents)`);
 });
 
 // --- ordinary content: a pinned document full of real tables --------------
