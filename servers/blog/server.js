@@ -9,14 +9,24 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { createHash, randomBytes } from "node:crypto";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateSlug, generateExcerpt } from "./renderer.js";
-import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
+import { generateToken, peekToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import { createNotification } from "../shared/notifications.js";
 import { parseChordPro, transposeAst, renderChordProHtml, extractChords, isChordPro, parseSongMeta } from "./chordpro.js";
 import { getChordDiagram } from "./chord-diagrams.js";
 import { actorFromEnv } from "../research/actor.js";
-import { guardBlogServer, draftOnlyEditRefusal } from "./bot-owner-only.js";
+import { guardBlogServer, draftOnlyEditRefusal, draftOnlyCoverRefusal } from "./bot-owner-only.js";
+
+/**
+ * The fixed refusal a confirmation gets when the row is not in the state the preview showed — the
+ * post was edited (by a bot, or anyone) between the preview and the confirm. Nothing is published or
+ * deleted: the operator's confirmation is for what they were shown, not for whatever is there now.
+ * One text for both confirms, asking for a fresh preview rather than saying what changed.
+ */
+export const STALE_PREVIEW_REFUSAL =
+  "The post changed since that preview, so nothing was done. Pass confirm_token: \"\" to get a fresh preview.";
 
 export function createBlogServer(dbPath, options = {}) {
   const server = new McpServer(
@@ -48,21 +58,71 @@ export function createBlogServer(dbPath, options = {}) {
   const draftOnly = (call) => !!(call && call.draftOnly);
 
   /**
-   * Ensure slug is unique, appending -2, -3, etc. if needed.
+   * Ensure slug is unique.
+   *
+   * The owner's form appends -2, -3, etc. A draft-only bot gets a random 6-hex-character suffix once
+   * the base slug is taken instead: `-2` answers "is this slug already in use?" for the whole
+   * shared slug space (drafts, published, archived — `blog_posts.slug` is UNIQUE across all of
+   * them), so it would hand a bot a lookup oracle on slugs it may not read. A random suffix keeps
+   * the slug unique and says nothing. A free slug is used as-is, exactly as before.
    */
-  async function uniqueSlug(slug, excludeId) {
+  async function uniqueSlug(slug, excludeId, { randomSuffix = false } = {}) {
+    const taken = async (candidate) => (await db.execute({
+      sql: excludeId
+        ? "SELECT id FROM blog_posts WHERE slug = ? AND id != ?"
+        : "SELECT id FROM blog_posts WHERE slug = ?",
+      args: excludeId ? [candidate, excludeId] : [candidate],
+    })).rows.length > 0;
+
+    if (!(await taken(slug))) return slug;
+
+    if (randomSuffix) {
+      // Retried on a collision so the answer is always a free slug, never a guessable walk.
+      for (;;) {
+        const candidate = `${slug}-${randomBytes(3).toString("hex")}`;
+        if (!(await taken(candidate))) return candidate;
+      }
+    }
+
     let candidate = slug;
     let suffix = 2;
     while (true) {
-      const existing = await db.execute({
-        sql: excludeId
-          ? "SELECT id FROM blog_posts WHERE slug = ? AND id != ?"
-          : "SELECT id FROM blog_posts WHERE slug = ?",
-        args: excludeId ? [candidate, excludeId] : [candidate],
-      });
-      if (existing.rows.length === 0) return candidate;
       candidate = `${slug}-${suffix++}`;
+      if (!(await taken(candidate))) return candidate;
     }
+  }
+
+  /**
+   * The row state a confirmation token commits to (never shown to anyone, never stored anywhere but
+   * in the token itself): a sha256 over the fields the preview shows or that decide where the post
+   * goes — title, content, slug, visibility, cover_image_key — plus `updated_at`.
+   *
+   * A token bound to the post id alone is answerable: a bot may rewrite a draft between the
+   * operator's preview and their confirm, and the operator would then publish (or delete) something
+   * they never saw. With this in the token, that edit changes the hash, the confirm does not match,
+   * and the confirm is refused rather than acted on.
+   */
+  function postState(post) {
+    const sha = createHash("sha256");
+    for (const field of [post.title, post.content, post.slug, post.visibility, post.cover_image_key, post.updated_at]) {
+      sha.update(`${field ?? ""}\u0000`);
+    }
+    return sha.digest("hex");
+  }
+
+  /**
+   * Was this token minted against a DIFFERENT state of this row than the one now on disk?
+   *
+   * `validateToken` answers only "no", and "the row changed" deserves its own fixed answer. The
+   * token is peeked here (read, not consumed) and the `validateToken` call that follows still
+   * consumes it, so a token stays single-use whichever way the confirm goes.
+   */
+  function confirmIsStale(confirm_token, action, id, state) {
+    const pinned = peekToken(confirm_token);
+    return !!pinned
+      && pinned.action === action
+      && pinned.itemId === String(id)
+      && pinned.fingerprint !== state;
   }
 
   // --- crow_create_post ---
@@ -80,8 +140,17 @@ export function createBlogServer(dbPath, options = {}) {
       visibility: z.enum(["private", "public", "peers"]).optional().describe("Post visibility (default: private)"),
     },
     async ({ title, content, slug, excerpt, author, tags, cover_image_key, visibility }, _extra, call) => {
+      const botDraft = draftOnly(call);
+      // A draft-only bot may not set a cover image at all: the key names a private storage object,
+      // and publishing the post would serve it publicly at /blog/media/<key>. Decided from the
+      // call's own argument before anything is read or written, so nothing changes and the answer
+      // says nothing about any row.
+      if (botDraft && cover_image_key !== undefined) return draftOnlyCoverRefusal();
+
       const baseSlug = slug || generateSlug(title);
-      const finalSlug = await uniqueSlug(baseSlug);
+      // A bot's collision gets a random suffix (the readable `-2` would be a slug oracle); a slug no
+      // post holds is used exactly as asked, for a bot and the owner alike.
+      const finalSlug = await uniqueSlug(baseSlug, undefined, { randomSuffix: botDraft });
       const finalExcerpt = excerpt || generateExcerpt(content);
 
       // Author fallback: explicit param > blog_author setting > null
@@ -100,7 +169,6 @@ export function createBlogServer(dbPath, options = {}) {
       // left to the column default) and then read back, so a later default change, or a change
       // here, cannot put a bot's words on the public site. Visibility is still recorded — it only
       // means anything at publish time, and a bot cannot publish.
-      const botDraft = draftOnly(call);
       const insertSql = botDraft
         ? `INSERT INTO blog_posts (slug, title, content, excerpt, author, tags, cover_image_key, visibility, status)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')`
@@ -149,6 +217,11 @@ export function createBlogServer(dbPath, options = {}) {
     },
     async ({ id, title, content, slug, excerpt, author, tags, cover_image_key, visibility }, _extra, call) => {
       const botDraft = draftOnly(call);
+      // A draft-only bot cannot set a cover image on any post: the key is a private storage object
+      // that publishing would put on /blog/media/. Refused on the argument alone, before the row is
+      // read, so nothing changes and a live id answers exactly like a draft one.
+      if (botDraft && cover_image_key !== undefined) return draftOnlyCoverRefusal();
+
       const existing = await db.execute({ sql: "SELECT * FROM blog_posts WHERE id = ?", args: [id] });
       if (existing.rows.length === 0) {
         // A draft-only bot gets the one draft refusal here too: a missing id and a post it may not
@@ -170,7 +243,9 @@ export function createBlogServer(dbPath, options = {}) {
         }
       }
       if (slug !== undefined) {
-        const finalSlug = await uniqueSlug(slug, id);
+        // Same rule as crow_create_post: a bot's taken slug gets a random suffix, never `-2`, so the
+        // shared slug space cannot be probed through this tool either.
+        const finalSlug = await uniqueSlug(slug, id, { randomSuffix: botDraft });
         updates.push("slug = ?");
         args.push(finalSlug);
       }
@@ -231,18 +306,27 @@ export function createBlogServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
       const post = existing.rows[0];
+      // What this preview shows, and what the token commits to. A post edited between the preview
+      // and the confirm hashes differently, so the confirm is refused (STALE_PREVIEW_REFUSAL) rather
+      // than publishing text the operator never saw.
+      const state = postState(post);
 
       if (!shouldSkipGates()) {
         if (confirm_token) {
-          if (!validateToken(confirm_token, "publish_post", id)) {
+          const stale = confirmIsStale(confirm_token, "publish_post", id, state);
+          if (!validateToken(confirm_token, "publish_post", id, state)) {
+            if (stale) return { content: [{ type: "text", text: STALE_PREVIEW_REFUSAL }], isError: true };
             return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
           }
         } else {
-          const token = generateToken("publish_post", id);
+          const token = generateToken("publish_post", id, state);
+          // A cover image is part of what the operator is agreeing to: publishing makes
+          // /blog/media/<key> public, so the key is shown in the preview, not left to be discovered.
+          const coverLine = post.cover_image_key ? `\n  Cover image: ${post.cover_image_key}` : "";
           return {
             content: [{
               type: "text",
-              text: `⚠️ This will publish:\n  Post #${post.id}: "${post.title}" (${post.visibility})\n\nThis will make the post ${post.visibility === "public" ? `publicly accessible at /blog/${post.slug}` : `visible to ${post.visibility} audience`}.\nTo proceed, call again with confirm_token: "${token}"`,
+              text: `⚠️ This will publish:\n  Post #${post.id}: "${post.title}" (${post.visibility})${coverLine}\n\nThis will make the post ${post.visibility === "public" ? `publicly accessible at /blog/${post.slug}` : `visible to ${post.visibility} audience`}.\nTo proceed, call again with confirm_token: "${token}"`,
             }],
           };
         }
@@ -395,14 +479,19 @@ export function createBlogServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
       const post = existing.rows[0];
+      // Same state binding as crow_publish_post: deleting a post a bot rewrote between the preview
+      // and the confirm would be the operator confirming something they never saw.
+      const state = postState(post);
 
       if (!shouldSkipGates()) {
         if (confirm_token) {
-          if (!validateToken(confirm_token, "delete_post", id)) {
+          const stale = confirmIsStale(confirm_token, "delete_post", id, state);
+          if (!validateToken(confirm_token, "delete_post", id, state)) {
+            if (stale) return { content: [{ type: "text", text: STALE_PREVIEW_REFUSAL }], isError: true };
             return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
           }
         } else {
-          const token = generateToken("delete_post", id);
+          const token = generateToken("delete_post", id, state);
           return {
             content: [{
               type: "text",

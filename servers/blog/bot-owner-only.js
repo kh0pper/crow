@@ -32,6 +32,24 @@
  * predicate so a live post is exactly as invisible as a missing one. A bot can never change a
  * post's status through any of them: crow_edit_post has no status field at all.
  *
+ * Two more rules ride on the same draft-only context, both decided from the call's own arguments
+ * rather than from the row it names, so neither becomes an oracle:
+ *
+ *   - a bot can never set `cover_image_key` (DRAFT_IMAGE_REFUSAL), refused before any row is read.
+ *     The key names a private storage object, and once the operator publishes, /blog/media/<key>
+ *     serves it publicly — a bot that could point a cover anywhere would be publishing an
+ *     arbitrary private file under the operator's name. The owner sets the cover before publishing.
+ *   - slugs occupy ONE namespace (`blog_posts.slug` is UNIQUE across drafts, published and archived
+ *     posts alike), so the readable `-2`, `-3` collision suffix the owner gets is a lookup oracle
+ *     for a bot: ask for a slug and the answer says whether ANY post already holds it, published or
+ *     not. For a draft-only caller a taken base slug therefore gets a random 6-hex-character suffix
+ *     instead (servers/blog/server.js `uniqueSlug`), which is still a unique slug and tells the
+ *     caller nothing about the slug space. Owner behaviour — the readable `-2` walk — is unchanged.
+ *
+ * The confirmation token on crow_publish_post / crow_delete_post commits to the row's state at
+ * preview time, not just its id, so a bot editing a draft between the operator's preview and their
+ * confirm cannot get the operator's confirmation to publish text they never saw.
+ *
  * ONE exception, the operator's own spoken turn: the frozen operator-voice actor (isOperatorVoice —
  * the reserved crow.voice id with the frozen marker, never an id or a def field a caller can send)
  * keeps every tool. Every other bot is refused them, including the voice bot reached any other way
@@ -75,6 +93,20 @@ export const DRAFT_ONLY_EDIT_REFUSAL = "A bot can only edit draft posts.";
 /** The tool result for that refusal, in the shape every ACL refusal on these servers uses. */
 export function draftOnlyEditRefusal() {
   return refusalResult(DRAFT_ONLY_EDIT_REFUSAL);
+}
+
+/**
+ * The one refusal a draft-only bot gets for a cover image, on create and on edit alike. Fixed, and
+ * decided from the call's own argument before any row is read, so it says nothing about any post.
+ *
+ * The rule exists because a cover key is a private storage object: publishing the post makes
+ * /blog/media/<key> public, so a bot that could choose the key could expose any file it can name.
+ */
+export const DRAFT_IMAGE_REFUSAL = "A bot can't set a cover image; the owner sets it before publishing.";
+
+/** The tool result for that refusal. */
+export function draftOnlyCoverRefusal() {
+  return refusalResult(DRAFT_IMAGE_REFUSAL);
 }
 
 /**

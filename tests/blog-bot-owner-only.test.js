@@ -27,8 +27,19 @@
  *   (b2) on every one of those paths a bot reaches create/edit/list/get and is held to drafts: its
  *       new post is a draft whatever visibility it asked for, it can edit that draft, a published
  *       post (public or private) is refused with the one fixed draft text and left byte-identical,
- *       a missing id reads exactly the same, listings are drafts only on the plain, tag and FTS
- *       paths, and a live post reads exactly like a missing one;
+ *       an ARCHIVED post reads and edits exactly like a published one, a missing id reads exactly
+ *       the same (with fields and with none at all), listings are drafts only on the plain, tag and
+ *       FTS paths, and a live post reads exactly like a missing one;
+ *   (b3) the two rules that ride on the same draft-only context on every path: a bot cannot set a
+ *       `cover_image_key` on create or edit (fixed refusal, no row written or changed — the key is
+ *       a private storage object that publishing would serve at /blog/media/<key>), and the shared
+ *       slug space is not a lookup oracle — a slug held by ANY post, published-private included,
+ *       gets a random 6-hex suffix for a bot, never the readable "-2", while a free slug is used
+ *       exactly as asked (on create and on edit);
+ *   (b4) the publish/delete confirmation is bound to the row state the preview showed: an owner
+ *       previews a draft, a bot edits it, the owner confirms with the old token → the fixed
+ *       stale-preview refusal and the post is still a draft; a fresh preview → confirm publishes.
+ *       The publish preview shows the cover image key when there is one;
  *   (c) the one harmless tool still works for a bot;
  *   (d) the frozen operator-voice actor, the owner and an unidentified caller are unchanged: create
  *       → publish token round-trip, an edit of a PUBLISHED post, every post listed and read — and
@@ -75,10 +86,14 @@ const META_BOT = "blog-meta-bot";
 const CONTACT_CROW_ID = "crowblogcontact001";
 const OWNER_ONLY_TEXT = "Error: That tool is for the operator only.";
 const DRAFT_ONLY_EDIT_TEXT = "Error: A bot can only edit draft posts.";
+const DRAFT_IMAGE_TEXT = "Error: A bot can't set a cover image; the owner sets it before publishing.";
+const STALE_PREVIEW_TEXT = "The post changed since that preview, so nothing was done. Pass confirm_token: \"\" to get a fresh preview.";
 const NOT_FOUND_TEXT = "Post not found. Use crow_list_posts to see available posts.";
 const DRAFT_TITLE = "A heron draft the bot must not touch";
 const LIVE_TITLE = "A gull the bot must never see";
 const PRIVATE_LIVE_TITLE = "A tern posted to nobody in particular";
+const ARCHIVED_TITLE = "A petrel put away last winter";
+const ARCHIVED_SLUG = "petrel-archived";
 const TAGGED_DRAFT_TITLE = "A kestrel draft with a shared tag";
 const TAGGED_DRAFT_CONTENT = "The kestrel hovers over the sharedtag field.";
 const SHARED_TAG = "sharedtag";
@@ -94,6 +109,7 @@ let BLOG_TOOL_CLASS = null;
 let DRAFT_ID = null;
 let LIVE_ID = null;
 let PRIVATE_LIVE_ID = null;
+let ARCHIVED_ID = null;
 let TAGGED_DRAFT_ID = null;
 const openServers = []; // every { client, server } this file built, closed in after()
 
@@ -138,6 +154,15 @@ before(async () => {
     args: [PRIVATE_LIVE_TITLE, SHARED_TAG],
   });
   PRIVATE_LIVE_ID = Number(privateLive.lastInsertRowid);
+
+  // An ARCHIVED post, with the same tag and the same searchable word: archived is a live status, not
+  // a draft, so a bot must be blind to it in exactly the way it is blind to a published post.
+  const archived = await db.execute({
+    sql: `INSERT INTO blog_posts (slug, title, content, excerpt, status, visibility, tags, published_at)
+          VALUES (?, ?, 'The petrel is still on the kestrel line.', 'Archived.', 'archived', 'public', ?, datetime('now'))`,
+    args: [ARCHIVED_SLUG, ARCHIVED_TITLE, SHARED_TAG],
+  });
+  ARCHIVED_ID = Number(archived.lastInsertRowid);
 
   // A DRAFT with the same tag and the same searchable word, so the tag and FTS paths below prove the
   // status filter rather than an empty result.
@@ -210,6 +235,10 @@ async function openUnderEnv(env, options = {}) {
 
 const rows = async (sql, args = []) => (await db.execute({ sql, args })).rows;
 const count = async (sql, args = []) => Number((await rows(sql, args))[0].n);
+
+/** A name nothing else in this file (or this run) will collide with. */
+let uniqueSeq = 0;
+const uniqueName = (prefix) => `${prefix}-${(uniqueSeq++).toString(36)}-${Date.now().toString(36)}`;
 
 /** Every table a blog handler would leave a mark in. */
 async function snapshot() {
@@ -426,6 +455,85 @@ async function expectDraftTools(call, label) {
   assert.equal(refusedMissing.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit missing: the same refusal again`);
   assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts WHERE id = 999999"), 0,
     `${label} edit missing: and of course nothing was created`);
+
+  // edit a PUBLISHED post with NO fields at all → the same refusal as a missing id, not the "no
+  // changes provided" text: that answer would be an oracle saying a live post with this id exists.
+  const noFieldsLive = await call("crow_edit_post", { id: LIVE_ID });
+  const noFieldsMissing = await call("crow_edit_post", { id: 999999 });
+  assert.equal(noFieldsLive.isError, true, `${label} edit live, no fields: ${noFieldsLive.text}`);
+  assert.equal(noFieldsLive.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit live, no fields: the fixed draft refusal`);
+  assert.equal(noFieldsMissing.text, noFieldsLive.text,
+    `${label} edit missing, no fields: identical to a live post`);
+  assert.deepEqual(await rows("SELECT * FROM blog_posts WHERE id = ?", [LIVE_ID]), liveBefore,
+    `${label} edit live, no fields: nothing changed`);
+
+  // edit an ARCHIVED post → the very same refusal, and the row byte-identical: archived is live, not
+  // a draft, so it is as invisible and as untouchable to a bot as a published post.
+  const archivedBefore = await rows("SELECT * FROM blog_posts WHERE id = ?", [ARCHIVED_ID]);
+  const refusedArchived = await call("crow_edit_post", { id: ARCHIVED_ID, title: "A bot rewrote an archived post" });
+  assert.equal(refusedArchived.isError, true, `${label} edit archived: ${refusedArchived.text}`);
+  assert.equal(refusedArchived.text, DRAFT_ONLY_EDIT_TEXT, `${label} edit archived: the fixed draft refusal`);
+  assert.deepEqual(await rows("SELECT * FROM blog_posts WHERE id = ?", [ARCHIVED_ID]), archivedBefore,
+    `${label} edit archived: nothing changed`);
+
+  // --- a cover image is refused outright, on create and on edit ------------------------------
+  // The key would name a private storage object, and publishing the post would serve it at
+  // /blog/media/<key>. The refusal is decided from the argument, before any row is read, so it is
+  // the same fixed text for a draft id, a live id and a missing one — and nothing is written.
+  const postsBefore = await count("SELECT COUNT(*) AS n FROM blog_posts");
+  const createdWithCover = await call("crow_create_post", {
+    title: uniqueName("A bot post with a cover"),
+    content: "Words.",
+    cover_image_key: "private/operator-tax-return.pdf",
+  });
+  assert.equal(createdWithCover.isError, true, `${label} create cover: ${createdWithCover.text}`);
+  assert.equal(createdWithCover.text, DRAFT_IMAGE_TEXT, `${label} create cover: the fixed cover refusal`);
+  assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts"), postsBefore,
+    `${label} create cover: no post was written`);
+
+  for (const [what, postId] of [["draft", id], ["live", LIVE_ID], ["missing", 999999]]) {
+    const beforeEdit = await rows("SELECT * FROM blog_posts WHERE id = ?", [postId]);
+    const coverEdit = await call("crow_edit_post", { id: postId, cover_image_key: "private/operator-tax-return.pdf" });
+    assert.equal(coverEdit.isError, true, `${label} edit cover on ${what}: ${coverEdit.text}`);
+    assert.equal(coverEdit.text, DRAFT_IMAGE_TEXT, `${label} edit cover on ${what}: the fixed cover refusal`);
+    assert.deepEqual(await rows("SELECT * FROM blog_posts WHERE id = ?", [postId]), beforeEdit,
+      `${label} edit cover on ${what}: nothing changed`);
+  }
+  assert.equal((await rows("SELECT cover_image_key FROM blog_posts WHERE id = ?", [id]))[0].cover_image_key, null,
+    `${label}: the bot's own draft still has no cover`);
+
+  // --- the shared slug space is not a lookup oracle -------------------------------------------
+  // `blog_posts.slug` is UNIQUE across drafts, published and archived posts, so the readable "-2"
+  // collision suffix would tell a bot that SOME post already holds the slug it asked for. A bot
+  // gets a random 6-hex suffix instead, and cannot tell a taken slug from a free one by its answer.
+  const takenAsPublished = await call("crow_create_post", {
+    title: uniqueName("A bot slug probe"),
+    content: "Probe.",
+    // held by a PUBLISHED-PRIVATE post, which the bot may not see at all
+    slug: "tern-live-private",
+  });
+  assert.equal(takenAsPublished.isError, false, `${label} slug taken: ${takenAsPublished.text}`);
+  const takenSlug = /Slug: (\S+)/.exec(takenAsPublished.text)?.[1];
+  assert.match(takenSlug, /^tern-live-private-[0-9a-f]{6}$/,
+    `${label} slug taken: a random suffix, never the readable walk: ${takenAsPublished.text}`);
+  assert.notEqual(takenSlug, "tern-live-private-2", `${label} slug taken: not "-2"`);
+  const takenRow = (await rows("SELECT status, visibility FROM blog_posts WHERE slug = ?", [takenSlug]))[0];
+  assert.equal(takenRow?.status, "draft", `${label} slug taken: the row it created is still a draft`);
+  assert.equal(takenRow?.visibility, "private", `${label} slug taken: and private, as a bot's post always is`);
+
+  // A slug no post holds is used exactly as asked — the bot cannot tell the two cases apart from the
+  // shape of the answer alone, which is the point.
+  const freeWanted = uniqueName("bot-free-slug");
+  const free = await call("crow_create_post", { title: uniqueName("A bot free slug"), content: "Probe.", slug: freeWanted });
+  assert.equal(free.isError, false, `${label} slug free: ${free.text}`);
+  assert.equal(/Slug: (\S+)/.exec(free.text)?.[1], freeWanted, `${label} slug free: the natural form, unchanged`);
+
+  // And the same on an edit: a bot changing its own draft's slug to one a PUBLISHED post holds gets
+  // a random suffix, not "-2".
+  const slugEdit = await call("crow_edit_post", { id, slug: "gull-live" });
+  assert.equal(slugEdit.isError, false, `${label} edit slug taken: ${slugEdit.text}`);
+  assert.match((await rows("SELECT slug FROM blog_posts WHERE id = ?", [id]))[0].slug,
+    /^gull-live-[0-9a-f]{6}$/, `${label} edit slug taken: a random suffix, not "-2"`);
 }
 
 test("a bot creates and edits drafts, and only drafts, on every bot path", { timeout: 180_000 }, async () => {
@@ -441,6 +549,7 @@ async function expectDraftReads(call, label) {
   assert.ok(all.text.includes(TAGGED_DRAFT_TITLE), `${label} list: a draft is listed`);
   assert.ok(!all.text.includes(LIVE_TITLE), `${label} list: a published post is not`);
   assert.ok(!all.text.includes(PRIVATE_LIVE_TITLE), `${label} list: nor a published-private one`);
+  assert.ok(!all.text.includes(ARCHIVED_TITLE), `${label} list: nor an archived one`);
   const listedRows = all.text.split("\n").filter((l) => l.startsWith("- #"));
   assert.ok(listedRows.length > 0, `${label} list: something was listed`);
   for (const line of listedRows) assert.match(line, /\[draft\]/, `${label} list: every row is a draft: ${line}`);
@@ -457,6 +566,7 @@ async function expectDraftReads(call, label) {
   assert.ok(byTag.text.includes(TAGGED_DRAFT_TITLE), `${label} list tag: the tagged draft is listed`);
   assert.ok(!byTag.text.includes(LIVE_TITLE), `${label} list tag: the tagged PUBLISHED post is not`);
   assert.ok(!byTag.text.includes(PRIVATE_LIVE_TITLE), `${label} list tag: nor the tagged published-private one`);
+  assert.ok(!byTag.text.includes(ARCHIVED_TITLE), `${label} list tag: nor the tagged archived one`);
 
   // … and on the FTS join path.
   const bySearch = await call("crow_list_posts", { search: SEARCH_WORD });
@@ -464,6 +574,7 @@ async function expectDraftReads(call, label) {
   assert.ok(bySearch.text.includes(TAGGED_DRAFT_TITLE), `${label} list search: the draft matches`);
   assert.ok(!bySearch.text.includes(LIVE_TITLE), `${label} list search: the matching PUBLISHED post does not`);
   assert.ok(!bySearch.text.includes(PRIVATE_LIVE_TITLE), `${label} list search: nor the matching published-private one`);
+  assert.ok(!bySearch.text.includes(ARCHIVED_TITLE), `${label} list search: nor the matching archived one`);
 
   // get: a draft answers with its content …
   const draft = await call("crow_get_post", { id: TAGGED_DRAFT_ID });
@@ -471,8 +582,9 @@ async function expectDraftReads(call, label) {
   assert.ok(draft.text.includes(TAGGED_DRAFT_CONTENT), `${label} get draft: the body is returned`);
   assert.match(draft.text, /Status: draft/, label);
 
-  // … while a published post, a published-private one, and an id that does not exist are the same
-  // one "not found" (by id and by slug), so nothing reveals that a live post exists.
+  // … while a published post, a published-private one, an ARCHIVED one and an id that does not
+  // exist are the same one "not found" (by id and by slug), so nothing reveals that a live post
+  // exists.
   const missing = await call("crow_get_post", { id: 999999 });
   assert.equal(missing.isError, true, `${label} get missing: ${missing.text}`);
   assert.equal(missing.text, NOT_FOUND_TEXT, `${label} get missing: the ordinary not-found text`);
@@ -480,6 +592,8 @@ async function expectDraftReads(call, label) {
     ["live by id", { id: LIVE_ID }],
     ["live by slug", { slug: "gull-live" }],
     ["published-private by id", { id: PRIVATE_LIVE_ID }],
+    ["archived by id", { id: ARCHIVED_ID }],
+    ["archived by slug", { slug: ARCHIVED_SLUG }],
   ]) {
     const hidden = await call("crow_get_post", args);
     assert.equal(hidden.isError, true, `${label} get ${what}: ${hidden.text}`);
@@ -489,6 +603,101 @@ async function expectDraftReads(call, label) {
 
 test("a bot lists and reads drafts only, on every bot path", { timeout: 180_000 }, async () => {
   for (const path of await botPaths()) await expectDraftReads(path.call, path.label);
+});
+
+// --- (b4) the confirmation is bound to the state the preview showed -------------------------
+
+/**
+ * The publish confirm, as it really happens: the operator previews, a bot may still edit that
+ * DRAFT (the accepted draft allowance), and only then does the operator's confirmation arrive. A
+ * token bound to the post id alone would publish the bot's words; bound to the row state it refuses
+ * and asks for a fresh preview.
+ */
+test("a bot's edit between the operator's publish preview and their confirm refuses the confirm", async () => {
+  const owner = await open({ baseActor: actor.OWNER });
+  const bot = await open({ baseActor: { kind: "bot", id: BOT } });
+
+  // A draft the operator wrote, with a cover image.
+  const created = await owner.call("crow_create_post", {
+    title: uniqueName("An operator draft"),
+    content: "The operator's own words.",
+    slug: uniqueName("operator-publish"),
+    cover_image_key: "covers/heron-at-dusk.png",
+  });
+  assert.equal(created.isError, false, created.text);
+  const id = Number(/ID: (\d+)/.exec(created.text)?.[1]);
+  assert.ok(Number.isFinite(id), `the create response carries the id: ${created.text}`);
+
+  // The preview shows the cover key: publishing makes /blog/media/<key> public, so the operator must
+  // be told what that is, not left to discover it.
+  const preview = await owner.call("crow_publish_post", { id, confirm_token: "" });
+  assert.equal(preview.isError, false, preview.text);
+  assert.ok(preview.text.includes("covers/heron-at-dusk.png"), `the preview shows the cover key: ${preview.text}`);
+  const staleToken = /confirm_token: "([^"]+)"/.exec(preview.text)?.[1];
+  assert.ok(staleToken, `the preview carries a confirm token: ${preview.text}`);
+
+  // The bot edits the operator's draft — allowed, and it is what makes the old token stale.
+  const botEdit = await bot.call("crow_edit_post", { id, content: "Words the operator never read." });
+  assert.equal(botEdit.isError, false, `a bot may still edit a draft: ${botEdit.text}`);
+  assert.equal((await rows("SELECT content FROM blog_posts WHERE id = ?", [id]))[0].content,
+    "Words the operator never read.", "the draft really changed under the preview");
+
+  // The stale confirm: the fixed refusal, and nothing published.
+  const refused = await owner.call("crow_publish_post", { id, confirm_token: staleToken });
+  assert.equal(refused.isError, true, `the stale confirm is refused: ${refused.text}`);
+  assert.equal(refused.text, STALE_PREVIEW_TEXT, "the fixed stale-preview refusal");
+  assert.match(refused.text, /confirm_token/, "it asks for a fresh preview");
+  const stillDraft = (await rows("SELECT status, published_at FROM blog_posts WHERE id = ?", [id]))[0];
+  assert.equal(stillDraft.status, "draft", "the post is still a draft");
+  assert.equal(stillDraft.published_at, null, "and no publish timestamp was stamped");
+
+  // A fresh preview and its confirm publish the row as it now is.
+  const fresh = await owner.call("crow_publish_post", { id, confirm_token: "" });
+  assert.equal(fresh.isError, false, fresh.text);
+  const freshToken = /confirm_token: "([^"]+)"/.exec(fresh.text)?.[1];
+  assert.ok(freshToken, fresh.text);
+  const published = await owner.call("crow_publish_post", { id, confirm_token: freshToken });
+  assert.equal(published.isError, false, published.text);
+  assert.match(published.text, /^Published!/, published.text);
+  const live = (await rows("SELECT status, published_at FROM blog_posts WHERE id = ?", [id]))[0];
+  assert.equal(live.status, "published", "the post really is published");
+  assert.ok(live.published_at, "with a timestamp");
+});
+
+/** The delete confirm shares the same binding: an edit between preview and confirm deletes nothing. */
+test("a bot's edit between the operator's delete preview and their confirm refuses the confirm", async () => {
+  const owner = await open({ baseActor: actor.OWNER });
+  const bot = await open({ baseActor: { kind: "bot", id: BOT } });
+
+  const created = await owner.call("crow_create_post", {
+    title: uniqueName("A draft the operator will delete"),
+    content: "The operator's own words.",
+    slug: uniqueName("operator-delete"),
+  });
+  assert.equal(created.isError, false, created.text);
+  const id = Number(/ID: (\d+)/.exec(created.text)?.[1]);
+
+  const preview = await owner.call("crow_delete_post", { id, confirm_token: "" });
+  assert.equal(preview.isError, false, preview.text);
+  const staleToken = /confirm_token: "([^"]+)"/.exec(preview.text)?.[1];
+  assert.ok(staleToken, preview.text);
+
+  const botEdit = await bot.call("crow_edit_post", { id, content: "Words the operator never read." });
+  assert.equal(botEdit.isError, false, botEdit.text);
+
+  const refused = await owner.call("crow_delete_post", { id, confirm_token: staleToken });
+  assert.equal(refused.isError, true, `the stale delete is refused: ${refused.text}`);
+  assert.equal(refused.text, STALE_PREVIEW_TEXT, "the fixed stale-preview refusal");
+  assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts WHERE id = ?", [id]), 1,
+    "the post is still there");
+
+  // A fresh preview → confirm deletes it, so the binding narrows the confirm rather than breaking it.
+  const fresh = await owner.call("crow_delete_post", { id, confirm_token: "" });
+  const freshToken = /confirm_token: "([^"]+)"/.exec(fresh.text)?.[1];
+  const deleted = await owner.call("crow_delete_post", { id, confirm_token: freshToken });
+  assert.equal(deleted.isError, false, deleted.text);
+  assert.match(deleted.text, /^Deleted post/, deleted.text);
+  assert.equal(await count("SELECT COUNT(*) AS n FROM blog_posts WHERE id = ?", [id]), 0, "and now it is gone");
 });
 
 // --- (c) the one harmless tool still works for a bot ---------------------------------------
