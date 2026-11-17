@@ -4585,9 +4585,9 @@ ${perchTakeOverJs(lang)}
      forever, because nothing else calls applyHash() or loadList() on first
      paint. parseHash being exhaustively unit-tested does not help: it is a
      pure function and it was green throughout. */
+  loadMailDraftFromQuery();   /* ?maildraft= on a page with no chat yet still shows the card */
   if(parseHash(location.hash)) applyHash();
   else { startListPolling(); loadList(); }
-  loadMailDraftFromQuery();   /* ?maildraft= on a page with no chat yet still shows the card */
   takeOverFromLink();
   toMineRefresh();
 })();`;
