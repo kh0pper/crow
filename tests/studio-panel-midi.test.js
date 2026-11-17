@@ -266,6 +266,10 @@ function fakeEngine() {
     clips: [],
     pads: [],
     releases: [],
+    holds: [],
+    heldReleases: [],
+    pauses: [],
+    gatePads: [],
     fx: [],
     looper: [],
     plays: 0,
@@ -292,6 +296,26 @@ function fakeEngine() {
     },
     liveRelease(trackId, bankId, index) {
       engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+    },
+    holdPad(trackId, bankId, index) {
+      const key = `${trackId}|${bankId}|${index}`;
+      if (!engine.gatePads.includes(key)) return false;
+      engine.holds.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
+      return true;
+    },
+    releaseHeld(trackId, bankId, index) {
+      if (trackId === undefined || trackId === null) {
+        engine.heldReleases.push([]);
+        return;
+      }
+      engine.heldReleases.push([String(trackId), String(bankId), Number(index)]);
+    },
+    pauseVoices(on) {
+      engine.pauses.push(on === true);
+    },
+    /** Make one pad a Gate pad: HOLD latches it and nothing else (M15). */
+    gate(trackId, bankId, index) {
+      engine.gatePads.push(`${trackId}|${bankId}|${index}`);
     },
     fxHold(name, amount) { engine.fx.push({ name: String(name), amount: Number(amount), on: true }); },
     fxRelease(name) { engine.fx.push({ name: String(name), amount: 0, on: false }); },
@@ -1588,6 +1612,103 @@ test("a routed action is held to what the page can really do", async () => {
   assert.equal(ui.toastText(), "", "and it is said once");
 
   ui.window.StudioMidiRoute = real;
+});
+
+// ---- HOLD and Pause, from a pedal (C5a) ------------------------------------
+
+/** The pads host's HOLD button, asserted to be drawn. */
+function holdButtonOf(ui) {
+  const node = ui.document.querySelector("[data-role=sampler-pads] [data-act=pad-hold]");
+  assert.ok(node, "the pads carry a HOLD button");
+  return node;
+}
+
+test("a mapped pad.hold runs the HOLD button's own path", async () => {
+  const doc = await midiDoc();
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false", "HOLD starts unarmed");
+
+  // HOLD is a Learn target like any other control: picking it arms nothing, and
+  // the next message becomes its mapping.
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  ui.click("[data-role=sampler-pads] [data-act=pad-hold]");
+  await ui.settle();
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false",
+    "picking HOLD for Learn does not arm it");
+  assert.equal(String(holdButtonOf(ui).className).includes("st-learn"), true,
+    "and it is outlined while Learn waits on it");
+
+  ui.pedal(DEVICE, [0x90, 64, 100]);
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the pedal taught one mapping");
+  assert.deepEqual(maps[0].args.action, { kind: "pad.hold" }, "to HOLD itself");
+  await ui.apply("midi.map", maps[0].args, { kind: "human" });
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "false",
+    "and the gesture that taught it armed nothing");
+
+  // From then on the pedal's press is the tap the button makes.
+  ui.pedal(DEVICE, [0x90, 64, 100]);
+  await ui.settle();
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "true", "the pedal's press armed HOLD");
+
+  // HOLD is a latch: letting the note go leaves it armed.
+  ui.pedal(DEVICE, [0x80, 64, 0]);
+  await ui.settle();
+  assert.equal(holdButtonOf(ui).getAttribute("aria-pressed"), "true", "and its release changes nothing");
+});
+
+test("with HOLD armed, a mapped pad.play latches the pad as a touch press does", async () => {
+  const doc = await midiDoc();
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const bankId = String(Object.values(snapshot(doc).banks || {})[0].id);
+  await writeMapping(doc, {
+    id: "m-hold-key",
+    device_name: DEVICE,
+    message: { type: "note", channel: 1, number: 64 },
+    action: { kind: "pad.hold" },
+  });
+  await writeMapping(doc, {
+    id: "m-pad-0",
+    device_name: DEVICE,
+    message: { type: "note", channel: 1, number: 70 },
+    action: { kind: "pad.play", track_id: TRACK, bank_id: bankId, index: 0 },
+  });
+  const ui = await bootMidi({ doc });
+  ui.engine.gate(TRACK, bankId, 0);
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  ui.pedal(DEVICE, [0x90, 64, 100]);
+  await ui.settle();
+  ui.pedal(DEVICE, [0x80, 64, 0]);
+  await ui.settle();
+
+  // A pad press from the controller goes through the same press a finger makes:
+  // it plays the pad at the message's velocity and HOLD latches it.
+  ui.pedal(DEVICE, [0x90, 70, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.pads,
+    [{ track_id: TRACK, bank_id: bankId, index: 0, v: 100 }], "the mapped press played the pad");
+  assert.deepEqual(ui.engine.holds,
+    [{ track_id: TRACK, bank_id: bankId, index: 0 }], "and HOLD latched it");
+
+  ui.pedal(DEVICE, [0x80, 70, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.releases, [], "letting the note go ends nothing: the latch holds the pad");
+
+  // The next press of that same note is HOLD's second tap on the pad: it lets a
+  // latched pad go and plays nothing.
+  ui.pedal(DEVICE, [0x90, 70, 100]);
+  await ui.settle();
+  assert.equal(ui.engine.pads.length, 1, "a latched pad's mapped tap plays nothing");
+  assert.deepEqual(ui.engine.heldReleases, [[TRACK, bankId, 0]], "and lets that pad go");
 });
 
 // ---- the MIDI page: proposals, accept, and what a row sends -----------------

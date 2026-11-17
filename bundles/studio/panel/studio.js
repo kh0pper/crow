@@ -1038,6 +1038,7 @@ const STYLES = `
   .studio .st-bank-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
   .studio .st-pad-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
   .studio .st-pad {
+    position: relative;
     aspect-ratio: 1 / 1; min-height: 72px; padding: 8px; border-radius: 10px;
     border: 2px solid #121417; background: #24282D; color: var(--st-text);
     font: inherit; text-align: left; cursor: pointer;
@@ -1052,6 +1053,19 @@ const STYLES = `
   .studio .st-pad.st-pad-on { background: #3A3222; }
   .studio .st-pad.st-pad-loop { background: #1E2C3A; }
   .studio .st-pad.st-pad-held { background: #3A2A1C; }
+  /* A pad HOLD latched keeps a steady glow and wears a small lock mark in its
+     corner: the light says it is still sounding, the mark says why (the latch,
+     not a finger, is what holds it). Neither is a flash, so neither animates. */
+  .studio .st-pad.st-pad-held { box-shadow: inset 0 0 0 2px var(--st-human); }
+  .studio .st-pad-lock {
+    position: absolute; top: 6px; right: 6px; width: 10px; height: 10px;
+    border-radius: 2px; background: var(--st-human); pointer-events: none;
+  }
+  .studio .st-pad-lock::before {
+    content: ''; position: absolute; left: 1px; top: -6px; width: 8px; height: 7px;
+    box-sizing: border-box; border: 2px solid var(--st-human); border-bottom: none;
+    border-radius: 5px 5px 0 0;
+  }
   .studio .st-pad.st-pad-hit {
     background: #F2A541; border-color: #FFFFFF;
     animation: st-pad-flash 180ms ease-out;
@@ -1073,6 +1087,16 @@ const STYLES = `
   }
   .studio .st-pad-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
   .studio .st-sampler-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  /* The live pad bar: HOLD and Pause beside the pads, two controls a thumb
+     uses while a pad sounds. Each is a 44 px target that never selects its own
+     label and never opens the browser's menu on a long press (the HOLD press
+     IS a long press). */
+  .studio .st-pad-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .studio .st-pad-bar .st-toggle {
+    flex: 0 0 auto; min-width: 44px; min-height: 44px;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-pad-bar-note { flex: 1 1 100%; margin: 0; font-size: 11px; color: var(--st-muted); }
   .studio .st-import { position: relative; display: inline-flex; align-items: center; }
   .studio .st-file { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
   .studio .st-btn.st-on { background: #3D3420; border-color: #5C4A1E; }
