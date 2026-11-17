@@ -192,6 +192,11 @@
       ownStart = true;
       tempoSeconds = isSeconds(target.tempoSeconds) ? target.tempoSeconds : null;
       still = target.still === true;
+      /* A still exercise is held in one position, never moved between two: its
+       * first key position is the one the move into it arrives at, so the work,
+       * a switch of sides, the rest after it and the next step's move all stay
+       * on that one pose. */
+      if (still) endPose = startPose;
       if (target.reps !== undefined) {
         type = "reps";
         reps = isPositiveInt(repsOverride) ? repsOverride

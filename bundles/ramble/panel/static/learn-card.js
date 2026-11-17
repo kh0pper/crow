@@ -493,6 +493,10 @@
 
     var sheetNode = null;
     var sheetBody = null;
+    var sheetClose = null;
+    /* Whatever had focus when the sheet opened, so closing hands it back. */
+    var sheetOpener = null;
+    var sheetKeysLive = false;
     /* The step index the sheet body was last built for. The sheet says the same
      * thing for the whole of one hold, so a tick inside that step leaves it be. */
     var sheetStep = -1;
@@ -570,6 +574,7 @@
       close.className = "rb-btn rb-btn-ghost";
       close.textContent = backText;
       close.addEventListener("click", closeSheet);
+      sheetClose = close;
       panel.appendChild(sheetBody);
       panel.appendChild(close);
       sheetNode.appendChild(panel);
@@ -577,24 +582,72 @@
 
     var sheetOpen = false;
 
+    /* Whether a node is still inside the card's host, so focus is never handed
+     * to something the page has already taken away. */
+    function onHost(node) {
+      var at = node;
+      while (at) {
+        if (at === host) return true;
+        at = at.parentNode;
+      }
+      return false;
+    }
+
+    /* Back to where the reader was before the sheet, or to the button that opens
+     * it when that element is gone. */
+    function returnFocus() {
+      var target = sheetOpener && onHost(sheetOpener) ? sheetOpener : els.anatomy;
+      sheetOpener = null;
+      if (target && onHost(target) && typeof target.focus === "function") target.focus();
+    }
+
+    /* Escape only, and only while the sheet is up; every other key is left to
+     * whoever else listens for it. */
+    function onSheetKey(ev) {
+      if (!sheetOpen) return;
+      if (!ev || ev.key !== "Escape") return;
+      closeSheet();
+    }
+
+    function listenForEscape() {
+      if (sheetKeysLive) return;
+      if (!doc || typeof doc.addEventListener !== "function") return;
+      sheetKeysLive = true;
+      doc.addEventListener("keydown", onSheetKey);
+    }
+
+    function forgetEscape() {
+      if (!sheetKeysLive) return;
+      sheetKeysLive = false;
+      if (doc && typeof doc.removeEventListener === "function") {
+        doc.removeEventListener("keydown", onSheetKey);
+      }
+    }
+
     function openSheet() {
       if (sheetOpen) return;
       sheetOpen = true;
+      sheetOpener = doc.activeElement || null;
       buildSheet();
       paintSheetBody();
       append(sheetNode);
+      listenForEscape();
+      if (sheetClose && typeof sheetClose.focus === "function") sheetClose.focus();
     }
 
     function closeSheet() {
       if (!sheetOpen) return;
       sheetOpen = false;
+      forgetEscape();
       var node = sheetNode;
       sheetNode = null;
       sheetBody = null;
+      sheetClose = null;
       for (var i4 = nodes.length - 1; i4 >= 0; i4 -= 1) {
         if (nodes[i4] === node) nodes.splice(i4, 1);
       }
       removeNode(node, host);
+      returnFocus();
     }
 
     els.anatomy.addEventListener("click", openSheet);
@@ -705,10 +758,16 @@
       for (var i8 = 0; i8 < stepNodes.length; i8 += 1) {
         stepNodes[i8].node.removeEventListener("click", stepNodes[i8].handler);
       }
-      sheetOpen = false;
+      if (sheetOpen) {
+        /* The card is being taken down, so there is nothing to hand focus back
+         * to: only the Escape listener is forgotten. */
+        sheetOpen = false;
+        forgetEscape();
+      }
       sheetStep = -1;
       sheetNode = null;
       sheetBody = null;
+      sheetClose = null;
       nodes.length = 0;
       chipNodes.length = 0;
       stepNodes.length = 0;

@@ -539,9 +539,9 @@ function readEntryFiles(root) {
  * against everything that passed shape, so a flow can only name a pose that
  * itself is valid. Anatomy ids are checked against the shared vocabulary; an
  * unreadable vocabulary turns those checks off rather than dropping every
- * entry that carries anatomy.
+ * entry that carries anatomy. `vocabFile` (optional) names the vocabulary file to read.
  */
-export function loadLibrary(dir) {
+export function loadLibrary(dir, vocabFile) {
   const root = dir ? String(dir) : DEFAULT_DIR;
   const { dirError, files, problems } = readEntryFiles(root);
   if (dirError) {
@@ -549,7 +549,7 @@ export function loadLibrary(dir) {
     return [];
   }
   const warn = (id, errors) => console.warn(`[ramble moves] skipping entry ${id}: ${errors.join("; ")}`);
-  const vocab = loadVocab();
+  const vocab = loadVocab(vocabFile);
   const options = vocab.size > 0 ? { vocab: new Set(vocab.keys()) } : {};
   for (const { file, error } of problems) {
     console.warn(`[ramble moves] skipping file ${file}: ${error}`);

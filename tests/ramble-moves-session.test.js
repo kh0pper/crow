@@ -584,6 +584,122 @@ test("a per-side exercise starts its second side from its own first key position
   assert.ok(flippedSides.every((s) => JSON.stringify(s.fromPose) === JSON.stringify(entry.poses[0])));
 });
 
+/* -------------------------------------- a still exercise's one position */
+
+/* A still exercise is held, never moved: its two authored key positions are a
+ * start and an end it does not use, and only the first — the one the move into
+ * it arrives at — is ever drawn. The test below it is the same entry without
+ * the still flag, which does travel between the two. */
+function heldLibrary() {
+  const poses = [{ kneeL: 10, hipL: 30 }, { kneeL: 70, hipL: 90 }];
+  const routine = (id, exerciseId) => routineEntry(id, {
+    rounds: 1,
+    blocks: {
+      warmup: [],
+      main: [
+        { id: "pose-a", seconds: 60 },
+        { id: exerciseId, seconds: 60, restSeconds: 15 },
+        { id: "pose-b", seconds: 60 },
+      ],
+      cooldown: [],
+    },
+  });
+  const lib = [
+    poseEntry("pose-a"),
+    poseEntry("pose-b"),
+    exerciseEntry("ex-held", {
+      reps: 4, tempoSeconds: 6, perSide: true, still: true, poses: deep(poses),
+    }),
+    exerciseEntry("ex-moved", {
+      reps: 4, tempoSeconds: 6, perSide: true, poses: deep(poses),
+    }),
+    routine("routine-held", "ex-held"),
+    routine("routine-moved", "ex-moved"),
+  ];
+  return { lib, poses };
+}
+
+/** Every segment from the move into a work step up to and including its rest. */
+function stepRun(timeline, work) {
+  const first = timeline.segments.indexOf(work[0]);
+  const last = timeline.segments.indexOf(work[work.length - 1]);
+  return timeline.segments.slice(first - 1, last + 2);
+}
+
+test("a still exercise draws only its first key position, never its second", () => {
+  const { lib, poses } = heldLibrary();
+  const held = poses[0];
+  const timeline = compileTimeline("routine-held", lib);
+
+  const work = timeline.segments.filter((s) => s.entryId === "ex-held");
+  assert.equal(work.length, 2, "a per-side still exercise is worked on both sides");
+  assert.deepEqual(work.map((s) => s.side), ["left", "right"]);
+  assert.equal(work[0].seconds + work[1].seconds, 60, "the two halves share the step");
+  assert.ok(work.every((s) => s.still === true), "both halves are held");
+
+  const first = timeline.segments.indexOf(work[0]);
+  const last = timeline.segments.indexOf(work[1]);
+  const into = timeline.segments[first - 1];
+  const between = timeline.segments[first + 1];
+  const rest = timeline.segments[last + 1];
+  const next = timeline.segments[last + 2];
+
+  /* The step stands in a routine: a move into it, a switch of sides, a rest
+   * and then the move into the step after it. */
+  assert.equal(into.type, "transition");
+  assert.equal(between.type, "switch-sides");
+  assert.equal(rest.type, "rest");
+  assert.equal(next.type, "transition");
+
+  assert.deepEqual(into.fromPose, lib.find((one) => one.id === "pose-a").pose,
+    "the move in starts where the step before it stood");
+  assert.deepEqual(into.toPose, held, "and arrives at the one position");
+  assert.notDeepEqual(into.fromPose, held, "so the move is a real one");
+  for (const half of work) {
+    assert.deepEqual(half.fromPose, held, "both halves start on the one position");
+    assert.deepEqual(half.toPose, held, "and end on it");
+  }
+  assert.deepEqual(between.fromPose, held, "the switch of sides moves nothing");
+  assert.deepEqual(between.toPose, held);
+  assert.deepEqual(rest.fromPose, held, "the rest rests in the same position");
+  assert.equal(rest.toPose, null);
+  assert.deepEqual(next.fromPose, held, "and the step after the rest starts there too");
+
+  /* Nothing the exercise puts on the figure is the second key position. */
+  const second = JSON.stringify(poses[1]);
+  for (const segment of stepRun(timeline, work)) {
+    assert.notEqual(JSON.stringify(segment.fromPose), second, segment.type + " draws the second position");
+    assert.notEqual(JSON.stringify(segment.toPose), second, segment.type + " draws the second position");
+  }
+
+  /* Holding still moves no time: the same routine with a moving exercise
+   * plans every second the same way. */
+  const movedTimeline = compileTimeline("routine-moved", lib);
+  assert.equal(timeline.totalSeconds, movedTimeline.totalSeconds);
+  assert.deepEqual(
+    timeline.chunks.map((chunk) => chunk.plannedSeconds),
+    movedTimeline.chunks.map((chunk) => chunk.plannedSeconds),
+  );
+});
+
+test("the same two key positions still move a non-still exercise", () => {
+  const { lib, poses } = heldLibrary();
+  const timeline = compileTimeline("routine-moved", lib);
+
+  const work = timeline.segments.filter((s) => s.entryId === "ex-moved");
+  assert.equal(work.length, 2);
+  assert.ok(work.every((s) => s.still === false), "a moving rep is not still");
+  for (const half of work) {
+    assert.deepEqual(half.fromPose, poses[0], "the half starts on the first key position");
+    assert.deepEqual(half.toPose, poses[1], "and moves to the second");
+  }
+
+  const last = timeline.segments.indexOf(work[1]);
+  const rest = timeline.segments[last + 1];
+  assert.equal(rest.type, "rest");
+  assert.deepEqual(rest.fromPose, poses[1], "a moving exercise rests where it ended");
+});
+
 /* ---------------------------------------------------- the clock (Task 2.2) */
 
 /** A clock on an injected millisecond reading the test advances by hand. */

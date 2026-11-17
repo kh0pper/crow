@@ -202,12 +202,24 @@ function fakeClock() {
     time: 0,
     intervals: [],
     cleared: [],
+    frames: [],
+    framesCleared: [],
+    frameSeq: 0,
     now() { return this.time; },
     setInterval(fn, ms) {
       this.intervals.push({ fn, ms });
       return this.intervals.length;
     },
     clearInterval(id) { this.cleared.push(id); },
+    requestAnimationFrame(fn) {
+      this.frameSeq += 1;
+      this.frames.push({ id: this.frameSeq, fn });
+      return this.frameSeq;
+    },
+    cancelAnimationFrame(id) {
+      this.framesCleared.push(id);
+      this.frames = this.frames.filter((one) => one.id !== id);
+    },
   };
 }
 
@@ -276,6 +288,31 @@ function advance(clock, seconds) {
   const latest = clock.intervals[clock.intervals.length - 1];
   assert.ok(latest, "the player must have started its interval");
   latest.fn();
+}
+
+/* Run every frame the player has asked for, once, at the clock's own time. */
+function flushFrames(clock) {
+  const pending = clock.frames;
+  clock.frames = [];
+  pending.forEach((one) => one.fn());
+}
+
+/* The clock the player builds for itself, so a test can read the engine's own
+ * state and count the beats it took. */
+function clockSpy(booted) {
+  const real = booted.sandbox.RambleSession.createClock;
+  const seen = { clock: null, ticks: 0 };
+  booted.sandbox.RambleSession.createClock = (spec) => {
+    const made = real(spec);
+    const realTick = made.tick;
+    made.tick = function () {
+      seen.ticks += 1;
+      return realTick.call(made);
+    };
+    seen.clock = made;
+    return made;
+  };
+  return seen;
 }
 
 /* The segments of any chain of the same fixtures. */
@@ -473,7 +510,12 @@ test("figure: a still exercise draws one pose at every time and never tweens", (
   }
   assert.equal(blent - blentBefore, 0, "a still rep never blends between the key positions");
   assert.equal(interpolated - interpolatedBefore, 0, "and never eases into one either");
-  assert.notDeepEqual(shown, plain(segment.fromPose), "the two key positions differ");
+
+  /* A held step's two ends are the one position, and it is the entry's first
+   * key position: the second is a pose the exercise never moves to. */
+  const entry = LIB.find((one) => one.id === "ex-side-hold");
+  assert.deepEqual(shown, plain(entry.poses[0]), "the first key position, as it is");
+  assert.deepEqual(plain(segment.fromPose), shown, "the step is held from end to end");
 });
 
 test("figure: reduced motion on a tempo segment swaps the key positions at the midpoint", () => {
@@ -510,6 +552,277 @@ test("figure: reduced motion on a tempo segment swaps the key positions at the m
 
   assert.equal(blent, 0, "reduced motion never blends a rep");
   assert.equal(interpolated, 0, "and never eases one");
+});
+
+/* ---------- the figure's own beat, between ticks ---------- */
+
+test("frames: a frame between two beats draws the figure on and leaves the clock where the beat left it", () => {
+  const booted = boot();
+  const spy = clockSpy(booted);
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((one) => one.entryId === "ex-curl");
+  const segment = segments[at];
+  assert.equal(segment.tempoSeconds, 4);
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const drawn = [];
+  let blent = 0;
+  Figure.tween = (from, to, t) => { blent += 1; return realTween(from, to, t); };
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  const { player } = mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(booted.host, "start").click();
+  seekTo(booted, at);
+
+  advance(booted.clock, 1);
+  assert.equal(drawn[drawn.length - 1].elbowL, 65, "the beat drew the rep halfway round");
+
+  const ticksAtBeat = spy.ticks;
+  const engineAtBeat = plain(spy.clock.state());
+  const drawnAtBeat = drawn.length;
+  const blentAtBeat = blent;
+  const nameBefore = byRole(booted.host, "name").textContent;
+  const cueBefore = byRole(booted.host, "cue").textContent;
+  const nextBefore = byRole(booted.host, "next").textContent;
+  const clockFaceBefore = byRole(booted.host, "clock").textContent;
+
+  /* Half a second on, with no beat: one frame, and the rep stands 1.5 s in. */
+  booted.clock.time += 500;
+  flushFrames(booted.clock);
+
+  assert.equal(drawn.length, drawnAtBeat + 1, "one frame drew the figure");
+  assert.equal(blent, blentAtBeat + 1, "and it blended the pose");
+  assert.deepEqual(drawn[drawn.length - 1], plain(realTween(segment.fromPose, segment.toPose, 0.75)),
+    "the pose is the one 1.5 s into the rep");
+  assert.equal(drawn[drawn.length - 1].elbowL, 92.5);
+
+  assert.equal(spy.ticks, ticksAtBeat, "a frame never ticks the engine");
+  assert.deepEqual(plain(spy.clock.state()), engineAtBeat, "the clock is where the beat left it");
+  assert.equal(player.state().segmentIndex, at, "no step was taken");
+  assert.equal(byRole(booted.host, "figure").innerHTML,
+    realSvg(realTween(segment.fromPose, segment.toPose, 0.75)), "the figure on screen is that pose");
+  assert.equal(byRole(booted.host, "name").textContent, nameBefore, "a frame names nothing");
+  assert.equal(byRole(booted.host, "cue").textContent, cueBefore, "and cues nothing");
+  assert.equal(byRole(booted.host, "next").textContent, nextBefore, "and previews nothing");
+  assert.equal(byRole(booted.host, "clock").textContent, clockFaceBefore, "and counts nothing");
+});
+
+test("frames: no frame advances the engine clock, and the next beat counts the same stretch once", () => {
+  const booted = boot();
+  const spy = clockSpy(booted);
+  mountPlayer(booted, { reducedMotion: false });
+  byRole(booted.host, "start").click();
+
+  advance(booted.clock, 0.5);
+  const held = plain(spy.clock.state());
+  assert.equal(byRole(booted.host, "clock").textContent, "60", "half a second in, sixty are left");
+
+  for (let i = 0; i < 4; i += 1) {
+    booted.clock.time += 100;
+    flushFrames(booted.clock);
+  }
+
+  assert.equal(spy.ticks, 1, "four frames, still one beat");
+  assert.deepEqual(plain(spy.clock.state()), held, "the engine counted nothing between beats");
+  assert.equal(byRole(booted.host, "clock").textContent, "60", "a frame leaves the countdown alone");
+
+  /* The beat that follows counts the whole stretch since the last one, once:
+   * the frames moved the page's clock on without the engine counting any of
+   * it, so the one read takes all of it. */
+  advance(booted.clock, 1.9);
+  assert.equal(spy.clock.state().segmentElapsed, 2.8, "2.8 s of the hold, counted once");
+  assert.equal(byRole(booted.host, "clock").textContent, "58");
+});
+
+test("frames: a pause cancels the pending frame, and Keep going asks for another", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((one) => one.entryId === "ex-curl");
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const drawn = [];
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(booted.host, "start").click();
+  seekTo(booted, at);
+
+  advance(booted.clock, 1);
+  assert.equal(booted.clock.frames.length, 1, "a moving step asks for a frame");
+  const pendingId = booted.clock.frames[0].id;
+
+  byRole(booted.host, "pause").click();
+
+  assert.equal(booted.clock.frames.length, 0, "the pause takes the pending frame with it");
+  assert.deepEqual(booted.clock.framesCleared, [pendingId], "the frame it asked for is cancelled");
+
+  const drawnWhilePaused = drawn.length;
+  booted.clock.time += 500;
+  flushFrames(booted.clock);
+  assert.equal(drawn.length, drawnWhilePaused, "nothing is drawn while the clock is stopped");
+
+  byRole(booted.host, "pause").click();
+  assert.equal(booted.clock.frames.length, 1, "Keep going asks for a frame again");
+
+  /* A tab that goes away is the same pause, and takes the frame with it. */
+  fireVisibility(booted, true);
+  assert.equal(booted.clock.frames.length, 0, "a hidden tab cancels the frame");
+  const drawnWhenHidden = drawn.length;
+  booted.clock.time += 500;
+  flushFrames(booted.clock);
+  assert.equal(drawn.length, drawnWhenHidden, "and nothing is drawn while the tab is away");
+});
+
+test("frames: destroy cancels the pending frame", () => {
+  const booted = boot();
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const drawn = [];
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  const { player } = mountPlayer(booted, { reducedMotion: false });
+  byRole(booted.host, "start").click();
+  assert.equal(booted.clock.frames.length, 1, "a running step asks for a frame");
+
+  const drawnBefore = drawn.length;
+  player.destroy();
+
+  assert.equal(booted.clock.frames.length, 0, "destroy takes the frame with it");
+  booted.clock.time += 500;
+  flushFrames(booted.clock);
+  assert.equal(drawn.length, drawnBefore, "nothing is drawn after the player is gone");
+  assert.equal(booted.host.children.length, 0);
+});
+
+test("frames: a jump to another step counts the next frame from that step's own start", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((one) => one.entryId === "ex-curl");
+  const segment = segments[at];
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const drawn = [];
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(booted.host, "start").click();
+
+  /* One beat, and then most of a second of the page's clock that no beat has
+   * counted yet. */
+  advance(booted.clock, 1);
+  booted.clock.time += 900;
+
+  seekTo(booted, at);
+  assert.equal(booted.clock.frames.length, 1, "the step the jump landed on asks for a frame");
+  const drawnAtJump = drawn.length;
+
+  /* The frame after the jump counts from the jump, not from the stale read the
+   * beat before it made: 0.9 s of a 4 s rep would show it a quarter of the way
+   * round. */
+  flushFrames(booted.clock);
+  assert.equal(drawn.length, drawnAtJump + 1, "one frame drew the figure");
+  assert.deepEqual(drawn[drawn.length - 1], plain(realTween(segment.fromPose, segment.toPose, 0)),
+    "the frame draws the rep at the very start of its step");
+  assert.equal(drawn[drawn.length - 1].elbowL, plain(segment.fromPose).elbowL,
+    "the first key position, not a blend carried over from the read before");
+});
+
+test("frames: reduced motion asks for no frame on a tempo step and swaps on the beats", () => {
+  const booted = boot();
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((one) => one.entryId === "ex-curl");
+  const segment = segments[at];
+  assert.equal(segment.tempoSeconds, 4);
+
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const realInterpolate = Figure.interpolate;
+  const drawn = [];
+  let blent = 0;
+  let interpolated = 0;
+  Figure.tween = (from, to, t) => { blent += 1; return realTween(from, to, t); };
+  Figure.interpolate = (from, to, t) => { interpolated += 1; return realInterpolate(from, to, t); };
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: true });
+  byRole(booted.host, "start").click();
+  seekTo(booted, at);
+
+  assert.equal(booted.clock.frames.length, 0,
+    "a tempo step under reduced motion draws on the beat and asks for no frame");
+
+  const startPose = plain(segment.fromPose);
+  const endPose = plain(segment.toPose);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "the rep opens on the first key position");
+
+  advance(booted.clock, 1.9);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "1.9 s in, the first position still shows");
+  assert.equal(booted.clock.frames.length, 0, "the beats ask for no frame either");
+
+  advance(booted.clock, 0.1);
+  assert.deepEqual(drawn[drawn.length - 1], endPose, "the beat at the midpoint swaps the position");
+
+  advance(booted.clock, 2);
+  assert.deepEqual(drawn[drawn.length - 1], startPose, "and the next rep's beat swaps it back");
+
+  assert.equal(blent, 0, "reduced motion never blends a rep");
+  assert.equal(interpolated, 0, "and never eases one");
+});
+
+test("frames: a still rep, a rest or a quiet step asks for no frame at all", () => {
+  const tempo = boot();
+  const stillSegments = segmentsOfChain(tempo.sandbox, TEMPO_CHAIN);
+  const still = stillSegments.findIndex((one) => one.entryId === "ex-side-hold");
+  assert.equal(stillSegments[still].still, true);
+
+  mountPlayer(tempo, { chain: TEMPO_CHAIN, reducedMotion: false });
+  byRole(tempo.host, "start").click();
+  seekTo(tempo, still);
+  assert.equal(tempo.clock.frames.length, 0, "a still rep has nothing to draw between beats");
+
+  const calm = boot();
+  const calmSegments = segmentsOf(calm.sandbox);
+  assert.equal(calmSegments[3].type, "rest");
+  mountPlayer(calm, { reducedMotion: false });
+  byRole(calm.host, "start").click();
+  advance(calm.clock, 63);
+  assert.equal(calm.clock.frames.length, 1, "a moving step does ask for one");
+  advance(calm.clock, 30);
+  assert.equal(calmSegments[3].type, "rest");
+  assert.equal(calm.clock.frames.length, 0, "a rest has nothing to draw between beats");
+});
+
+test("frames: a page with no frame API still plays on the beat alone", () => {
+  const booted = boot();
+  delete booted.clock.requestAnimationFrame;
+  delete booted.clock.cancelAnimationFrame;
+  assert.equal(typeof booted.sandbox.requestAnimationFrame, "undefined",
+    "neither the clock nor the page offers a frame");
+
+  const segments = segmentsOfChain(booted.sandbox, TEMPO_CHAIN);
+  const at = segments.findIndex((one) => one.entryId === "ex-curl");
+  const Figure = booted.sandbox.RambleFigure;
+  const realSvg = Figure.poseSvg;
+  const realTween = Figure.tween;
+  const drawn = [];
+  Figure.tween = (from, to, t) => realTween(from, to, t);
+  Figure.poseSvg = (pose, opts) => { drawn.push(plain(pose)); return realSvg(pose, opts); };
+
+  const { player } = mountPlayer(booted, { chain: TEMPO_CHAIN, reducedMotion: false });
+  assert.doesNotThrow(() => byRole(booted.host, "start").click());
+  seekTo(booted, at);
+
+  advance(booted.clock, 1);
+  assert.equal(drawn[drawn.length - 1].elbowL, 65, "the beat still draws the rep");
+  advance(booted.clock, 1);
+  assert.equal(drawn[drawn.length - 1].elbowL, 120, "and the rep still lands on its second position");
+  assert.equal(player.state().segmentIndex, at);
+  assert.doesNotThrow(() => player.destroy());
 });
 
 test("render: the safety note shows before the first Start only", () => {

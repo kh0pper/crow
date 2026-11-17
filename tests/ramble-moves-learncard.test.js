@@ -45,7 +45,7 @@ const BAND_LENGTHENING = "#c8423b";
 /* ---------- the fake DOM ---------- */
 
 class FakeEl {
-  constructor(tag) {
+  constructor(tag, doc) {
     this.tagName = String(tag || "div").toUpperCase();
     this.attrs = Object.create(null);
     this.listeners = Object.create(null);
@@ -55,6 +55,9 @@ class FakeEl {
     this.textContent = "";
     this.innerHTML = "";
     this.className = "";
+    /* The document this element belongs to, so focus() can move its
+     * activeElement the way a browser would. */
+    this.ownerDocument = doc || null;
   }
   get firstChild() { return this.children.length > 0 ? this.children[0] : null; }
   addEventListener(type, fn) {
@@ -88,7 +91,7 @@ class FakeEl {
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
   querySelectorAll() { return []; }
   querySelector() { return null; }
-  focus() {}
+  focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
   closest() { return null; }
   click() {
     (this.listeners.click || []).slice().forEach((fn) => fn({ target: this }));
@@ -148,10 +151,36 @@ const BROKEN_STORAGE = {
 
 /* ---------- loading the three scripts into one context ---------- */
 
+/* The document the card is handed: element factory, the one activeElement a
+ * browser keeps, and the document-level keydown listeners the card can add and
+ * remove. */
+function fakeDocument() {
+  const doc = {
+    activeElement: null,
+    listeners: Object.create(null),
+    createElement(tag) { return new FakeEl(tag, doc); },
+    addEventListener(type, fn) {
+      const list = this.listeners[type] || (this.listeners[type] = []);
+      list.push(fn);
+    },
+    removeEventListener(type, fn) {
+      const list = this.listeners[type] || [];
+      this.listeners[type] = list.filter((one) => one !== fn);
+    },
+    listenerCount(type) { return (this.listeners[type] || []).length; },
+    keydown(key) {
+      const ev = { key, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+      (this.listeners.keydown || []).slice().forEach((fn) => fn(ev));
+      return ev;
+    },
+  };
+  return doc;
+}
+
 function boot() {
   const host = new FakeEl("div");
   const clock = fakeClock();
-  const doc = { createElement: (tag) => new FakeEl(tag) };
+  const doc = fakeDocument();
   const sandbox = { console, document: doc };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
@@ -463,6 +492,111 @@ test("sheet: the why line, the sections, the common name before the anatomical n
 
   close.click();
   assert.equal(byRole(booted.host, "sheet"), null, "Back closes it");
+});
+
+/* ---------- the sheet's focus, and its Escape ---------- */
+
+/* Open the sheet from the anatomy button with focus already on it, the way a
+ * reader who tabbed to the button and pressed it arrives. */
+function openFromButton(booted) {
+  const see = byRole(booted.host, "anatomy");
+  booted.doc.activeElement = see;
+  see.click();
+  return see;
+}
+
+test("sheet: opening moves focus into the sheet, to the way out it carries", () => {
+  const booted = boot();
+  mountCard(booted, SQUAT);
+  const see = openFromButton(booted);
+
+  const close = byRole(booted.host, "sheet-close");
+  assert.ok(close, "the sheet is up with its close button");
+  assert.equal(booted.doc.activeElement, close, "focus is in the sheet, on the button that leaves it");
+  assert.notEqual(booted.doc.activeElement, see, "and no longer on the card behind it");
+  assert.equal(attachedTo(close, booted.host), true, "the focused node really is on the sheet");
+});
+
+test("sheet: Escape closes it, and focus goes back to the button that opened it", () => {
+  const booted = boot();
+  mountCard(booted, SQUAT);
+  const see = openFromButton(booted);
+  assert.equal(booted.doc.listenerCount("keydown"), 1, "one keydown listener while the sheet is open");
+
+  booted.doc.keydown("Escape");
+
+  assert.equal(byRole(booted.host, "sheet"), null, "Escape closes the sheet");
+  assert.equal(attachedTo(see, booted.host), true, "and leaves the card up");
+  assert.equal(booted.doc.activeElement, see, "focus is handed back to the opener");
+  assert.equal(booted.doc.listenerCount("keydown"), 0, "the Escape listener goes with the sheet");
+});
+
+test("sheet: the close button hands focus back too", () => {
+  const booted = boot();
+  mountCard(booted, SQUAT);
+  const see = openFromButton(booted);
+
+  byRole(booted.host, "sheet-close").click();
+
+  assert.equal(byRole(booted.host, "sheet"), null, "Back closes it");
+  assert.equal(booted.doc.activeElement, see, "focus is back on the anatomy button");
+  assert.equal(booted.doc.listenerCount("keydown"), 0, "and no Escape listener is left on the document");
+});
+
+test("sheet: focus falls back to the anatomy button when the previous element is gone", () => {
+  const booted = boot();
+  mountCard(booted, SQUAT);
+  /* Something that was focused once but is not on the card any more. */
+  const stray = new FakeEl("button", booted.doc);
+  booted.doc.activeElement = stray;
+  byRole(booted.host, "anatomy").click();
+
+  byRole(booted.host, "sheet-close").click();
+
+  assert.equal(booted.doc.activeElement, byRole(booted.host, "anatomy"),
+    "the card's own way in takes the focus back");
+});
+
+test("keys: with the sheet closed Escape is not listened for, and other keys never close it", () => {
+  const booted = boot();
+  mountCard(booted, SQUAT);
+  assert.equal(booted.doc.listenerCount("keydown"), 0, "no document keydown listener before the sheet opens");
+
+  const see = byRole(booted.host, "anatomy");
+  booted.doc.activeElement = see;
+  const away = booted.doc.keydown("Escape");
+  assert.equal(byRole(booted.host, "sheet"), null, "Escape does not open anything");
+  assert.equal(booted.doc.activeElement, see, "nor move focus");
+  assert.equal(away.defaultPrevented, false, "the card does not swallow the key");
+
+  openFromButton(booted);
+  assert.equal(booted.doc.listenerCount("keydown"), 1);
+  for (const key of ["ArrowLeft", "j", " ", "Tab"]) {
+    const ev = booted.doc.keydown(key);
+    assert.ok(byRole(booted.host, "sheet"), "the sheet stays open on " + JSON.stringify(key));
+    assert.equal(ev.defaultPrevented, false, "the card leaves " + JSON.stringify(key) + " alone");
+  }
+
+  const escape = booted.doc.keydown("Escape");
+  assert.equal(byRole(booted.host, "sheet"), null, "Escape does close it");
+  assert.equal(escape.defaultPrevented, false, "and the key is not swallowed either");
+});
+
+test("destroy: a card taken down with its sheet open forgets Escape and hands no focus back", () => {
+  const booted = boot();
+  const card = mountCard(booted, SQUAT);
+  const see = openFromButton(booted);
+  assert.equal(booted.doc.listenerCount("keydown"), 1, "the open sheet listens for Escape");
+
+  card.destroy();
+
+  assert.equal(booted.doc.listenerCount("keydown"), 0, "the listener goes with the card");
+  assert.notEqual(booted.doc.activeElement, see,
+    "the card is being removed, so no focus is handed back to the button that opened it");
+  assert.equal(booted.host.children.length, 0, "and the host is empty");
+  assert.doesNotThrow(() => booted.doc.keydown("Escape"), "a stray Escape finds nothing to close");
+  assert.equal(attachedTo(see, booted.host), false);
+  assert.equal(booted.clock.active.size, 0, "the beat is off the clock too");
 });
 
 test("sheet: the Back label comes from the page's copy when it carries one", () => {
