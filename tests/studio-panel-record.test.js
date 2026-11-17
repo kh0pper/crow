@@ -2713,6 +2713,37 @@ test("R4: count-in 0 sends exactly the arm and split messages of the characteris
   ui.releaseFinish();
 });
 
+test("R4: a calibrated count-in-0 take stores its offset on pass 0 and offset 0 on every later pass", async () => {
+  // Off (R4), with an input calibrated to a 3,408-frame round trip: the launch
+  // report's frame is the take's first frame, so those frames sit in front of
+  // pass 0's beat 0 and its row stores them. Passes 1 and 2 begin on their own
+  // split frames, which already carry the round trip, so they store nothing.
+  const ui = await bootPanel({ countIn: 0, latency: CALIBRATED, gateFinish: true });
+  await pressRecord(ui);
+  await launchReported(ui);
+  const recorder = ui.engine.recorders[0];
+  assert.equal(recorder.armFrame, 48000, "the launch report's frame is the take's first frame");
+
+  // One chunk per pass, each holding more frames than the round trip pass 0 is
+  // cut by: a pass holding no more than that would be dropped as silence.
+  const passFrames = CALIBRATED.latency_frames + 1200;
+  for (const pass of [0, 1, 2]) {
+    recorder.chunk(new Uint8Array(passFrames * 3 * 2).buffer, 0, pass);
+    await ui.settle(24);
+  }
+
+  const rows = Array.from(ui.store.pendings.values());
+  assert.equal(rows.length, 3, `three passes are three rows on this device (got ${rows.length})`);
+  const first = rows[0].offset_frames;
+  assert.ok(first > 0, "pass 0 holds the calibrated round trip in front of its beat 0");
+  assert.equal(first, CALIBRATED.latency_frames, "and stores exactly the round trip it was armed with");
+  assert.equal(rows[1].offset_frames, 0, "pass 1 begins on its own split frame, so it stores no offset");
+  assert.equal(rows[2].offset_frames, 0, "and pass 2 begins on its own beat 0 too");
+
+  ui.releaseFinish();
+  await ui.settle();
+});
+
 test("R1: count-in 1 plays with countInBars 1 and arms on the announced play_frame", async () => {
   const ui = await bootPanel({ storage: makeStorage(), clock: 0.75 });
   const recorder = await pressRecord(ui);

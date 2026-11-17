@@ -366,10 +366,29 @@ async function bootPanel(options = {}) {
     },
   };
 
+  // The page keeps its count-in length in this device's storage, and a device
+  // with nothing stored now defaults to counting one bar in. These tests record
+  // on the count-in-Off path (R4), where the operator's own launch is what arms
+  // the recorder, so the store starts out saying 0 bars.
+  const settings = new Map([["crow.studio.countin.v1", "0"]]);
+  const storage = {
+    getItem(key) {
+      const name = String(key);
+      return settings.has(name) ? settings.get(name) : null;
+    },
+    setItem(key, value) {
+      settings.set(String(key), String(value));
+    },
+    removeItem(key) {
+      settings.delete(String(key));
+    },
+  };
+
   const windowStub = {
     crypto: globalThis.crypto,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
+    localStorage: storage,
     confirm: () => true,
     AudioContext: function AudioContextStub() {
       return fakeContext(0);
