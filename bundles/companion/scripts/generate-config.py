@@ -889,6 +889,9 @@ def main():
 
     # Generate mcp_servers.json with Crow bridges
     # - "crow" connects to the router (memory, projects, blog, sharing — 7 category tools)
+    #   Blog is listed by the router like any other category, but its tools are owner-only: a companion
+    #   character sends a bot actor header (below), so every one of them but crow_get_chord_diagram is
+    #   refused for it — the category is there, unusable.
     # - "crow-storage" connects directly to the storage server for background generation
     #   (exposes crow_generate_background etc. as individual tools the LLM can call by name)
     mcp_bridge_host = os.environ.get("CROW_MCP_BRIDGE_HOST", "localhost")

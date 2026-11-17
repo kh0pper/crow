@@ -113,6 +113,24 @@ export function addonGranted(grants, server, tool) {
 }
 
 /**
+ * The name-shaped form of addonGranted, for a caller that only has the tool NAME the model called (the
+ * voice turn's policy gate). `servers` is the connected add-on map (connectedServers at runtime): the
+ * name is granted when SOME connected server exposing it was given it — the same "skip an ungranted
+ * server and keep looking" rule executeTool applies, so the offer, the gate and the call agree. A tool
+ * name is not unique across add-ons, so one granted exposure is enough and none is a refusal.
+ */
+export function addonToolGranted(grants, tool, servers = connectedServers) {
+  if (!grants) return true;
+  if (typeof tool !== "string" || !tool || !servers) return false;
+  for (const [server, entry] of servers) {
+    if (entry?.status !== "connected") continue;
+    if (!(entry.tools || []).some((t) => t.name === tool)) continue;
+    if (addonGranted(grants, server, tool)) return true;
+  }
+  return false;
+}
+
+/**
  * Slice B (B3): compute the voice-path tool scope for a bound bot from its EFFECTIVE
  * crow_mcp — effectiveCrowMcp: the def's stored selection plus the tools its repo skills
  * grant, minus the owner's declines. That is the list pi spawns with and the list the
@@ -120,7 +138,8 @@ export function addonGranted(grants, server, tool) {
  * Returns null when unbound — callers then fall back to the full, unscoped tool set / no
  * policy enforcement (the pre-Slice-B behavior, byte-for-byte).
  *
- *   selectedToolNames  bare tool names the bot picked (the name-only view the voice turn reads)
+ *   selectedToolNames  bare tool names the bot picked by name ("<server>/<tool>" entries only; the voice
+ *                      turn's add-on gate reads addonGrants instead, so a bare server pick is covered)
  *   selectedServers    server ids the bot picked under, a bare "<server>" entry included
  *   coreCategories     voice categories (A4 map) the bot has ANY selection under;
  *                      core crow_<category> proxies are all-or-nothing (decision 4)
@@ -128,6 +147,11 @@ export function addonGranted(grants, server, tool) {
  */
 export function botVoiceScope(botDef) {
   if (!botDef) return null;
+  // The union as computed, not as pi would spawn it: effectiveCrowMcp ignores addSkillToolsGuarded's
+  // tool-cap refusal and its voice-def skip (the same reading services/mount.js takes), so with a def
+  // over the model's tool cap, or a voice def that selected repo skills, this scope can grant slightly
+  // more than the spawned tool surface — wider, never narrower. Every call still passes the executor's
+  // own add-on gate, which reads this same map.
   const crowMcp = effectiveCrowMcp(botDef);
   const selectedToolNames = new Set();
   const selectedServers = new Set();

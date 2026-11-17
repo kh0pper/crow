@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toolCategoryOf } from "../servers/gateway/ai/tool-executor.js";
+import { toolCategoryOf, botVoiceScope, addonToolGranted, isConnectedAddonTool, connectedAddonToolNames, effectiveToolName } from "../servers/gateway/ai/tool-executor.js";
+import { connectedServers } from "../servers/gateway/proxy.js";
 import { TURN_CONTEXT_NOTE } from "../servers/gateway/voice/context-echo.js";
 import { createVoiceTurnRunner, wasOffered, ESCALATION_READY_TIMEOUT_MS, FILLER_TEXT, FALLBACK_TEXT, STOP_TOOLS_NOTE, BOT_TOO_LARGE_TEXT, DISPLAY_MISSED_TEXT, ACTION_NOTE, NOT_READY_TEXT } from "../servers/gateway/voice/turn.js";
 import { harness } from "./fixtures/voice-turn-harness.mjs";
@@ -1180,6 +1181,42 @@ test("offered tools only: a call to a tool the turn did not offer is refused (no
   await on.runner.runVoiceTurn({ db: {}, device: on.device, transcript: "list my projects", sink: on.sink });
   assert.deepEqual(on.calls.executed, ["crow_list_projects", "crow_projects"], "an action of an offered category, and the category tool itself");
 });
+
+// ── The add-on grant is the executor's own (server, tool) reading, so a bare "<server>" pick runs ──
+const ADDON = "stub";
+const ADDON_OTHER = "stub-ungranted";
+/** Two connected add-ons: the one the bot is given (two tools) and one it is not. */
+function withAddonStubs(fn) {
+  return async () => {
+    connectedServers.set(ADDON, { status: "connected", tools: [{ name: "stub_do" }, { name: "stub_more" }] });
+    connectedServers.set(ADDON_OTHER, { status: "connected", tools: [{ name: "other_do" }] });
+    try { await fn(); } finally { connectedServers.delete(ADDON); connectedServers.delete(ADDON_OTHER); }
+  };
+}
+/** The real add-on wiring defaultVoiceDeps builds (the shared harness fakes it as "no add-ons"). */
+const realAddonDeps = (h) => {
+  h.deps.botVoiceScope = botVoiceScope;
+  h.deps.isConnectedAddonTool = isConnectedAddonTool;
+  h.deps.connectedAddonTools = () => connectedAddonToolNames();
+  h.deps.addonToolGranted = addonToolGranted;
+  h.deps.effectiveToolName = effectiveToolName;   // a crow_tools call is named by the action it runs
+};
+
+test("a bot def with a bare-server grant calls that add-on's tools by voice; an add-on it was not given is still refused", withAddonStubs(async () => {
+  const call = (name, args = {}) => ({ type: "tool_call", id: name, name, arguments: args });
+  const bot = { bot_id: "studio-bot", display_name: "Studio", tools: { crow_mcp: [ADDON] } };
+  const h = harness({ bot, chatTools: ["crow_tools"], rounds: [
+    [call("stub_do"), call("stub_more"), call("other_do"), call("crow_tools", { action: "other_do", params: {} }), { type: "done" }],
+    [{ type: "content_delta", text: "Done. " }, { type: "done" }],
+  ] });
+  realAddonDeps(h);
+  const r = await h.runner.runVoiceTurn({ db: {}, device: h.device, transcript: "do the thing", sink: h.sink });
+  assert.deepEqual(h.calls.executed, ["stub_do", "stub_more"], 'the bare "stub" grant covers every tool that server exposes');
+  assert.deepEqual(r.timings.tools.map((s) => s.split("+")).flat(),
+    ["stub_do:ok", "stub_more:ok", "other_do:not_offered", "crow_tools:refused_policy"],
+    "an add-on the bot was never given is refused, directly and through the crow_tools proxy, as the executor would refuse it");
+  assert.match(h.log[1].messages.find((m) => m.role === "tool" && m.tool_name === "crow_tools").content, /isn't allowed to use "other do" by voice/);
+}));
 
 test("wasOffered: own name, an offered category's action, a selected add-on behind an offered wrapper; nothing else", () => {
   const cat = (n) => toolCategoryOf(n);

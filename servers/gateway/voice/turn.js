@@ -311,6 +311,20 @@ export function createVoiceTurnRunner(deps) {
   const withSuffix = (system, suffix) => (suffix ? `${system}\n\n${suffix}` : system);
 
   /**
+   * Is this add-on tool one the bound bot was given? The executor's own (server, tool) grant
+   * (`addonGranted(scope.addonGrants, server, tool)`), read by NAME because a voice call carries the name
+   * the model used: a bare "<server>" pick ("studio") grants every tool that server exposes, where
+   * selectedToolNames holds the "<server>/<tool>" picks only. deps.addonToolGranted is that grant over the
+   * connected add-on servers. A scope without the grant map fails closed — an add-on tool is allowed only
+   * when the same grant the executor reads gives it.
+   */
+  function addonAllowedName(scope, name) {
+    if (!scope || typeof name !== "string" || !name) return false;
+    if (typeof deps.addonToolGranted !== "function" || !(scope.addonGrants instanceof Map)) return false;
+    return deps.addonToolGranted(scope.addonGrants, name) === true;
+  }
+
+  /**
    * This turn's voice keys (roles Phase 1): the router's fast/escalate keys as resolved now (env, a chosen
    * voice/everyday binding, else the raw constants), and the bot's own fast key (a `role:` ref resolved, a raw key
    * as it is, none = the fast key). Without deps.resolveVoiceKeys / deps.resolveBotVoiceKey: deps.fastKey,
@@ -395,7 +409,7 @@ export function createVoiceTurnRunner(deps) {
     if (tools.some((t) => t.name === "crow_tools") && typeof deps.connectedAddonTools === "function") {
       const scope = deps.botVoiceScope(bot);
       const direct = new Set(tools.map((t) => t.name));
-      hidden = [...deps.connectedAddonTools()].filter((n) => !direct.has(n) && (!scope || scope.selectedToolNames.has(n)));
+      hidden = [...deps.connectedAddonTools()].filter((n) => !direct.has(n) && (!scope || addonAllowedName(scope, n)));
     }
     let escalates = false;
     if (keys.escalate && typeof deps.toolEscalationEnabled === "function" && deps.toolEscalationEnabled() === true) {
@@ -1179,7 +1193,7 @@ export function createVoiceTurnRunner(deps) {
       let offeredNames = new Set(tools.map((t) => t.name));
       const offeredCheck = {
         categoryOf: typeof deps.toolCategory === "function" ? deps.toolCategory : () => null,
-        selectedAddon: (n) => !!scope && scope.selectedToolNames.has(n) && deps.isConnectedAddonTool(n),
+        selectedAddon: (n) => !!scope && deps.isConnectedAddonTool(n) && addonAllowedName(scope, n),
       };
       const policyGate = (tc) => {
         // Crow's own tools run in-process and are offered by name: none of the remote-tool checks below (spoken
@@ -1222,7 +1236,7 @@ export function createVoiceTurnRunner(deps) {
         if (!extraByName.has(tc.name) && !wasOffered(tc, offeredNames, offeredCheck)) {
           return refuse("not_offered", `"${shortName(eff)}" is not available here. Tell the user you can't do that here, then end your turn — do not call another tool.`, true);
         }
-        if (scope && deps.isConnectedAddonTool(eff) && !scope.selectedToolNames.has(eff)) {
+        if (scope && deps.isConnectedAddonTool(eff) && !addonAllowedName(scope, eff)) {
           return refuse("refused_policy", `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.`);
         }
         if (policy.external_send === "draft_only" && deps.isExternalSendTool(eff)) {
@@ -2210,6 +2224,8 @@ export async function defaultVoiceDeps() {
     isExternalSendTool: tx.isExternalSendTool,
     isConnectedAddonTool: tx.isConnectedAddonTool,
     connectedAddonTools: () => tx.connectedAddonToolNames(),
+    // The same (server, tool) grant the advertising code and the executor read, by tool name.
+    addonToolGranted: tx.addonToolGranted,
     ownTools: ownTools.forTurn,
     // The hand-off tool (PR 3): one process core, this runner's pending store.
     handoffs: { forTurn: (ctx) => getHandoffCore().forTurn({ ...ctx, pending }) },

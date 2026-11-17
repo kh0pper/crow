@@ -97,6 +97,10 @@ test("forwardActorMeta carries a downgrade header to the server a router dispatc
   assert.deepEqual(forwardActorMeta(hdr({ "x-crow-actor-kind": "unknown" })), { _meta: { "crow/actor": { kind: "unknown" } } });
   assert.deepEqual(forwardActorMeta(hdr({ "x-crow-actor-kind": "owner" })), {});
   assert.deepEqual(forwardActorMeta({ authInfo: { token: "peer-instance" }, ...hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "b" }) }), { _meta: { "crow/actor": { kind: "peer" } } });
+  // a bot header with no usable id: the CLAIM still travels ({kind:"bot"}, no id), and the far side
+  // resolves it to unknown — never to the owner it would otherwise see.
+  assert.deepEqual(forwardActorMeta(hdr({ "x-crow-actor-kind": "bot" })), { _meta: { "crow/actor": { kind: "bot" } } });
+  assert.deepEqual(resolveCallActor(OWNER, forwardActorMeta(hdr({ "x-crow-actor-kind": "bot" }))), UNKNOWN);
   // a forwarded owner header can never become the owner on the far side
   assert.equal(resolveCallActor(OWNER, forwardActorMeta(hdr({ "x-crow-actor-kind": "unknown" }))).kind, "unknown");
 });
