@@ -44,6 +44,14 @@ export async function mountFeatureRoutes(app, deps) {
     const { default: storageHttpRouter } = await import("../routes/storage-http.js");
     app.use(storageHttpRouter(authMiddleware));
 
+    // The OWNER's media read: GET /dashboard/media/:key(*), behind the
+    // DASHBOARD session (a browser <img> carries only the crow_session cookie,
+    // which the MCP bearer auth above does not accept). It proxies the bytes
+    // and is NOT in PUBLIC_FUNNEL_PREFIXES — the global Funnel middleware
+    // refuses a funneled request before this mount. See routes/owner-media.js.
+    const { default: ownerMediaRouter } = await import("../routes/owner-media.js");
+    app.use(ownerMediaRouter(dashboardAuth));
+
     console.log("Storage server mounted");
   } catch (err) {
     // Storage server not available (missing deps or not configured)

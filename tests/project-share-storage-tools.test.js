@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import express from "express";
 
 const dir = mkdtempSync(join(tmpdir(), "share-storage-"));
 const DATA = join(dir, "data");
@@ -802,4 +803,112 @@ test("the background tools refuse an unverified bot and let a normal bot through
       assert.doesNotMatch(allowed.text, /That tool is for the operator only/, tool);
     }
   } finally { await unverified.close(); await normal.close(); }
+});
+
+// --- a bot may not attach a file to a blog post ----------------------------------------------
+// `/blog/media` serves what a PUBLISHED PUBLIC post uses, and `reference_id` is the uploader's
+// own claim — so a bot that could set `reference_type: blog_post` could park arbitrary bytes (a
+// text/html page included) behind a published post's id. Both upload paths refuse it, with one
+// fixed message; the owner and an unidentified caller are unchanged, and sunvox-studio's own
+// saveToStorage path (which writes its storage_files row itself) is not either.
+
+const BLOG_POST_REFUSAL = /^Error: Only the owner can attach files to blog posts\.$/;
+
+async function seedPublishedPublicPost(slug = "storage-share-post") {
+  const r = await db.execute({
+    sql: `INSERT INTO blog_posts (slug, title, content, status, visibility, published_at)
+          VALUES (?, ?, 'body', 'published', 'public', datetime('now')) RETURNING id`,
+    args: [slug, slug],
+  });
+  return Number(r.rows[0].id);
+}
+
+test("a bot-bound crow_upload_file may not use reference_type blog_post, with or without a reference_id", async () => {
+  const A = await mkProject();
+  const bot = await mkBot({ home: A });
+  const prefix = await storagePrefix(A);
+  const postId = await seedPublishedPublicPost();
+  const s3 = fakeS3();
+  const s = await open({ actor: { kind: "bot", id: bot }, s3 });
+  try {
+    const before = await count("SELECT COUNT(*) AS n FROM storage_files WHERE s3_key LIKE ?", [`${prefix}%`]);
+    for (const args of [
+      { reference_type: "blog_post", reference_id: postId },
+      { reference_type: "blog_post" },
+    ]) {
+      const r = await s.call("crow_upload_file", {
+        file_name: "page.html", mime_type: "text/html", data_base64: base64("<script>x</script>"), ...args,
+      });
+      assert.equal(r.isError, true, JSON.stringify(args));
+      assert.match(r.text, BLOG_POST_REFUSAL, JSON.stringify(args));
+    }
+    assert.equal(await count("SELECT COUNT(*) AS n FROM storage_files WHERE s3_key LIKE ?", [`${prefix}%`]), before,
+      "no row was recorded");
+    assert.equal(s3.calls.upload.length, 0, "nothing was written to storage");
+    assert.equal(s3.calls.put.length, 0, "no presigned upload URL either");
+
+    // The refusal names no post and no file.
+    const named = await s.call("crow_upload_file", {
+      file_name: "page.html", mime_type: "text/html", data_base64: base64("x"), reference_type: "blog_post", reference_id: postId,
+    });
+    assert.doesNotMatch(named.text, /storage-share-post|page\.html/);
+  } finally { await s.close(); }
+});
+
+test("the owner (and an unidentified caller) may still attach a file to a blog post", async () => {
+  const postId = await seedPublishedPublicPost("storage-share-owner-post");
+  for (const [label, actor] of [["owner", OWNER], ["unknown", UNKNOWN]]) {
+    const s3 = fakeS3();
+    const s = await open({ actor, s3 });
+    try {
+      const r = await s.call("crow_upload_file", {
+        file_name: "cover.png", mime_type: "image/png", data_base64: base64("png"),
+        reference_type: "blog_post", reference_id: postId,
+      });
+      assert.equal(r.isError, false, `${label}: ${r.text}`);
+      const row = await fileRow(/Key: (\S+)/.exec(r.text)[1]);
+      assert.equal(row.reference_type, "blog_post");
+      assert.equal(Number(row.reference_id), postId);
+      assert.equal(s3.calls.upload.length, 1);
+    } finally { await s.close(); }
+  }
+});
+
+test("the HTTP upload refuses a bot-bound blog_post reference too, before touching storage", async () => {
+  const { default: storageHttpRouter } = await import("../servers/gateway/routes/storage-http.js");
+  const postId = await seedPublishedPublicPost("storage-share-http-post");
+  const app = express();
+  app.use(storageHttpRouter(null));   // the bearer wrapper, not the rule under test
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((ok) => server.once("listening", ok));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const upload = async (headers, fields = {}) => {
+    const fd = new FormData();
+    fd.append("file", new Blob(["<script>x</script>"], { type: "text/html" }), "page.html");
+    for (const [k, v] of Object.entries(fields)) fd.append(k, String(v));
+    return fetch(`${base}/storage/upload`, { method: "POST", headers, body: fd });
+  };
+  try {
+    const before = await count("SELECT COUNT(*) AS n FROM storage_files");
+    // The bot's own marker headers (servers/research/actor.js reads them off the request).
+    for (const fields of [
+      { reference_type: "blog_post", reference_id: postId },
+      { reference_type: "blog_post" },
+    ]) {
+      const r = await upload({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "storage-http-bot" }, fields);
+      assert.equal(r.status, 403, JSON.stringify(fields));
+      const body = await r.json();
+      assert.equal(body.error, "Only the owner can attach files to blog posts.");
+    }
+    assert.equal(await count("SELECT COUNT(*) AS n FROM storage_files"), before, "no row was recorded");
+
+    // The same request without a bot marker is not refused by THIS rule: it
+    // falls through to the storage probe (no backend in this test → 503).
+    const ownerish = await upload({}, { reference_type: "blog_post", reference_id: postId });
+    assert.equal(ownerish.status, 503);
+    assert.doesNotMatch(JSON.stringify(await ownerish.json()), /Only the owner/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((ok) => server.close(ok));
+  }
 });

@@ -74,7 +74,7 @@ tools:
 ## Tips
 
 - Use tags consistently for cross-referencing (same tags across blog and research)
-- Cover images: upload with `crow_upload_file` (reference_type: `blog_post`), then set the `cover_image_key` — the file is served at `/blog/media/<key>` once the post is published as public
+- Cover images: upload with `crow_upload_file` (reference_type: `blog_post` — the owner's to set; a bot is refused that reference), then set the `cover_image_key` — the file is served at `/blog/media/<key>` once a published public post uses it (as its cover, or linked in its text). A `reference_id` alone serves nothing.
 - The Blog panel in the Crow's Nest at `/dashboard/blog` provides a visual editor
 - `crow_blog_stats` shows post counts and tag distribution
 - Open Graph meta tags are automatically generated for public posts

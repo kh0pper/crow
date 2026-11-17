@@ -28,7 +28,7 @@ tools:
 1. Check if storage is available: `crow_storage_stats`
 2. For small files (<1MB): Use `crow_upload_file` with base64 data
 3. For larger files: Use `crow_upload_file` without data to get a presigned upload URL, or direct the user to `POST /storage/upload`
-4. Link files to other items using `reference_type` and `reference_id` (e.g., `blog_post` with the post's id, `research_source`)
+4. Link files to other items using `reference_type` and `reference_id` (e.g., `research_source`). Only the owner attaches files to blog posts (`blog_post`): a bot's upload with that reference type is refused.
 
 ### Find and Share Files
 
@@ -44,8 +44,9 @@ tools:
 
 ## Tips
 
-- Always set `reference_type` when uploading files for blog posts (`blog_post`) or research (`research_source`)
-- A `blog_post` file is served at `/blog/media/<key>` only once a published public post uses it — its `reference_id` names that post, or the file is the post's cover, or the post's content links `/blog/media/<key>`. Until then the URL is a 404.
+- Set `reference_type` when uploading files for research (`research_source`). `blog_post` is the owner's to set: a bot asking for it is refused ("Only the owner can attach files to blog posts."), because it is how a file becomes public.
+- A `blog_post` file is served at `/blog/media/<key>` only once a published public post uses it — as its cover image, or linked in its text (`/blog/media/<key>` or `storage:<key>`). A `reference_id` alone publishes nothing: the uploader supplies it. Until a post uses the file, the URL is a 404.
+- What comes back inline is a raster image, audio, video or a `.sunvox` project. Anything else (HTML, SVG, PDF) is served as a download, so hosting a page on the blog origin is not a thing a file upload can do.
 - Use descriptive file names — they're preserved in the database
 - Presigned URLs expire (default 1 hour) — generate fresh ones when needed
 - MIME type validation blocks executables for security

@@ -22,6 +22,7 @@ Core MCP transport logic is in `routes/mcp.js`, which exports the `mountMcpServe
 |---|---|
 | `routes/mcp.js` | `mountMcpServer()` — mounts Streamable HTTP + SSE transports for any MCP server |
 | `routes/storage-http.js` | File upload (multipart) and download (presigned redirect) HTTP routes |
+| `routes/owner-media.js` | `GET /dashboard/media/:key(*)` — the owner's media read behind the dashboard session (proxied bytes; the MCP bearer route `/storage/file/` is not reachable from an `<img>`) |
 | `routes/blog-public.js` | Public blog pages, tag pages, RSS and Atom feeds (no auth) |
 | `dashboard/` | Crow's Nest UI panels and auth system |
 | `session-manager.js` | Consolidated session storage for all MCP servers (replaces per-server Maps) |

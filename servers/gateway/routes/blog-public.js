@@ -19,6 +19,7 @@ import { generateRss, generateAtom } from "../../blog/rss.js";
 import { generatePodcastFeed } from "../../blog/podcast-rss.js";
 import { LEGACY_FONT_IMPORT as FONT_IMPORT, legacyDesignTokensCss as designTokensCss } from "../dashboard/shared/design-tokens-legacy.js";
 import { isAvailable, getObject } from "../../storage/s3-client.js";
+import { setMediaResponseHeaders } from "../../blog/media-policy.js";
 import { loadCollectionsConfig } from "../blog/collections-config.js";
 import { sanitizeLimitedHtml } from "../../blog/limited-html.js";
 import { t, SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
@@ -621,7 +622,7 @@ export default function blogPublicRouter({ storage = {} } = {}) {
     }
     try {
       // OWNER PREVIEW: the editor is drawing a DRAFT, so its media references go
-      // to the authenticated storage route (the public /blog/media route serves
+      // to the dashboard's own media route (the public /blog/media route serves
       // a key only once a published public post uses it). Public pages and bot
       // rendering never pass a media base.
       const html = renderMarkdown(markdown, { mediaBase: OWNER_MEDIA_BASE });
@@ -921,38 +922,34 @@ export default function blogPublicRouter({ storage = {} } = {}) {
       const s3Key = req.params.key;
 
       // Security: serve a key only when it belongs to a PUBLISHED PUBLIC blog
-      // post — one of:
-      //   (a) a storage_files row attached to such a post (reference_id names
-      //       it; the column is TEXT-y, so compare cast text-to-text),
-      //   (b) a published public post's cover_image_key, or
-      //   (c) a key one of their bodies links, i.e. the rendered
+      // post in one of exactly two ways:
+      //   (b) it is such a post's cover_image_key, or
+      //   (c) one of their bodies links it, i.e. the rendered
       //       `/blog/media/<key>`, the `storage:<key>` form the renderer and
       //       the songbook turn into it, or its percent-encoded spelling (per
       //       segment, and the whole-key form the songbook emits for a SunVox
       //       project).
-      // A bare reference_type = 'blog_post' row proves nothing — the upload
-      // API accepts that with no reference_id — so on this Funnel-public route
-      // it would let any caller with storage tools host arbitrary files, and
-      // would publish a draft's images before the post is published.
+      //
+      // There is no third rule. A storage_files row's `reference_id` naming a
+      // published public post is NOT a grant: the uploader supplies it, so a
+      // bot could point any object at any published post and have
+      // `/blog/media` serve it on this Funnel-public route. A file becomes
+      // public when a post actually USES it — as its cover, or linked in its
+      // text — and not before.
       //
       // And a storage row of another KIND is never served here, however it is
       // linked: (b) and (c) are about a blog post's USE of a key, not about the
       // object being harmless, so `research_source`/`research_note` (and any
       // other type) stays off the public Funnel even when a public post's body
-      // happens to spell its key. Only 'blog_post' — what (a) already requires —
-      // and an UNTYPED row (NULL/'', the older inline uploads) qualify.
+      // happens to spell its key. Only 'blog_post' and an UNTYPED row
+      // (NULL/'', the older inline uploads) qualify.
       if (!s3Key) return res.status(404).send("Not found");
-      const attached = await db.execute({
+      const rows = await db.execute({
         sql: `SELECT sf.mime_type, sf.bucket,
-                     ((sf.reference_type = 'blog_post' AND EXISTS (
-                        SELECT 1 FROM blog_posts bp_ref
-                         WHERE CAST(bp_ref.id AS TEXT) = CAST(sf.reference_id AS TEXT)
-                           AND bp_ref.status = 'published' AND bp_ref.visibility = 'public'))
-                      OR EXISTS (
-                        SELECT 1 FROM blog_posts bp_cover
-                         WHERE bp_cover.cover_image_key = sf.s3_key
-                           AND bp_cover.status = 'published' AND bp_cover.visibility = 'public'))
-                       AS attached
+                     EXISTS (
+                       SELECT 1 FROM blog_posts bp_cover
+                        WHERE bp_cover.cover_image_key = sf.s3_key
+                          AND bp_cover.status = 'published' AND bp_cover.visibility = 'public') AS is_cover
                 FROM storage_files sf
                WHERE sf.s3_key = ?
                  AND (sf.reference_type = 'blog_post'
@@ -962,11 +959,11 @@ export default function blogPublicRouter({ storage = {} } = {}) {
         args: [s3Key],
       });
 
-      if (attached.rows.length === 0) {
+      if (rows.rows.length === 0) {
         return res.status(404).send("Not found");
       }
-      const file = attached.rows[0];
-      const allowed = Number(file.attached) > 0 || (await contentLinksKey(db, s3Key));
+      const file = rows.rows[0];
+      const allowed = Number(file.is_cover) > 0 || (await contentLinksKey(db, s3Key));
       if (!allowed) {
         return res.status(404).send("Not found");
       }
@@ -981,15 +978,15 @@ export default function blogPublicRouter({ storage = {} } = {}) {
       const { stream, stat } = bucket
         ? await storageGetObject(s3Key, { bucket })
         : await storageGetObject(s3Key);
-      const contentType = file.mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
+      const mimeType = file.mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
 
-      res.set("Content-Type", contentType);
       res.set("Content-Length", String(stat.size));
-      res.set("Cache-Control", "public, max-age=86400");
-      // This is a Funnel-public route: a stored object must never be sniffed
-      // into something the browser would execute (an HTML or SVG upload served
-      // as octet-stream stays a download).
-      res.set("X-Content-Type-Options", "nosniff");
+      // This is a Funnel-public route: a stored object must never be an inline
+      // DOCUMENT on the dashboard's origin. media-policy.js is the one rule
+      // both media routes use — an inline-capable type is a raster image,
+      // audio, video or a `.sunvox` octet-stream; HTML, SVG, PDF and everything
+      // else goes out as an attachment under a sandboxing CSP, nosniff always.
+      setMediaResponseHeaders(res, { mimeType, s3Key, cacheControl: "public, max-age=86400" });
       stream.pipe(res);
     } catch (err) {
       console.error("[blog] Media error:", err);

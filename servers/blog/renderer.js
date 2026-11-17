@@ -111,7 +111,7 @@ marked.setOptions({ gfm: true, breaks: true });
  *   `img-src` names (see setRendererStorageOrigin). `mediaBase` renders media
  *   references against another base than the PUBLIC `/blog/media/` route — it
  *   exists for the OWNER's authenticated previews only (OWNER_MEDIA_BASE, the
- *   dashboard-only `/storage/file/` route), because a draft's images are
+ *   dashboard-only `/dashboard/media/` route), because a draft's images are
  *   refused by the public route until the post is published. Omitted, this is
  *   exactly the renderer it always was: every public page and bot surface keeps
  *   `/blog/media/`.
@@ -1292,17 +1292,21 @@ const botMarked = new Marked({
 /** The only image path a bot reply may use — the public blog media route. */
 const BOT_IMAGE_PREFIX = "/blog/media/";
 /**
- * The AUTHENTICATED storage route as a media base — `/storage/file/<key>`
- * (servers/gateway/routes/storage-http.js, `GET /storage/file/:key(*)`, mounted
- * behind the gateway's auth middleware in boot/feature-mounts.js). Passed as
+ * The DASHBOARD session's media route as a media base — `/dashboard/media/<key>`
+ * (servers/gateway/routes/owner-media.js, `GET /dashboard/media/:key(*)`, behind
+ * dashboardAuth and mounted in boot/feature-mounts.js). Passed as
  * renderMarkdown's `mediaBase` by the owner-only previews (the blog panel's
  * draft preview, its live `POST /blog/preview`), which draw a DRAFT's images:
  * the public `/blog/media/` route serves a key only while a published public
  * post uses it, so a preview pointing there would show broken images until
  * publish day. Never passed by a public page or a bot surface — those keep
  * `/blog/media/`.
+ *
+ * NOT `/storage/file/`: that route sits behind the MCP bearer auth, and a
+ * browser `<img>` sends only the `crow_session` cookie, so every draft image
+ * rendered through it was a 401.
  */
-export const OWNER_MEDIA_BASE = "/storage/file/";
+export const OWNER_MEDIA_BASE = "/dashboard/media/";
 /**
  * A published case-study figure — one of the OWNER path's read-only
  * same-origin paths, and NEVER one a bot reply may use.
@@ -1542,7 +1546,7 @@ function isAllowedImageSrc(src, policy, storageOrigin, mediaBase = null) {
   // media route.
   if (isAllowedBotImageSrc(src)) return true;
   if (policy !== "owner") return false;
-  // (a1) the AUTHENTICATED storage route, when this render is an owner preview
+  // (a1) the DASHBOARD's own media route, when this render is an owner preview
   // that swapped the media base (see rewriteMediaSrc): the same read-only GET,
   // under the same shape rules as (a) — nothing that resolves out of the prefix,
   // no encoded separator, no `//`. Only a preview passes a base, so no bot reply

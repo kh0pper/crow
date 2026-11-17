@@ -20,10 +20,12 @@ Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files.
 | `mime_type` | string | No | 200 | MIME type (e.g., `image/png`) |
 | `data_base64` | string | No | 1500000 | Base64-encoded file data (for files <1MB) |
 | `bucket` | string | No | 100 | Target bucket (default: `crow-files`) |
-| `reference_type` | string | No | 100 | What this file is attached to (e.g., `blog_post`, `project_source`) |
+| `reference_type` | string | No | 100 | What this file is attached to (`research_source`, `research_note`). `blog_post` is the owner's: a BOT-BOUND caller asking for it is refused ("Only the owner can attach files to blog posts.") |
 | `reference_id` | number | No | — | ID of the referenced item |
 
 When `data_base64` is provided, the file is uploaded directly. When omitted, a presigned upload URL is returned for larger files.
+
+A `blog_post` reference never makes a file public by itself: `GET /blog/media/<key>` serves a key only while a PUBLISHED PUBLIC post uses it — as its cover image, or linked from its content. And only media comes back inline (a raster image, audio, video, a `.sunvox` project); HTML, SVG and PDF are served as attachments under a sandboxing CSP.
 
 **Returns (direct upload):**
 

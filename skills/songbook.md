@@ -94,7 +94,7 @@ Songs can carry a SunVox project (`.sunvox`, `.xm`, or `.mod`) that renders as a
 interactive player on the song page — transport, volume, and an **A/B section
 loop** for practicing a passage. The track loops endlessly until stopped.
 
-1. Upload the project via `crow_upload_file` (S3 storage) with `reference_type: "blog_post"`, then let a published public post use it — `/blog/media/<key>` serves a file only for a published public post (the `**SunVox:**` line below is that use), so without it the player gets a 404
+1. Upload the project via `crow_upload_file` (S3 storage, `reference_type: "blog_post"` — the owner's to set; a bot is refused that reference), then let a published public post use it — `/blog/media/<key>` serves a file only when a published public post uses it, as its cover or linked in its text (the `**SunVox:**` line below is that use), so without it the player gets a 404
 2. Create the song with `sunvox_key` parameter (or add `**SunVox:** storage:<key>` to the content of an existing song)
 3. The player appears automatically; its engine (~800KB WASM) loads lazily on first Play
 

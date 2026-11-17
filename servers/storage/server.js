@@ -27,6 +27,7 @@ import {
   isAllowedMimeType,
 } from "./s3-client.js";
 import { actorFromEnv, resolveCallActor, auditActor } from "../research/actor.js";
+import { BLOG_POST_REFERENCE_TYPE, BLOG_POST_OWNER_ONLY_MESSAGE } from "../blog/media-policy.js";
 import {
   makeShareGate,
   scopePredicate,
@@ -39,12 +40,14 @@ import {
 // referenced row must belong to the same project_id (or both be project-less).
 // Otherwise file ACL and content ACL silently disagree.
 //
-// Public serving: a `blog_post` reference no longer makes a file public by
-// itself. GET /blog/media/<key> serves a key only when it is attached to a
-// blog post that is BOTH published and public (by reference_id), is such a
-// post's cover image, or is linked from such a post's content — so storing
-// reference_type='blog_post' here, with or without a reference_id, publishes
-// nothing until a post actually uses the file.
+// Public serving: a file's `reference_id` is never what makes it public.
+// GET /blog/media/<key> serves a key only when a blog post that is BOTH
+// published and public USES it — as its cover image, or linked from its
+// content — so storing reference_type='blog_post' here, with or without a
+// reference_id, publishes nothing until a post actually uses the file. And a
+// BOT-BOUND caller may not attach a file to a blog post at all: the reference
+// is the uploader's claim, so a bot could otherwise park arbitrary bytes (a
+// text/html object, say) behind any published post's id.
 const REFERENCE_PROJECT_LOOKUP = {
   research_source: "SELECT project_id FROM research_sources WHERE id = ?",
   research_note:   "SELECT project_id FROM research_notes   WHERE id = ?",
@@ -199,6 +202,12 @@ export function createStorageServer(dbPath, options = {}) {
       const targetProjectId = pass.projectId;
       const bound = await boundByShares(gate);
       if (bound && bucket) return refusalResult(BUCKET_OVERRIDE_MESSAGE);
+      // A bot may not attach a file to a blog post (see the note above
+      // REFERENCE_PROJECT_LOOKUP). Checked before the storage probe, so the
+      // refusal needs no backend and nothing is written. The owner, an
+      // unidentified caller and sunvox-studio's own saveToStorage path (which
+      // writes its storage_files row itself) are unaffected.
+      if (bound && reference_type === BLOG_POST_REFERENCE_TYPE) return refusalResult(BLOG_POST_OWNER_ONLY_MESSAGE);
 
       if (!(await s3.isAvailable())) return notConfiguredError();
 

@@ -98,7 +98,7 @@ export default {
     // Preview renders a draft/private post exactly as it would appear on
     // the public blog, so authors can review before publishing. Auth is
     // already enforced by the dashboard middleware stack. The one deliberate
-    // difference: media references render against the AUTHENTICATED storage
+    // difference: media references render against the DASHBOARD's own media
     // route (renderMarkdown's mediaBase), because the public /blog/media route
     // serves a key only once a published public post uses it — a draft's images
     // would otherwise be broken exactly where the author is checking them.
@@ -211,10 +211,12 @@ export default {
         const previewBtn = `<a href="?preview=${p.id}" target="_blank" rel="noopener" data-turbo="false" class="btn btn-sm btn-secondary">Preview</a>`;
         const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("blog.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-danger" type="submit">${t("blog.delete", lang)}</button></form>`;
 
-        // The authenticated storage route, not /blog/media: this list shows
-        // DRAFTS and private posts too, whose covers the public route refuses.
+        // The dashboard's own media route, not /blog/media: this list shows
+        // DRAFTS and private posts too, whose covers the public route refuses —
+        // and not /storage/file, which is behind the MCP bearer auth a browser
+        // <img> never sends.
         const thumb = p.cover_image_key
-          ? `<img src="/storage/file/${encodeURIComponent(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
+          ? `<img src="/dashboard/media/${encodeURIComponent(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
           : "";
         return [
           `${thumb}<a href="?edit=${p.id}" data-turbo-frame="_top" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(p.title)}</a>`,

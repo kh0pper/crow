@@ -12,8 +12,10 @@
 /** reference_type values this bundle may set. Others (research_source,
  *  research_note) carry project ACL checks in the storage server, which a
  *  bundle must not bypass. blog_post marks a file a post may use; the gateway's
- *  /blog/media/<key> serves it only while a PUBLISHED PUBLIC post references
- *  it, which is where a song page's player fetches it. */
+ *  /blog/media/<key> serves it only while a PUBLISHED PUBLIC post actually uses
+ *  it (as its cover, or linked in its text), which is where a song page's
+ *  player fetches it. This bundle writes its own storage_files row (a bot-bound
+ *  crow_upload_file may not set blog_post at all), so that rule is unchanged. */
 import { randomBytes } from "node:crypto";
 
 export const REFERENCE_TYPES = Object.freeze(["blog_post"]);
