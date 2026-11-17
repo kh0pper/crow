@@ -30,6 +30,7 @@ import { parseHTML } from "linkedom";
 
 import { markFromLaptop } from "./helpers/off-box.js";
 import { mailClientJs } from "../servers/gateway/dashboard/panels/mail/client.js";
+import { mailCss } from "../servers/gateway/dashboard/panels/mail/css.js";
 import { renderMailPage } from "../servers/gateway/dashboard/panels/mail/html.js";
 import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
 
@@ -288,6 +289,89 @@ test("choosing a bot creates one draft and starts one turn", async () => {
   assert.deepEqual(rig.visits, [`/dashboard/perch?bot=draftbot&maildraft=${DRAFT_ID}`]);
 });
 
+test("a refused drafting turn still opens the draft's card, without a bot in the URL", async () => {
+  // The turn was refused, so the draft holds no revision — but it exists, and the card is where the
+  // person fills it by hand. The reader goes there with no bot in the URL, as the hand paths do, so
+  // the draft is never orphaned; the refusal sentence is kept for a card that cannot be opened.
+  const rig = boot(messagePage(), {
+    answers: {
+      ...botOptions({
+        bots: [{ id: "draftbot", name: "Draft bot", suggested: false, reason: null }],
+        projects: [],
+      }),
+      [`POST ${DRAFTS}`]: { draft: { id: DRAFT_ID } },
+      [`POST ${DRAFTS}/${DRAFT_ID}/turn`]: () => jsonResponse(503, { error: "cloud_drafting_off" }),
+    },
+  });
+  rig.click(rig.$("[data-ml-reply-bot]"));
+  await rig.settle();
+
+  const pick = rig.$('[data-ml-bot-pick][data-bot="draftbot"]');
+  assert.ok(pick, "the picker lists the bot");
+  rig.click(pick);
+  await rig.settle();
+
+  assert.equal(rig.calls.filter((call) => call.method === "POST" && call.url === DRAFTS).length, 1);
+  assert.deepEqual(rig.visits, [`/dashboard/perch?maildraft=${DRAFT_ID}`], "the card opens, with no bot");
+  const refusal = rig.$("[data-ml-picker-refusal]");
+  assert.equal(refusal.hasAttribute("hidden"), true, "the refusal sentence is not what the person sees");
+  assert.equal(pick.hasAttribute("disabled"), false, "the button is usable again");
+});
+
+test("a created draft whose id is not a draft id opens nothing and starts no turn", async () => {
+  const rig = boot(messagePage(), {
+    answers: {
+      ...botOptions({
+        bots: [{ id: "draftbot", name: "Draft bot", suggested: false, reason: null }],
+        projects: [],
+      }),
+      [`POST ${DRAFTS}`]: { draft: { id: "md-not-a-draft-id" } },
+    },
+  });
+  rig.click(rig.$("[data-ml-reply-bot]"));
+  await rig.settle();
+  rig.click(rig.$('[data-ml-bot-pick][data-bot="draftbot"]'));
+  await rig.settle();
+
+  assert.equal(rig.calls.filter((call) => call.method === "POST" && call.url.includes("/turn")).length, 0, "no turn is started");
+  assert.deepEqual(rig.visits, [], "no URL is built from the id");
+  const line = rig.$("[data-mail-reply-slot] [data-ml-status-line]");
+  assert.ok(line, "the failure is said in the slot");
+  assert.equal(line.hasAttribute("hidden"), false);
+  assert.equal(line.textContent, translations["mail.error.network"].en);
+});
+
+test("the picker skips a bot whose id is not a bot id", async () => {
+  const rig = boot(messagePage(), {
+    answers: botOptions({
+      bots: [
+        { id: "draftbot", name: "Draft bot", suggested: false, reason: null },
+        { id: "../escape", name: "Bad bot", suggested: false, reason: null },
+        { id: "bad bot", name: "Spaced bot", suggested: false, reason: null },
+        { id: "x".repeat(65), name: "Long bot", suggested: false, reason: null },
+        { id: "", name: "Nameless bot", suggested: false, reason: null },
+      ],
+      projects: [],
+    }),
+  });
+  rig.click(rig.$("[data-ml-reply-bot]"));
+  await rig.settle();
+
+  const picks = rig.$$("[data-ml-bot-pick]").map((node) => node.getAttribute("data-bot"));
+  assert.deepEqual(picks, ["draftbot"], "only an id of letters, digits, dot, underscore or hyphen is drawn");
+});
+
+test("the reply slot's strings element cannot override hidden", async () => {
+  const html = messagePage();
+  const strings = /<div class="ml-note" data-ml-reply-strings hidden/.test(html);
+  assert.ok(strings, "the strings element carries the hidden attribute");
+  // `.ml-note` is the class that element carries: a display declaration there would beat the user
+  // agent's own `[hidden]` rule and print the data attributes on the page.
+  const rule = /\.ml-note \{([^}]*)\}/.exec(mailCss({ message: true }));
+  assert.ok(rule, "the base rules carry .ml-note");
+  assert.doesNotMatch(rule[1], /display\s*:/, "no display declaration, so hidden still applies");
+});
+
 test("a bot that may not draft shows the fixed refusal and creates no draft", async () => {
   const rig = boot(messagePage(), {
     answers: botOptions({ bots: [], projects: [], refused: "cloud_drafting_off" }),
@@ -526,6 +610,9 @@ test("a thread with no filing suggests no bot, and a filed one suggests its proj
     parseError: null,
   });
   s.seed((raw) => {
+    // `project_id` is not a column of `mail_threads` in the shipped schema: this ALTER adds it to
+    // this scratch copy alone, so the suggestion path is exercised against a hypothetical store that
+    // records a thread's filing (the shipped store records none, as the case above shows).
     raw.prepare("ALTER TABLE mail_threads ADD COLUMN project_id INTEGER").run();
     raw.prepare("INSERT INTO project_spaces (id, slug, name) VALUES (7, 'launch', 'Launch')").run();
     raw.prepare("UPDATE mail_threads SET project_id = 7 WHERE id = ?").run(stored.threadId);

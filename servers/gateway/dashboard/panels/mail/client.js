@@ -70,8 +70,12 @@
  * picker asks GET /drafts/bot-options once per page: it draws a "No project" group always, one group
  * per project the answer names, and one button per bot, so a bot the person may not use is never
  * drawn. Picking a bot creates the reply draft, starts that bot's turn over it, and opens that bot's
- * card; a refusal — the owner's cloud switch off, an account that drafts with local models only, a
- * host that cannot start a turn — shows the sentence the page drew for that code and opens nothing.
+ * card. A refused turn — the owner's cloud switch off, an account that drafts with local models
+ * only, a host that cannot start a turn — still opens that draft's card, without a bot in the URL,
+ * because the draft exists and the card is where the person fills it by hand; the sentence the page
+ * drew for that code is kept for the one case the card cannot be opened at all (no usable draft id).
+ * A draft id that is not a draft id, and a bot id that is not a bot id, never become a URL or a
+ * control.
  * Bot names and reasons, and every project name, are written with textContent.
  *
  * Lifecycle: Turbo re-runs this script on every visit. Listeners on an element inside the panel are
@@ -821,6 +825,10 @@ export function mailClientJs(lang = "en") {
   var REPLY_SLOT = '[data-mail-reply' + '-slot]';
   var DRAFTS_PATH = '/dashboard/mail/api/drafts';
   var PERCH_PATH = '/dashboard/perch';
+  // The two ids that may be built into a URL or a control: the draft id the server mints ('md-' and
+  // sixteen hex characters) and a bot id. Anything else is a failure, never a link.
+  var DRAFT_ID_RE = /^md-[0-9a-f]{16}$/;
+  var BOT_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
   // One action at a time per page: a second tap while a draft is being made is ignored.
   var slotBusy = false;
 
@@ -919,7 +927,7 @@ export function mailClientJs(lang = "en") {
   function draftIdOf(result) {
     var draft = result && result.json && result.json.draft ? result.json.draft : null;
     var id = draft ? String(draft.id || '') : '';
-    return id === '' ? null : id;
+    return DRAFT_ID_RE.test(id) ? id : null;
   }
 
   // The person's own path: a draft made from this message (or from nothing) and its card, no bot.
@@ -969,7 +977,7 @@ export function mailClientJs(lang = "en") {
     var raw = json && Array.isArray(json.bots) ? json.bots : [];
     for (var i = 0; i < raw.length; i += 1) {
       var entry = raw[i];
-      if (!entry || typeof entry.id !== 'string' || entry.id === '') { continue; }
+      if (!entry || typeof entry.id !== 'string' || !BOT_ID_RE.test(entry.id)) { continue; }
       bots.push({
         id: entry.id,
         name: typeof entry.name === 'string' && entry.name !== '' ? entry.name : entry.id,
@@ -1047,7 +1055,7 @@ export function mailClientJs(lang = "en") {
     var mid = slotMid(slot);
     var bot = String(button.getAttribute('data-bot') || '');
     var project = String(button.getAttribute('data-project') || '');
-    if (account === '' || mid === '' || bot === '') { return; }
+    if (account === '' || mid === '' || !BOT_ID_RE.test(bot)) { return; }
     var body = { accountId: account, mode: 'reply', replyToMid: mid, botId: bot };
     if (project !== '') { body.projectId = Number(project); }
     slotBusy = true;
@@ -1064,9 +1072,11 @@ export function mailClientJs(lang = "en") {
         .then(function (turned) {
           button.removeAttribute('disabled');
           if (!turned.ok) {
-            // The draft exists, but nothing was written into it: the person sees why, and the card
-            // they can open from the reader is theirs to fill by hand.
+            // The draft exists, but nothing was written into it. It is not left behind: the reader
+            // opens that draft's card, with no bot in the URL, which is where the person fills it by
+            // hand. The refusal sentence is only for a card that cannot be opened at all.
             slotBusy = false;
+            if (id !== null) { navigate(perchHref(id, null)); return; }
             showRefusal(slot, turned.json && turned.json.error ? String(turned.json.error) : 'generic');
             return;
           }
