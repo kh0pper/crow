@@ -188,13 +188,25 @@
  *   on every edit, releases nothing that still exists: only a voice whose pad is
  *   gone from the new snapshot, or whose pad no longer names the sample (or
  *   slice) that voice is playing, ends, through the normal release.
- * - **Stop** releases the live state — every loop now — and so does
+ * - **Stop** releases the live state — every loop and every HOLD — and so does
  *   `{type:"reset_live"}`, which the page sends when a DIFFERENT song opens.
  *   Neither touches the song, and an ordinary song update never sends one.
  * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
  *   start never goes through history and is never quantized. A release only
- *   releases `gate` voices: a `oneshot` pad that was pressed plays to its end.
+ *   releases `gate` voices: a `oneshot` pad that was pressed plays to its end,
+ *   and a HELD voice is left alone (`{type:"hold"}` below).
+ * - **HOLD:** `{type:"hold", track_id, bank_id, index}` latches the `gate`
+ *   voices that pad is sounding right now (`holdPad`): the flag `held` goes on
+ *   the voice and it then ignores the operator letting go and its own gate
+ *   countdown, so a Gate pad keeps sounding on its own and a Gate+Loop pad's
+ *   loop keeps turning. HOLD is for Gate pads ONLY (M15): a `oneshot` or
+ *   `normal` pad is refused, and the page says so. `{type:"release_held"}` with
+ *   no ids lets every latch go, and with a track (and, or just, a pad) only
+ *   those; both clear the flag and run the voice's ORDINARY release from where
+ *   it stands. A held voice is the last one a steal takes (see `stealRank`), a
+ *   mute group's choke and a fade tail drop the flag, and a start clears it, so
+ *   a latched light always ends through the same scan as any other.
  * - **Speed:** `speed_pct` (50..150 %) and, while `bpm_sync` is on and the pad
  *   names a `source_bpm_x10`, the song's tempo against the sample's own move
  *   the voice's playback speed, held inside 0.25×..4×. It is varispeed: the
@@ -207,8 +219,10 @@
  *   whichever velocity the step carries: the voice's own gain, the
  *   `velocity_gain` a gain lane starts from, and the hit event the page lights
  *   are all the full 127.
- * - **Hold:** a `hold_ms` makes the voice sit at level 1 for that long between
- *   the attack and the decay (`sampler-voice.js`, "The hold stage").
+ * - **Hold stage:** a `hold_ms` makes the voice sit at level 1 for that long
+ *   between the attack and the decay (`sampler-voice.js`, "The hold stage"). It
+ *   belongs to the pad's envelope and is nothing to do with the operator's HOLD
+ *   latch above: a pad may have either, both or neither.
  * - **Locks:** every one of a pad's own fields can be locked per step —
  *   `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `pitch`, `gain_db`,
  *   `pan`, `reverse`, `cutoff_hz`, `resonance` and the filter's kind under
@@ -616,7 +630,8 @@
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
  * `{type:"play"}`, `{type:"pause"}`, `{type:"stop"}` (which also releases
- * the pads' live state — every loop), `{type:"reset_live"}` (the same release,
+ * the pads' live state — every loop and every HOLD), `{type:"reset_live"}` (the
+ * same release,
  * sent when a DIFFERENT song opens), `{type:"setMode", mode}`,
  * `{type:"seek", bar}` (a bar at beat resolution), `{type:"metronome", on}`,
  * `{type:"flush", id}`,
@@ -627,7 +642,9 @@
  * or `"ir"` with `channels`/`rate`), `{type:"library_unload", library_id}`,
  * `{type:"nam-wasm", bytes}` (the NAM engine binary, once per page),
  * `{type:"monitor", track_id, on}`, `{type:"live", track_id,
- * bank_id, index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name,
+ * bank_id, index, v, on}`, `{type:"hold", track_id, bank_id, index}`,
+ * `{type:"release_held", track_id?, bank_id?, index?}`, `{type:"tap", target, on}`,
+ * `{type:"fx", name,
  * amount, on}`, `{type:"looper", action}`, `{type:"looper_buffers", left,
  * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`,
  * `{type:"pad_events_on", on}` (a page subscribed to the pad lights)
@@ -2742,6 +2759,16 @@
           break;
         case "live":
           this.live(message);
+          break;
+        case "hold":
+          // HOLD latches the Gate voices a pad is sounding right now: live
+          // state on the voice, never a command, never a history step.
+          this.holdPad(message.track_id, message.bank_id, message.index);
+          break;
+        case "release_held":
+          // No ids lets every latch go (Stop's business in the engine); a track
+          // or a pad releases just those.
+          this.releaseHeld(message.track_id, message.bank_id, message.index);
           break;
         case "tap":
           this.setTap(message.target, message.on === true);
@@ -7854,7 +7881,7 @@
           voice.sustain = voice.base_sustain;
           if (voice.stage === STAGE_SUSTAIN) {
             if (voice.sustain > 0) voice.level = voice.sustain;
-            else StudioSamplerVoice.release(voice);
+            else this.endVoice(voice);
           } else if (voice.stage === STAGE_DECAY) {
             voice.increment = voice.decayFrames > 0 ? (1 - voice.sustain) / voice.decayFrames : 0;
           }
@@ -7933,7 +7960,7 @@
           if (voice.stage === STAGE_SUSTAIN) {
             // A sustain of 0 has nothing to hold at: the voice releases from
             // wherever it stands (a release of 0 frames ends it at once).
-            if (!(held > 0)) StudioSamplerVoice.release(voice);
+            if (!(held > 0)) this.endVoice(voice);
             else voice.level = held;
             return;
           }
@@ -8497,6 +8524,10 @@
      * history, never quantized), a release lets the `gate` voices that pad
      * started go. A `oneshot` pad keeps playing to the end of its range: letting
      * go of the key does not cut a one-shot sound short.
+     *
+     * A HELD voice is left alone here: the operator's HOLD outranks letting go of
+     * the pad (and the gate countdown that would end it), and only
+     * `release_held`, a Stop or a fade lets a held voice go.
      * @param {{track_id: string, bank_id: string, index: number, v: number, on: boolean}} event
      * @returns {void}
      */
@@ -8510,11 +8541,93 @@
       const bankId = asId(event.bank_id);
       const index = Math.trunc(Number(event.index) || 0);
       for (const voice of record.voices) {
-        if (!voice.sounding) continue;
+        if (!voice.sounding || voice.held) continue;
         if (voice.mode !== "gate") continue;
         if (voice.bankId !== bankId || voice.index !== index) continue;
         StudioSamplerVoice.release(voice);
       }
+    }
+
+    /**
+     * Latch the voices one pad is sounding right now: the SP-404's HOLD key.
+     *
+     * A held voice ignores the operator letting go and its own gate countdown,
+     * so a Gate pad keeps sounding with the finger off it (M13) and a
+     * Gate+Loop pad's loop keeps turning (M14). Several pads may be held at
+     * once, and a second HOLD on a latched pad is the page's `releaseHeld` for
+     * that pad, not another call here.
+     *
+     * HOLD is for Gate pads ONLY (M15): every other pad is refused here, so a
+     * page that asks anyway changes nothing. A pad the song does not have, or a
+     * track that is not a sampler, is refused the same way.
+     * @param {unknown} trackId
+     * @param {unknown} bankId
+     * @param {unknown} index the pad, 0-15
+     * @returns {boolean} whether the pad is a Gate pad with a sounding voice that
+     *   was latched (or was already latched); false when there is nothing to hold
+     */
+    holdPad(trackId, bankId, index) {
+      const record = this.samplerRecord(asId(trackId));
+      if (!record) return false;
+      const bankIdValue = asId(bankId);
+      const padIndex = Math.trunc(Number(index) || 0);
+      const pad = this.pads.get(padKey(trackId, bankIdValue, padIndex));
+      if (!pad || padMode(pad.mode) !== "gate") return false;
+      let latched = false;
+      for (const voice of record.voices) {
+        if (!voice.sounding) continue;
+        if (voice.mode !== "gate") continue;
+        if (voice.bankId !== bankIdValue || voice.index !== padIndex) continue;
+        latched = true;
+        if (voice.held) continue;
+        StudioSamplerVoice.hold(voice);
+      }
+      return latched;
+    }
+
+    /**
+     * Let HOLD go: every latched voice when no ids are given (what Stop and
+     * `reset_live` do), one track's when only it is named, and one pad's when
+     * the pad is.
+     *
+     * A latch is cleared and the voice's ORDINARY release runs from where it
+     * stands: a Gate pad's release is its envelope's, and a Gate+Loop pad's loop
+     * stops turning. Its light goes off through the block scan like any other.
+     * @param {unknown} [trackId]
+     * @param {unknown} [bankId]
+     * @param {unknown} [index]
+     * @returns {void}
+     */
+    releaseHeld(trackId, bankId, index) {
+      const everyTrack = trackId === undefined || trackId === null;
+      const trackIdValue = asId(trackId);
+      const everyPad = everyTrack || bankId === undefined || bankId === null;
+      const bankIdValue = asId(bankId);
+      const padIndex = Math.trunc(Number(index) || 0);
+      for (const record of this.slots) {
+        if (!record || !record.sampler) continue;
+        if (!everyTrack && asId(record.track_id) !== trackIdValue) continue;
+        for (const voice of record.voices) {
+          if (!voice.sounding || !voice.held) continue;
+          if (!everyPad && (voice.bankId !== bankIdValue || voice.index !== padIndex)) continue;
+          StudioSamplerVoice.releaseHeld(voice);
+        }
+      }
+    }
+
+    /**
+     * End one sampler voice through the normal release, latch and all.
+     *
+     * A HOLD outranks a live release (that is what makes it a hold) but it never
+     * outranks what must end a voice outright: a Stop, a loop's clip going away,
+     * a pad or sample the song no longer has, a motion lane that sweeps its
+     * sustain to 0. Those clear the latch here and then release, so the voice's
+     * own release still runs from wherever it stands.
+     * @param {object} voice
+     * @returns {void}
+     */
+    endVoice(voice) {
+      StudioSamplerVoice.releaseHeld(voice);
     }
 
     /**
@@ -8540,7 +8653,9 @@
      * the track turns over onto a different clip, at the frame the sequencer put
      * on that boundary. A relaunch of the very clip it plays is no change and
      * leaves the loop alone, and a loop a live press started belongs to no clip
-     * at all, so a scene launch never ends it.
+     * at all, so a scene launch never ends it. A HOLD does not outlive the clip
+     * either: whatever latch a step-started voice carries is let go here before
+     * its release runs.
      * @param {{track_id: string, clip_id: string|null, frame: number}} change
      * @returns {void}
      */
@@ -8552,25 +8667,32 @@
         if (!voice.sounding || !voice.looping) continue;
         if (voice.clip_id === "") continue;
         if (voice.clip_id === clipId) continue;
-        StudioSamplerVoice.release(voice);
+        this.endVoice(voice);
       }
     }
 
     /**
-     * Release the pads' live state: every loop now, through the normal release.
+     * Release the pads' live state: every loop and every HOLD now, through the
+     * normal release.
      *
      * This is what Stop and `reset_live` (a DIFFERENT song being opened) do, and
-     * it is the one place the later live state — HOLD latches, ROLL and
-     * Pause-all — is released from as well. An ordinary `setSong` never comes
-     * here: it runs on every document edit, so it must not touch what still
-     * exists (see `releaseVanishedPads`).
+     * it is the one place the later live state — ROLL and Pause-all — is
+     * released from as well. An ordinary `setSong` never comes here: it runs on
+     * every document edit, so it must not touch what still exists (see
+     * `releaseVanishedPads`).
      * @returns {void}
      */
     releaseLive() {
       for (const record of this.slots) {
         if (!record || !record.sampler) continue;
         for (const voice of record.voices) {
-          if (!voice.sounding || !voice.looping) continue;
+          if (!voice.sounding) continue;
+          // A HOLD is let go as a loop is: Stop ends the live state outright.
+          if (voice.held) {
+            this.endVoice(voice);
+            continue;
+          }
+          if (!voice.looping) continue;
           StudioSamplerVoice.release(voice);
         }
       }
@@ -8600,14 +8722,14 @@
           if (!voice.sounding) continue;
           const pad = this.pads.get(padKey(voice.trackId, voice.bankId, voice.index));
           if (!pad) {
-            StudioSamplerVoice.release(voice);
+            this.endVoice(voice);
             continue;
           }
           if (asId(pad.sample_id) !== voice.sample_id) {
-            StudioSamplerVoice.release(voice);
+            this.endVoice(voice);
             continue;
           }
-          if (asId(pad.slice_id) !== voice.slice_id) StudioSamplerVoice.release(voice);
+          if (asId(pad.slice_id) !== voice.slice_id) this.endVoice(voice);
         }
       }
     }

@@ -195,9 +195,14 @@
  *   itself adds, for the page to add to the round trip it shows.
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
- *   command or a history step, and never quantized. `resetLive()` releases the
- *   pads' live state (every loop now), and the page sends it when a DIFFERENT
- *   song opens — never on an ordinary song update, which runs on every edit.
+ *   command or a history step, and never quantized. `holdPad(track_id, bank,
+ *   index)` latches the Gate voices that pad is sounding — the HOLD key — and
+ *   answers `false` when the song has no Gate pad there, so a HOLD on a pad of
+ *   another mode is refused (M15); `releaseHeld(track, bank, index)` lets that
+ *   latch go again, and with no argument every latch. HOLD is page state, never
+ *   song data. `resetLive()` releases the pads' live state (every loop and every
+ *   HOLD), and the page sends it when a DIFFERENT song opens — never on an
+ *   ordinary song update, which runs on every edit.
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
  *   own output (`track_id`) on, per block, as `{type:"tap_block", target, frame,
  *   channels}`: `frame` is the context frame the block's first sample sits on,
@@ -409,6 +414,22 @@
 
   /** How many bars the looper's buffers hold: the longest take it records. */
   const LOOPER_BARS = 8;
+
+  /**
+   * The key one pad lives under in a song's `pads` container — the very key
+   * `server/doc.js` writes and `studio-processor.js` looks a pad up with. This
+   * side of the port builds the same one, so `holdPad` can answer whether a pad
+   * is a Gate pad without waiting for the audio thread.
+   * @param {unknown} trackId
+   * @param {unknown} bankId
+   * @param {unknown} index
+   * @returns {string}
+   */
+  function padKeyOf(trackId, bankId, index) {
+    const track = trackId === undefined || trackId === null ? "" : String(trackId);
+    const bank = bankId === undefined || bankId === null ? "" : String(bankId);
+    return track + "/" + bank + "/" + Math.trunc(Number(index) || 0);
+  }
 
   /**
    * The page's own copy of one looper-take channel, clipped to [−1, 1].
@@ -1598,6 +1619,14 @@
     let looperBufferFrames = 0;
     /** The tempo the song is at, as the last `setSong` read it. */
     let looperSongBpm = DEFAULT_BPM;
+    /**
+     * The keys of the pads the last song handed to `setSong` says are Gate pads.
+     * A HOLD is for Gate pads only (M15), and that is song data this side of the
+     * port may be asked about at once — `holdPad` answers from here instead of
+     * waiting for the audio thread to hear the message.
+     * @type {Set<string>}
+     */
+    const gatePads = new Set();
     const post = (message, transfer) => {
       if (transfer && transfer.length > 0) {
         try {
@@ -2086,6 +2115,15 @@
         const tracks = snapshot && Array.isArray(snapshot.tracks) ? snapshot.tracks : [];
         if (tracks.length > MAX_TRACKS) throw new Error(`A song can have at most ${MAX_TRACKS} tracks.`);
         post({ type: "song", snapshot: snapshot });
+        // Which pads a HOLD may latch is song data, so it is read here, once per
+        // song: `holdPad` answers from it without a round trip.
+        gatePads.clear();
+        const pads = snapshot && typeof snapshot.pads === "object" && snapshot.pads ? snapshot.pads : {};
+        for (const key of Object.keys(pads)) {
+          const item = pads[key];
+          if (!item || typeof item !== "object" || item.mode !== "gate") continue;
+          gatePads.add(padKeyOf(item.track_id, item.bank_id, item.index));
+        }
         // The looper's buffers are the page's, so they are sized off this song's
         // tempo before anything can record into them.
         const meta = snapshot && typeof snapshot.meta === "object" && snapshot.meta ? snapshot.meta : {};
@@ -2142,8 +2180,9 @@
       },
 
       /**
-       * Release the pads' live state: every loop the engine is holding ends
-       * through the normal release. The page sends this when a DIFFERENT song
+       * Release the pads' live state: every loop and every HOLD the engine is
+       * holding ends through the normal release. The page sends this when a
+       * DIFFERENT song
        * opens — the live state belongs to the one going away — and never on an
        * ordinary song update, which runs on every edit and must leave what still
        * exists playing.
@@ -2539,6 +2578,65 @@
           index: Math.trunc(Number(index) || 0),
           v: 0,
           on: false,
+        });
+      },
+
+      /**
+       * Latch the `gate` voices one pad is sounding right now: the HOLD key.
+       *
+       * A held voice keeps sounding after the operator lets go and ignores its
+       * own gate countdown, so a Gate pad goes on by itself (M13) and a
+       * Gate+Loop pad's loop keeps turning (M14). Several pads may be held at
+       * once, and the SECOND tap of a latched pad is `releaseHeld` for that pad,
+       * not another call here.
+       *
+       * HOLD is page state, not engine state: while the page's HOLD key is armed
+       * it sends `livePad` and then this for each press. It works on Gate pads
+       * only (M15), and that is what the answer says: `false` means the song the
+       * engine was last handed has no Gate pad at this place, so nothing was
+       * asked of the engine and the page shows its note. A Gate pad that is not
+       * sounding has nothing to latch and still says `true` — the answer is about
+       * the pad's kind, never about what happens to be sounding.
+       * @param {string} trackId
+       * @param {string} bankId
+       * @param {number} index the pad, 0-15
+       * @returns {boolean} whether a HOLD was asked of the engine
+       */
+      holdPad(trackId, bankId, index) {
+        if (!gatePads.has(padKeyOf(trackId, bankId, index))) return false;
+        post({
+          type: "hold",
+          track_id: String(trackId),
+          bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
+          index: Math.trunc(Number(index) || 0),
+        });
+        return true;
+      },
+
+      /**
+       * Let HOLD go: every latched voice when no pad is named (Stop and
+       * `resetLive` do this in the engine anyway), one track's when only it is
+       * named, and one pad's when the pad is. The latch is cleared and the
+       * voice's ordinary release runs from where it stands.
+       * @param {string} [trackId]
+       * @param {string} [bankId]
+       * @param {number} [index] the pad, 0-15
+       * @returns {void}
+       */
+      releaseHeld(trackId, bankId, index) {
+        if (trackId === undefined || trackId === null) {
+          post({ type: "release_held" });
+          return;
+        }
+        if (bankId === undefined || bankId === null) {
+          post({ type: "release_held", track_id: String(trackId) });
+          return;
+        }
+        post({
+          type: "release_held",
+          track_id: String(trackId),
+          bank_id: String(bankId),
+          index: Math.trunc(Number(index) || 0),
         });
       },
 

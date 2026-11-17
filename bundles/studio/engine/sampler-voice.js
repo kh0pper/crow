@@ -60,6 +60,15 @@
  * stage at all, and such a voice renders exactly as it did before the stage
  * existed.
  *
+ * ## The HOLD latch
+ *
+ * `held` is the operator's HOLD on a voice: a Gate pad's press latched so it
+ * keeps sounding after the finger is gone. `hold()` raises it, and a held voice
+ * ignores both a release and its own gate countdown, so nothing but a deliberate
+ * ending takes it away: `releaseHeld()` clears the flag and runs the ordinary
+ * release, a fade (`beginFadeOut`) drops it on its way out, and a start clears
+ * it, so a reused slot never comes back held.
+ *
  * ## A live reverse flip
  *
  * `flipReverse` turns a sounding voice round where it stands: it negates `dir`
@@ -240,10 +249,11 @@
       /** Whether the voice is turning at its range ends (cleared by a release or a fade). */
       looping: false,
       /**
-       * The operator's live state on this voice: `held` (a HOLD latch) and
-       * `paused` (Pause-all). The processor raises them; a voice that is on its
-       * way out (a fade, a steal, a reused slot) drops them here, so a dead
-       * voice never keeps a pad held or paused.
+       * The operator's live state on this voice: `held` (a HOLD latch, raised by
+       * `hold()` and let go by `releaseHeld()`) and `paused` (Pause-all). The
+       * processor raises them; a voice that is on its way out (a fade, a steal,
+       * a reused slot) drops them here, so a dead voice never keeps a pad held or
+       * paused.
        */
       held: false,
       paused: false,
@@ -581,13 +591,44 @@
   }
 
   /**
+   * Latch a voice: a HOLD keeps it sounding past the operator letting go and
+   * past its own gate countdown, until `releaseHeld` lets the latch go. A voice
+   * that is not sounding has nothing to latch.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function holdVoice(voice) {
+    if (!voice.sounding) return;
+    voice.held = true;
+  }
+
+  /**
+   * Let a HOLD go: clear the latch and run the ordinary release from wherever
+   * the voice stands. This is the only way a held voice is released (a plain
+   * `release` leaves it alone, which is what makes HOLD a hold), so every path
+   * that must end a held voice — a Stop, a pad the song no longer has — comes
+   * through here.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function releaseHeldVoice(voice) {
+    if (!voice.sounding) return;
+    voice.held = false;
+    releaseVoice(voice);
+  }
+
+  /**
    * Begin the envelope's release. A release of 0 frames stops the voice at once
    * (the very frame the gate ends), which is what `gate` mode's step end means.
+   *
+   * A held voice ignores it: the operator's HOLD outranks letting go of the pad
+   * (and the gate that would have ended it), and `releaseHeld` is what takes the
+   * latch away and releases.
    * @param {object} voice
    * @returns {void}
    */
   function releaseVoice(voice) {
-    if (!voice.sounding) return;
+    if (!voice.sounding || voice.held) return;
     voice.looping = false;
     // A release ends the hold: whether it comes from a gate's countdown or from
     // the player letting go, the voice goes to its release from here, never on
@@ -669,8 +710,12 @@
     }
   }
 
-  /** One frame of the gate's countdown; at zero the release begins. */
+  /**
+   * One frame of the gate's countdown; at zero the release begins. A held voice
+   * has no countdown: its gate would end it, and a HOLD is what keeps it on.
+   */
   function countdown(voice) {
+    if (voice.held) return;
     if (voice.gateRemaining > 0) {
       voice.gateRemaining -= 1;
       return;
@@ -836,6 +881,9 @@
     start: startVoice,
     render: renderVoice,
     release: releaseVoice,
+    /** Latch a sounding voice (HOLD), and let that latch go again. */
+    hold: holdVoice,
+    releaseHeld: releaseHeldVoice,
     beginFadeOut: beginFadeOut,
     flipReverse: flipReverse,
     refreshStep: refreshStep,

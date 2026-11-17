@@ -2668,6 +2668,378 @@ test("M9 reverse+pingpong starts backwards and reflects at each end", async () =
   assertLevel(out.left[9599], (4799 / 100000) * CENTRE, "reflecting there too");
 });
 
+// --- HOLD: the latch a Gate pad can carry (C1a) ------------------------------
+
+/**
+ * Latch one pad through the engine, the way the page's `holdPad` does.
+ * @param {object} engine a processor from `createProcessor`
+ * @param {number} index
+ * @returns {boolean} whether the engine latched it
+ */
+function holdPadOf(engine, index) {
+  return engine.processor.holdPad("track-1", BANK, index);
+}
+
+/**
+ * Let a HOLD go, for one pad (`index` given) or for every pad.
+ * @param {object} engine a processor from `createProcessor`
+ * @param {number} [index]
+ * @returns {void}
+ */
+function releaseHeldOf(engine, index) {
+  if (index === undefined) engine.processor.releaseHeld();
+  else engine.processor.releaseHeld("track-1", BANK, index);
+}
+
+test("M13 hold a pad pressed live, let go, it keeps sounding; a second pad holds too; releaseHeld(pad) ends only that one", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "gate", release_ms: 5 }), pad("track-1", 1, { mode: "gate", release_ms: 5 })],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  // A press, the HOLD the page sends with it, and the operator letting go.
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "a Gate pad with a sounding voice latches");
+  pressPad(engine, 0, false);
+  const latched = await engine.process(128, 512);
+  for (const at of [0, 240, 511]) {
+    assertLevel(latched.left[at], ONE_VOICE, `frame ${at} sounds with the finger off the pad`);
+  }
+
+  // A second pad holds beside the first: several may be held.
+  pressPad(engine, 1);
+  assert.equal(holdPadOf(engine, 1), true, "a second Gate pad latches beside the first");
+  pressPad(engine, 1, false);
+  const both = await engine.process(128, 512);
+  assertLevel(both.left[511], 2 * ONE_VOICE, "both held voices sound with both fingers off them");
+
+  // The second HOLD tap on pad 0 is its release, and only its release.
+  releaseHeldOf(engine, 0);
+  const one = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  // Pad 0's voice runs its own 5 ms release (240 frames) while pad 1 holds on.
+  for (const at of [0, 60, 120, 239]) {
+    assertLevel(
+      one.left[at],
+      ONE_VOICE + ONE_VOICE * ((240 - at) / 240),
+      `frame ${at} is pad 0's release over pad 1's held voice`,
+      1e-6,
+    );
+  }
+  for (const at of [240, 300, 511]) {
+    assertLevel(one.left[at], ONE_VOICE, `frame ${at} is the pad that is still held alone`);
+  }
+
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [
+      ["track-1", BANK, 0, StudioPadEvents.STATE_HELD],
+      ["track-1", BANK, 1, StudioPadEvents.STATE_HELD],
+      // The released voice's latch is gone, so its light reads sounding again
+      // while its 5 ms release runs, and goes off when that release ends.
+      ["track-1", BANK, 0, StudioPadEvents.STATE_ON],
+      ["track-1", BANK, 0, StudioPadEvents.STATE_OFF],
+    ],
+    "both pads light as held, and only the released one leaves the held state",
+  );
+});
+
+test("M14 holdPad on a Gate+Loop pad keeps the loop going after the release", async () => {
+  const frames = 4800;
+  const song = kitSong({ pads: [pad("track-1", 0, { mode: "gate", loop: "loop" })], frames });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(frames, 0.5)] }]);
+
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "a Gate+Loop pad latches");
+  pressPad(engine, 0, false);
+  const out = await engine.process(128, 9000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  for (const at of [0, frames, 8999]) {
+    assertLevel(out.left[at], ONE_VOICE, `frame ${at} is the latched loop, past its sample's end`);
+  }
+
+  // Letting the latch go ends the loop through the ordinary release.
+  releaseHeldOf(engine, 0);
+  const after = await engine.process(128, 256);
+  assert.equal(peakOf(after.left), 0, "releaseHeld ends the latched loop");
+});
+
+test("M15 holdPad on a non-Gate pad returns false and changes nothing", async () => {
+  const song = kitSong({ pads: [pad("track-1", 0), pad("track-1", 1, { mode: "gate" })] });
+
+  // The page's own answer, read off the song the client was handed: a HOLD on a
+  // pad that is not a Gate pad is refused without asking the audio thread.
+  const context = new OfflineAudioContext({ numberOfChannels: 2, length: 1024, sampleRate: SAMPLE_RATE });
+  let client = null;
+  try {
+    client = await studioEngine.create(context, { assetBytes: ASSETS });
+    client.setSong(song);
+    assert.equal(client.holdPad("track-1", BANK, 0), false, "a one-shot pad cannot be held");
+    assert.equal(client.holdPad("track-1", BANK, 1), true, "a Gate pad can");
+    assert.equal(client.holdPad("track-2", BANK, 0), false, "a pad the song does not have cannot either");
+  } finally {
+    if (client) client.dispose();
+    await releaseWorklet(context);
+  }
+
+  // And the engine refuses it too: nothing is latched and the light never reads
+  // held, so a page that asked anyway changed nothing.
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+  pressPad(engine, 0);
+  await engine.process(128, 128);
+  assert.equal(holdPadOf(engine, 0), false, "the engine refuses a one-shot pad");
+  await engine.process(128, 128);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.deepEqual(
+    soundingOf(recordOf(engine, "track-1")).filter((voice) => voice.held === true),
+    [],
+    "no voice was latched",
+  );
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_ON]],
+    "the pad's light reads sounding, never held",
+  );
+});
+
+test("M12 a mute-group cut of a held pad and of a looping pad each clear the flag and emit one off", async () => {
+  const song = kitSong({
+    pads: [
+      pad("track-1", 0, { mode: "gate", choke: 1 }),
+      pad("track-1", 1, { mode: "gate", loop: "loop", choke: 2 }),
+      // The two pads the cut comes from, each in one of the two groups.
+      pad("track-1", 2, { choke: 1 }),
+      pad("track-1", 3, { choke: 2 }),
+    ],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "pad 0 is latched");
+  pressPad(engine, 1);
+  await engine.process(128, 128);
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages)),
+    [
+      ["track-1", BANK, 0, StudioPadEvents.STATE_HELD],
+      ["track-1", BANK, 1, StudioPadEvents.STATE_LOOP],
+    ],
+    "one pad is held and the other loops",
+  );
+
+  const record = recordOf(engine, "track-1");
+  const held = soundingOf(record).filter((voice) => voice.index === 0)[0];
+  const loop = soundingOf(record).filter((voice) => voice.index === 1)[0];
+  assert.equal(held.held, true, "the held voice carries its latch");
+  assert.equal(loop.looping, true, "and the other one its loop");
+
+  // One hit in each group cuts one of them, over the crossfade length.
+  pressPad(engine, 2);
+  pressPad(engine, 3);
+  assert.equal(held.held, false, "the mute-group cut drops the HOLD latch");
+  assert.equal(loop.looping, false, "and ends the looping voice's loop");
+  assert.equal(loop.held, false, "which held nothing anyway");
+
+  await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  const offs = stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF);
+  assert.deepEqual(
+    statePairs(offs),
+    [
+      ["track-1", BANK, 0, StudioPadEvents.STATE_OFF],
+      ["track-1", BANK, 1, StudioPadEvents.STATE_OFF],
+    ],
+    "each cut pad's light goes off exactly once",
+  );
+});
+
+// --- HOLD and the song (M16) -------------------------------------------------
+
+test("M16 Stop and resetLive release holds, not just loops", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "gate" }), pad("track-1", 1, { mode: "gate" })],
+    frames: 48000,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  pressPad(engine, 0);
+  pressPad(engine, 1);
+  holdPadOf(engine, 0);
+  holdPadOf(engine, 1);
+  pressPad(engine, 0, false);
+  pressPad(engine, 1, false);
+  const held = await engine.process(128, 512);
+  assertLevel(held.left[511], 2 * ONE_VOICE, "both pads are held with the fingers off them");
+
+  engine.post({ type: "stop" });
+  const stopped = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assert.equal(peakOf(stopped.left), 0, "Stop releases every hold");
+
+  pressPad(engine, 0);
+  holdPadOf(engine, 0);
+  pressPad(engine, 0, false);
+  const again = await engine.process(128, 512);
+  assertLevel(again.left[511], ONE_VOICE, "a press and a HOLD start it again");
+
+  engine.post({ type: "reset_live" });
+  const reset = await engine.process(128, 512);
+  assert.equal(peakOf(reset.left), 0, "resetLive releases holds too");
+});
+
+test("M16 an unrelated setSong (a step toggle) leaves a held pad holding", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "gate" })],
+    frames: 48000,
+    clips: [patternClip("clip-1", "track-1")],
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "pad 0 is latched");
+  pressPad(engine, 0, false);
+  const latched = await engine.process(128, 512);
+  assertLevel(latched.left[511], ONE_VOICE, "the pad is held with the finger off it");
+
+  // An ordinary edit: a step is toggled on in the song. It runs on every edit,
+  // so it must leave the pad the operator is holding exactly as it was.
+  const edited = JSON.parse(JSON.stringify(song));
+  const added = step("clip-1", 8, 0, { v: 100 });
+  edited.steps[stepKeyOf(added)] = added;
+  engine.post({ type: "song", snapshot: edited });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 512);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(after.left[511], ONE_VOICE, "the held pad plays on through an unrelated edit");
+  assert.deepEqual(
+    soundingOf(recordOf(engine, "track-1")).filter((voice) => voice.held === true).length,
+    1,
+    "and it is still latched",
+  );
+  assert.equal(
+    stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF).length,
+    0,
+    "its light never went off",
+  );
+});
+
+test("M16 a setSong that removes the pad's sample ends a held voice", async () => {
+  const song = kitSong({
+    pads: [pad("track-1", 0, { mode: "gate" }), pad("track-1", 1, { mode: "gate", gain_db: -6 })],
+    frames: 48000,
+  });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  const quiet = ONE_VOICE * Math.pow(10, -6 / 20);
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "pad 0 is latched");
+  pressPad(engine, 1);
+  const running = await engine.process(128, 512);
+  assertLevel(running.left[511], ONE_VOICE + quiet, "the held voice and the one-shot both sound");
+
+  // The pad goes, and the sample only it played with it. The other pad of the
+  // bank still names that sample, so its voice stays.
+  const without = JSON.parse(JSON.stringify(song));
+  delete without.pads[padKeyOf(pad("track-1", 0))];
+  delete without.samples[SAMPLE_ID];
+  engine.post({ type: "song", snapshot: without });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const after = await engine.process(128, 1000);
+  assert.deepEqual(engine.errors, [], "the processor must render without a fault");
+  assertLevel(after.left[999], quiet, "only the pad that is still in the song sounds");
+  assert.deepEqual(
+    statePairs(stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF)),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
+    "and only the gone held pad's light goes off",
+  );
+});
+
+// --- HOLD and voice stealing (B4b) ------------------------------------------
+
+test("a stolen held voice leaves a tail that is not held and emits exactly one off", async () => {
+  const pads = [];
+  for (let index = 0; index < 16; index += 1) pads.push(pad("track-1", index, { mode: "gate", loop: "loop" }));
+  const song = kitSong({ pads });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+  engine.post({ type: "pad_events_on", on: true });
+
+  for (let index = 0; index < 16; index += 1) pressPad(engine, index);
+  await engine.process(128, 128);
+
+  // Every slot loops and pad 0 is the oldest, so the next press takes it — and
+  // it was latched, so the tail it becomes must hold nothing.
+  assert.equal(holdPadOf(engine, 0), true, "pad 0 is latched");
+  pressPad(engine, 1);
+  await engine.process(128, 32);
+
+  const record = recordOf(engine, "track-1");
+  const tails = tailsOf(record);
+  assert.equal(tails.length, 1, "the stolen held voice rings out in one fade tail");
+  assert.equal(tails[0].index, 0, "and it is pad 0's voice");
+  assert.equal(tails[0].held, false, "the tail holds nothing");
+  assert.equal(tails[0].looping, false, "and it does not loop");
+
+  await engine.process(128, 256);
+  assert.equal(tailsOf(record).length, 0, "the tail is over within its fade");
+  const offs = stateEvents(engine.messages).filter((event) => event.state === StudioPadEvents.STATE_OFF);
+  assert.deepEqual(
+    statePairs(offs),
+    [["track-1", BANK, 0, StudioPadEvents.STATE_OFF]],
+    "pad 0's light goes off exactly once, and no other pad's does",
+  );
+});
+
+test("a held voice is the last stolen (B4b rank)", async () => {
+  const pads = [pad("track-1", 0, { mode: "gate" })];
+  for (let index = 1; index < 16; index += 1) pads.push(pad("track-1", index));
+  const song = kitSong({ pads, frames: 48000 });
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [constant(48000, 0.5)] }]);
+
+  pressPad(engine, 0);
+  assert.equal(holdPadOf(engine, 0), true, "pad 0 is latched");
+  for (let index = 1; index < 16; index += 1) pressPad(engine, index);
+  await engine.process(128, 32);
+
+  const record = recordOf(engine, "track-1");
+  const latched = soundingOf(record).filter((voice) => voice.index === 0);
+  const ordinary = soundingOf(record).filter((voice) => voice.index !== 0)[0];
+  assert.equal(latched.length, 1, "pad 0's latched voice is sounding");
+  assert.equal(latched[0].held, true, "and it carries the latch");
+  assert.ok(
+    engine.processor.stealRank(latched[0]) > engine.processor.stealRank(ordinary),
+    "a held voice ranks below every voice the operator is not holding",
+  );
+
+  // The track's 16 slots are full, so the next press steals: it takes the oldest
+  // ordinary voice and never the latched one.
+  pressPad(engine, 15);
+  await engine.process(128, 32);
+  assert.equal(
+    soundingOf(record).filter((voice) => voice.index === 1).length,
+    0,
+    "the oldest ordinary voice is the one the steal takes",
+  );
+  assert.equal(latched[0].sounding, true, "the latched voice is untouched");
+  assert.equal(latched[0].held, true, "and still latched");
+
+  // With nothing but held-or-looping voices left, the latched one is the oldest
+  // of them, and only now does it go.
+  for (const voice of soundingOf(record)) voice.looping = true;
+  pressPad(engine, 15);
+  await engine.process(128, 32);
+  const tails = tailsOf(record);
+  assert.equal(tails.length, 1, "a tail is the only way a protected voice goes");
+  assert.equal(tails[0].index, 0, "and it is the latched pad's turn last");
+  assert.equal(tails[0].held, false, "a tail holds nothing");
+});
+
 test("M16 Stop and resetLive release every loop", async () => {
   const song = kitSong({
     pads: [pad("track-1", 0, { loop: "loop" }), pad("track-1", 1, { loop: "pingpong" })],

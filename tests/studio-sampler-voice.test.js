@@ -280,6 +280,94 @@ test("beginFadeOut clears looping, held and paused", () => {
   assert.equal(voice.fadeRemaining, StudioSamplerVoice.FADE_FRAMES, "the fade is the 64-frame one");
 });
 
+test("a held gate voice survives release() and its gate countdown, and releaseHeld ends it through the envelope", () => {
+  const GATE = 100; // frames the step's gate would last
+  const RELEASE = 240; // 5 ms at 48 kHz
+  const samples = constant(48000, 0.5);
+  const voice = startVoice({ channels: [samples], mode: "gate", releaseMs: 5, gateFrames: GATE });
+  render(voice, 10);
+
+  StudioSamplerVoice.hold(voice);
+  assert.equal(voice.held, true, "hold() raises the latch");
+
+  // The operator lets go of the pad: a release is not the latch's to answer.
+  StudioSamplerVoice.release(voice);
+  assert.notEqual(voice.stage, StudioSamplerVoice.STAGE_RELEASE, "a held voice never enters its release");
+  assert.equal(voice.sounding, true, "so it keeps sounding");
+
+  // The gate the step gave it would have ended it four times over by now.
+  const held = render(voice, GATE * 4);
+  for (const at of [0, 1, GATE, GATE * 2, GATE * 4 - 1]) {
+    assert.equal(held.left[at], atCentre(0.5), `frame ${at} is still the held voice at full level`);
+  }
+  assert.equal(voice.sounding, true, "a held voice ignores its gate countdown too");
+
+  // Letting the latch go runs the ordinary release from where the voice stands.
+  StudioSamplerVoice.releaseHeld(voice);
+  assert.equal(voice.held, false, "releaseHeld clears the latch");
+  assert.equal(voice.stage, StudioSamplerVoice.STAGE_RELEASE, "and begins the envelope's release");
+  const tail = render(voice, RELEASE + 2);
+  // One frame at a time: the release starts from the level the voice held and
+  // falls to nothing over its own 5 ms.
+  for (const at of [0, 60, 120, 239]) {
+    const want = 0.5 * ((RELEASE - at) / RELEASE) * CENTRE;
+    assert.ok(
+      Math.abs(tail.left[at] - want) < 1e-6,
+      `frame ${at} is that far into the release: expected ${want}, got ${tail.left[at]}`,
+    );
+  }
+  // The last step of a linear release lands a rounding error short of 0 (the
+  // same way the engine suite's gate test reads it).
+  assert.ok(Math.abs(tail.left[RELEASE]) < 1e-12, `frame ${RELEASE} is the end of the release, got ${tail.left[RELEASE]}`);
+  assert.equal(tail.left[RELEASE + 1], 0, "and nothing is left sounding after the release time");
+  assert.equal(voice.sounding, false, "a 5 ms release ends the voice inside its release time");
+});
+
+test("beginFadeOut clears a HOLD latch raised by hold()", () => {
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], mode: "gate" });
+  render(voice, 10);
+
+  StudioSamplerVoice.hold(voice);
+  assert.equal(voice.held, true, "the voice is latched");
+
+  StudioSamplerVoice.beginFadeOut(voice);
+  assert.equal(voice.held, false, "a fade drops the latch, so its ramp runs to its end");
+  assert.equal(voice.sounding, true, "it is on its way out, not gone yet");
+  assert.equal(voice.fadeRemaining, StudioSamplerVoice.FADE_FRAMES, "the fade is the 64-frame one");
+
+  render(voice, StudioSamplerVoice.FADE_FRAMES);
+  assert.equal(voice.sounding, false, "64 frames of fade end a held voice as they end any other");
+});
+
+test("a start clears the HOLD latch a previous trigger left on the slot", () => {
+  const samples = constant(4800, 0.5);
+  const voice = startVoice({ channels: [samples], mode: "gate" });
+  StudioSamplerVoice.hold(voice);
+  assert.equal(voice.held, true, "the latch is on the voice");
+
+  // The slot is reused by the next trigger: the live state the trigger that has
+  // just ended carried belongs to it, never to the new voice.
+  const restarted = StudioSamplerVoice.start(voice, {
+    channels: [samples],
+    sampleRate: SAMPLE_RATE,
+    velocity: 127,
+    gainDb: 0,
+    pan: 0,
+  });
+  assert.equal(restarted, true, "the slot starts again");
+  assert.equal(voice.held, false, "a start holds nothing");
+
+  // And the voice answers a release again, so the cleared latch is not cosmetic.
+  StudioSamplerVoice.release(voice);
+  assert.equal(voice.sounding, false, "a release of 0 ms ends the restarted voice at once");
+
+  // A voice that is not sounding has nothing to latch.
+  const idle = StudioSamplerVoice.create();
+  StudioSamplerVoice.hold(idle);
+  assert.equal(idle.held, false, "an idle voice cannot be latched");
+});
+
 test("the frame a fade ends on leaves a dead voice with no live state", () => {
   // A one-frame range: the voice reads it and its range is spent, which is the
   // fade the render loop starts on its own (no beginFadeOut involved).
