@@ -34,7 +34,11 @@ const RENDERER_URL = pathToFileURL(
 
 /** Wall-clock budget for one worker: start-up + import + BOTH renders. */
 const WORKER_TIMEOUT_MS = 5_000;
-/** CPU budget for each render (see the header: a healthy render is ~1 ms). */
+/** CPU budget for each render (see the header: a healthy render is ~1 ms, and the
+ *  worst of three measured runs on the dev box was 10.9 ms — so this is ~18x the
+ *  measurement and far under the cliff, which is minutes: the exponential
+ *  backtracking never returns). The 5 s WORKER_TIMEOUT_MS stays: it is the
+ *  hang guard for that cliff, not a timing assertion. */
 const RENDER_CPU_BUDGET_MS = 200;
 
 const WORKER_SRC = String.raw`
@@ -155,7 +159,6 @@ test("marked link/reference-label ReDoS (#3918): every PoC renders fast in a wor
   }
   t.diagnostic(`worst render: ${worst.ms.toFixed(2)} ms — ${worst.what}`);
 });
-
 /**
  * `a` is at least `b`, comparing the numeric x.y.z prefix (a prerelease or
  * build suffix is ignored: 17.0.5-rc.1 counts as 17.0.5).

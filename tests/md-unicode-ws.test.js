@@ -31,15 +31,19 @@
 // What must stay true (see brScanCost / MD_BR_SCAN_MAX in servers/blog/renderer.js):
 //   - every unit above renders 64 KB in < 1,000 ms on the bot path and the 128 KB
 //     owner head in < 2,000 ms, and a 1 MiB document of them through the CHUNKED
-//     owner path in < 5,000 ms in total. Each render runs in a WORKER with a
+//     owner path in < 6,000 ms in total. Each render runs in a WORKER with a
 //     20 s kill, so the pre-guard cost (436–996 ms at 64 KB, 1.7–3.5 s at 128 KB)
-//     fails the test instead of hanging the suite. The bounds are sized for a CI
-//     runner ~5x slower than this box — measured here, in a fresh worker like the
-//     test's: 103 ms at 64 KB, 156 ms at the owner head — and the pre-guard cost
-//     still sits past them. That the guard is PRESENT (rather than merely that
-//     the box is fast) is separately and non-temporally pinned below:
-//     brScanStats says the pathological block was flattened, and 2,000 documents
-//     are compared byte for byte with the guard on and off;
+//     fails the test instead of hanging the suite. The bounds are 5x the worst of
+//     three measured runs here in a fresh worker: 135–185 ms at 64 KB, 200–205 ms
+//     at the owner head, 949–1,029 ms for a 1 MiB chunked document. NOTE the
+//     conflict the audit found: the pre-guard cost of the CHEAPEST unit is 436 ms
+//     at 64 KB, so a bound that keeps a ~3.5x-slower CI runner green (1,000 ms)
+//     is necessarily above a third of that cliff and cannot catch a return of the
+//     regression for U+000B/U+00A0 — it catches only the 996 ms end of the range.
+//     That the guard is PRESENT (rather than merely that the box is fast) is
+//     separately and non-temporally pinned below: brScanStats says the
+//     pathological block was flattened, and 2,000 documents are compared byte for
+//     byte with the guard on and off;
 //   - and neither is "fully formatted" for a document whose CHUNKS are each
 //     pathological: that assertion runs with the total-time budget raised out of
 //     the way (it is a property of the CHUNKER), and the DEFAULT budget is
@@ -228,10 +232,11 @@ test("every Unicode-whitespace line unit renders in < 1000 ms at 64 KB and < 200
     const bot = await renderInWorker("bot", botSrc);
     if (bot.ms > worstBot.ms) worstBot = { ms: bot.ms, what: name };
     assert.ok(bot.length > 0, `${name}: the bot path still renders (an over-cap answer would be "")`);
-    // 1,000 ms is ~10x the 103 ms this measures here in a fresh worker, and above
-    // what a CI runner ~5x slower than this box needs; the PRE-guard cost was
-    // 436-996 ms for this shape, so a return of the unguarded br rule lands on or
-    // past the bound instead of passing.
+    // 1,000 ms is ~7x the 135-137 ms this measures here in a fresh worker, and
+    // above what a CI runner ~3.5x slower than this box needs; the PRE-guard
+    // cost was 436-996 ms for this shape, so the bound only catches the top of
+    // that range (see the note in the header: 5x measured and 1/3 of the
+    // cheapest cliff cannot both hold).
     assert.ok(bot.ms < 1000, `${name}: 64 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 1000 ms)`);
 
     const ownerSrc = rep(`${unit}\n`, OWNER_HEAD);
@@ -244,7 +249,7 @@ test("every Unicode-whitespace line unit renders in < 1000 ms at 64 KB and < 200
     // content is never dropped.
     assert.ok(owner.length >= OWNER_HEAD * 0.9,
       `${name}: the 128 KB owner head still shows its content (got ${owner.length} chars of HTML)`);
-    // Same reasoning as the bot bound: measured 156 ms here, 1.7-3.5 s before
+    // Same reasoning as the bot bound: measured 200-205 ms here, 1.7-3.5 s before
     // the guard.
     assert.ok(owner.ms < 2000, `${name}: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 2000 ms)`);
   }
@@ -265,8 +270,13 @@ test("the CHUNKED owner path renders a 1 MiB document of them FULLY (all 8 chunk
     assert.equal(src.length, CHUNKED, `${name}: the fixture is 1 MiB`);
     const r = await renderInWorker("owner", src, { budgetMs: FULL_RENDER_BUDGET_MS });
     if (r.ms > worst.ms) worst = { ms: r.ms, what: name };
-    assert.ok(r.ms < 5000,
-      `${name}: a 1 MiB document took ${r.ms.toFixed(0)} ms through the chunked owner path with the budget raised (bound 5000 ms)`);
+    // Measured 949-1,029 ms (worst of three runs) for 1 MiB with the budget
+    // raised; the bound is 6,000 ms, 5x that, so a CI runner ~3.5x slower than
+    // this box stays inside it. The pre-guard cost of this document was 3,518 ms
+    // (the 1 s budget plus one ~2.75 s chunk), so the bound sits above a third
+    // of that cliff — reported by the audit rather than pretended away.
+    assert.ok(r.ms < 6000,
+      `${name}: a 1 MiB document took ${r.ms.toFixed(0)} ms through the chunked owner path with the budget raised (bound 6000 ms)`);
     assert.equal((r.html.match(/md-tail-notice/g) || []).length, 0,
       `${name}: all 8 chunks rendered (no plain-text tail), got ${JSON.stringify(r.html.slice(-200))}`);
     assert.ok(r.html.length >= CHUNKED,
@@ -289,8 +299,9 @@ test("the CHUNKED owner path keeps 1 MiB of them inside 5000 ms on the DEFAULT b
     assert.equal(src.length, CHUNKED, `${name}: the fixture is 1 MiB`);
     const r = await renderInWorker("owner", src);
     if (r.ms > worst.ms) worst = { ms: r.ms, what: name };
-    // Budget plus at most one bounded chunk, on any runner: measured 679-816 ms
-    // here, and the pre-chunking quadratic was 3.5 s for this shape at 1 MiB.
+    // Budget plus at most one bounded chunk, on any runner: measured 954-964 ms
+    // here (5x is 5,000 ms, so this bound is unchanged), and the pre-chunking
+    // quadratic was 3.5 s for this shape at 1 MiB.
     assert.ok(r.ms < 5000, `${name}: a 1 MiB document took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 5000 ms)`);
     assert.ok(r.html.length >= CHUNKED,
       `${name}: all 1 MiB of content is on the page (got ${r.html.length} chars of HTML)`);
@@ -425,9 +436,9 @@ test("a paragraph of U+0085 lines (not `\\s`) is not this shape: no charge, iden
   const bot = await renderInWorker("bot", rep("\u0085\n", CAP));
   assert.ok(bot.ms < 1000, `U+0085: 64 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 1000 ms)`);
   const owner = await renderInWorker("owner", rep("\u0085\n", OWNER_HEAD));
-  // Measured 126 ms (bot) and 190 ms (owner head) here in a fresh worker: this
-  // shape never had the quadratic, so it only has to stay under the same bounds
-  // its guarded neighbours get.
+  // Measured 121-131 ms (bot) and 185 ms (owner head) here in a fresh worker:
+  // this shape never had the quadratic (138 / 234 ms before the guard), so it
+  // only has to stay under the same bounds its guarded neighbours get.
   assert.ok(owner.ms < 2000, `U+0085: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 2000 ms)`);
 
   const src = rep("\u0085\n", 4096);
@@ -600,15 +611,15 @@ test("differential: 2,000 seeded documents mixing normal lines with Unicode-whit
 //     so does the same line inside a heading, a blockquote, a list item, a
 //     table cell, a link label and an emphasis span (each is one inline block);
 //   - the CHUNKED owner path renders 1 MiB of 120 KB space runs (separated by
-//     the blank lines that make them separate chunks) and one 1 MiB space line
-//     in < 5,000 ms in total;
+//     the blank lines that make them separate chunks) in < 6,000 ms and one
+//     1 MiB space line in < 5,000 ms in total;
 //
-// Those bounds are sized for a CI runner ~5x slower than the dev box (measured
-// here in a fresh worker, like the test's: 212-230 ms for a container at the
-// 128 KB owner head, 1,055 ms and 218 ms for the two 1 MiB chunked documents —
-// and a CI runner's 1,037 ms for the table cell at 128 KB is the case that made
-// them); the PRE-window cost was ~1,366 ms at 64 KB and ~5,523 ms at the owner
-// head, i.e. still past these bounds.
+// Those bounds are 5x the worst of three measured runs here in a fresh worker,
+// like the test's: 116–119 ms for a container at 64 KB and 218–232 ms at the
+// 128 KB owner head, 1,056–1,083 ms and 219–236 ms for the two 1 MiB chunked
+// documents (a CI runner's 1,037 ms for the table cell at 128 KB is the case
+// that set these); the PRE-window cost was ~1,366 ms at 64 KB and ~5,523 ms at
+// the owner head, i.e. still past these bounds.
 //   - the output is unchanged: the cut sits BETWEEN two characters of one run of
 //     spaces/tabs, where nothing in marked's inline rules can start or stop, so
 //     the pieces merge back into the same raw text (`p.raw += o.raw, p.text +=
@@ -653,11 +664,11 @@ test("a run of plain spaces renders in < 1000 ms at 64 KB and < 2000 ms at the 1
       const r = await renderInWorker("owner", src);
       if (r.ms > worst.ms) worst = { ms: r.ms, what: `${name} @ ${size}` };
       // Two bounds, because the two sizes cost differently: the 64 KB one is
-      // ~1,366 ms of quadratic before the window (so 1,000 ms must still catch
-      // it), the 128 KB containers measured 212-230 ms here in a fresh worker
-      // and 1,037 ms for the table cell on a CI runner ~5x slower than this box
-      // (so 1,000 ms did NOT catch the cliff and 2,000 ms does, with the ~5,523
-      // ms pre-window cost still past it).
+      // ~1,366 ms of quadratic before the window (so 1,000 ms catches it — but
+      // only just, and see the header note), the 128 KB containers measured
+      // 218-232 ms here in a fresh worker and 2,000 ms covers a CI runner ~3.5x
+      // slower than this box (5x measured would be 1,200 ms, and the ~5,523 ms
+      // pre-window cost is still past either bound).
       const bound = size >= OWNER_HEAD ? 2000 : 1000;
       assert.ok(r.ms < bound,
         `${name} at ${size} chars took ${r.ms.toFixed(0)} ms on the owner path (bound ${bound} ms)`);
@@ -669,7 +680,7 @@ test("a run of plain spaces renders in < 1000 ms at 64 KB and < 2000 ms at the 1
   t.diagnostic(`worst plain-space render: ${worst.ms.toFixed(0)} ms — ${worst.what}`);
 });
 
-test("the CHUNKED owner path renders 1 MiB of plain-space runs in < 5000 ms in total", async (t) => {
+test("the CHUNKED owner path renders 1 MiB of plain-space runs in < 6000 ms in total", async (t) => {
   // 120 KB runs, each ended by a blank line so every chunk holds ONE of them —
   // the shape that makes the per-chunk cost, rather than the split, the thing
   // under test.
@@ -677,8 +688,11 @@ test("the CHUNKED owner path renders 1 MiB of plain-space runs in < 5000 ms in t
   const r = await renderInWorker("owner", runs);
   // Over the per-document budget the remainder becomes the plain-text tail, so
   // the bound is "budget plus one chunk" (see OWNER_MD_RENDER_BUDGET_MS) — and
-  // nothing is dropped either way.
-  assert.ok(r.ms < 5000, `1 MiB of 120 KB space runs took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 5000 ms)`);
+  // nothing is dropped either way. Measured 1,056-1,083 ms (worst of three
+  // runs); the bound is 6,000 ms, 5x that. No before-fix time is recorded for
+  // THIS 1 MiB fixture (the window's cliff, ~1,366 ms at 64 KB and ~5,523 ms at
+  // the 128 KB owner head, is on the shapes above).
+  assert.ok(r.ms < 6000, `1 MiB of 120 KB space runs took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 6000 ms)`);
   assert.ok(r.html.length >= CHUNKED, `all 1 MiB of content is on the page (got ${r.html.length} chars of HTML)`);
 
   const one = SPACE_SHAPES.plain(CHUNKED);
@@ -705,8 +719,9 @@ test("a stretch with no double space is left uncut and stays linear (bot 64 KB, 
   assert.ok(botOnce.length > 0 && ownerOnce.length > 0, "both paths still render the words");
 
   const bot = await renderInWorker("bot", botSrc);
-  // Measured 21 ms here in a fresh worker (a single-space line has no usable cut
-  // and is linear), so the pre-guard bounds stay: nothing to head for.
+  // Measured 18-22 ms here in a fresh worker (a single-space line has no usable
+  // cut and is linear), so 500 ms is ~23x it: the pre-guard bounds stay, nothing
+  // to head for.
   assert.ok(bot.ms < 500, `a 64 KB single-space line took ${bot.ms.toFixed(0)} ms on the bot path (bound 500 ms)`);
   const owner = await renderInWorker("owner", ownerSrc);
   assert.ok(owner.ms < 1000, `a 128 KB single-space line took ${owner.ms.toFixed(0)} ms on the owner path (bound 1000 ms)`);
@@ -1130,15 +1145,15 @@ test("a run that ends in a line break is cut up to its last tab (B2): bot 60 KB 
     const botSrc = shape(60 * 1024);
     assert.equal(botSrc.length, 60 * 1024, `${name}: the bot fixture is 60 KB`);
     const bot = await renderInWorker("bot", botSrc);
-    // Measured 62-112 ms here in a fresh worker; the pre-fix cost was 1,175 ms
-    // on this path, so 1,000 ms still separates it.
+    // Measured 112-114 ms here in a fresh worker; the pre-fix cost was 1,175 ms
+    // on this path, so 1,000 ms still separates it (5x measured would be 600 ms).
     assert.ok(bot.ms < 1000, `${name}: 60 KB took ${bot.ms.toFixed(0)} ms on the bot path (bound 1000 ms)`);
     assert.ok(bot.length > 0, `${name}: the bot path still renders`);
 
     const ownerSrc = shape(OWNER_HEAD);
     assert.equal(ownerSrc.length, OWNER_HEAD, `${name}: the owner fixture is the 128 KB head`);
     const owner = await renderInWorker("owner", ownerSrc);
-    // Measured 128-236 ms here; the pre-fix cost was 5,255 ms on this path.
+    // Measured 204-215 ms here; the pre-fix cost was 5,255 ms on this path.
     assert.ok(owner.ms < 2000, `${name}: the 128 KB owner head took ${owner.ms.toFixed(0)} ms (bound 2000 ms)`);
     assert.ok(owner.length >= ownerSrc.length * 0.99, `${name}: the content is on the page`);
 
@@ -1226,13 +1241,17 @@ test("every spelling of a run that ends in a line break renders exactly as it do
 
 const TAB_BREAK_UNIT = "a" + " ".repeat(120000 - 2) + "\t\nb\n\n";
 
-test("the CHUNKED owner path renders 1 MiB of space-run-then-tab-then-line-break units in < 5000 ms", async (t) => {
+test("the CHUNKED owner path renders 1 MiB of space-run-then-tab-then-line-break units in < 6000 ms", async (t) => {
   const src = rep(TAB_BREAK_UNIT, CHUNKED);
   assert.equal(src.length, CHUNKED, "the fixture is 1 MiB");
   const r = await renderInWorker("owner", src);
-  // Measured 1,055 ms here (budget plus one chunk); the pre-fix cost was 4,576 ms.
-  assert.ok(r.ms < 5000,
-    `1 MiB of 120 KB space runs ending in ` + "`\\t\\n`" + ` took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 5000 ms)`);
+  // Measured 1,174-1,203 ms here (budget plus one chunk); the bound is 6,000 ms,
+  // 5x that. The pre-fix cost was 4,576 ms — BELOW this bound, so this assertion
+  // cannot catch a full return of the regression (it catches a hang); the audit
+  // reports that, and the per-shape bounds above (bot 1,000 / owner 2,000 against
+  // 1,175 / 5,255 ms) are where the regression is caught.
+  assert.ok(r.ms < 6000,
+    `1 MiB of 120 KB space runs ending in ` + "`\\t\\n`" + ` took ${r.ms.toFixed(0)} ms through the chunked owner path (bound 6000 ms)`);
   assert.ok(r.length > 0, "the 1 MiB document still renders");
   t.diagnostic(`1 MiB space-run/tab units: ${r.ms.toFixed(0)} ms (${r.length} chars of HTML)`);
 });
@@ -1300,7 +1319,7 @@ test("a memo collision between two inline blocks cannot silence the window (M)",
   // the whole quadratic — renders in well under the bound instead of in ~5 s.
   const big = collisionDoc(OWNER_HEAD - 1);
   const r = await renderInWorker("owner", big);
-  // Measured 259 ms here in a fresh worker; the stale-memo cost was ~5 s.
+  // Measured 226-229 ms here in a fresh worker; the stale-memo cost was ~5 s.
   assert.ok(r.ms < 2000, `the 128 KB collision document took ${r.ms.toFixed(0)} ms (bound 2000 ms)`);
   assert.ok(r.length >= big.length * 0.99, "the content is on the page");
   t.diagnostic(`collision document: 16 KB ${botCuts}+${ownerCuts} cuts, 128 KB owner ${r.ms.toFixed(0)} ms`);

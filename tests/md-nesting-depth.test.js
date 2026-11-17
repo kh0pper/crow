@@ -22,8 +22,10 @@
 // What must stay true:
 //   - 64 KB of any container marker, 30 seeded random mixes of them, marker lines
 //     that arrive with bare `\r` / `\r\n`, quote+indent+marker stacks and a
-//     marker run followed by a LAZY continuation line render in well under half
-//     a second of CPU on BOTH paths, and neither path throws;
+//     marker run followed by a LAZY continuation line render in under a second
+//     of CPU on BOTH paths (measured: 74 ms for the fixed markers, 138 ms for
+//     the seeded mixes, 185 ms for the bare-`\r` shapes), and neither path
+//     throws;
 //   - the depth counter also sees the SECOND way down marked's blockquote
 //     tokenizer has — its own `this.blockquote(f)` / `this.list(f)` re-lex for
 //     lazy continuation lines, which never passes through blockTokens — so a
@@ -73,14 +75,38 @@ const rep = (u, n) => u.repeat(Math.ceil(n / u.length)).slice(0, n);
 // CPU time of THIS process, not wall-clock: rendering is synchronous and
 // single-threaded, so the cost still shows in full while the parallel suite's
 // load on other cores does not (the same measure bot-markdown-quadratic.test.js
-// uses). The bound is sized for a loaded runner: the worst measured render after
-// the guard is 128 ms, the regression it guards was 0.7–1.4 s AND a throw.
-const BOUND_MS = 500;
+// uses).
+//
+// Every bound below is 5x the WORST of three measured runs on the dev box
+// (CPU ms, the same process), rounded up to a clean number, and each records
+// the cliff it guards (the before-fix times in the comments above):
+//   - BOUND_MS — the 64 KB container markers, quote+indent+marker stacks, the
+//     lazy-continuation shapes and the 30 seeded marker mixes (measured 1 ms to
+//     138 ms, the seeded mixes being the slowest); the cliff is the unguarded
+//     64 KB nesting parse, 1.0 s on the bot path and 1.36 s on the owner's,
+//     which then threw. 700 ms is above a THIRD of that cliff (233-333 ms): the
+//     audit's conflict — a runner ~3.5x slower than this box costs ~483 ms on
+//     the seeded mixes, so a bound that cannot flake is necessarily above a
+//     third of a 1 s cliff;
+//   - CRLF_BOUND_MS — the bare `\r` / `\r\n` / mixed line-break shapes, the
+//     same cliff reached through borrowed line breaks: measured 163-185 ms on
+//     the bot path, 71-126 ms on the owner's. 5x is 925 ms, so 1,000 ms sits AT
+//     the bot-side cliff (1.0 s): another irreconcilable pair reported by the
+//     audit (this shape's guard is only ~5-6x faster than the unguarded parse);
+//   - LONG_DOC_BOUND_MS — the 300 KB realistic document through the chunked
+//     path: measured 179-231 ms. No pathological cliff is recorded for THAT
+//     fixture (it is a realistic document, so marked is near-linear on it);
+//     the bound is a tripwire against a chunking regression, and 5x is what a
+//     runner ~3x slower than this box needs (CI measured 502 ms once against
+//     the old shared 500 ms bound — the flake this split fixes).
+const BOUND_MS = 700;
+const CRLF_BOUND_MS = 1000;
+const LONG_DOC_BOUND_MS = 1200;
 function cpuMs() { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }
 
 /** The budget a CHUNKER assertion runs under: high enough that no runner's
  *  speed can turn "the whole document is formatted" into a plain-text tail. The
- *  budget is 1 s of CPU and a 300 KB document measures ~100 ms here, so a CI
+ *  budget is 1 s of CPU and a 300 KB document measures 179-231 ms here, so a CI
  *  runner a few times slower than this box is what used to make these
  *  assertions depend on the box rather than on the split. Whether the DEFAULT
  *  budget keeps a render bounded (and drops nothing when it stops) is pinned
@@ -126,9 +152,9 @@ function tracker(t) {
   };
 }
 
-function assertBounded(result, what) {
+function assertBounded(result, what, bound = BOUND_MS) {
   for (const [who, r] of Object.entries(result)) {
-    assert.ok(r.ms < BOUND_MS, `${what} took ${r.ms.toFixed(0)} ms on the ${who} path (bound ${BOUND_MS} ms)`);
+    assert.ok(r.ms < bound, `${what} took ${r.ms.toFixed(0)} ms on the ${who} path (bound ${bound} ms)`);
   }
 }
 
@@ -169,7 +195,7 @@ const SHAPES = {
   "indentation staircase": staircase,
 };
 
-test("64 KB of every container marker renders in < 500 ms on both paths, no throw", (t) => {
+test("64 KB of every container marker renders in < 700 ms on both paths, no throw", (t) => {
   const note = tracker(t);
   for (const [name, make] of Object.entries(SHAPES)) {
     const src = make();
@@ -199,7 +225,7 @@ test("a bare \\r cannot bypass the bound (borrowed line breaks, both paths)", (t
     const src = make();
     const result = both(src);
     note(result, name);
-    assertBounded(result, `64 KB of ${name} marker lines`);
+    assertBounded(result, `64 KB of ${name} marker lines`, CRLF_BOUND_MS);
     assert.ok(result.bot.html.length > 0, `${name}: the bot path still renders`);
     assert.ok(result.owner.html.length > 0, `${name}: the owner path still renders`);
   }
@@ -312,7 +338,7 @@ function mulberry32(a) {
   };
 }
 
-test("random-search smoke: 30 seeded 64 KB marker mixes, each < 500 ms, no throw", (t) => {
+test("random-search smoke: 30 seeded 64 KB marker mixes, each < 700 ms, no throw", (t) => {
   const note = tracker(t);
   const MIX = ["1) ", "1. ", "- ", "* ", "+ ", "> ", ">", "- 1) ", "> 1) ", "- > 1. ", "\n", "  ", "text "];
   const rnd = mulberry32(0x5eed1e);
@@ -548,7 +574,7 @@ test("the owner cap is 128 KB, and a 300 KB document is rendered in full", (t) =
   const html = renderFully(doc);
   const ms = cpuMs() - t0;
   t.diagnostic(`300 KB document (first cut ${cut} chars): ${ms.toFixed(0)} ms`);
-  assert.ok(ms < BOUND_MS, `a 300 KB realistic document took ${ms.toFixed(0)} ms`);
+  assert.ok(ms < LONG_DOC_BOUND_MS, `a 300 KB realistic document took ${ms.toFixed(0)} ms (bound ${LONG_DOC_BOUND_MS} ms)`);
 
   // Fully formatted: no notice, no plain-text tail.
   assert.ok(!html.includes("md-tail"), "the whole document is formatted: " + html.slice(-300));

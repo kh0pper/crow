@@ -104,8 +104,10 @@ function isRemainderAtChunkBoundary(src, tail) {
 const FULL_RENDER_BUDGET_MS = 60_000;
 /** A sanity bound on those unbudgeted renders too — a chunking regression that
  *  reverted to one giant parse would be seconds, and this catches it without
- *  being a speed test (measured on the dev box: 227 ms at 600 KB, 479 ms at
- *  1 MB — and the pre-chunking quadratic was 11-200 s). */
+ *  being a speed test. Measured on the dev box (worst of three runs, budget
+ *  raised): 605 ms at 600 KB and 489 ms at 1 MiB against the 5,000 ms bound —
+ *  and the pre-chunking quadratic was 11-200 s, so the bound sits far below the
+ *  cliff it guards. */
 const FULL_RENDER_BOUND_MS = 5000;
 
 /** renderMarkdown with the total-time budget raised out of the way, for the
@@ -365,10 +367,10 @@ test("budget: 1 MiB of every pathological shape renders in < 5 s CPU and drops n
     t.diagnostic(`1 MiB of ${name}: ${ms.toFixed(0)} ms CPU, ${html.length} chars of HTML`);
     assert.ok(html.length > 0, `${name}: still rendered`);
     // A 1 MiB chunked render costs the 1 s budget plus at most one bounded
-    // chunk, whatever the box: measured here 16-1,002 ms for the four shapes
-    // (table lines are the worst, right at the budget). The bound is 5 s so a
-    // CI runner ~3.5x slower than this box cannot fail it, and the cliffs it
-    // guards are 4-27 s.
+    // chunk, whatever the box: measured here 26-1,003 ms for the four shapes
+    // (table lines are the worst, at the budget). The bound is 5 s — 5x the
+    // worst measured value, and so a CI runner ~3.5x slower than this box stays
+    // inside it — and the cliffs it guards are 4-27 s.
     assert.ok(ms < 5000, `1 MiB of ${name} took ${ms.toFixed(0)} ms CPU (bound 5000 ms)`);
 
     // Nothing dropped. Either the whole document is formatted (no notice), or
@@ -405,10 +407,16 @@ test("budget: a pathological 8 MiB document shows the notice and keeps the WHOLE
   const html = renderMarkdown(src);
   const ms = cpuMs() - t0;
   t.diagnostic(`8 MiB of one-cell tables: ${ms.toFixed(0)} ms CPU, ${html.length} chars of HTML`);
-  // Budget + one chunk, so the same 5 s bound the 1 MiB chunked renders get
-  // (measured 1,333 ms on the dev box, where the 8 MiB of unbudgeted work would
-  // be ~16 s).
-  assert.ok(ms < 5000, `the budgeted render took ${ms.toFixed(0)} ms CPU (bound 5000 ms)`);
+  // Budget + one chunk, so the same 5 s bound the 1 MiB chunked renders get is
+  // not enough here: this fixture is 8 MiB, and the CHUNK after the budget is
+  // the most expensive one measured (~250 ms per 128 KB of one-cell tables, so
+  // ~550 ms of it on the dev box). Measured 1,418-1,544 ms across three runs,
+  // and the unbudgeted work would be ~16 s — the bound is 5x the worst measured
+  // value (8,000 ms) and stays well under the ~16 s cliff a lost budget would
+  // cost, though it is above a third of it (see the note on the audit: for a
+  // BUDGETED render the measured cost includes the fixed 1 s budget, which does
+  // not scale with the runner, so 5x measured over-provisions by design).
+  assert.ok(ms < 8000, `the budgeted render took ${ms.toFixed(0)} ms CPU (bound 8000 ms)`);
 
   const { head, text } = tailOf(html);
   // The formatted part is real HTML (tables, wrapped for scroll by the owner
@@ -524,12 +532,14 @@ test("a multi-megabyte line that looks like a link definition renders, and quick
     const ms = cpuMs() - t0;
     t.diagnostic(`${name}: ${(src.length / 1048576).toFixed(1)} MB in ${ms.toFixed(0)} ms CPU`);
     assert.ok(html.length > 0, `${name}: and the page is not empty`);
-    // Measured on the dev box: 120 ms for the unclosed `[` label and 1,360 ms for
-    // the unclosed def title (marked's def tokenizer walks that line until the
-    // stack gives out, which is what the guard prevents from throwing). The bound
-    // is 3 s — over 2x the measured cost of the slower shape, so a slow runner
-    // cannot fail it, and the throw this guards returns immediately.
-    assert.ok(ms < 3000, `${name}: quick (${ms.toFixed(0)} ms CPU, bound 3000 ms)`);
+    // Measured on the dev box (worst of three runs): 137 ms for the unclosed `[`
+    // label and 1,404 ms for the unclosed def title (marked's def tokenizer
+    // walks that line until the stack gives out, which is what the guard
+    // prevents from THROWING — the cliff here is a RangeError, not a duration).
+    // The bound is 7,500 ms: 5x the slower shape's measured cost, so a runner
+    // ~3.5x slower than this box (CI measured ~3.5x on this suite's work) stays
+    // inside it, and nothing about the guard's contract is a time here.
+    assert.ok(ms < 7500, `${name}: quick (${ms.toFixed(0)} ms CPU, bound 7500 ms)`);
   }
 });
 

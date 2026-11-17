@@ -24,8 +24,8 @@
 //   - the shapes in the report, at 64 KB and at the owner cap, render in well
 //     under a second of CPU each (they used to be seconds to minutes; measured
 //     1-6 ms and 33 ms for a normal owner-cap post, and the definition flood at
-//     the owner cap — the slowest of the family — 213 ms against a 2,000 ms
-//     bound sized for a CI runner a few times slower than the dev box);
+//     the owner cap — the slowest of the family — 209-243 ms against a 2,000 ms
+//     bound sized for a CI runner ~3.5x slower than the dev box);
 //   - the email-autolink run shapes (`a…@a…`, `HTTP…@a…`, a long `HTTP` run, an
 //     `@` every 4,096 `a`s) do too — < 500 ms at both sizes — while ordinary
 //     email content still autolinks and renders byte-identically; and so do runs
@@ -98,6 +98,8 @@ const UNITS = {
 
 test("64 KB of every reported unit renders in < 1000 ms (they were 0.5-1.8 s)", (t) => {
   const note = tracker(t);
+  // Measured 23-24 ms (worst of three runs) against the 1,000 ms bound: ~40x,
+  // and 0.5-1.8 s before the guard.
   for (const [unit, make] of Object.entries(UNITS)) {
     const src = make();
     assert.equal(src.length, CAP64, `${unit}: fixture size`);
@@ -118,7 +120,8 @@ test("every reported unit at the owner cap renders in < 1000 ms (they were secon
   // The owner cap is 2x the bot path's, and the budgets are per DOCUMENT — so
   // the worst a document can spend in marked's inline lexer does not grow with
   // the input, and a render at the owner cap is bounded like a 64 KB one.
-  // Measured with the guard at the then-1-MiB cap: 17-47 ms per unit.
+  // Measured with the guard at the current owner cap: 7-10 ms per unit (33 ms
+  // for a normal post), against the 1,000 ms bound.
   for (const [unit, make] of Object.entries(UNITS)) {
     const src = rep(make(), CAP_OWNER);
     assert.equal(src.length, CAP_OWNER, `${unit}: fixture size`);
@@ -169,9 +172,8 @@ test("the reference-definition flood is capped at 256 definitions and renders in
   const bigRun = timed(big.src);
   note(bigRun.ms, `owner-cap definition flood (${(big.defs / 1024).toFixed(0)} KB of definitions)`);
   assert.ok(bigRun.html.length > 0, "still rendered");
-  // Measured 213 ms on the dev box (the fixture took > 10 minutes before the
-  // definition cap), so 2,000 ms covers a CI runner a few times slower than this
-  // box and is still nowhere near the cliff.
+  // Measured 209-243 ms on the dev box (worst of three runs) against the
+  // 2,000 ms bound; the fixture took > 10 minutes before the definition cap.
   assert.ok(bigRun.ms < 2000, `owner-cap definition flood took ${bigRun.ms.toFixed(0)} ms`);
   assert.match(bigRun.html, /<em>a<\/em>/);
 });
@@ -198,6 +200,8 @@ test("definitions past the cap resolve as text, and the first 256 still resolve 
 // `@`. 1 MiB of `HTTP` measured 330 s on the owner path before the guard.
 test("a run of `HTTP` at the owner cap renders in < 1000 ms (it was 330 s at 1 MiB)", (t) => {
   const note = tracker(t);
+  // Measured 12-14 ms at the owner cap and 6-7 ms at the bot cap (worst of three
+  // runs) against the 1,000 ms bound: 1 MiB of `HTTP` was 330 s before the guard.
   for (const unit of ["HTTP", "http", "Http"]) {
     const { html, ms } = timed(rep(unit, CAP_OWNER));
     note(ms, `owner cap of ${JSON.stringify(unit)}`);
@@ -259,6 +263,8 @@ test("email-autolink runs are flattened: 64 KB and the owner cap render in < 500
       assert.ok(html.length > 0, `${name}: still rendered (never "")`);
       assert.ok(ms < 500, `${name} at ${label} took ${ms.toFixed(0)} ms`);
       // Flattened, not autolinked: the run is on screen as text, inert.
+      // (Measured 1-6 ms — worst of three runs — against 500 ms, and 1,833 ms for
+      // this shape before the run-length guard.)
       assert.ok(!/<a[\s>]/.test(html), `${name}: nothing was autolinked`);
       assert.ok(html.replace(/<[^>]+>/g, "").length > size * 0.5,
         `${name}: the text is still shown`);
@@ -376,6 +382,9 @@ test("`@`-separated chains are flattened: 64 KB bot and the owner cap in < 500 m
       assert.ok(html.length > 0, `${name} at ${label}: still rendered (never "")`);
       assert.ok(ms < 500, `${name} at ${label} took ${ms.toFixed(0)} ms`);
       // Flattened, not autolinked: the chain is on screen as text, inert.
+      // (Measured 2-4 ms — worst of three runs — against 500 ms; before the
+      // billing fix every other run of a chain escaped the budget and the shape
+      // was quadratic.)
       assert.ok(!/<a[\s>]/.test(html), `${name} at ${label}: nothing was autolinked`);
       assert.ok(html.replace(/<[^>]+>/g, "").length > size * 0.5,
         `${name} at ${label}: the text is still shown`);
@@ -448,6 +457,8 @@ test("normal email content renders byte-identical, and still autolinks", (t) => 
 // --- the block-nesting cliff is still guarded on this path ----------------
 test("container markers at the owner cap render in < 1000 ms, no throw (the nesting guard)", (t) => {
   const note = tracker(t);
+  // Measured 49-60 ms (worst of three runs) against the 1,000 ms bound; the
+  // unguarded 64 KB parse of `1) ` was ~1.0 s, and 128 KB is worse.
   for (const unit of ["1) ", "> 1) ", "> "]) {
     const { html, ms } = timed(rep(unit, CAP_OWNER));
     note(ms, `owner cap of ${JSON.stringify(unit)}`);
@@ -469,6 +480,7 @@ function mulberry32(a) {
 
 test("random-search smoke: 30 seeded 256 KB delimiter soups, each < 1000 ms", (t) => {
   const note = tracker(t);
+  // Measured 154-166 ms (worst of three runs) against the 1,000 ms bound.
   const ALPHABET = "*_[]()~`<>!\\ a\n";
   const SIZE = 256 * 1024;
   const rnd = mulberry32(0x5eed1e);
@@ -487,7 +499,9 @@ test("random-search smoke: 30 seeded 256 KB delimiter soups, each < 1000 ms", (t
 // output, linearly. The 1 MiB version of it (~500,000 paragraphs, a 3 MB
 // output) measured 890 ms on the pre-change renderer and 942 ms through the
 // guard (the pre-pass is linear), so the bound here is a regression tripwire,
-// not the 1 s target the cliffs are held to.
+// not the 1 s target the cliffs are held to. Measured 122-129 ms at the owner
+// cap (worst of three runs), so the 3,000 ms bound is ~23x the measurement and
+// well under the 890 ms the pre-change 1 MiB version cost.
 test("a document of tiny paragraphs at the owner cap stays at its linear floor", (t) => {
   const { html, ms } = timed(rep("a\n\n", CAP_OWNER));
   t.diagnostic(`tiny paragraphs at the owner cap: ${ms.toFixed(0)} ms, ${html.length} chars of output`);
