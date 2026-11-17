@@ -1,0 +1,149 @@
+{
+ "note": "Bones of our own armature. figFrom/figTo are figure.cjs solve() joint names (plus crown = chin + 2*(head-chin)); lmFrom/lmTo are landmark names. Anatomical R is the NEAR side of a right-facing side view and is drawn with figure.cjs L joints.",
+ "bones": [
+  {
+   "name": "pelvis",
+   "side": "C",
+   "figFrom": "hip",
+   "figTo": "mid",
+   "lmFrom": "hipMid",
+   "lmTo": "waistMid",
+   "radiusMm": 150
+  },
+  {
+   "name": "torso",
+   "side": "C",
+   "figFrom": "mid",
+   "figTo": "shoulder",
+   "lmFrom": "waistMid",
+   "lmTo": "shoulderMid",
+   "radiusMm": 150
+  },
+  {
+   "name": "neck",
+   "side": "C",
+   "figFrom": "shoulder",
+   "figTo": "chin",
+   "lmFrom": "shoulderMid",
+   "lmTo": "chin",
+   "radiusMm": 55
+  },
+  {
+   "name": "head",
+   "side": "C",
+   "figFrom": "chin",
+   "figTo": "crown",
+   "lmFrom": "chin",
+   "lmTo": "crown",
+   "radiusMm": 95
+  },
+  {
+   "name": "upperArm.R",
+   "side": "R",
+   "figFrom": "shoulder",
+   "figTo": "elbowL",
+   "lmFrom": "shoulderR",
+   "lmTo": "elbowR",
+   "radiusMm": 45
+  },
+  {
+   "name": "forearm.R",
+   "side": "R",
+   "figFrom": "elbowL",
+   "figTo": "wristL",
+   "lmFrom": "elbowR",
+   "lmTo": "wristR",
+   "radiusMm": 35
+  },
+  {
+   "name": "hand.R",
+   "side": "R",
+   "figFrom": "wristL",
+   "figTo": "handL",
+   "lmFrom": "wristR",
+   "lmTo": "handR",
+   "radiusMm": 30
+  },
+  {
+   "name": "thigh.R",
+   "side": "R",
+   "figFrom": "hip",
+   "figTo": "kneeL",
+   "lmFrom": "hipR",
+   "lmTo": "kneeR",
+   "radiusMm": 85
+  },
+  {
+   "name": "shank.R",
+   "side": "R",
+   "figFrom": "kneeL",
+   "figTo": "ankleL",
+   "lmFrom": "kneeR",
+   "lmTo": "ankleR",
+   "radiusMm": 55
+  },
+  {
+   "name": "foot.R",
+   "side": "R",
+   "figFrom": "ankleL",
+   "figTo": "toeL",
+   "lmFrom": "ankleR",
+   "lmTo": "toeR",
+   "radiusMm": 60
+  },
+  {
+   "name": "upperArm.L",
+   "side": "L",
+   "figFrom": "shoulder",
+   "figTo": "elbowR",
+   "lmFrom": "shoulderL",
+   "lmTo": "elbowL",
+   "radiusMm": 45
+  },
+  {
+   "name": "forearm.L",
+   "side": "L",
+   "figFrom": "elbowR",
+   "figTo": "wristR",
+   "lmFrom": "elbowL",
+   "lmTo": "wristL",
+   "radiusMm": 35
+  },
+  {
+   "name": "hand.L",
+   "side": "L",
+   "figFrom": "wristR",
+   "figTo": "handR",
+   "lmFrom": "wristL",
+   "lmTo": "handL",
+   "radiusMm": 30
+  },
+  {
+   "name": "thigh.L",
+   "side": "L",
+   "figFrom": "hip",
+   "figTo": "kneeR",
+   "lmFrom": "hipL",
+   "lmTo": "kneeL",
+   "radiusMm": 85
+  },
+  {
+   "name": "shank.L",
+   "side": "L",
+   "figFrom": "kneeR",
+   "figTo": "ankleR",
+   "lmFrom": "kneeL",
+   "lmTo": "ankleL",
+   "radiusMm": 55
+  },
+  {
+   "name": "foot.L",
+   "side": "L",
+   "figFrom": "ankleR",
+   "figTo": "toeR",
+   "lmFrom": "ankleL",
+   "lmTo": "toeL",
+   "radiusMm": 60
+  }
+ ]
+}
