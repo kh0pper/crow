@@ -72,6 +72,8 @@ let ownerServer;
 let ownerBase;
 const ids = {};
 const objects = new Map(); // key -> { bytes, mime }
+/** The object store's OWN content-type, for rows that carry no type of their own. */
+const metaTypes = new Map();
 const requested = [];      // keys getObject was asked for (the public route)
 const ownerRequested = []; // the same, for the owner route
 /** The owner's dashboard session token (its sha256 is the oauth_tokens row). */
@@ -238,6 +240,24 @@ before(async () => {
       "![t](/blog/media/types/notes.txt)",
     ].join("\n\n"),
   });
+  // One published public post linking EVERY stored type the parse in
+  // media-policy.js has to survive: comma-shaped lists that a browser reads as
+  // a LIST (the last valid type wins, so `video/mp4, text/html` becomes a
+  // page), a CRLF header-splitting shape, a clean but parameterised type, and
+  // two rows with no type of their own whose object-store content-type is the
+  // fallback.
+  await post("mime-post", {
+    status: "published",
+    visibility: "public",
+    content: [
+      "![v](/blog/media/mime/list.mp4)",
+      "![a](/blog/media/mime/audio-list.mp3)",
+      "![c](/blog/media/mime/crlf.png)",
+      "![p](/blog/media/mime/params.png)",
+      "![m](/blog/media/mime/meta-list.png)",
+      "![s](/blog/media/mime/meta-clean.png)",
+    ].join("\n\n"),
+  });
 
   for (const [slug, s] of Object.entries(SONGS)) {
     await post(slug, { status: s.status, visibility: s.visibility, content: songContent(s) });
@@ -282,6 +302,18 @@ before(async () => {
     row("types/notes.txt", "text/plain"),
     row("types/clip.mp4", "video/mp4"),
     row("types/project.sunvox", "application/octet-stream"),
+    // Uploader-chosen types that a browser would read as a page if the RAW
+    // string were emitted: a comma list (the last valid type wins), a list with
+    // no space after the comma, and a CRLF header-splitting shape.
+    row("mime/list.mp4", "video/mp4, text/html"),
+    row("mime/audio-list.mp3", "audio/x,text/html"),
+    row("mime/crlf.png", "image/png\r\nX: y"),
+    // A clean, parameterised type: the essence is sent, never the parameters.
+    row("mime/params.png", "image/png; charset=x"),
+    // No type of the row's own: the object store's content-type is the fallback,
+    // under exactly the same parse.
+    row("mime/meta-list.png", null),
+    row("mime/meta-clean.png", null),
     // sunvox-studio's saves: reference_type blog_post, NO reference_id.
     ...[...Object.values(SONGS)].flatMap((s) => [row(s.sunvoxKey, "application/octet-stream"), row(s.audioKey, "audio/mpeg")]),
   ];
@@ -293,6 +325,9 @@ before(async () => {
     });
     objects.set(f.s3_key, { bytes: Buffer.from(`bytes of ${f.s3_key}`), mime: f.mime_type });
   }
+  // The object store's own content-type, only for the rows that have no type.
+  metaTypes.set("mime/meta-list.png", "image/png, text/html");
+  metaTypes.set("mime/meta-clean.png", "image/png");
   db.close();
 
   const { default: blogPublicRouter } = await import("../servers/gateway/routes/blog-public.js");
@@ -305,7 +340,8 @@ before(async () => {
         requested.push({ key, bucket: opts.bucket || null });
         const o = objects.get(key);
         if (!o) throw new Error("Object not found");
-        return { stream: Readable.from([o.bytes]), stat: { size: o.bytes.length } };
+        const metaData = metaTypes.has(key) ? { "content-type": metaTypes.get(key) } : undefined;
+        return { stream: Readable.from([o.bytes]), stat: { size: o.bytes.length, metaData } };
       },
     },
   }));
@@ -340,7 +376,8 @@ before(async () => {
         ownerRequested.push({ key, bucket: opts.bucket || null });
         const o = objects.get(key);
         if (!o) throw new Error("Object not found");
-        return { stream: Readable.from([o.bytes]), stat: { size: o.bytes.length } };
+        const metaData = metaTypes.has(key) ? { "content-type": metaTypes.get(key) } : undefined;
+        return { stream: Readable.from([o.bytes]), stat: { size: o.bytes.length, metaData } };
       },
     },
   }));
@@ -423,7 +460,7 @@ test("a video and a .sunvox project are inline; an octet-stream that is not a .s
 });
 
 test("the inline allowlist helper is the one both media routes use", async () => {
-  const { isInlineMediaType } = await import("../servers/blog/media-policy.js");
+  const { isInlineMediaType, parseMediaType } = await import("../servers/blog/media-policy.js");
   for (const t of ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "audio/mpeg", "video/mp4"]) {
     assert.equal(isInlineMediaType(t, "a.bin"), true, t);
   }
@@ -431,6 +468,55 @@ test("the inline allowlist helper is the one both media routes use", async () =>
   assert.equal(isInlineMediaType("application/octet-stream", "a.bin"), false);
   for (const t of ["text/html", "image/svg+xml", "application/pdf", "text/plain", "application/json", "", null]) {
     assert.equal(isInlineMediaType(t, "a.png"), false, String(t));
+  }
+  // Only a CLEAN essence can ever be inline, whatever its head says.
+  for (const t of ["video/mp4, text/html", "audio/x,text/html", "image/png\r\nX: y", "image/png\u0000", "image", "/png", "image/"]) {
+    assert.equal(isInlineMediaType(t, "a.sunvox"), false, JSON.stringify(t));
+    assert.equal(parseMediaType(t), null, JSON.stringify(t));
+  }
+  assert.equal(parseMediaType("image/png; charset=x"), "image/png", "the essence, parameter dropped");
+  assert.equal(parseMediaType("  Image/PNG  "), "image/png", "trimmed and lowercased");
+  assert.equal(parseMediaType(null), null);
+});
+
+test("a comma- or CRLF-shaped stored type is never emitted: octet-stream, attachment, sandbox", async () => {
+  // A browser splits Content-Type on commas and takes the last VALID type, so
+  // `video/mp4, text/html` passed an inline VIDEO check and then RENDERED AS
+  // HTML (script ran in Chromium). The raw string is never sent now — not from
+  // a row's mime_type, and not from the object store's fallback.
+  for (const key of ["mime/list.mp4", "mime/audio-list.mp3", "mime/crlf.png"]) {
+    for (const [route, r] of [["/blog/media", await get(key)], ["/dashboard/media", await ownerGet(key)]]) {
+      assert.equal(r.status, 200, `${route} ${key}: served`);
+      assert.equal(r.contentType, "application/octet-stream", `${route} ${key}: the unclean type is not emitted`);
+      assert.equal(r.disposition, "attachment", `${route} ${key}: never an inline document`);
+      assert.equal(r.csp, "sandbox", `${route} ${key}: and sandboxed`);
+      assert.equal(r.nosniff, "nosniff", `${route} ${key}: nosniff`);
+    }
+  }
+});
+
+test("a clean type with parameters goes out as its bare essence", async () => {
+  for (const [route, r] of [["/blog/media", await get("mime/params.png")], ["/dashboard/media", await ownerGet("mime/params.png")]]) {
+    assert.equal(r.status, 200, `${route}: served`);
+    assert.equal(r.contentType, "image/png", `${route}: the essence only, no parameters, no raw string`);
+    assert.equal(r.disposition, null, `${route}: a raster image draws inline`);
+    assert.equal(r.csp, null, `${route}: inline media needs no sandbox`);
+  }
+});
+
+test("the object store's content-type fallback goes through the same parse", async () => {
+  // The row has no mime_type of its own; a presigned PUT lets the uploader set
+  // the object's content-type, so the fallback is untrusted text too.
+  for (const [route, r] of [["/blog/media", await get("mime/meta-list.png")], ["/dashboard/media", await ownerGet("mime/meta-list.png")]]) {
+    assert.equal(r.status, 200, `${route}: served`);
+    assert.equal(r.contentType, "application/octet-stream", `${route}: the comma list is not emitted`);
+    assert.equal(r.disposition, "attachment", `${route}: attachment`);
+    assert.equal(r.csp, "sandbox", `${route}: sandboxed`);
+  }
+  for (const [route, r] of [["/blog/media", await get("mime/meta-clean.png")], ["/dashboard/media", await ownerGet("mime/meta-clean.png")]]) {
+    assert.equal(r.status, 200, `${route}: served`);
+    assert.equal(r.contentType, "image/png", `${route}: a clean fallback type is used as it is`);
+    assert.equal(r.disposition, null, `${route}: and draws inline`);
   }
 });
 

@@ -912,3 +912,124 @@ test("the HTTP upload refuses a bot-bound blog_post reference too, before touchi
     await new Promise((ok) => server.close(ok));
   }
 });
+
+// --- the upload contract for a media type -----------------------------------
+// A stored mime_type is what a media route may one day serve through
+// Content-Type, and a browser reads that as a LIST: `video/mp4, text/html` is a
+// page. So an upload's type must be one clean `type/subtype` (parameters
+// optional) — refused on every path, for the owner and a bot alike — and the
+// serving side parses it again (servers/blog/media-policy.js).
+
+test("crow_upload_file refuses a comma/control-shaped mime_type on both its branches", async () => {
+  const { INVALID_MIME_TYPE_MESSAGE } = await import("../servers/blog/media-policy.js");
+  const refusal = `Error: ${INVALID_MIME_TYPE_MESSAGE}`;
+  const A = await mkProject();
+  const bot = await mkBot({ home: A });
+  const prefix = await storagePrefix(A);
+  const s3 = fakeS3();
+  const s = await open({ actor: { kind: "bot", id: bot }, s3 });
+  try {
+    const before = await count("SELECT COUNT(*) AS n FROM storage_files WHERE s3_key LIKE ?", [`${prefix}%`]);
+    const bad = ["video/mp4, text/html", "audio/x,text/html", "image/png\r\nX: y", "image/png\u0000"];
+    for (const mime_type of bad) {
+      // The direct (base64) branch.
+      const direct = await s.call("crow_upload_file", {
+        file_name: "clip.mp4", mime_type, data_base64: base64("bytes"), project_id: A,
+      });
+      assert.equal(direct.isError, true, JSON.stringify(mime_type));
+      assert.equal(direct.text, refusal, "a fixed message, and it never echoes the value");
+      // The presigned-upload branch: the same string is what the store would
+      // record as the object's content-type, so it is refused here too.
+      const presign = await s.call("crow_upload_file", { file_name: "clip.mp4", mime_type, project_id: A });
+      assert.equal(presign.isError, true, JSON.stringify(mime_type));
+      assert.equal(presign.text, refusal);
+    }
+    assert.equal(await count("SELECT COUNT(*) AS n FROM storage_files WHERE s3_key LIKE ?", [`${prefix}%`]), before,
+      "no row was recorded");
+    assert.equal(s3.calls.upload.length, 0, "nothing was written to storage");
+    assert.equal(s3.calls.put.length, 0, "and no presigned upload URL was handed out");
+
+    // A clean, parameterised type is accepted and stored as given (the essence
+    // is what the media routes emit; the parameters are theirs to drop).
+    const clean = await s.call("crow_upload_file", {
+      file_name: "cover.png", mime_type: "image/png; charset=x", data_base64: base64("png"), project_id: A,
+    });
+    assert.equal(clean.isError, false, clean.text);
+    assert.equal((await fileRow(/Key: (\S+)/.exec(clean.text)[1])).mime_type, "image/png; charset=x");
+  } finally { await s.close(); }
+
+  // The owner is refused by the same rule: the type is not a bot privilege.
+  const ownerS3 = fakeS3();
+  const owner = await open({ actor: OWNER, s3: ownerS3 });
+  try {
+    const refused = await owner.call("crow_upload_file", {
+      file_name: "owner-clip.mp4", mime_type: "video/mp4, text/html", data_base64: base64("bytes"),
+    });
+    assert.equal(refused.isError, true, "the owner is refused too");
+    assert.equal(refused.text, refusal);
+    assert.equal(ownerS3.calls.upload.length, 0);
+    assert.equal(ownerS3.calls.put.length, 0);
+
+    const ok = await owner.call("crow_upload_file", {
+      file_name: "owner.png", mime_type: "image/png", data_base64: base64("png"),
+    });
+    assert.equal(ok.isError, false, ok.text);
+  } finally { await owner.close(); }
+});
+
+test("POST /storage/upload refuses an unclean mimetype and accepts a clean one", async () => {
+  const { INVALID_MIME_TYPE_MESSAGE } = await import("../servers/blog/media-policy.js");
+  const { default: storageHttpRouter } = await import("../servers/gateway/routes/storage-http.js");
+  const app = express();
+  // The route's own guard, exercised with the exact string multer hands it.
+  // (A real multipart part header cannot carry a comma this far: busboy parses
+  // it into `type/subtype` and falls back to text/plain on a list — see the
+  // second half of this test. The route must not DEPEND on that parser being
+  // strict, so the mimetype is injected the way a laxer parser — a future
+  // multer, or any other mime reader — could hand it over.)
+  app.use((req, res, next) => {
+    if (req.get("x-test-mimetype")) {
+      req.file = { originalname: "clip.mp4", mimetype: req.get("x-test-mimetype"), buffer: Buffer.from("bytes"), size: 5 };
+    }
+    next();
+  });
+  app.use(storageHttpRouter(null));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((ok) => server.once("listening", ok));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const before = await count("SELECT COUNT(*) AS n FROM storage_files");
+    for (const mime_type of ["video/mp4, text/html", "audio/x,text/html"]) {
+      const r = await fetch(`${base}/storage/upload`, { method: "POST", headers: { "x-test-mimetype": mime_type } });
+      assert.equal(r.status, 400, JSON.stringify(mime_type));
+      assert.deepEqual(await r.json(), { error: INVALID_MIME_TYPE_MESSAGE });
+    }
+    assert.equal(await count("SELECT COUNT(*) AS n FROM storage_files"), before, "no row was recorded");
+
+    // A clean, parameterised type passes this rule and falls through to the
+    // storage probe (no backend in this test → 503).
+    const clean = await fetch(`${base}/storage/upload`, { method: "POST", headers: { "x-test-mimetype": "image/png; charset=x" } });
+    assert.equal(clean.status, 503);
+    assert.doesNotMatch(JSON.stringify(await clean.json()), /mime_type/);
+
+    // A REAL multipart upload whose part header is a list: the parser already
+    // reduces it to a clean type (text/plain), so nothing unclean can reach the
+    // row — the request passes the mime rule and reaches the storage probe
+    // unrefused.
+    const fd = new FormData();
+    fd.append("file", new Blob(["bytes"], { type: "video/mp4, text/html" }), "clip.mp4");
+    const part = await fetch(`${base}/storage/upload`, { method: "POST", body: fd });
+    assert.equal(part.status, 503, "a list in the part header cannot reach the row as a list");
+
+    // And a real part header the parser passes through but the type rule does
+    // not (a token the strict `type/subtype` alphabet excludes) is refused.
+    const strict = new FormData();
+    strict.append("file", new Blob(["bytes"], { type: "image/png~1" }), "clip.png");
+    const strictRes = await fetch(`${base}/storage/upload`, { method: "POST", body: strict });
+    assert.equal(strictRes.status, 400, "an unclean type from a real part header is refused");
+    assert.deepEqual(await strictRes.json(), { error: INVALID_MIME_TYPE_MESSAGE });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((ok) => server.close(ok));
+  }
+});

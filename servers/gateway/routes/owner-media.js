@@ -72,10 +72,17 @@ export default function ownerMediaRouter(dashboardAuth, { storage = {} } = {}) {
         ? await storageGetObject(s3Key, { bucket })
         : await storageGetObject(s3Key);
 
-      const mimeType = file.mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
       // private + no-store: this is the owner's own view of a file that may not
-      // be published yet, and a shared cache must never keep a copy.
-      setMediaResponseHeaders(res, { mimeType, s3Key, cacheControl: "private, no-store" });
+      // be published yet, and a shared cache must never keep a copy. The type
+      // goes through media-policy's single parse — the stored string (and the
+      // object store's content-type fallback) is untrusted text, so only a
+      // clean essence is emitted, never the raw value.
+      setMediaResponseHeaders(res, {
+        mimeType: file.mime_type,
+        objectContentType: stat.metaData?.["content-type"],
+        s3Key,
+        cacheControl: "private, no-store",
+      });
       res.set("Content-Length", String(stat.size));
       stream.pipe(res);
     } catch (err) {

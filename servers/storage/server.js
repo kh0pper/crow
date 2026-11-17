@@ -27,7 +27,7 @@ import {
   isAllowedMimeType,
 } from "./s3-client.js";
 import { actorFromEnv, resolveCallActor, auditActor } from "../research/actor.js";
-import { BLOG_POST_REFERENCE_TYPE, BLOG_POST_OWNER_ONLY_MESSAGE } from "../blog/media-policy.js";
+import { BLOG_POST_REFERENCE_TYPE, BLOG_POST_OWNER_ONLY_MESSAGE, INVALID_MIME_TYPE_MESSAGE, isCleanMediaType } from "../blog/media-policy.js";
 import {
   makeShareGate,
   scopePredicate,
@@ -208,6 +208,16 @@ export function createStorageServer(dbPath, options = {}) {
       // unidentified caller and sunvox-studio's own saveToStorage path (which
       // writes its storage_files row itself) are unaffected.
       if (bound && reference_type === BLOG_POST_REFERENCE_TYPE) return refusalResult(BLOG_POST_OWNER_ONLY_MESSAGE);
+
+      // One clean `type/subtype` (optional ;params), or nothing: the type is what
+      // a media route may one day serve, and a comma-shaped list like
+      // "video/mp4, text/html" is read by a browser as a list whose last valid
+      // type wins. Refused before the storage probe (no backend needed), for the
+      // owner and a bot alike, and it covers BOTH branches below — the base64
+      // upload and the presigned upload URL this tool hands out, whose PUT the
+      // object store records as the object's content-type. The serving side
+      // parses it again (servers/blog/media-policy.js).
+      if (mime_type && !isCleanMediaType(mime_type)) return refusalResult(INVALID_MIME_TYPE_MESSAGE);
 
       if (!(await s3.isAvailable())) return notConfiguredError();
 

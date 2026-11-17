@@ -171,7 +171,8 @@ Upload a file via multipart form data.
 ```
 
 **Errors:**
-- `400` — No file provided or invalid MIME type
+- `400` — No file provided, or a MIME type that is not a single `type/subtype` (parameters such as `; charset=x` are fine; a comma-separated list or a control character is not)
+- `415` — Blocked MIME type (an executable type)
 - `413` — File exceeds size limit
 - `507` — Storage quota exceeded
 
@@ -247,4 +248,4 @@ Get bucket statistics. Returns `{ fileCount, totalSizeBytes }`.
 
 ### isAllowedMimeType(mimeType)
 
-Validate that a MIME type is allowed for upload (blocks executable types). Returns `boolean`.
+Validate that a MIME type is allowed for upload (blocks executable types). Returns `boolean`. This is the OLD allowlist check; it does not decide what may be served. A stored type is served only as a clean single `type/subtype` essence — anything else (a comma-separated list, a control character) is an `application/octet-stream` attachment (see `servers/blog/media-policy.js`), and the upload paths refuse such a value outright.

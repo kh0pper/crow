@@ -978,7 +978,6 @@ export default function blogPublicRouter({ storage = {} } = {}) {
       const { stream, stat } = bucket
         ? await storageGetObject(s3Key, { bucket })
         : await storageGetObject(s3Key);
-      const mimeType = file.mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
 
       res.set("Content-Length", String(stat.size));
       // This is a Funnel-public route: a stored object must never be an inline
@@ -986,7 +985,16 @@ export default function blogPublicRouter({ storage = {} } = {}) {
       // both media routes use — an inline-capable type is a raster image,
       // audio, video or a `.sunvox` octet-stream; HTML, SVG, PDF and everything
       // else goes out as an attachment under a sandboxing CSP, nosniff always.
-      setMediaResponseHeaders(res, { mimeType, s3Key, cacheControl: "public, max-age=86400" });
+      // The type is the row's `mime_type` (the object store's own content-type
+      // only when the row has none), and media-policy parses it: both are
+      // uploader-influenced text, and only a clean single `type/subtype` — never
+      // the raw string, never a comma-shaped list — reaches `Content-Type`.
+      setMediaResponseHeaders(res, {
+        mimeType: file.mime_type,
+        objectContentType: stat.metaData?.["content-type"],
+        s3Key,
+        cacheControl: "public, max-age=86400",
+      });
       stream.pipe(res);
     } catch (err) {
       console.error("[blog] Media error:", err);
