@@ -2,14 +2,16 @@
  * Studio panel — a looped recording split into one take per pass, and where
  * playback puts each take.
  *
- * One test, no browser: the emitted client script runs against a linkedom
+ * Four tests, no browser: the emitted client script runs against a linkedom
  * document built from the page the handler renders, with a real Yjs song, a
  * fake take store, a fake recorder and a fake audio context. A calibrated
  * input measures a 1,200-frame round trip at 48 kHz, the recorder is armed at
  * frame 48,000, and three loop passes are recorded — one chunk per pass, so the
  * page writes a pending row for each pass. The rows the page kept are then read
  * back and placed with the sequencer's own formula, which is what an operator
- * hears.
+ * hears. The other three pin the offset each row is given: the first pass
+ * keeps it, every later pass stores 0, a one-pass recording is the row it was
+ * before, and a row this device resumes keeps the offset it was written with.
  *
  * The model: a click played at the start of pass k sits at context frame
  * `arm + round(k * loop)`, and the interface hands it back `rec_offset` frames
@@ -465,6 +467,22 @@ async function startFakeRecording(ui, frame = ARM_FRAME) {
   return recorder;
 }
 
+/**
+ * A fake take store that also remembers the order its pending rows were made
+ * in: one row per loop pass, so the first id is pass 0's row.
+ * @param {object} store a fake take store
+ * @returns {{store: object, created: string[]}} the same store, and that order
+ */
+function trackingStore(store) {
+  const created = [];
+  const put = store.putPending.bind(store);
+  store.putPending = async (value) => {
+    if (!created.includes(value.take_id)) created.push(value.take_id);
+    return put(value);
+  };
+  return { store, created };
+}
+
 test("every pass of a looped recording plays back on its own beat 0, not just the first", async () => {
   const store = fakeTakeStore({ latency: CALIBRATED, log: [] });
   // The order the page makes its takes in: one per pass, segment 0 first.
@@ -539,4 +557,149 @@ test("every pass of a looped recording plays back on its own beat 0, not just th
         + `is at frame ${clickIndex} in it (${stored - clickIndex} frames late)`,
     );
   }
+});
+
+test("pass 0 keeps its offset and a later pass stores offset 0", async () => {
+  // A calibrated input: every take of this recording starts 1,200 frames after
+  // the sound it holds. Pass 0 begins on the arm frame, so those frames sit in
+  // front of its first beat and it stores them. Passes 1 and 2 begin on their
+  // split frames, which already carry the round trip, so they begin on their own
+  // beat 0 and store nothing.
+  const tracked = trackingStore(fakeTakeStore({ latency: CALIBRATED, log: [] }));
+  const ui = await bootPanel({ store: tracked.store, gateFinish: true });
+  const recorder = await startFakeRecording(ui, ARM_FRAME);
+
+  for (const segment of [0, 1, 2]) {
+    recorder.chunk(new Uint8Array(PASS_BYTES).buffer, 0, segment);
+    await ui.settle(24);
+  }
+  recorder.done({
+    segments: [0, 1, 2].map((segment) => ({ segment, start_frame: ARM_FRAME, frames: PASS_FRAMES })),
+    frames: PASS_FRAMES * 3,
+    start_frame: ARM_FRAME,
+  });
+  await ui.settle(24);
+
+  const rows = tracked.created.map((takeId, pass) => {
+    const row = tracked.store.pendings.get(takeId);
+    assert.ok(row, `pass ${pass} has a pending row on this device`);
+    return row;
+  });
+  assert.equal(rows.length, 3, `three passes made three rows (got ${rows.length})`);
+
+  const pageOffset = rows[0].offset_frames;
+  assert.equal(pageOffset, ROUND_TRIP, "pass 0 is cut by the round trip this input measured");
+  assert.ok(pageOffset > 0, "so the pass that holds a delay stores a real one");
+  for (const pass of [1, 2]) {
+    assert.equal(
+      rows[pass].offset_frames,
+      0,
+      `pass ${pass} begins on its own beat 0, so its take stores no offset`,
+    );
+  }
+  // The rest of the row is the recording's, whichever pass it belongs to.
+  for (const pass of [1, 2]) {
+    for (const field of ["compensated", "bpm", "rate"]) {
+      assert.equal(
+        rows[pass][field],
+        rows[0][field],
+        `pass ${pass} carries the same ${field} as pass 0`,
+      );
+    }
+  }
+
+  ui.releaseFinish();
+  await ui.settle();
+});
+
+test("a one-pass recording (stopped before the first split) stores the same row it always did", async () => {
+  // Stop inside the first pass: one segment, one chunk, and no split frame ever
+  // came, so the recording never leaves segment 0 and its take is the pass that
+  // holds the delay.
+  const tracked = trackingStore(fakeTakeStore({ latency: CALIBRATED, log: [] }));
+  const ui = await bootPanel({ store: tracked.store, gateFinish: true });
+  const recorder = await startFakeRecording(ui, ARM_FRAME);
+
+  recorder.chunk(new Uint8Array(PASS_BYTES).buffer, 0, 0);
+  await ui.settle(24);
+  recorder.done({
+    segments: [{ segment: 0, start_frame: ARM_FRAME, frames: PASS_FRAMES }],
+    frames: PASS_FRAMES,
+    start_frame: ARM_FRAME,
+  });
+  await ui.settle(24);
+
+  const rows = Array.from(tracked.store.pendings.values());
+  assert.equal(rows.length, 1, `one pass is one take (got ${rows.length} rows)`);
+  const row = rows[0];
+  assert.equal(row.offset_frames, ROUND_TRIP, "the one pass keeps the round trip before its beat 0");
+  assert.equal(row.chunk_count, 1, "with its chunk count");
+  assert.equal(row.frames, PASS_FRAMES, "and the frames its own bytes give");
+  assert.equal(row.compensated, true, "cut by the calibrated input it was recorded on");
+  assert.equal(row.bpm, BPM, "at the song's tempo");
+  assert.equal(row.rate, RATE, "at the context's rate");
+  assert.equal(row.song_id, "song-1", "for the song this page has open");
+
+  ui.releaseFinish();
+  await ui.settle();
+});
+
+test("a resumed pending row keeps the offset it was written with", async () => {
+  // A row left on this device by an earlier page: a later pass, begun on its own
+  // beat 0, so its row says 0. That page measured a 1,200-frame round trip, and
+  // the page that resumes the row must send what the row says, never the delay
+  // its own input is calibrated with.
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000cd";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-later",
+    rate: RATE,
+    channels: 2,
+    offset_frames: 0,
+    compensated: true,
+    bpm: BPM,
+    chunk_count: 1,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  const store = fakeTakeStore({ latency: CALIBRATED, log: [] });
+  store.pendings.set(takeId, row);
+  store.chunks.set(takeId + ":0", new Uint8Array(PASS_FRAMES * 6).buffer);
+
+  const ui = await bootPanel({ store, gateFinish: true });
+  await ui.settle(24);
+
+  const begins = ui.requests
+    .filter((request) => request.method === "PUT" && request.url.includes("/api/studio/takes/") && request.body)
+    .map((request) => JSON.parse(request.body));
+  const resumed = begins.find((body) => body.clip_id === "c-later");
+  assert.ok(resumed, "the row this device still owes was begun");
+  assert.equal(resumed.offset_frames, 0, "with the offset it was written with");
+  assert.equal(
+    ui.store.pendings.get(takeId).offset_frames,
+    0,
+    "and the row on this device keeps it, as the page never re-offsets a take",
+  );
+
+  // A take armed on this page is cut by this page's own measurement: the resumed
+  // row is not.
+  const recorder = await startFakeRecording(ui, ARM_FRAME);
+  recorder.chunk(new Uint8Array(PASS_BYTES).buffer, 0, 0);
+  await ui.settle();
+  recorder.done({
+    segments: [{ segment: 0, start_frame: ARM_FRAME, frames: PASS_FRAMES }],
+    frames: PASS_FRAMES,
+    start_frame: ARM_FRAME,
+  });
+  await ui.settle(24);
+
+  const armed = Array.from(ui.store.pendings.values()).find((entry) => entry.clip_id !== "c-later");
+  assert.ok(armed, "the take armed here has its own row");
+  assert.equal(armed.offset_frames, ROUND_TRIP, "cut by this page's round trip");
+  assert.equal(resumed.offset_frames, 0, "while the resumed row keeps its own");
+
+  ui.releaseFinish();
+  await ui.settle();
 });
