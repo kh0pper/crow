@@ -374,6 +374,13 @@ export const translations = {
   "signals.logins.action": { en: "Add extra sign-in protection", es: "Añadir protección extra al inicio de sesión" },
   "signals.logins.notifTitle": { en: "Someone tried to sign in {n} times and was blocked", es: "Alguien intentó iniciar sesión {n} veces y fue bloqueado" },
   "signals.logins.notifBody": { en: "Your Crow blocked them for 15 minutes. Consider turning on two-step sign-in.", es: "Tu Crow los bloqueó durante 15 minutos. Considera activar la verificación en dos pasos." },
+  // llm-door (satellite-exposure phase A1): devices using the models with no Crow credential.
+  "signals.llmDoor.label": { en: "Model access", es: "Acceso a los modelos" },
+  "signals.llmDoor.value": { en: "{sources} sources · {calls} calls in 24 h", es: "{sources} orígenes · {calls} llamadas en 24 h" },
+  "signals.llmDoor.unidentified": {
+    en: "Some devices use your models without a Crow credential; this will be refused soon. Seen in the last 24 h: {list}",
+    es: "Algunos dispositivos usan tus modelos sin una credencial de Crow; esto se rechazará pronto. Visto en las últimas 24 h: {list}",
+  },
   // exposure
   "signals.artifactNode.label": { en: "Artifact view", es: "Vista de artefactos" },
   "signals.artifactNode.ok": { en: "online", es: "en línea" },

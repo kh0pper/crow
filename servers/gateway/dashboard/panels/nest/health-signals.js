@@ -50,6 +50,12 @@
  *   externalEngines — engines another machine runs (spec 2026-09-23): own id,
  *               info at most — never warn, never a push; no card when none
  *   syncOutbox — stdio→gateway outbox depth + oldest-row age (stuck >15min → warn)
+ *   llm-door  — the model door's shadow census (satellite-exposure phase A1):
+ *               the sources seen calling /llm/v1, /llm/p or /llm/acquire with
+ *               no Crow credential, counted by source and class over 24 h
+ *               (models/door-identity.js). INFO and strip-only: nothing is
+ *               refused until CROW_LLM_DOOR_ENFORCE=1, and the sentence says it
+ *               will be soon. No card when no such caller has been seen.
  *   reservation — box reservation held (info; no card when the box is free).
  *               Box-reservation scope §3.5: "Box reserved by <owner> until
  *               <time>" for as long as the file exists.
@@ -146,6 +152,7 @@ import { getPeerProbeHealth } from "../../../peer-probe-health.js";
 import { getPeerTrustHealth } from "../../../../shared/peer-trust-health.js";
 import { getPeerDialHealth } from "../../../../shared/peer-dial-health.js";
 import { readReservation } from "../../../box-reservation.js";
+import { doorShadowSummary } from "../../../models/door-identity.js";
 import { localBackupContext, newestBackupOwnership } from "../../../../shared/backup-naming.js";
 import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 import { createSidecarHealthReader } from "../../../artifact-origin/sidecar-health.js";
@@ -1159,6 +1166,37 @@ async function loginsSignal(db, lang) {
       .replace("{n}", String(failures)).replace("{ips}", String(distinctIps)),
     actionLabel: t("signals.logins.action", lang),
     actionHref: "/dashboard/settings?section=two-factor",
+  };
+}
+
+/**
+ * The model door's shadow census (satellite-exposure phase A1): who called
+ * /llm/v1, /llm/p or /llm/acquire in the last 24 h with no Crow credential —
+ * nothing but a tailnet address, a non-owner Serve login, on its own say-so.
+ * The door logs and counts them today without refusing them; refusing is
+ * CROW_LLM_DOOR_ENFORCE=1's job (off by default), so this is INFO, strip-only
+ * (never pushed), and the sentence says so while it matters. No card at all
+ * when nobody has been seen: the common case on a box whose devices all hold a
+ * credential.
+ *
+ * The counts come from the in-process ring in models/door-identity.js (bounded,
+ * one event per source+route per 10 min), so they are "at least this many"
+ * across a restart and never a DB read here.
+ */
+function llmDoorSignal(lang = "en", nowFn = () => Date.now()) {
+  const summary = doorShadowSummary(nowFn());
+  if (!summary.total) return null;
+  const list = summary.sources
+    .slice(0, 3)
+    .map((s) => `${s.source} ×${s.count}`)
+    .join(", ");
+  return {
+    id: "llm-door:unidentified-callers",
+    severity: "info",
+    state: "info",
+    label: t("signals.llmDoor.label", lang),
+    value: fill(t("signals.llmDoor.value", lang), { sources: summary.sources.length, calls: summary.total }),
+    issueLabel: fill(t("signals.llmDoor.unidentified", lang), { list }),
   };
 }
 
@@ -2698,6 +2736,8 @@ export async function collectHealthSignals(db, opts = {}) {
     syncConflictsSignal(db),
     outboxSignal(db),
     loginsSignal(db, lang),
+    // Deferred so the ring read is a signal, not an array-literal statement.
+    Promise.resolve().then(() => llmDoorSignal(lang, nowFn)),
     exposureSignal(db, lang, nowFn, { bind: opts.bind }),
     integrationsSignal(db, lang),
     federationAuditSignal(lang),
