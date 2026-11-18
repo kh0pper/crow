@@ -210,17 +210,25 @@ ningún otro.
   un `~` inicial es tu carpeta personal. `..`, una ruta absoluta en otro sitio y un
   enlace simbólico que apunte fuera se rechazan;
 - si la dejas vacía, decide el tope de salida: con `GWS_OUTBOUND_GUARD` encendido
-  se rechaza **toda** ruta local («define una carpeta de archivos»); con el tope
-  apagado, una instalación que se actualiza sigue comportándose como antes
-  —cualquier ruta que reciba—, así que nada se rompe hasta que nombres una
-  carpeta;
+  se rechaza **toda** ruta local («define una carpeta de archivos»). Con el tope
+  apagado, una instalación actualizada puede seguir usando cualquier ruta que
+  reciba fuera de las carpetas que siempre se rechazan —así que nada de lo que
+  funcionaba deja de funcionar—, pero «apagado» solo quita la exigencia de
+  carpeta, no el manejo de archivos. Incluso con el tope apagado: una descarga o
+  exportación nunca sobrescribe un archivo que ya existe (y el nombre por defecto
+  es único, así que exportar dos veces crea dos archivos), una carpeta contenedora
+  que falta se rechaza, un archivo que no es regular (carpeta, dispositivo,
+  tubería) se rechaza al leer, los primeros bytes de una imagen local tienen que
+  ser de verdad PNG/JPEG/GIF/WebP, y la carpeta de inicio de sesión, `~/.ssh` y
+  `~/.gnupg` se rechazan siempre;
 - las descargas y exportaciones se **crean**, nunca se sobrescriben: un destino
   que ya existe, o que es un enlace simbólico, se rechaza (da otro nombre); los
   archivos se crean con modo 0600. El nombre por defecto se arma con el id de
-  Google sustituyendo todo carácter fuera de `[A-Za-z0-9._-]`, así que un id nunca
-  puede colar un separador de ruta. La ubicación por defecto es la carpeta de
-  archivos cuando existe, y `/tmp` solo para una instalación sin carpeta y sin
-  tope;
+  Google sustituyendo todo carácter fuera de `[A-Za-z0-9._-]` (así que un id nunca
+  puede colar un separador de ruta) más una marca de tiempo UTC, de modo que
+  exportar otra vez sin ruta crea un archivo nuevo. La ubicación por defecto es la
+  carpeta de archivos cuando existe, y `/tmp` solo para una instalación sin
+  carpeta y sin tope;
 - una imagen local para `gdocs_insert_image` tiene que ser de verdad PNG, JPEG,
 GIF o WebP (se revisan sus primeros bytes), no un archivo con nombre de imagen.
 
@@ -249,8 +257,11 @@ El manifiesto declara `"sandbox": { "network": "internet", "files": {
 - **la carpeta de archivos** — `GWS_FILES_DIR`, si la defines, también se monta
   con lectura y escritura, para leer de ella lo que se sube y escribir en ella
   descargas y exportaciones. Sin definir no se monta ninguna: con el tope apagado
-  las herramientas de ruta local siguen aceptando cualquier ruta que reciban (como
-  antes de la 1.2.0), y con el tope encendido se rechaza toda ruta local.
+  las herramientas de ruta local siguen aceptando cualquier ruta que reciban fuera
+  de las carpetas que siempre se rechazan (como antes de la 1.2.0), aunque siguen
+  sin sobrescribir un archivo, siguen rechazando una carpeta contenedora que falta
+  o un archivo no regular al leer, y siguen revisando la magia de las imágenes;
+  con el tope encendido se rechaza toda ruta local.
 
 Mantén `credentials.json` en la misma carpeta que el token para que el servidor
 pueda leerlo, y apunta las dos rutas a `~/.config/google-workspace-mcp/` en vez

@@ -196,15 +196,22 @@ sharing it — so it is decided in one place (`local_paths.py`) and nowhere else
   resolved; a relative path is relative to it, a leading `~` is your home. `..`,
   an absolute path elsewhere and a symlink pointing out are all refused;
 - leave it empty and the outbound guard decides: with `GWS_OUTBOUND_GUARD` on,
-  **every** local path is refused ("set a files folder"); with the guard off, an
-  install that upgrades keeps behaving as it did — any path it is handed — so
-  nothing breaks until you name a folder;
+  **every** local path is refused ("set a files folder"). With the guard off, an
+  upgraded install may still use any path it is handed outside the always-refused
+  folders — so nothing that worked stops working — but "off" removes only the
+  folder requirement, not the file handling. Even with the guard off: a download
+  or export never overwrites an existing file (and a default output name is
+  unique, so repeated exports create new files), a missing parent folder is
+  refused, a non-regular file (folder, device, pipe) is refused for reading, a
+  local image's first bytes must really be PNG/JPEG/GIF/WebP, and the sign-in
+  folder, `~/.ssh` and `~/.gnupg` are refused always;
 - downloads and exports are **created**, never overwritten: a target that
   already exists, or is a symlink, is refused (give a new name); files are created
   at mode 0600. A default name is built from the Google id with every character
-  outside `[A-Za-z0-9._-]` replaced, so an id can never smuggle in a path
-  separator. The default location is the files folder when it is set, and `/tmp`
-  only for an install with neither a folder nor the guard;
+  outside `[A-Za-z0-9._-]` replaced (so an id can never smuggle in a path
+  separator) plus a UTC timestamp, so a repeat export with no path creates a new
+  file. The default location is the files folder when it is set, and `/tmp` only
+  for an install with neither a folder nor the guard;
 - a local image for `gdocs_insert_image` must really be a PNG, JPEG, GIF or WebP
   (its first bytes are checked), not just a file with an image-looking name.
 
@@ -232,8 +239,10 @@ The bundle declares `"sandbox": { "network": "internet", "files": {
 - **the files folder** — `GWS_FILES_DIR`, when you name one, is bound read-write
   as well, so uploads can be read from it and downloads and exports written into
   it. Unset, no files folder is bound: with the guard off the local-path tools
-  still accept any path they are handed (how they behaved before 1.2.0), and with
-  the guard on every local path is refused.
+  still accept any path they are handed outside the always-refused folders (as
+  before 1.2.0), though they still never overwrite a file, still refuse a missing
+  parent or a non-regular file for reading, and still check image magic; with the
+  guard on every local path is refused.
 
 Keep `credentials.json` in the same folder as the token so the server can read
 it, and point both paths at `~/.config/google-workspace-mcp/` rather than at

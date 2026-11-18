@@ -17,6 +17,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from .local_paths import signin_file
 from .scopes import resolve_scopes
 
 logger = logging.getLogger(__name__)
@@ -69,11 +70,11 @@ DEFAULT_TOKEN_FILE = _DEFAULT_CONFIG_DIR / "token.json"
 
 
 def _get_credentials_file() -> Path:
-    return Path(os.environ.get("GOOGLE_CREDENTIALS_FILE", str(DEFAULT_CREDENTIALS_FILE)))
+    return Path(signin_file("GOOGLE_CREDENTIALS_FILE"))
 
 
 def _get_token_file() -> Path:
-    return Path(os.environ.get("GOOGLE_TOKEN_FILE", str(DEFAULT_TOKEN_FILE)))
+    return Path(signin_file("GOOGLE_TOKEN_FILE"))
 
 
 class GoogleAuth:

@@ -1128,7 +1128,11 @@ async def gdocs_insert_image(
 
     A LOCAL image must be inside the files folder (GWS_FILES_DIR) this server may use
     and its first bytes must really be a PNG, JPEG, GIF or WebP (see local_paths);
-    the sign-in folder is never one, guard or no guard.
+    the sign-in folder is never one, guard or no guard. A bare token shaped like a
+    Drive id is treated as an id; anything with a path separator (or a name that
+    resolves inside the files folder) is a local path. That decision never asks
+    whether an arbitrary path exists, so a local file outside the folder is refused
+    the same way whether or not it is really there.
 
     That window is why a LOCAL image is refused outright while GWS_OUTBOUND_GUARD
     is on: the guard will not publish a file, however briefly. A Drive-hosted image
@@ -1138,7 +1142,7 @@ async def gdocs_insert_image(
     in Drive yourself, share it as you intend, and pass its file id."""
     # Decided before any client is built, so a refused call touches nothing: a guard-
     # refused local image must not be uploaded at all.
-    is_local = os.path.exists(image)
+    is_local = local_paths.image_is_local(image)
     if is_local and outbound_guard.guard_enabled():
         return {
             "success": False,

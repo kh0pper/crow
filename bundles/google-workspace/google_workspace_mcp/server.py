@@ -1033,7 +1033,8 @@ async def gslides_batch_update(presentation_id: str, requests: list) -> dict:
 @mcp.tool()
 async def gslides_export(presentation_id: str, fmt: str = "pdf", out_path: Optional[str] = None) -> dict:
     """Export the deck to a local file via Drive. fmt: 'pdf' or 'pptx'. Returns the path. With out_path
-    omitted it lands in the files folder (GWS_FILES_DIR); it is created, never overwritten."""
+    omitted it lands in the files folder (GWS_FILES_DIR) under a unique timestamped name, so repeated
+    exports create new files; it is created, never overwritten."""
     return await slides.gslides_export(presentation_id, fmt=fmt, out_path=out_path)
 
 

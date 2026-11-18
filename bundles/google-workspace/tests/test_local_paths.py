@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from googleapiclient.http import MediaIoBaseUpload  # noqa: E402
 
 from google_workspace_mcp import docs as docs_mod  # noqa: E402
-from google_workspace_mcp import drive, local_paths, slides  # noqa: E402
+from google_workspace_mcp import auth, drive, local_paths, slides  # noqa: E402
 
 FOLDER = "folder-1"
 TOKEN_NAME = "token.json"
@@ -252,6 +252,62 @@ class OutsideTheFolderTests(unittest.TestCase):
             self.assertIn("sign-in folder", str(caught.exception))
 
 
+class RaceAndHardLinkTests(unittest.TestCase):
+    """The path that was resolved is checked again on the fd the kernel opened."""
+
+    def test_a_folder_swapped_for_a_symlink_before_the_read_open_is_refused(self):
+        with scratch() as paths:
+            sub = os.path.join(paths["files"], "sub")
+            os.makedirs(sub)
+            target = write_file(os.path.join(sub, "note.txt"), b"innocent")
+            write_file(os.path.join(paths["signin"], "note.txt"), b'{"token": "secret"}')
+            # The reviewer's probe: resolve() has already answered with the old path,
+            # and only now is the directory it named replaced by a link to the sign-in
+            # folder. O_NOFOLLOW does not cover this component.
+            os.remove(target)
+            os.rmdir(sub)
+            os.symlink(paths["signin"], sub)
+            with mock.patch.object(local_paths, "resolve", return_value=target):
+                with self.assertRaises(local_paths.PathRefused) as caught:
+                    open_read(paths, target, GWS_FILES_DIR=paths["files"])
+            self.assertIn("sign-in folder", str(caught.exception))
+
+    def test_a_folder_swapped_for_a_symlink_before_the_write_open_is_refused(self):
+        with scratch() as paths:
+            sub = os.path.join(paths["files"], "sub")
+            os.makedirs(sub)
+            target = os.path.join(sub, "out.txt")
+            os.rmdir(sub)
+            os.symlink(paths["signin"], sub)
+            real_open = os.open
+
+            def without_nofollow(path, flags, *args, **kwargs):
+                # Proves the post-open check catches this on its own: the same swap
+                # with O_NOFOLLOW stripped must still be refused, and leave nothing.
+                return real_open(
+                    path, flags & ~getattr(os, "O_NOFOLLOW", 0), *args, **kwargs
+                )
+
+            with mock.patch.object(local_paths, "resolve", return_value=target), \
+                    mock.patch.object(local_paths.os, "open", side_effect=without_nofollow):
+                with self.assertRaises(local_paths.PathRefused) as caught:
+                    open_write(paths, target, GWS_FILES_DIR=paths["files"])
+            self.assertIn("sign-in folder", str(caught.exception))
+            self.assertFalse(
+                os.path.exists(os.path.join(paths["signin"], "out.txt")),
+                "nothing is left behind in the sign-in folder",
+            )
+
+    def test_a_hard_link_to_the_token_file_is_refused_for_reading(self):
+        with scratch() as paths:
+            link = os.path.join(paths["files"], "innocent.png")
+            os.link(paths["token"], link)
+            with self.assertRaises(local_paths.PathRefused) as caught:
+                open_read(paths, link, GWS_FILES_DIR=paths["files"])
+            self.assertIn("hard link", str(caught.exception))
+            self.assertIn("sign-in folder", str(caught.exception))
+
+
 class AlwaysRefusedTests(unittest.TestCase):
     def test_the_token_folder_is_refused_with_the_guard_off_and_no_files_folder(self):
         with scratch() as paths:
@@ -321,6 +377,42 @@ class AlwaysRefusedTests(unittest.TestCase):
                     GWS_FILES_DIR=loop,
                 )
             self.assertIn("cannot be resolved", str(caught.exception))
+
+
+    def test_a_symlinked_token_file_protects_both_folders_and_the_file(self):
+        with scratch() as paths:
+            target_dir = os.path.join(paths["home"], "real-signin")
+            link_dir = os.path.join(paths["home"], "linked-signin")
+            os.makedirs(target_dir)
+            os.makedirs(link_dir)
+            real_token = write_file(os.path.join(target_dir, "token.json"), b"{}")
+            link = os.path.join(link_dir, "token.json")
+            os.symlink(real_token, link)
+            # realpath(file) and dirname(abspath(file)) are both protected, and the
+            # file itself at its real location is protected too.
+            for target in (
+                os.path.join(target_dir, "anything.txt"),
+                os.path.join(link_dir, "anything.txt"),
+                real_token,
+            ):
+                with self.subTest(path=target):
+                    with self.assertRaises(local_paths.PathRefused) as caught:
+                        resolve(paths, target, GOOGLE_TOKEN_FILE=link)
+                    self.assertIn("sign-in folder", str(caught.exception))
+
+    def test_a_signin_file_directly_in_home_names_that_problem(self):
+        with scratch() as paths:
+            home_token = write_file(os.path.join(paths["home"], "token.json"), b"{}")
+            with self.assertRaises(local_paths.PathRefused) as caught:
+                resolve(
+                    paths,
+                    os.path.join(paths["files"], "note.txt"),
+                    GWS_FILES_DIR=paths["files"],
+                    GOOGLE_TOKEN_FILE=home_token,
+                )
+            message = str(caught.exception)
+            self.assertIn("directly in your home folder", message)
+            self.assertIn("move it into its own folder", message)
 
 
 class GuardWithoutAFolderTests(unittest.TestCase):
@@ -405,9 +497,35 @@ class WriteTests(unittest.TestCase):
             self.assertTrue(name.endswith(".pdf"))
             self.assertNotIn(name, (".", "..", ".pdf"))
 
-    def test_the_legacy_default_is_tmp_only_without_a_folder(self):
+    def test_a_taken_default_name_is_retried_with_a_suffix(self):
         with scratch() as paths:
-            self.assertEqual(default_path(paths, "pres-1", "pdf"), "/tmp/pres-1.pdf")
+            env = env_for(paths, GWS_FILES_DIR=paths["files"])
+            taken = write_file(os.path.join(paths["files"], "deck.pdf"), b"old")
+            free = os.path.join(paths["files"], "deck-2.pdf")
+
+            def fake_default(ident, extension, env=None, home=None, attempt=1):
+                return taken if attempt == 1 else free
+
+            with mock.patch.object(local_paths, "default_path", side_effect=fake_default):
+                real, handle = local_paths.open_write_default(
+                    "deck", "pdf", env=env, home=paths["home"]
+                )
+            try:
+                handle.write(b"new")
+            finally:
+                handle.close()
+            self.assertEqual(real, os.path.realpath(free))
+            with open(free, "rb") as fh:
+                self.assertEqual(fh.read(), b"new")
+            with open(taken, "rb") as fh:
+                self.assertEqual(fh.read(), b"old", "the taken name is not overwritten")
+
+    def test_the_legacy_default_is_tmp_with_a_unique_name_without_a_folder(self):
+        with scratch() as paths:
+            default = default_path(paths, "pres-1", "pdf")
+            self.assertEqual(os.path.dirname(default), "/tmp")
+            self.assertTrue(os.path.basename(default).startswith("pres-1-"))
+            self.assertTrue(default.endswith(".pdf"))
 
     def test_safe_name_keeps_only_the_safe_characters(self):
         self.assertEqual(local_paths.safe_name("1AbC-_x.y"), "1AbC-_x.y")
@@ -445,6 +563,75 @@ class ImageMagicTests(unittest.TestCase):
                     with self.assertRaises(local_paths.PathRefused) as caught:
                         self.check(paths, data, "shot.png")
                     self.assertIn("not a PNG, JPEG, GIF or WebP image", str(caught.exception))
+
+
+class SigninPathTests(unittest.TestCase):
+    def test_auth_and_local_paths_resolve_the_signin_files_the_same_way(self):
+        with scratch() as paths:
+            home = paths["home"]
+            env = env_for(
+                paths,
+                GOOGLE_TOKEN_FILE="~/somewhere/token.json",
+                GOOGLE_CREDENTIALS_FILE="",
+            )
+            self.assertEqual(
+                local_paths.signin_file("GOOGLE_TOKEN_FILE", env, home=home),
+                os.path.join(home, "somewhere", "token.json"),
+            )
+            self.assertEqual(
+                local_paths.signin_file("GOOGLE_CREDENTIALS_FILE", env, home=home),
+                os.path.join(home, ".config", "google-workspace-mcp", "credentials.json"),
+            )
+            # auth.py goes through the same resolver: ~ is expanded and empty is the
+            # same default, so the folder protected here is the folder it reads.
+            with mock.patch.dict(os.environ, {
+                "HOME": home,
+                "GOOGLE_TOKEN_FILE": "~/somewhere/token.json",
+                "GOOGLE_CREDENTIALS_FILE": "",
+            }):
+                self.assertEqual(
+                    str(auth._get_token_file()),
+                    os.path.join(home, "somewhere", "token.json"),
+                )
+                self.assertEqual(
+                    str(auth._get_credentials_file()),
+                    os.path.join(
+                        home, ".config", "google-workspace-mcp", "credentials.json"
+                    ),
+                )
+
+
+class ImageSourceTests(unittest.TestCase):
+    def kind(self, paths, value, **values):
+        return local_paths.image_is_local(
+            value, env=env_for(paths, **values), home=paths["home"]
+        )
+
+    def test_a_bare_id_shaped_token_is_a_drive_id(self):
+        with scratch() as paths:
+            drive_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz"
+            self.assertFalse(self.kind(paths, drive_id))
+            self.assertFalse(self.kind(paths, drive_id, GWS_FILES_DIR=paths["files"]))
+
+    def test_a_separator_or_a_dot_prefix_makes_it_local(self):
+        with scratch() as paths:
+            for value in (
+                os.path.join(paths["elsewhere"], "pic.png"),
+                "sub/pic.png",
+                "sub\\pic.png",
+                "~/pic.png",
+                "./pic.png",
+                "../pic.png",
+            ):
+                with self.subTest(value=value):
+                    self.assertTrue(self.kind(paths, value, GWS_FILES_DIR=paths["files"]))
+            self.assertTrue(self.kind(paths, "pic.png", GWS_FILES_DIR=paths["files"]))
+
+    def test_an_id_shaped_name_inside_the_files_folder_is_local(self):
+        with scratch() as paths:
+            name = "a" * 24
+            write_file(os.path.join(paths["files"], name), b"x")
+            self.assertTrue(self.kind(paths, name, GWS_FILES_DIR=paths["files"]))
 
 
 # --- the tools, wired ------------------------------------------------------
@@ -570,6 +757,58 @@ class ToolRefusalTests(unittest.TestCase):
             docs_service.assert_not_called()
             drive_service_mock.assert_not_called()
 
+    def test_a_relative_image_name_resolves_inside_the_files_folder(self):
+        with scratch() as paths:
+            write_file(os.path.join(paths["files"], "shot.png"), b"not an image")
+            with tool_env(paths, GWS_FILES_DIR=paths["files"]), mock.patch.object(
+                docs_mod, "get_docs_service"
+            ) as docs_service, mock.patch.object(
+                docs_mod, "get_drive_service"
+            ) as drive_service_mock:
+                result = asyncio.run(
+                    docs_mod.gdocs_insert_image("doc-1", "shot.png", index=1)
+                )
+            self.assert_refused(result, "not a PNG, JPEG, GIF or WebP image")
+            docs_service.assert_not_called()
+            drive_service_mock.assert_not_called()
+
+    def test_a_local_image_outside_the_folder_is_refused_whether_or_not_it_exists(self):
+        with scratch() as paths:
+            existing = os.path.join(paths["elsewhere"], "note.txt")
+            missing = os.path.join(paths["elsewhere"], "missing.png")
+            with tool_env(paths, GWS_FILES_DIR=paths["files"]), mock.patch.object(
+                docs_mod, "get_docs_service"
+            ) as service:
+                first = asyncio.run(
+                    docs_mod.gdocs_insert_image("doc-1", existing, index=1)
+                )
+                second = asyncio.run(
+                    docs_mod.gdocs_insert_image("doc-1", missing, index=1)
+                )
+            self.assert_refused(first, "files folder")
+            self.assert_refused(second, "files folder")
+            self.assertNotIn("not found", first["error"])
+            self.assertNotIn("not found", second["error"])
+            service.assert_not_called()
+
+    def test_an_id_shaped_image_is_a_drive_id_not_a_local_path(self):
+        with scratch() as paths:
+            service = drive_service()
+            service.permissions.return_value.list.return_value.execute.return_value = {
+                "permissions": []
+            }
+            with tool_env(paths, GWS_OUTBOUND_GUARD="1"), mock.patch.object(
+                docs_mod, "get_docs_service"
+            ), mock.patch.object(docs_mod, "get_drive_service", return_value=service):
+                result = asyncio.run(
+                    docs_mod.gdocs_insert_image(
+                        "doc-1", "1AbCdEfGhIjKlMnOpQrStUvWxYz", index=1
+                    )
+                )
+            self.assertFalse(result["success"], result)
+            self.assertNotIn("LOCAL image is disabled", result["error"])
+            self.assertIn("anyone-with-the-link", result["error"])
+
     def test_download_refuses_to_overwrite_and_writes_nothing(self):
         with scratch() as paths:
             target = write_file(os.path.join(paths["files"], "out.txt"), b"keep me")
@@ -615,10 +854,26 @@ class ToolWriteTests(unittest.TestCase):
             ):
                 result = asyncio.run(slides.gslides_export("pres-1"))
             self.assertTrue(result["success"], result)
-            default = os.path.join(os.path.realpath(paths["files"]), "pres-1.pdf")
-            self.assertEqual(result["data"]["path"], default)
+            default = result["data"]["path"]
+            self.assertEqual(os.path.dirname(default), os.path.realpath(paths["files"]))
+            self.assertTrue(os.path.basename(default).startswith("pres-1-"))
+            self.assertTrue(default.endswith(".pdf"))
             with open(default, "rb") as fh:
                 self.assertEqual(fh.read(), b"exported")
+
+    def test_repeated_default_exports_create_new_files(self):
+        with scratch() as paths:
+            service = drive_service()
+            with tool_env(paths, GWS_FILES_DIR=paths["files"]), mock.patch.object(
+                slides, "get_drive_service", return_value=service
+            ):
+                first = asyncio.run(slides.gslides_export("pres-1"))
+                second = asyncio.run(slides.gslides_export("pres-1"))
+            self.assertTrue(first["success"], first)
+            self.assertTrue(second["success"], second)
+            self.assertNotEqual(first["data"]["path"], second["data"]["path"])
+            for result in (first, second):
+                self.assertTrue(os.path.exists(result["data"]["path"]))
 
     def test_a_slides_id_cannot_escape_the_folder_through_the_default_name(self):
         with scratch() as paths:

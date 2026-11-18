@@ -835,6 +835,11 @@ def png_bytes():
     )
 
 
+#: A bare token only counts as a Drive id when it has the id shape (see
+#: local_paths.image_is_local), so the fake id used here must look like one.
+IMAGE_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz"
+
+
 class DocsImageGuardTests(unittest.TestCase):
     def run_insert(self, docs_svc, drive_svc, image):
         with mock.patch.object(
@@ -880,7 +885,7 @@ class DocsImageGuardTests(unittest.TestCase):
             permissions=[{"id": "perm-owner", "type": "user", "role": "owner"}]
         )
         with gws_env(GWS_OUTBOUND_GUARD="1"):
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertFalse(result["success"])
         # The required wording: already-shared or nothing happens.
         self.assertIn("must already be shared for embedding", result["error"])
@@ -899,7 +904,7 @@ class DocsImageGuardTests(unittest.TestCase):
             ]
         )
         with gws_env(GWS_OUTBOUND_GUARD="1"):
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertFalse(result["success"])
         self.assertIn("must already be shared for embedding", result["error"])
         drive_svc.permissions.return_value.create.assert_not_called()
@@ -910,7 +915,7 @@ class DocsImageGuardTests(unittest.TestCase):
             permissions=[{"id": "perm-any", "type": "anyone", "role": "reader"}]
         )
         with gws_env(GWS_OUTBOUND_GUARD="1"):
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertTrue(result["success"])
         drive_svc.permissions.return_value.create.assert_not_called()
         drive_svc.permissions.return_value.delete.assert_not_called()
@@ -920,7 +925,7 @@ class DocsImageGuardTests(unittest.TestCase):
     def test_a_drive_image_whose_sharing_cannot_be_read_is_refused(self):
         docs_svc, drive_svc = docs_image_mocks(list_error=RuntimeError("boom"))
         with gws_env(GWS_OUTBOUND_GUARD="1"):
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertFalse(result["success"])
         self.assertIn("could not be read", result["error"])
         drive_svc.permissions.return_value.create.assert_not_called()
@@ -929,7 +934,7 @@ class DocsImageGuardTests(unittest.TestCase):
     def test_a_drive_hosted_image_with_the_guard_off_creates_and_revokes_one_grant(self):
         docs_svc, drive_svc = docs_image_mocks()
         with gws_env():
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertTrue(result["success"])
         body = drive_svc.permissions.return_value.create.call_args.kwargs["body"]
         self.assertEqual(body["type"], "anyone")
@@ -937,7 +942,7 @@ class DocsImageGuardTests(unittest.TestCase):
         drive_svc.permissions.return_value.delete.assert_called_once()
         kwargs = drive_svc.permissions.return_value.delete.call_args.kwargs
         self.assertEqual(kwargs["permissionId"], "perm-1")
-        self.assertEqual(kwargs["fileId"], "drive-file-1")
+        self.assertEqual(kwargs["fileId"], IMAGE_ID)
         self.assertEqual(result["data"]["public_permission_created"], "perm-1")
 
     def test_the_revoke_targets_exactly_the_permission_the_tool_created(self):
@@ -946,7 +951,7 @@ class DocsImageGuardTests(unittest.TestCase):
             "id": "perm-42"
         }
         with gws_env():
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertTrue(result["success"])
         kwargs = drive_svc.permissions.return_value.delete.call_args.kwargs
         self.assertEqual(kwargs["permissionId"], "perm-42")
@@ -954,11 +959,11 @@ class DocsImageGuardTests(unittest.TestCase):
     def test_a_failed_revoke_is_reported_as_a_failure_not_a_success(self):
         docs_svc, drive_svc = docs_image_mocks(revoke_error=RuntimeError("boom"))
         with gws_env():
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertFalse(result["success"])
         self.assertIn("STILL readable by anyone with the link", result["error"])
         self.assertIn("perm-1", result["error"])
-        self.assertIn("drive-file-1", result["error"])
+        self.assertIn(IMAGE_ID, result["error"])
         self.assertEqual(result["data"]["permission_id"], "perm-1")
         self.assertFalse(result["data"]["permission_revoked"])
         self.assertTrue(result["data"]["inserted"])
@@ -969,7 +974,7 @@ class DocsImageGuardTests(unittest.TestCase):
             RuntimeError("doc")
         )
         with gws_env():
-            result = self.run_insert(docs_svc, drive_svc, "drive-file-1")
+            result = self.run_insert(docs_svc, drive_svc, IMAGE_ID)
         self.assertFalse(result["success"])
         self.assertIn("STILL readable by anyone with the link", result["error"])
         self.assertFalse(result["data"]["inserted"])

@@ -13,19 +13,26 @@ decided here and nowhere else.
 Three rules, in the order they are checked:
 
 1. **The sign-in folder is never a local path.** Always — guard on or off, files
-   folder set or not. The parent folders of ``GOOGLE_TOKEN_FILE`` and
-   ``GOOGLE_CREDENTIALS_FILE``, ``~/.ssh``, ``~/.gnupg`` and any
-   ``~/.config/google-workspace-mcp*`` sibling are refused, and so are the token
-   and credentials files themselves (they are inside those folders). Every one of
-   them is compared after ``os.path.realpath``, so a symlink pointing into them is
-   refused too. If a protected folder cannot be resolved, nothing is allowed at
-   all: unknown fails closed, never open.
+   folder set or not. The real and the named parent folders of
+   ``GOOGLE_TOKEN_FILE`` and ``GOOGLE_CREDENTIALS_FILE``, ``~/.ssh``, ``~/.gnupg``
+   and any ``~/.config/google-workspace-mcp*`` sibling are refused, and so are the
+   token and credentials files themselves (they are inside those folders). Every
+   one of them is compared after ``os.path.realpath``, so a symlink pointing into
+   them is refused too, and a file opened for reading is compared by
+   ``(st_dev, st_ino)`` with both files, so a hard link to the token is refused as
+   well. If a protected folder cannot be resolved, nothing is allowed at all:
+   unknown fails closed, never open.
 
 2. **With no files folder set**, the outbound guard (``GWS_OUTBOUND_GUARD``)
    decides. On, every local path is refused — an install that means to wall the
    assistant in gets no local file at all until the owner names a folder. Off, an
-   install that upgrades keeps behaving exactly as it did (any path it was handed),
-   which is what lets this ship without breaking anyone.
+   install that upgrades may still use any path it is handed (outside the always-
+   refused folders), so nothing that worked stops working — but "off" removes only
+   the folder requirement, not the file handling: a write still never overwrites an
+   existing file, a default output name is unique (repeated exports create new
+   files), a missing parent folder is refused, a non-regular file is refused for
+   reading, a local image's first bytes must really be an image, and the sign-in
+   folder, ``~/.ssh`` and ``~/.gnupg`` are refused always.
 
 3. **With a files folder set**, a path must land *strictly inside* it after
    ``os.path.realpath`` — never on the folder itself. A relative path is relative
@@ -40,18 +47,29 @@ that already exists is always refused. Reads are opened ``O_NOFOLLOW`` and must 
 a regular file; the local-image insert also checks the first bytes really are a
 PNG, JPEG, GIF or WebP.
 
+A resolved path is not the last word: after the kernel opens the file — and, for a
+write, the parent directory — the location it reports for that descriptor is run
+through the same two checks again, so a directory swapped for a symlink between
+``resolve`` and the open is caught and refused (and a just-created file removed).
+A file opened for reading with more than one link is compared by
+``(st_dev, st_ino)`` with the token and credentials files, which is what refuses a
+hard link that is otherwise a plain file inside the folder.
+
 Default output names are built from Google ids, which arrive as caller input: every
 character outside ``[A-Za-z0-9._-]`` is replaced, so an id can never smuggle in a
 path separator (and a value that is only dots becomes ``file``), which keeps the
-write inside the folder it was resolved against. The default location is the files
-folder when one is set, and ``/tmp`` only for an install with neither a folder nor
-the guard (the old behaviour) — with the guard on there is no default to fall back
-to, because ``resolve`` refuses first.
+write inside the folder it was resolved against. A default name also carries a UTC
+timestamp (and ``-2``, ``-3``… on an ``O_EXCL`` collision), so a repeated export
+with no path creates a new file instead of being refused. The default location is
+the files folder when one is set, and ``/tmp`` only for an install with neither a
+folder nor the guard (the old behaviour) — with the guard on there is no default to
+fall back to, because ``resolve`` refuses first.
 
 Pure apart from the filesystem reads it needs, and every entry point takes ``env``
 and ``home`` so the tests run in a scratch tree.
 """
 
+import datetime
 import glob
 import mimetypes
 import os
@@ -69,9 +87,8 @@ WRITE = "write"
 #: The setting itself.
 FILES_DIR_VAR = "GWS_FILES_DIR"
 
-# The one default of the sign-in files this module mirrors from auth.py, used only
-# to protect the folder they live in when the owner has not pointed the variables
-# anywhere else (the folder is refused either way, see _PRIVATE_PATTERNS).
+# The default sign-in folder and file names, resolved by signin_file() for both
+# auth.py and this module, so the file auth.py reads is the file protected here.
 _DEFAULT_SIGNIN_DIR = (".config", "google-workspace-mcp")
 _DEFAULT_SIGNIN_FILES = {
     "GOOGLE_TOKEN_FILE": "token.json",
@@ -91,6 +108,10 @@ _PRIVATE_PATTERNS = (
 _SIGNIN_LABEL = "the Google sign-in folder (the OAuth token and credentials live there)"
 
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+#: The shape of a Drive file id: a bare token with no path separator. Used only to
+#: tell a Drive id apart from a local image name (see ``image_is_local``).
+_DRIVE_ID = re.compile(r"[A-Za-z0-9_-]{20,}\Z")
 
 _IMAGE_MAGIC = (
     b"\x89PNG\r\n\x1a\n",
@@ -128,6 +149,25 @@ def _expand(value: str, home: str) -> str:
     if value.startswith("~/"):
         return os.path.join(home, value[2:])
     return value
+
+
+def signin_file(name: str, env: Optional[Mapping[str, str]] = None,
+                home: Optional[str] = None) -> str:
+    """The configured path of the token or credentials file, or its default.
+
+    The one resolver ``auth.py`` and this module share, so they can never disagree:
+    a leading ``~`` is expanded against ``home`` (the process owner's when not
+    given) and an empty value counts as unset, which yields the same default both
+    read and protected here.
+    """
+    if name not in _DEFAULT_SIGNIN_FILES:
+        raise ValueError(f"not a Google sign-in file setting: {name}")
+    env = os.environ if env is None else env
+    home_path = _home(home)
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return os.path.join(home_path, *_DEFAULT_SIGNIN_DIR, _DEFAULT_SIGNIN_FILES[name])
+    return _expand(raw, home_path)
 
 
 def _resolved(path: str) -> Optional[str]:
@@ -174,6 +214,23 @@ def _refuse(what: str, problem: str, hint: str) -> PathRefused:
     return PathRefused(f"{what} is refused — {problem}. {hint}")
 
 
+def _refuse_protected(what: str, shown: str, protected_path: str,
+                      label: str, home: str) -> PathRefused:
+    """The refusal for a protected path; a home sign-in file gets its own reason."""
+    if protected_path == home and label == _SIGNIN_LABEL:
+        return PathRefused(
+            f"{what} is refused — the sign-in file is directly in your home folder, so "
+            f"Crow can't keep local files away from it — move it into its own folder "
+            f"(for example ~/.config/google-workspace-mcp/) and point GOOGLE_TOKEN_FILE "
+            f"and GOOGLE_CREDENTIALS_FILE there, then try again."
+        )
+    return _refuse(
+        what,
+        f"{shown} is in {label}, which this server never reads or writes for a tool call",
+        "Put the file in your files folder (GWS_FILES_DIR) instead.",
+    )
+
+
 # --- the three rules -------------------------------------------------------
 
 
@@ -198,20 +255,33 @@ def files_dir(env: Optional[Mapping[str, str]] = None,
     return _resolved(_expand(raw, home_path))
 
 
-def _protected_dirs(env: Mapping[str, str], home: str) -> list[tuple[str, str]]:
-    """``[(dir, label)]`` no tool call may read or write, resolved.
+def _protected(env: Mapping[str, str], home: str
+               ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """``([(path, label)], [(sign-in file, label)])`` no tool call may touch.
 
-    Fail closed: a protected folder whose real path cannot be computed refuses every
-    local path, because the check itself would be blind.
+    The folders come from each sign-in FILE after ``realpath``: both the folder it
+    really lives in and the folder it was named in are protected (a symlinked token
+    protects both ends), and so is the file itself. Fail closed: a protected path
+    whose real location cannot be computed refuses every local path, because the
+    check itself would be blind. The second list is what the hard-link check in
+    ``open_read`` compares against.
     """
     candidates: list[tuple[str, str]] = []
+    files: list[tuple[str, str]] = []
     for name in ("GOOGLE_TOKEN_FILE", "GOOGLE_CREDENTIALS_FILE"):
-        raw = (env.get(name) or "").strip()
-        if raw:
-            path = _expand(raw, home)
-        else:
-            path = os.path.join(home, *_DEFAULT_SIGNIN_DIR, _DEFAULT_SIGNIN_FILES[name])
-        candidates.append((os.path.dirname(os.path.abspath(path)), _SIGNIN_LABEL))
+        given = os.path.abspath(signin_file(name, env, home))
+        real_file = _resolved(given)
+        if real_file is None:
+            raise PathRefused(
+                f"This tool call is refused — the folders this server protects (the "
+                f"Google sign-in folder, ~/.ssh, ~/.gnupg) cannot be resolved right "
+                f"now, so no local path is allowed. Fix the filesystem (a broken "
+                f"symbolic link can cause this) and try again."
+            )
+        files.append((real_file, _SIGNIN_LABEL))
+        candidates.append((os.path.dirname(given), _SIGNIN_LABEL))
+        candidates.append((os.path.dirname(real_file) or os.sep, _SIGNIN_LABEL))
+        candidates.append((real_file, _SIGNIN_LABEL))
     for pattern, label in _PRIVATE_PATTERNS:
         expanded = _expand(pattern, home)
         if "*" not in pattern:
@@ -239,7 +309,7 @@ def _protected_dirs(env: Mapping[str, str], home: str) -> list[tuple[str, str]]:
             continue
         seen.add((real, label))
         out.append((real, label))
-    return out
+    return out, files
 
 
 def _candidate(path: str, folder: Optional[str], home: str) -> str:
@@ -270,7 +340,7 @@ def resolve(path: Optional[str], mode: str = READ, what: str = "this tool call",
             "Pass the name of a file inside your files folder (GWS_FILES_DIR).",
         )
     # Rule 1 always, before anything else can allow it.
-    protected = _protected_dirs(env, home_path)
+    protected, _protected_files = _protected(env, home_path)
     folder = files_dir(env, home_path)
     if folder is None and _files_dir_setting(env):
         raise _refuse(
@@ -282,14 +352,9 @@ def resolve(path: Optional[str], mode: str = READ, what: str = "this tool call",
         )
     real = _real(_candidate(shown, folder, home_path), shown, what)
 
-    for protected_dir, label in protected:
-        if _at_or_inside(real, protected_dir):
-            raise _refuse(
-                what,
-                f"{shown} is in {label}, which this server never reads or writes for a "
-                f"tool call",
-                "Put the file in your files folder (GWS_FILES_DIR) instead.",
-            )
+    for protected_path, label in protected:
+        if _at_or_inside(real, protected_path):
+            raise _refuse_protected(what, shown, protected_path, label, home_path)
 
     # Rule 2: no folder set.
     if folder is None:
@@ -318,6 +383,89 @@ def resolve(path: Optional[str], mode: str = READ, what: str = "this tool call",
 # --- opening ------------------------------------------------------------------
 
 
+def _fd_path(fd: int) -> Optional[str]:
+    """Where the kernel says this descriptor points, or None.
+
+    ``/proc/self/fd`` (Linux) and ``/dev/fd`` (the BSDs) are the same readlink; on
+    macOS ``F_GETPATH`` is the equivalent. Asked *after* the open, so it reports the
+    file that was actually opened, not the path resolved beforehand.
+    """
+    for prefix in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return os.readlink(f"{prefix}/{fd}")
+        except OSError:
+            continue
+    try:
+        import array
+        import fcntl
+
+        buf = array.array("B", b"\0" * 4096)
+        fcntl.fcntl(fd, fcntl.F_GETPATH, buf)
+        return buf.tobytes().split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+    except Exception:  # noqa: BLE001 - F_GETPATH is not on every platform
+        return None
+
+
+def _check_kernel_path(what: str, shown: str, fd_path: Optional[str],
+                       folder: Optional[str], protected: list[tuple[str, str]],
+                       *, strict: bool, home: str,
+                       where: str = "the file") -> None:
+    """Re-run the sign-in and files-folder checks on the kernel-reported path."""
+    if fd_path is None:
+        raise _refuse(
+            what,
+            f"the kernel could not report where {shown} really is, so it is not touched",
+            "Pass a plain file inside your files folder (GWS_FILES_DIR).",
+        )
+    path = fd_path
+    if path.endswith(" (deleted)"):
+        path = path[: -len(" (deleted)")]
+    if not os.path.isabs(path):
+        raise _refuse(
+            what,
+            f"the kernel reported a location for {shown} this server cannot check "
+            f"({fd_path!r}), so it is not touched",
+            "Pass a plain file inside your files folder (GWS_FILES_DIR).",
+        )
+    for protected_path, label in protected:
+        if _at_or_inside(path, protected_path):
+            raise _refuse_protected(what, shown, protected_path, label, home)
+    if folder is not None:
+        if strict and not _strictly_inside(path, folder):
+            raise _refuse(
+                what,
+                f"{shown} moved outside your files folder ({folder}) between the "
+                f"check and the open",
+                "Put the file in your files folder (GWS_FILES_DIR) and try again.",
+            )
+        if not strict and not _at_or_inside(path, folder):
+            raise _refuse(
+                what,
+                f"{where} for {shown} moved outside your files folder ({folder}) "
+                f"between the check and the open",
+                "Put the file in your files folder (GWS_FILES_DIR) and try again.",
+            )
+
+
+def _refuse_hardlink(what: str, shown: str, info: os.stat_result,
+                     protected_files: list[tuple[str, str]]) -> None:
+    """Refuse a file that is the token or credentials under another name."""
+    if info.st_nlink <= 1:
+        return
+    for protected_file, label in protected_files:
+        try:
+            target = os.stat(protected_file)
+        except OSError:
+            continue  # nothing to compare against, so this comparison is skipped
+        if (target.st_dev, target.st_ino) == (info.st_dev, info.st_ino):
+            raise _refuse(
+                what,
+                f"{shown} is a hard link to {label} — the same file on disk under "
+                f"another name — which this server never reads for a tool call",
+                "Put a copy of the file in your files folder (GWS_FILES_DIR) instead.",
+            )
+
+
 def open_read(path: Optional[str], what: str = "reading a local file",
               env: Optional[Mapping[str, str]] = None,
               home: Optional[str] = None) -> Tuple[str, IO[bytes]]:
@@ -325,10 +473,17 @@ def open_read(path: Optional[str], what: str = "reading a local file",
 
     The handle is opened ``O_NOFOLLOW`` on the final component (the path is already
     resolved, so this is the second half of the same guarantee) and must be a
-    regular file: a directory, a device, a FIFO or a socket is refused.
+    regular file: a directory, a device, a FIFO or a socket is refused. After the
+    open the kernel-reported path is checked again, and a multi-link file is
+    compared with the sign-in files, so a swapped directory or a hard link cannot
+    use the gap between ``resolve`` and the open.
     """
-    real = resolve(path, READ, what, env=env, home=home)
+    env = os.environ if env is None else env
+    home_path = _home(home)
+    real = resolve(path, READ, what, env=env, home=home_path)
     shown = "" if path is None else str(path).strip()
+    folder = files_dir(env, home_path)
+    protected, protected_files = _protected(env, home_path)
     # O_NONBLOCK so a FIFO cannot block the call before the regular-file check below;
     # it changes nothing for a regular file.
     flags = (
@@ -344,20 +499,41 @@ def open_read(path: Optional[str], what: str = "reading a local file",
             f"(GWS_FILES_DIR) and pass its path inside that folder."
         )
     except OSError as e:
+        # O_NOFOLLOW refused the final component. If what is there now resolves into
+        # a protected folder (or out of the files folder), name that reason instead.
+        swapped = _resolved(real)
+        if swapped is not None:
+            for protected_path, label in protected:
+                if _at_or_inside(swapped, protected_path):
+                    raise _refuse_protected(
+                        what, shown, protected_path, label, home_path
+                    )
+            if folder is not None and not _strictly_inside(swapped, folder):
+                raise _refuse(
+                    what,
+                    f"{shown} is not inside your files folder ({folder})",
+                    "Put the file in your files folder (GWS_FILES_DIR) and pass its "
+                    "path inside that folder (or a name relative to it).",
+                )
         raise _refuse(
             what,
             f"{shown} cannot be opened ({e.strerror or e})",
             "Pass a plain file inside your files folder (GWS_FILES_DIR).",
         )
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             raise _refuse(
                 what,
                 f"{shown} is not a regular file (a folder, a device or a pipe)",
                 "Pass a plain file inside your files folder (GWS_FILES_DIR).",
             )
+        _refuse_hardlink(what, shown, info, protected_files)
+        _check_kernel_path(
+            what, shown, _fd_path(fd), folder, protected, strict=True, home=home_path
+        )
         return real, os.fdopen(fd, "rb")
-    except PathRefused:
+    except BaseException:
         os.close(fd)
         raise
 
@@ -371,15 +547,20 @@ def open_write(path: Optional[str], what: str = "writing a local file",
     so an existing file, a symlink and (on Linux) a file being created elsewhere at
     the same moment are all refusals. None of the tools that write a local file has
     an overwrite flag, so there is no path through this function that replaces one.
+    The parent directory's kernel-reported path is checked before the create, and
+    the new file's own path after it, so a directory swapped for a symlink between
+    ``resolve`` and the open is refused (the empty file it created is removed).
     """
     env = os.environ if env is None else env
     home_path = _home(home)
     real = resolve(path, WRITE, what, env=env, home=home_path)
     shown = "" if path is None else str(path).strip()
+    folder = files_dir(env, home_path)
+    protected, _protected_files = _protected(env, home_path)
 
     # The un-resolved target: a symlink here is refused by name, which reads better
     # than the "already exists" the O_EXCL open would give (it is the same refusal).
-    candidate = _candidate(shown, files_dir(env, home_path), home_path)
+    candidate = _candidate(shown, folder, home_path)
     if os.path.islink(candidate):
         raise _refuse(
             what,
@@ -402,8 +583,30 @@ def open_write(path: Optional[str], what: str = "writing a local file",
             "Pass the name of a file inside your files folder (GWS_FILES_DIR).",
         )
     try:
-        dir_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        dir_fd = os.open(
+            parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
     except OSError as e:
+        # O_NOFOLLOW refused a parent that is now a symlink. If the swap points into
+        # a folder this server protects, name that instead of a bare ELOOP.
+        swapped = _resolved(parent)
+        if swapped is not None:
+            for protected_path, label in protected:
+                if _at_or_inside(swapped, protected_path):
+                    raise _refuse_protected(
+                        what, shown, protected_path, label, home_path
+                    )
+            if folder is not None and not _at_or_inside(swapped, folder):
+                raise _refuse(
+                    what,
+                    f"the folder it would be created in for {shown} is not inside "
+                    f"your files folder ({folder})",
+                    "Put the file in your files folder (GWS_FILES_DIR) and try "
+                    "again.",
+                )
         raise _refuse(
             what,
             f"the folder {parent} does not exist or cannot be opened "
@@ -411,33 +614,57 @@ def open_write(path: Optional[str], what: str = "writing a local file",
             "Create that folder inside your files folder (GWS_FILES_DIR), or pass a "
             "name directly in it.",
         )
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    handle: Optional[IO[bytes]] = None
     try:
-        fd = os.open(base, flags, 0o600, dir_fd=dir_fd)
-    except FileExistsError:
-        raise _refuse(
-            what,
-            f"{shown} already exists, and this server never overwrites a local file",
-            "Choose a name that is not taken yet (or delete the old file first).",
+        # The directory the kernel actually opened — before anything is created in
+        # it, so a swapped path can never leave a file in a protected folder.
+        _check_kernel_path(
+            what, shown, _fd_path(dir_fd), folder, protected,
+            strict=False, home=home_path,
+            where="the folder it would be created in",
         )
-    except OSError as e:
-        raise _refuse(
-            what,
-            f"{shown} cannot be created ({e.strerror or e})",
-            "Pass the name of a plain file inside your files folder (GWS_FILES_DIR).",
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
         )
+        try:
+            fd = os.open(base, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            raise _refuse(
+                what,
+                f"{shown} already exists, and this server never overwrites a local file",
+                "Choose a name that is not taken yet (or delete the old file first).",
+            )
+        except OSError as e:
+            raise _refuse(
+                what,
+                f"{shown} cannot be created ({e.strerror or e})",
+                "Pass the name of a plain file inside your files folder (GWS_FILES_DIR).",
+            )
+        try:
+            _check_kernel_path(
+                what, shown, _fd_path(fd), folder, protected,
+                strict=True, home=home_path,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass  # the mode above is already 0600 minus the umask
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            try:
+                os.unlink(base, dir_fd=dir_fd)  # O_EXCL: this call created it
+            except OSError:
+                pass
+            raise
     finally:
         os.close(dir_fd)
-    try:
-        os.fchmod(fd, 0o600)
-    except OSError:
-        pass  # the mode above is already 0600 minus the umask
-    return real, os.fdopen(fd, "wb")
+    if handle is None:  # unreachable: the create above either returns or raises
+        raise AssertionError("open_write created no handle")
+    return real, handle
 
 
 # --- names, defaults and images ------------------------------------------------
@@ -457,17 +684,82 @@ def safe_name(value: object, fallback: str = "file") -> str:
 
 def default_path(ident: object, extension: object,
                  env: Optional[Mapping[str, str]] = None,
-                 home: Optional[str] = None) -> str:
-    """Where a write with no path given lands: the files folder, else ``/tmp``.
+                 home: Optional[str] = None, attempt: int = 1) -> str:
+    """Where a write with no path given lands: a new, uniquely named file.
 
     The files folder when one is set (the only place the guard lets a write go);
     ``/tmp`` only for an install with neither a folder nor the guard, which is what
     that install did before. With the guard on and no folder, ``resolve`` refuses
     the result, so nothing is written at all.
+
+    The name is the sanitized id, a UTC timestamp (microseconds) and, after an
+    ``O_EXCL`` collision has been retried, ``-2``, ``-3``… — so a repeated export
+    with no path creates a new file instead of being refused.
     """
     folder = files_dir(env, home)
-    name = f"{safe_name(ident)}.{safe_name(extension, 'bin')}"
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stem = f"{safe_name(ident)}-{stamp}"
+    if attempt > 1:
+        stem = f"{stem}-{attempt}"
+    name = f"{stem}.{safe_name(extension, 'bin')}"
     return os.path.join(folder if folder else "/tmp", name)
+
+
+def open_write_default(ident: object, extension: object,
+                       what: str = "writing a local file", attempts: int = 100,
+                       env: Optional[Mapping[str, str]] = None,
+                       home: Optional[str] = None) -> Tuple[str, IO[bytes]]:
+    """Create a new file under a default, unique name (see ``default_path``).
+
+    A name that is already taken is retried with ``-2``, ``-3``… — the retry is safe
+    because each attempt goes through ``open_write``'s ``O_EXCL`` create, so it is
+    the kernel that refuses an existing name, never a check-then-create here.
+    """
+    for attempt in range(1, attempts + 1):
+        path = default_path(ident, extension, env=env, home=home, attempt=attempt)
+        try:
+            return open_write(path, what, env=env, home=home)
+        except PathRefused as refusal:
+            message = str(refusal)
+            taken = "already exists" in message or "symbolic link" in message
+            if not taken or attempt >= attempts:
+                raise
+    raise PathRefused(
+        f"{what} is refused — no free default file name was found after {attempts} tries."
+    )
+
+
+def image_is_local(image: object, env: Optional[Mapping[str, str]] = None,
+                   home: Optional[str] = None) -> bool:
+    """True when ``gdocs_insert_image``'s ``image`` is a local path, not a Drive id.
+
+    Decided without asking whether an arbitrary path exists: a value with a path
+    separator, or one starting with ``~`` or ``.``, is local; a bare token shaped
+    like a Drive id (``[A-Za-z0-9_-]{20,}``) is a Drive id unless it resolves
+    strictly inside the files folder, where a relative name wins. Everything else is
+    local and goes through ``open_read``, so a refused or missing local path reads
+    the same whether or not something exists outside the folder.
+    """
+    env = os.environ if env is None else env
+    text = "" if image is None else str(image).strip()
+    if not text:
+        return True
+    separators = {"/", "\\", os.sep}
+    if os.altsep:
+        separators.add(os.altsep)
+    if any(sep and sep in text for sep in separators):
+        return True
+    if text.startswith("~") or text.startswith("."):
+        return True
+    if _DRIVE_ID.fullmatch(text) is None:
+        return True
+    folder = files_dir(env, home)
+    if folder is None:
+        return False
+    real = _resolved(_candidate(text, folder, _home(home)))
+    # Only a name that is really there in the owner's folder wins over the id shape;
+    # a real Drive id is not a file merely because its name would fit in the folder.
+    return real is not None and _strictly_inside(real, folder) and os.path.lexists(real)
 
 
 def is_image(head: bytes) -> bool:

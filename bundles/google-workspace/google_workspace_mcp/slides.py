@@ -589,9 +589,10 @@ async def gslides_export(
 
     With `out_path` omitted the file lands in the files folder (GWS_FILES_DIR), named
     after the presentation id (every character outside [A-Za-z0-9._-] replaced, so an
-    id cannot name a path). An install with neither a folder nor the outbound guard
-    keeps the old default of /tmp; a path outside the files folder, or over an
-    existing file, is refused — see local_paths.
+    id cannot name a path) plus a UTC timestamp, so repeated exports create new files
+    instead of being refused. An install with neither a folder nor the outbound guard
+    keeps the old default location of /tmp; a path outside the files folder, or over
+    an existing file, is refused — see local_paths.
     """
     mimes = {
         "pdf": "application/pdf",
@@ -614,9 +615,14 @@ async def gslides_export(
         .execute()
     )
     try:
-        written, handle = local_paths.open_write(
-            path, "exporting a presentation"
-        )
+        if requested is None:
+            written, handle = local_paths.open_write_default(
+                presentation_id, fmt, "exporting a presentation"
+            )
+        else:
+            written, handle = local_paths.open_write(
+                path, "exporting a presentation"
+            )
     except local_paths.PathRefused as refusal:
         return {"success": False, "error": str(refusal)}
     try:
