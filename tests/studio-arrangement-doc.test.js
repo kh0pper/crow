@@ -643,6 +643,62 @@ test("record_performance is one undo step", (t) => {
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
+test("R15: one undo removes the placements only; the clip and the takes remain (record_performance is one history step, take.add and clip.add_audio are their own)", (t) => {
+  const s = studio(t);
+  const track = runCommand(s.doc, "track.add", { name: "Guitar", kind: "audio" }).args.id;
+  const scene = addScene(s.doc);
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000c1";
+
+  // A by-hand take reaches the song in parts: the clip the empty slot got, the
+  // take each pass made, and the performance that places the recorded clip.
+  s.run("clip.add_audio", {
+    clip_id: "c-hand",
+    track_id: track,
+    scene_id: scene,
+    length_bars: 2,
+    name: "Guitar",
+  });
+  s.run("take.add", {
+    clip_id: "c-hand",
+    take: {
+      id: takeId,
+      storage_key: `studio/song-1/takes/${takeId}.wav`,
+      rate: 48000,
+      channels: 2,
+      frames: 96000,
+      offset_frames: 0,
+      compensated: true,
+      bpm: 120,
+      recorded_at: "2026-03-01T10:00:00.000Z",
+      author_label: "You",
+      discarded: false,
+    },
+  });
+  const performed = s.run("arrangement.record_performance", {
+    placements: [{ id: "perf-hand", track_id: track, clip_id: "c-hand", start_bar: 4, bars: 2 }],
+  });
+  assert.deepEqual(Object.keys(placementsOf(s.doc)), ["perf-hand"]);
+
+  // One undo takes the performance back and nothing else: the placements go,
+  // while the clip and the takes the passes made — each a step of its own — are
+  // still there, waiting for their own undos.
+  const undone = s.undo(performed.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.deepEqual(placementsOf(s.doc), {}, "the placements are gone");
+
+  const after = snapshot(s.doc);
+  assert.ok(after.clips["c-hand"], "the clip stays");
+  assert.equal(after.clips["c-hand"].kind, "audio", "still the audio clip it was");
+  assert.deepEqual(Object.keys(after.takes), [takeId], "and the take stays");
+  assert.deepEqual(
+    after.clips["c-hand"].comp,
+    [{ take_id: takeId, from_beat: 0, to_beat: 8 }],
+    "with the whole-clip comp it made when it landed",
+  );
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
 test("placement past bar 999 refused naming the limit", (t) => {
   const s = studio(t);
   const { track, clip } = placeable(s.doc);

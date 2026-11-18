@@ -2681,6 +2681,207 @@ test("at the highest zoom a short placement label is not empty", async () => {
   assert.ok(String(block.getAttribute("title")).includes("A"), "with the full name in its title");
 });
 
+// ---- By hand writes the take into the plan (C3, R15) ----------------------
+//
+// A take that plays scenes by hand collects its launches the way the toggle
+// does, but from the arrangement bar the playhead stood on when Record was
+// pressed: the performance lands there, not at bar 0. An overlap with what the
+// plan already plays is the existing command's whole refusal, and the existing
+// notice is where the operator is offered the part that fits.
+
+/**
+ * Leave the page's arrangement playhead standing on one bar and come back to
+ * the Session view, where a By-hand take records: the ruler seeks on whole bars,
+ * and the playhead the operator left is what the take writes from.
+ * @param {object} ui a booted page
+ * @param {number} bar the arrangement bar the playhead should stand on
+ */
+async function playheadLeftAt(ui, bar) {
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = stubRuler(ui);
+  rulerPress(ui, strip, bar * 10 + 5);
+  await ui.settle();
+  ui.fireWindow("pointerup", ui.event("pointerup", {}));
+  await ui.settle();
+  ui.click("[data-act=mode-session]");
+  await ui.settle();
+}
+
+test("R15: the Record to timeline toggle returns to its previous value after Stop", async () => {
+  const ui = await bootTimeline();
+  const toggle = () => ui.document.querySelector("[data-act=rec-timeline]");
+  const notice = () => ui.document.querySelector("[data-role=timeline-notice]");
+  assert.equal(toggle().getAttribute("aria-pressed"), "false", "the toggle starts Off");
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.equal(
+    toggle().getAttribute("aria-pressed"),
+    "true",
+    "a By-hand take collects what it plays, and the toggle shows it",
+  );
+
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 48000 });
+  await ui.settle();
+  ui.position({ bar: 3, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  assert.equal(toggle().getAttribute("aria-pressed"), "false", "and it is Off again once the take is over");
+  assert.equal(notice().hidden, true, "with the recording-to-the-timeline notice hidden");
+
+  // A toggle the operator had turned on before Record stays on afterwards.
+  const on = await bootTimeline();
+  on.click("[data-act=rec-timeline]");
+  await on.settle();
+  on.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await on.settle();
+  on.click("[data-act=record]");
+  await on.settle(24);
+  assert.equal(
+    on.document.querySelector("[data-act=rec-timeline]").getAttribute("aria-pressed"),
+    "true",
+    "the take did not turn the operator's own toggle off",
+  );
+  on.click("[data-act=stop]");
+  await on.settle(24);
+  assert.equal(
+    on.document.querySelector("[data-act=rec-timeline]").getAttribute("aria-pressed"),
+    "true",
+    "and it is still on after it",
+  );
+});
+
+test("R15: with a plan already at the playhead bar the performance is refused as a whole, the notice offers place-what-fits, and nothing is written", async () => {
+  const ui = await bootTimeline();
+  // The fixture plays its audio clip over bars 5 to 8. The playhead is left
+  // standing on bar 5, which is where a By-hand take writes from.
+  await playheadLeftAt(ui, 4);
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 48000 });
+  await ui.settle();
+  // The session's own bar counter started at 0: two bars in, Stop lands on bar 2.
+  ui.position({ bar: 3, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = commands(ui, "arrangement.record_performance");
+  assert.equal(sent.length, 1, "Stop sent the take's performance");
+  const placements = sent[0].args.placements;
+  assert.deepEqual(
+    placements,
+    [{ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 4, bars: 2 }],
+    "written from the bar the playhead stood on when Record was pressed",
+  );
+
+  // The plan already plays that clip there, so the command refuses the whole
+  // performance: it is all-or-nothing, and this one writes nothing.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/arrangement.js");
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  let refusal = null;
+  try {
+    ui.doc.transact(() => runCommand(ui.doc, "arrangement.record_performance", { placements }));
+  } catch (error) {
+    refusal = error;
+  }
+  assert.ok(refusal, "the performance is refused");
+  assert.match(String(refusal.message), /overlap/, "because it overlaps what the plan already plays");
+  assert.deepEqual(
+    Object.keys(placementsOf(snapshot(ui.doc))).sort(),
+    [AUDIO_PLACEMENT, NOTE_PLACEMENT],
+    "and nothing of it was written",
+  );
+
+  // The page keeps the refused performance in its own notice, with the two
+  // things the operator can do about it.
+  ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: false, error: String(refusal.message) });
+  await ui.settle();
+  const notice = ui.document.querySelector("[data-role=performance-notice]");
+  assert.equal(notice.hidden, false, "the refusal stays on the page");
+  assert.ok(String(notice.textContent).includes("overlap"), "with the server's own sentence");
+  assert.ok(notice.querySelector("[data-act=performance-fit]"), "Place what fits is offered");
+  assert.ok(notice.querySelector("[data-act=performance-discard]"), "and Discard");
+  assert.equal(
+    commands(ui, "arrangement.record_performance").length,
+    1,
+    "a refused performance is not sent again on its own",
+  );
+});
+
+test("R15: with the playhead past the existing plan the performance lands there", async () => {
+  const ui = await bootTimeline();
+  // The plan plays bars 5 to 8; the playhead stands past it, on bar 9.
+  await playheadLeftAt(ui, 8);
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 48000 });
+  await ui.settle();
+  // Two bars into the session's own count, which started at bar 0.
+  ui.position({ bar: 3, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = commands(ui, "arrangement.record_performance");
+  assert.equal(sent.length, 1, "Stop sent the take's performance");
+  const placements = sent[0].args.placements;
+  assert.deepEqual(
+    placements,
+    [{ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 8, bars: 2 }],
+    "nothing overlaps there, so the whole performance lands past the plan",
+  );
+
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const performed = ui.doc.transact(() =>
+    runCommand(ui.doc, "arrangement.record_performance", { placements }));
+  const written = placementsOf(snapshot(ui.doc));
+  assert.deepEqual(
+    Object.keys(written).sort(),
+    [AUDIO_PLACEMENT, NOTE_PLACEMENT, performed.args.placements[0].id].sort(),
+    "the song took it as one placement",
+  );
+  assert.equal(written[performed.args.placements[0].id].start_bar, 8, "on the bar the playhead stood on");
+});
+
+test("performancePlacements with baseBar 0 is unchanged (the existing toggle)", async () => {
+  // The toggle's own performance is written from bar 0, exactly as it was before
+  // a By-hand take existed: a launch opens a placement on its bar, the next
+  // launch on that track closes it, and Stop closes the last one.
+  const ui = await bootTimeline();
+  ui.click("[data-act=rec-timeline]");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 0, frame: 0 });
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 2, frame: 192000 });
+  ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 6, frame: 576000 });
+  ui.position({ bar: 11, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle();
+
+  const sent = commands(ui, "arrangement.record_performance");
+  assert.equal(sent.length, 1, "the whole performance is one command");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 0, bars: 6 },
+      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 6, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 2, bars: 8 },
+    ],
+    "every bar is the one its launch played on, with no shift at all",
+  );
+});
+
 // ---- the same timeline against a real hub, in a real browser ---------------
 
 let chrome = null;

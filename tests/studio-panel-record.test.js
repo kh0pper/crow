@@ -5194,3 +5194,304 @@ test("Follow with nothing placed under the playhead behaves as today: it cancels
   );
   assert.equal(ui.store.pendings.size, 0, "no take row exists");
 });
+
+// ---- By hand: what the take played is written into the plan (C3, R15) ------
+//
+// A take that plays scenes by hand is collected the way the Record to timeline
+// toggle collects a performance, whether or not the operator had the toggle on:
+// at Stop the launches it heard become placements, shifted to the arrangement
+// bar the playhead stood on when Record was pressed. The record clip's own
+// launch is one of them, so the clip the empty slot got is placed over the
+// passes it recorded. Overlaps are the existing command's refusal, and the
+// existing notice is where the operator is offered what fits.
+
+/** @returns {object[]} every record_performance the page sent, in order */
+function performances(ui) {
+  return ui.sent.filter(
+    (message) => message.type === "command" && message.command === "arrangement.record_performance",
+  );
+}
+
+/**
+ * Put the page's arrangement playhead on one bar: the ruler seeks on a whole
+ * bar, and the playhead the operator leaves there is what a By-hand take writes
+ * from.
+ * @param {object} ui a booted panel
+ * @param {number} bar the arrangement bar the playhead should stand on
+ */
+async function standPlayheadAt(ui, bar) {
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const strip = ui.document.querySelector("[data-role=bar-ruler]");
+  assert.ok(strip, "the timeline draws the bar ruler");
+  // 32 bars across 320 px: 10 px a bar, so the middle of a bar is 10 px in.
+  strip.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 18, right: 320, bottom: 18, x: 0, y: 0,
+  });
+  strip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: bar * 10 + 5 }));
+  await ui.settle();
+  ui.fireWindow("pointerup", ui.event("pointerup", {}));
+  await ui.settle();
+  ui.click("[data-act=mode-session]");
+  await ui.settle();
+}
+
+test("R15: a by-hand take sends one record_performance at Stop with the launches made during the take, each bar shifted by the playhead bar at Record", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  // The arrangement's playhead is left standing in bar 5 — arrangement bar 4 —
+  // and the take records from the Session view.
+  await standPlayheadAt(ui, 4);
+  const view = viewOf(ui);
+  assert.equal(view.mode, "session", "the take records from the Session view");
+  assert.equal(view.playhead, 4, "with the playhead left on arrangement bar 4");
+  assert.equal(view.planMode, "hand", "and By hand chosen");
+
+  await pressRecord(ui);
+  assert.equal(view.recTimeline.on, true, "Record collected what the take plays for the plan");
+  assert.equal(view.recTimeline.base_bar, 4, "from the bar the playhead stood on");
+
+  // The record scene's own launch arms the take; a tap on the armed track's
+  // scene two bars in closes its placement and opens the next one.
+  await reportLaunch(ui);
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 2, frame: 144000 }),
+  );
+  await ui.settle();
+
+  ui.engine.position({ bar: 5, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the whole take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 6, bars: 2 },
+    ],
+    "each launch bar is shifted by the playhead's own bar, and the last one ends on the stop bar",
+  );
+});
+
+test("R15: a launch posted BEFORE count_in_done but with frame >= play_frame is collected, and one with an earlier frame is not (both message orders)", async () => {
+  /**
+   * One bar of count-in, with an optional hook that runs between the announced
+   * play frame and the first click.
+   * @param {object} ui a booted panel
+   * @param {number} playFrame
+   * @param {function(): void} [between]
+   */
+  const countOneBar = (ui, playFrame, between) => {
+    const beats = 4;
+    ui.engine.countIn({ type: "count_in_start", play_frame: playFrame });
+    if (between) between();
+    for (let beat = 1; beat <= beats; beat += 1) {
+      ui.engine.countIn({
+        type: "count_in",
+        beat,
+        beats,
+        frame: playFrame - (beats - beat) * 12000,
+        play_frame: playFrame,
+      });
+    }
+    ui.engine.countIn({ type: "count_in_done", frame: playFrame });
+  };
+
+  /** A launch of the armed track's scene at one session bar and frame. */
+  const launchAt = (ui, bar, frame) => {
+    ui.engine.launches.forEach((listener) =>
+      listener({ track_id: AUDIO_TRACK, clip_id: CLIP, scene_id: SCENE, bar, frame }),
+    );
+  };
+
+  const PLAY_FRAME = 96000;
+
+  // The launches arrive while the count-in runs: the take's own downbeat launch
+  // is collected even though the engine has not said the count is over, and the
+  // one from before that frame is not.
+  const early = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
+  await pressRecord(early);
+  assert.equal(countInPlays(early).length, 1, "Record counted one bar in");
+  countOneBar(early, PLAY_FRAME, () => {
+    launchAt(early, 0, 84000);
+    launchAt(early, 1, PLAY_FRAME);
+  });
+  await early.settle();
+  early.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  early.click("[data-act=stop]");
+  await early.settle(24);
+
+  const before = performances(early);
+  assert.equal(before.length, 1, "the take wrote one performance");
+  assert.deepEqual(
+    before[0].args.placements,
+    [{ track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 1, bars: 1 }],
+    "only the launch at or after the announced play frame is in it",
+  );
+
+  // The same two launches, posted after the count is over: the order they came
+  // in decides nothing, only the frames they played at do.
+  const late = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
+  await pressRecord(late);
+  countOneBar(late, PLAY_FRAME);
+  await late.settle();
+  launchAt(late, 0, 84000);
+  launchAt(late, 1, PLAY_FRAME);
+  await late.settle();
+  late.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  late.click("[data-act=stop]");
+  await late.settle(24);
+
+  const after = performances(late);
+  assert.equal(after.length, 1, "the take wrote one performance");
+  assert.deepEqual(
+    after[0].args.placements,
+    before[0].args.placements,
+    "and it is the same performance, whichever order the messages arrived in",
+  );
+});
+
+test("R15: the record clip (created at arm on an empty slot) is placed from its launch bar over the recorded passes", async () => {
+  // Nothing is in the armed track's slot: the launch that arms the take names no
+  // clip, because the clip is what the arm makes. The performance places that
+  // clip from the bar its launch played, over the passes it recorded.
+  const ui = await bootPanel();
+  await pressRecord(ui);
+  await reportLaunch(ui);
+
+  const added = ui.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty slot got one audio clip");
+  const clipId = added[0].args.clip_id;
+  assert.equal(typeof clipId, "string", "under the id the arm made for it");
+
+  // Two four-bar passes: the take stops at the end of bar 8.
+  ui.engine.position({ bar: 9, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "Stop wrote one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [{ track_id: AUDIO_TRACK, clip_id: clipId, start_bar: 0, bars: 8 }],
+    "the recorded clip is placed from its launch bar over the passes it recorded",
+  );
+});
+
+test("R14: Follow writes no placement", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+  assert.equal(viewOf(ui).planMode, "follow", "the take follows the plan");
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.equal(viewOf(ui).mode, "arrangement", "which puts the page on the timeline");
+  assert.equal(viewOf(ui).recTimeline.on, false, "nothing is collected for the plan");
+
+  // A launch report, the kind the Session view's sequencer posts: the plan
+  // launches no scene, and a following take writes nothing into the plan.
+  await reportLaunch(ui);
+  ui.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  assert.equal(performances(ui).length, 0, "a Follow take writes no placement");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "arrangement.place").length,
+    0,
+    "and no placement either",
+  );
+});
+
+test("R15: a Stop during the count-in writes nothing", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
+  await pressRecord(ui);
+  assert.equal(viewOf(ui).recTimeline.on, true, "the By-hand take collects what it plays");
+
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+  // The downbeat's launch arrives before the count is over; the Stop comes
+  // before the take's first frame, so nothing of it is written.
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: CLIP, scene_id: SCENE, bar: 0, frame: 96000 }),
+  );
+  await ui.settle();
+
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  assert.equal(viewOf(ui).rec, null, "no take is left armed");
+  assert.equal(performances(ui).length, 0, "a take that never began writes no performance");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "and no clip",
+  );
+  assert.equal(viewOf(ui).recTimeline.on, false, "the toggle goes back to what it was");
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+});
+
+test("R7: Pause during a By-hand count-in (recTimeline.on forced) cancels it", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
+  const view = viewOf(ui);
+  const pause = () => ui.document.querySelector("[data-act=pause]");
+
+  await pressRecord(ui);
+  assert.equal(view.recTimeline.on, true, "the By-hand take forced the collection on");
+  assert.equal(pause().disabled, false, "counting is not recording, so Pause is offered");
+
+  ui.click("[data-act=pause]");
+  await ui.settle(24);
+
+  assert.equal(ui.engine.cancels, 1, "the count-in was cancelled on the audio thread");
+  assert.equal(view.rec, null, "no take is left armed");
+  assert.equal(view.playing, false, "nothing is playing");
+  assert.equal(performances(ui).length, 0, "and nothing is written into the plan");
+  assert.equal(view.recTimeline.on, false, "the toggle is back to what the operator had it at");
+  assert.equal(pause().disabled, false, "Pause is offered again once nothing runs");
+  assert.ok(noticeText(ui).includes("Count-in cancelled"), "the notice says so");
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
+});
+
+test("a take with no launches sends no command", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await pressRecord(ui);
+  assert.equal(viewOf(ui).recTimeline.on, true, "the By-hand take collects what it plays");
+  assert.ok(
+    noticeText(ui).includes("Launch a scene on the armed track to start at its first bar."),
+    "the page waits for a scene launch",
+  );
+
+  const before = commandsSent(ui);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  assert.equal(performances(ui).length, 0, "a take that played nothing writes no performance");
+  assert.equal(commandsSent(ui), before, "and nothing else either");
+  assert.equal(viewOf(ui).rec, null, "the take is over");
+  assert.equal(viewOf(ui).recTimeline.on, false, "and the toggle is back to what it was");
+});
+
+test("the By-hand undo note is on the page only while By hand is selected", async () => {
+  const ui = await bootPanel();
+  const note = () => ui.document.querySelector("[data-role=scene-plan-undo-note]");
+  assert.ok(note(), "a device that plays scenes by hand says what one undo does");
+  const text = String(note().textContent);
+  assert.match(text, /saved in parts/, "that the take is saved in parts");
+  assert.match(text, /performance is one more step/, "that the performance is one step of its own");
+  assert.match(text, /Undo takes the performance back first/, "and that one undo takes the placements back only");
+  assert.match(text, /clip and the takes stay/, "leaving the clip and the takes until they are undone too");
+
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+  assert.equal(note(), null, "Follow writes nothing into the plan, so the sentence is not there");
+
+  ui.click("[data-act=plan-mode][data-mode=hand]");
+  await ui.settle();
+  assert.ok(note(), "and it is back with By hand");
+});
