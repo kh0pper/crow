@@ -1,4 +1,4 @@
-"""The order gateway's read-only check chain.
+"""The order gateway: the read-only check chain, then the execution after it.
 
 `OrderGateway.check()` answers one question — may this intent go out? — and stops
 at the first refusal.  For a place intent the order is fixed:
@@ -13,29 +13,45 @@ alone (NOT_OWNER): it skips every other check, so a halt or a spent budget never
 blocks taking an order off the book.
 
 `check()` is read-only: it writes no order row and never moves a high-water mark,
-and it never calls the exchange — the exchange handed to the constructor is kept
-for submit/cancel, which this phase does not have.  Money and size are `Decimal`
-throughout (the rounding, the fee-inclusive buy cost, the maker pricing and the
-minimums all come from `money.py`); the only floats are a snapshot's timestamp
-and the measured clock skew.  P1 is dry-run only, so a route that is not "dry"
-is refused while `live_enabled` is false.
+and it never calls the exchange.  Money and size are `Decimal` throughout (the
+rounding, the fee-inclusive buy cost, the maker pricing and the minimums all come
+from `money.py`); the only floats are a snapshot's timestamp and the measured
+clock skew.  P1 is dry-run only, so a route that is not "dry" is refused while
+`live_enabled` is false.
+
+Execution sits beside the chain and runs under the cycle lock.  `submit()` runs
+`check()` first and refuses without touching the exchange; past that it writes the
+order row BEFORE the exchange call, so a lost answer can never leave an order the
+engine has no name for.  A post-only rejection is repriced one tick further from
+the market and retried under a fresh client order id, up to
+`max_post_only_retries` times, and each retry re-runs the whole chain at its new
+price.  A transient failure is looked up by client order id and re-sent under the
+same id only when it did not land; three attempts and an unknown outcome leave
+the row PENDING_SUBMIT for the reconcile loop.  `cancel_all()` is the kill path:
+it sweeps the open `cb-` orders off the exchange without going through `check()`,
+so it works while halted.  `halt()` sets the in-memory flag before persisting it
+and never waits for the cycle lock; `is_halted()` reads that flag, the persisted
+marker (a restarted gateway on the same store is still halted) and the injected
+callable.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 
 from . import money
+from .exchange import PermanentError, TransientError, new_client_order_id
 from .ledger import Ledger
 from .limits import CapWindow, Limits
 from .money import ProductSpec
 from .snapshot import SnapshotCache
-from .store import ACTIVE, RESERVED_OWNERS, Store
+from .store import ACTIVE, OPEN, PENDING_SUBMIT, REJECTED, RESERVED_OWNERS, Store
 from .strategies.base import MarketSnapshot, OrderIntent
 
 D = Decimal
@@ -59,6 +75,12 @@ UNALLOCATED_NEGATIVE = "UNALLOCATED_NEGATIVE"  # the exchange is short of the ow
 DRAWDOWN_STOP = "DRAWDOWN_STOP"  # the owner's or the portfolio's drawdown stop
 NOT_OWNER = "NOT_OWNER"  # a cancel of an order this owner does not own
 
+# ---------------------------------------------------------------- cancel/exec codes
+NOT_CANCELLABLE = "NOT_CANCELLABLE"  # no live row to cancel yet, or one already done
+CANCEL_FAILED = "CANCEL_FAILED"  # the exchange did not take the cancellation
+EXCHANGE_REJECTED = "EXCHANGE_REJECTED"  # the exchange refused the order itself
+POST_ONLY_EXHAUSTED = "POST_ONLY_EXHAUSTED"  # every post-only retry was refused
+
 # The high-water mark key the portfolio drawdown stop reads and the runner
 # ratchets with `portfolio_equity()`.  The leading underscore puts it outside the
 # bot id grammar (`[a-z0-9]{1,16}`), so it can never name a bot.
@@ -80,7 +102,7 @@ DEFAULT_DRAWDOWN_PCT = 20
 
 @dataclass(frozen=True)
 class GatewayResult:
-    """The outcome of a submit attempt (filled in by the submit path, Task 3c)."""
+    """The outcome of one submit: did it go out, as which cid, or why it did not."""
 
     ok: bool
     cid: Optional[str]
@@ -94,7 +116,9 @@ class OrderGateway:
     check chain can be exercised against any store, clock and snapshot cache.
     `totals()` is the caller's cached exchange totals per currency.  The
     `CapWindow` is built by the caller on the same clock that stamps order rows;
-    `now` here is only for snapshot staleness.
+    `now` here is only for snapshot staleness.  `self.lock` is the cycle lock:
+    submit, cancel_all and seed_dry hold it, halt and clear_halt never do.
+    `sleep` is the retry backoff, injectable so a caller need not wait.
     """
 
     def __init__(
@@ -113,6 +137,8 @@ class OrderGateway:
         route_for: Optional[Callable[[str], str]] = None,
         live_enabled: bool = False,
         now: Callable[[], float] = time.time,
+        max_post_only_retries: int = 5,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.store = store
         self.ledger = ledger
@@ -122,11 +148,15 @@ class OrderGateway:
         self.spec_for = spec_for
         self.fee_rate = D(fee_rate)
         self.totals = totals
-        self.exchange = exchange  # Task 3c's submit/cancel; check() never touches it
-        self.is_halted = is_halted if is_halted is not None else _never_halted
+        self.exchange = exchange  # submit/cancel_all/seed_dry only; check() never
+        self._injected_halt = is_halted if is_halted is not None else _never_halted
         self.route_for = route_for if route_for is not None else _always_dry
         self.live_enabled = live_enabled
         self.now = now
+        self.max_post_only_retries = int(max_post_only_retries)
+        self.sleep = sleep
+        self.lock = threading.RLock()
+        self._halt_event = threading.Event()
 
     # ------------------------------------------------ the chain
     def check(
@@ -369,6 +399,250 @@ class OrderGateway:
             if equity is None or equity < floor:
                 return DRAWDOWN_STOP
         return None
+
+    # ------------------------------------------------ halt
+    def halt(self, reason: str) -> None:
+        """Stop the engine: set the flag first, then persist it; never wait for a cycle.
+
+        The flag is set before the write so a submit that is already queued is
+        refused even if persisting fails.  `self.lock` is deliberately not taken:
+        a kill must never queue behind a cycle that is holding it.
+        """
+        self._halt_event.set()
+        try:
+            self.store.put("halted", {"reason": reason, "ts": time.time()})
+        except Exception as error:  # noqa: BLE001 - the flag is already set
+            log.error("halt: could not persist the flag: %s", error, exc_info=True)
+            raise
+
+    def clear_halt(self) -> None:
+        """Lower the halt, in memory and in the store.  Takes no lock."""
+        self._halt_event.clear()
+        self.store.put("halted", None)
+
+    def is_halted(self) -> bool:
+        """True when the flag is set here, persisted by an earlier run, or injected."""
+        if self._halt_event.is_set():
+            return True
+        if self.store.get("halted"):
+            return True
+        return bool(self._injected_halt())
+
+    # ------------------------------------------------ execution
+    def submit(
+        self,
+        source: str,
+        owner: str,
+        intent: OrderIntent,
+        product: Optional[str] = None,
+    ) -> GatewayResult:
+        """Run one intent under the cycle lock: refuse it, or put it on the exchange."""
+        with self.lock:
+            if intent.action == "cancel":
+                return self._submit_cancel(source, owner, intent, product)
+            return self._submit_place(source, owner, intent, product)
+
+    def _submit_place(
+        self,
+        source: str,
+        owner: str,
+        intent: OrderIntent,
+        product: Optional[str],
+    ) -> GatewayResult:
+        """Place one post-only order, repricing and retrying a post-only refusal.
+
+        The row is written before every send, so the engine always has a name for
+        an order whose answer was lost.  An unknown outcome (None from `_send`)
+        leaves the row PENDING_SUBMIT and counts as accepted: the reconcile loop
+        resolves it.  Each retry re-runs the chain at its own price, because a
+        reprice moves a sell UP and can push the notional over a cap.
+        """
+        refusal = self.check(source, owner, intent, product)
+        if refusal is not None:
+            return GatewayResult(False, None, refusal)
+        bot = self.store.get_bot(owner)
+        resolved = self._resolve_product(bot, product)
+        if resolved is None:
+            return GatewayResult(False, None, PRODUCT_NOT_ALLOWED)
+        snap = self.snapshots.get(resolved)
+        if snap is None:
+            return GatewayResult(False, None, STALE_MARKET)
+        spec = self.spec_for(resolved)
+        price = money.maker_price(
+            intent.side, intent.limit_price, snap.bid, snap.ask, spec.price_increment
+        )
+        level = intent.level if intent.level is not None else 0
+
+        cid: Optional[str] = None
+        for attempt in range(self.max_post_only_retries + 1):
+            if attempt > 0:
+                refusal = self.check(
+                    source, owner, replace(intent, limit_price=price), product
+                )
+                if refusal is not None:
+                    return GatewayResult(False, None, refusal)
+            cid = new_client_order_id(f"cb-{owner}-", intent.side, level)
+            self.store.insert_order(
+                cid,
+                owner,
+                source,
+                resolved,
+                intent.side,
+                level,
+                price,
+                intent.size,
+                consumes_fill=intent.consumes_fill,
+            )
+            try:
+                res = self._send(cid, resolved, intent.side, intent.size, price)
+            except PermanentError as error:
+                self.store.update_order(cid, status=REJECTED, note=str(error))
+                return GatewayResult(False, cid, EXCHANGE_REJECTED)
+            if res is None:
+                return GatewayResult(True, cid, None)
+            if res["ok"]:
+                self.store.update_order(cid, status=OPEN, order_id=res["order_id"])
+                return GatewayResult(True, cid, None)
+            reason = str(res.get("reason") or "")
+            self.store.update_order(cid, status=REJECTED, note=reason)
+            if "POST_ONLY" not in reason:
+                return GatewayResult(False, cid, EXCHANGE_REJECTED)
+            price = money.reprice_away(intent.side, price, spec.price_increment)
+        return GatewayResult(False, cid, POST_ONLY_EXHAUSTED)
+
+    def _submit_cancel(
+        self,
+        source: str,
+        owner: str,
+        intent: OrderIntent,
+        product: Optional[str],
+    ) -> GatewayResult:
+        """Cancel one order this owner holds; reconcile moves the row to CANCELLED."""
+        cid = intent.cancel_cid
+        refusal = self.check(source, owner, intent, product)
+        if refusal is not None:
+            return GatewayResult(False, None, refusal)
+        row = self.store.order(cid)
+        if (
+            row is None
+            or row["status"] not in (PENDING_SUBMIT, OPEN)
+            or row["order_id"] is None
+        ):
+            return GatewayResult(False, cid, NOT_CANCELLABLE)
+        order_id = row["order_id"]
+        try:
+            res = self.exchange.cancel([order_id])
+        except (TransientError, PermanentError) as error:
+            log.warning("cancel %s: %s", cid, error)
+            return GatewayResult(False, cid, CANCEL_FAILED)
+        if not (res or {}).get(order_id):
+            return GatewayResult(False, cid, CANCEL_FAILED)
+        self.store.update_order(cid, note="cancel requested")
+        return GatewayResult(True, cid, None)
+
+    def _send(
+        self,
+        cid: str,
+        product: str,
+        side: str,
+        size: Decimal,
+        price: Decimal,
+    ) -> Optional[dict]:
+        """Place ONE order, adopting it rather than re-placing it after a timeout.
+
+        At most three place calls per cid.  After a transient failure the order is
+        looked up by client order id: found means it landed (adopt its id, open the
+        row only when it is OPEN, never send again); not found means the same cid
+        is re-sent.  Three lost answers return None, an outcome nobody knows.
+        """
+        created = self.now()
+        for attempt in range(3):
+            try:
+                return self.exchange.place_limit(cid, product, side, size, price)
+            except TransientError as error:
+                log.warning("place %s: %s; looking it up", cid, error)
+                self.sleep(min(2**attempt, 10))
+                found = self._lookup(cid, created, product)
+                if found is not None:
+                    return self._adopt(cid, found)
+        return None
+
+    def _lookup(self, cid: str, created: float, product: str) -> Optional[dict]:
+        """The order the exchange holds for *cid*; a failed lookup counts as none."""
+        try:
+            return self.exchange.find_by_client_id(cid, created, product)
+        except TransientError as error:
+            log.warning("lookup %s: %s", cid, error)
+            return None
+
+    def _adopt(self, cid: str, found: dict) -> dict:
+        """Record the id the exchange gave the order and report it as placed."""
+        fields = {"order_id": found["order_id"]}
+        if found.get("status") == "OPEN":
+            fields["status"] = OPEN
+        self.store.update_order(cid, **fields)
+        return {"ok": True, "order_id": found["order_id"], "reason": None}
+
+    # ------------------------------------------------ kill path
+    def cancel_all(
+        self, scope: Literal["owner", "all"], owner: Optional[str] = None
+    ) -> int:
+        """Sweep our open orders off the book; returns how many the exchange took.
+
+        No `check()`: this is the kill path, so it works while halted and skips
+        every cap, and it never touches an order whose id is not ours.  For
+        scope "owner" the prefix ends at the dash, so "b1" does not sweep "cb-b10-".
+        A failing list or cancel propagates; the caller decides what to do.
+        """
+        if scope not in ("owner", "all"):
+            raise ValueError(f"unknown cancel scope: {scope!r}")
+        if scope == "owner" and owner is None:
+            raise ValueError("the owner scope needs an owner")
+        prefix = "cb-" if scope == "all" else f"cb-{owner}-"
+        with self.lock:
+            open_orders = self.exchange.list_open_orders(None)
+            selected = [
+                order
+                for order in open_orders
+                if str(order.get("client_order_id") or "").startswith(prefix)
+            ]
+            if not selected:
+                return 0
+            order_ids = [order["order_id"] for order in selected]
+            res = self.exchange.cancel(order_ids) or {}
+            for order in selected:
+                cid = order.get("client_order_id")
+                if cid and self.store.order(cid) is not None:
+                    self.store.update_order(cid, note="cancel requested")
+            return sum(1 for order_id in order_ids if res.get(order_id))
+
+    # ------------------------------------------------ dry seeding
+    def seed_dry(self, owner: str, quote: Decimal, base: Decimal) -> None:
+        """Fund a dry-run owner: the package's only `deposit` caller.
+
+        Both deposits share one BEGIN IMMEDIATE transaction, and neither is made
+        for an owner that is not on a dry route (or has no bot row to name the
+        product), so a live account can never be funded from here.  A zero amount
+        is skipped: the deposit itself refuses anything at or below zero.
+        """
+        with self.lock:
+            if self.exchange is None:
+                raise ValueError("no exchange to seed")
+            if self.route_for(owner) != "dry":
+                raise ValueError(f"owner {owner!r} is not on a dry route")
+            bot = self.store.get_bot(owner)
+            if bot is None:
+                raise ValueError(f"no bot row for owner {owner!r}")
+            quote_amt, base_amt = D(quote), D(base)
+            if quote_amt < 0 or base_amt < 0:
+                raise ValueError(f"a seed amount must not be negative: {owner!r}")
+            base_cur, quote_cur = bot["product"].split("-", 1)
+            note = f"seed {owner}"
+            with self.store.tx():
+                if quote_amt > 0:
+                    self.exchange.deposit(quote_cur, quote_amt, note)
+                if base_amt > 0:
+                    self.exchange.deposit(base_cur, base_amt, note)
 
     # ------------------------------------------------ portfolio mark
     def portfolio_equity(self) -> Optional[Decimal]:
