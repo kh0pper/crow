@@ -1090,8 +1090,20 @@ function fakeEngine(clock = { seconds: 0 }) {
     launchScene(sceneId) {
       engine.launched.push(String(sceneId));
     },
-    onPosition() {
+    /** Every mode the page put the engine in (`session`, `arrangement`). */
+    modes: [],
+    setMode(mode) {
+      engine.modes.push(String(mode));
+    },
+    // The position reports the transport sends: a test hands one over the way the
+    // engine does, so the page's own readers of it are the ones that react.
+    positionListeners: [],
+    onPosition(listener) {
+      engine.positionListeners.push(listener);
       return () => {};
+    },
+    position(report) {
+      for (const listener of engine.positionListeners) listener(report);
     },
     onError() {
       return () => {};
@@ -1243,6 +1255,7 @@ async function bootPanel(options = {}) {
   const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
   const { TAKE_STORE_SCRIPT } = await import("../bundles/studio/panel/take-store.js");
   const { PUNCH_SCRIPT } = await import("../bundles/studio/panel/punch.js");
+  const { SCENE_PLAN_SCRIPT } = await import("../bundles/studio/panel/scene-plan.js");
 
   const doc = await recordingDoc(options.bpm, {
     clip: options.clip === true,
@@ -1393,6 +1406,23 @@ async function bootPanel(options = {}) {
   // window.StudioPunch for the comp splice a punched pass writes with.
   new Function("window", PUNCH_SCRIPT)(windowStub);
   assert.equal(typeof windowStub.StudioPunch.spliceComp, "function", "the punch rules are evaluated");
+
+  // So is the scene plan, which the page asks window.StudioScenePlan for the
+  // blocks its strip and the lanes' bands draw.
+  delete windowStub.StudioScenePlan;
+  new Function("window", SCENE_PLAN_SCRIPT)(windowStub);
+  assert.equal(typeof windowStub.StudioScenePlan.planOf, "function", "the plan rules are evaluated");
+
+  // The transport bar's own reducer is what the page asks for the scene a launch
+  // has queued for the next bar. The bar's layout and its controls are not what
+  // this harness draws, so only its two readout helpers are handed over: a stub
+  // that moves nothing and holds nothing, and the real rules the page reads.
+  const transportBar = await import("../bundles/studio/panel/transport-bar.js");
+  windowStub.StudioTransport = {
+    mount: () => ({ refresh() {}, destroy() {} }),
+    sceneLabel: transportBar.sceneLabel,
+    nextQueued: transportBar.nextQueued,
+  };
 
   const timers = [];
   // Everything the page says with console.warn: one case is about a comp write
@@ -4899,4 +4929,268 @@ test("S12: an input that opens after the count-in began says the start of the ta
     false,
     "and the page says nothing about a late input",
   );
+});
+
+// ---- the scene plan's blocks and Follow (C2, R14, R17) ---------------------
+//
+// The plan is the arrangement read as blocks (panel/scene-plan.js): sections,
+// and the bars outside them gathered by the scene they play. The scene plan
+// widget lists those blocks, outlines the one the transport is in, dashes the
+// one after it, and the recording lanes draw the same blocks as bands under
+// their ruler. Follow plays the plan from the playhead — the arrangement view,
+// armed on the bar frame — and By hand plays scenes, where a block's tap
+// launches its scene on the next bar. The choice is this device's own, per song,
+// and it is fixed for the take.
+
+/**
+ * Give the fixture song a plan: the audio clip placed over bars 0 to 2, then a
+ * section over bars 2 to 4. The plan is two blocks, "Verse" and "Chorus".
+ * @param {object} ui a booted panel
+ */
+async function placeThePlan(ui) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "arrangement.place", {
+    id: "p-plan",
+    track_id: AUDIO_TRACK,
+    clip_id: CLIP,
+    start_bar: 0,
+    bars: 2,
+  });
+  runCommand(ui.doc, "section.add", { id: "s-plan", start_bar: 2, end_bar: 4, name: "Chorus" });
+  await ui.pushState();
+}
+
+/** @returns {object[]} the plan's block buttons, in page order */
+function planBlockNodes(ui) {
+  return Array.from(ui.document.querySelectorAll("[data-role=scene-plan-block]"));
+}
+
+/** @returns {string[]} their labels, in page order */
+function planBlockLabels(ui) {
+  return planBlockNodes(ui).map((node) => String(node.textContent));
+}
+
+/** @returns {string} the label of the plan-mode choice the row shows pressed */
+function pressedPlanMode(ui) {
+  const pressed = Array.from(ui.document.querySelectorAll("[data-act=plan-mode]"))
+    .filter((node) => node.getAttribute("aria-pressed") === "true");
+  assert.equal(pressed.length, 1, "exactly one plan choice reads as pressed");
+  return String(pressed[0].textContent);
+}
+
+/** @returns {string} the sentence beside the Follow / By hand switch */
+function planModeNoteText(ui) {
+  return String(ui.document.querySelector("[data-role=scene-plan-mode-note]").textContent || "");
+}
+
+/** @returns {string} one rule's body out of the page's stylesheet */
+function styleRule(html, selector) {
+  const at = html.indexOf(selector + " {");
+  assert.ok(at >= 0, `the page carries a rule for ${selector}`);
+  const end = html.indexOf("}", at);
+  return html.slice(at, end + 1);
+}
+
+test("the strip lists the song's plan blocks and outlines the current one as the position moves", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  // The engine the transport reports through exists once the page has asked for
+  // it: Play is the plainest way to have one without recording anything.
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  assert.deepEqual(planBlockLabels(ui), ["Verse", "Chorus"], "the plan's blocks are listed in bar order");
+  const blocks = planBlockNodes(ui);
+  assert.match(String(blocks[0].className), /st-plan-block-current/, "the block bar 1 is in is outlined");
+  assert.doesNotMatch(String(blocks[0].className), /st-plan-block-next/, "and it is not the one after it");
+  assert.match(String(blocks[1].className), /st-plan-block-next/, "the next block is dashed");
+  assert.doesNotMatch(String(blocks[1].className), /st-plan-block-current/, "and is not the current one");
+
+  // A section names no scene, so its block has nothing to launch and is inert.
+  assert.equal(blocks[1].disabled, true, "a section block plays nothing of its own");
+  assert.equal(blocks[1].getAttribute("aria-disabled"), "true", "and says so");
+  assert.equal(blocks[0].getAttribute("data-scene-id"), SCENE, "the scene block names the scene it plays");
+
+  // The lanes draw the same blocks as bands under their ruler.
+  const bands = Array.from(ui.document.querySelectorAll("[data-role=rec-lanes] .st-lane-band"));
+  assert.deepEqual(bands.map((node) => String(node.textContent)), ["Verse", "Chorus"],
+    "the ruler carries the plan's blocks as bands");
+  const bars = viewOf(ui).recLanesBars;
+  for (const band of bands) {
+    assert.ok(String(band.style.width).endsWith("%"), "a band is placed by percentage of the ruler's bars");
+    assert.ok(String(band.style.left).endsWith("%"), "from its own first bar");
+  }
+  assert.equal(Number.parseFloat(bands[1].style.left), Math.round((2 / bars) * 100 * 1000) / 1000,
+    "the second band starts where its block does on the ruler's own bar scale");
+
+  // The transport moves into the second block: a position report redraws the
+  // strip, and the count-in controls beside it are the very nodes they were.
+  const countIn = countInButtons(ui)[0];
+  ui.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  await ui.settle();
+  const moved = planBlockNodes(ui);
+  assert.match(String(moved[1].className), /st-plan-block-current/, "the block the transport is in is outlined now");
+  assert.doesNotMatch(String(moved[0].className), /st-plan-block-current/, "and the one before it is not");
+  assert.doesNotMatch(String(moved[1].className), /st-plan-block-next/, "nothing follows it in the plan");
+  assert.equal(countInButtons(ui)[0], countIn, "a position report draws only the strip, not the controls beside it");
+
+  // Back into the first block, from a bar inside it.
+  ui.engine.position({ bar: 2, beat: 3, sixteenth: 1 });
+  await ui.settle();
+  assert.match(String(planBlockNodes(ui)[0].className), /st-plan-block-current/,
+    "bar 2 belongs to the first block");
+  assert.match(String(planBlockNodes(ui)[1].className), /st-plan-block-next/, "and the next one is dashed again");
+});
+
+test("Follow switches the engine to arrangement and Record arms through armArrangementRecording", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  assert.equal(viewOf(ui).planMode, "hand", "a device that has never chosen one plays scenes by hand");
+  assert.equal(pressedPlanMode(ui), "By hand", "and the switch shows it");
+
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+  assert.equal(viewOf(ui).planMode, "follow", "Follow is the page's choice now");
+  assert.equal(ui.storage.getItem("crow.studio.planmode.v1.song-1"), "follow", "and this browser keeps it");
+  assert.equal(pressedPlanMode(ui), "Follow the plan", "the switch shows it");
+  assert.match(planModeNoteText(ui), /does nothing/, "and says a part of the plan is not tapped while it plays");
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.engine.modes.length = 0;
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const view = viewOf(ui);
+  assert.equal(view.mode, "arrangement", "Record put the page on the plan");
+  assert.equal(ui.engine.modes[ui.engine.modes.length - 1], "arrangement",
+    "and the engine was moved with it, as the view switch does");
+  assert.equal(countInPlays(ui).length, 0, "the count-in is Off: nothing counts in");
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the panel built a recorder");
+  assert.equal(recorder.armFrame, 48000, "the take armed on the bar frame the engine named");
+  assert.equal(view.rec.clip_id, CLIP, "it records into the placement's own clip");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "and makes no clip of its own",
+  );
+});
+
+test("By hand leaves the view where it is, so an arrangement take records the plan as it always has", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  assert.equal(viewOf(ui).mode, "arrangement", "the page shows the plan");
+  assert.equal(viewOf(ui).planMode, "hand", "with a By-hand take chosen");
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const view = viewOf(ui);
+  assert.equal(view.mode, "arrangement", "a By-hand Record leaves the view alone");
+  assert.equal(view.rec.clip_id, CLIP, "the take records into the placement's own clip");
+  assert.equal(ui.engine.recorders[ui.engine.recorders.length - 1].armFrame, 48000,
+    "and arms on the bar frame the engine names, as the arrangement always has");
+});
+
+test("By hand tap launches the block's scene (launchSceneAt) and the queued scene shows dashed", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+
+  const before = ui.engine.launched.length;
+  ui.click(`[data-act=plan-block][data-scene-id=${SCENE}]`);
+  await ui.settle(24);
+  assert.ok(ui.engine.launched.slice(before).includes(SCENE), "the block's scene was launched");
+  assert.equal(String(viewOf(ui).queuedScene), SCENE, "and waits for the next bar");
+  const queued = planBlockNodes(ui).find((node) => node.getAttribute("data-scene-id") === SCENE);
+  assert.ok(queued, "the block is still listed");
+  assert.match(String(queued.className), /st-plan-block-queued/, "the scene a tap queued is dashed");
+
+  // Follow: a tap on a block is inert, because the plan is what plays.
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+  const launched = ui.engine.launched.length;
+  ui.click(`[data-act=plan-block][data-scene-id=${SCENE}]`);
+  await ui.settle(24);
+  assert.equal(ui.engine.launched.length, launched, "a tap while the plan is followed launches nothing");
+});
+
+test("the switch is disabled while a take runs", async () => {
+  const ui = await bootPanel();
+  const switches = () => Array.from(ui.document.querySelectorAll("[data-act=plan-mode]"));
+  assert.equal(switches().length, 2, "Follow and By hand are both offered");
+  for (const node of switches()) assert.equal(node.disabled, false, "and both are offered before a take");
+
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.ok(viewOf(ui).rec, "a take is open");
+  for (const node of switches()) {
+    assert.equal(node.disabled, true, "the switch is disabled while the take runs");
+    assert.equal(node.getAttribute("aria-disabled"), "true", "and says so");
+  }
+
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+  assert.equal(viewOf(ui).rec, null, "the take is over");
+  for (const node of switches()) assert.equal(node.disabled, false, "and the switch is offered again");
+});
+
+test("a song with no scenes shows the widget note", async () => {
+  // A song with nothing placed has no plan: the widget says what to add rather
+  // than drawing an empty strip nobody can act on.
+  const ui = await bootPanel();
+  const empty = ui.document.querySelector("[data-role=scene-plan-empty]");
+  assert.ok(empty, "the widget carries the note");
+  assert.equal(String(empty.textContent), "Add a scene to plan.", "in the words the design gives it");
+  assert.equal(planBlockNodes(ui).length, 0, "and lists no blocks");
+  assert.equal(
+    ui.document.querySelectorAll("[data-role=rec-lanes] .st-lane-band").length,
+    0,
+    "the lanes' ruler draws no bands either",
+  );
+});
+
+test("on a phone the strip scrolls horizontally and blocks are 44px high", async () => {
+  const res = { html: "", send(body) { this.html = String(body); } };
+  await studioPanel.handler({ query: { song: "song-1" }, headers: {} }, res, { db: panelDb(), layout: minimalLayout });
+
+  const strip = styleRule(res.html, ".studio .st-plan-strip");
+  assert.match(strip, /overflow-x: auto/, "a plan longer than the widget scrolls sideways");
+  assert.match(strip, /flex-wrap: nowrap/, "and keeps its blocks on one row");
+  const block = styleRule(res.html, ".studio .st-plan-block");
+  assert.match(block, /min-height: 44px/, "every block is a 44 px target");
+  assert.match(block, /flex: 0 0 auto/, "and never shrinks to fit");
+  assert.match(styleRule(res.html, ".studio .st-plan-block-current"), /outline: 2px solid var\(--st-accent/,
+    "the current block is outlined in the page's accent");
+  assert.match(styleRule(res.html, ".studio .st-plan-block-next"), /border-style: dashed/,
+    "the next block is dashed");
+  assert.match(styleRule(res.html, ".studio .st-lane-band"), /position: absolute/,
+    "a lane's band sits on the ruler's own bar axis");
+});
+
+test("Follow with nothing placed under the playhead behaves as today: it cancels and says why", async () => {
+  // The only scene slot on the armed track is taken and the arrangement places
+  // nothing, so a plan take has nowhere to record: the page cancels it with the
+  // sentence it has always used, and leaves no take behind.
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.equal(viewOf(ui).mode, "arrangement", "Follow put the page on the plan");
+  assert.equal(viewOf(ui).rec, null, "and no take is left open");
+  assert.ok(
+    toastText(ui).includes("There is no free scene slot on this track for a new recording; add a scene first."),
+    `the page says why (got: ${toastText(ui)})`,
+  );
+  assert.equal(ui.store.pendings.size, 0, "no take row exists");
 });
