@@ -12,6 +12,13 @@ method per step, so the body reads as that order:
     7. alert while the exchange is short of what its owners hold
     8. write the heartbeat, and return it
 
+The heartbeat's payload names the bots that raised in step 5 (`errors`), which is
+empty when every bot got through and also when a halt skipped the step, so a
+reader can tell a bot's own failure from a cycle that never got that far.  A loop
+that keeps failing is not silent either: `run_forever` logs and records one
+failure at a time, and re-raises after `MAX_CONSECUTIVE_FAILURES` failures in a
+row, which ends the thread so the container restarts it.
+
 Reads the store, the snapshots and the strategy; writes only through the store
 and the gateway.  It never calls an exchange write method: every order goes out
 through `gateway.submit("bot", owner, intent)`, and the only kill paths it uses
@@ -49,7 +56,16 @@ from typing import Any, Optional
 
 from . import money
 from .benchmark import Benchmark
-from .gateway import PORTFOLIO_OWNER, _bot_drawdown_pct
+from .gateway import (
+    CLOCK_SKEW,
+    DAILY_CAP,
+    DRAWDOWN_STOP,
+    HALTED,
+    PORTFOLIO_OWNER,
+    RATE_CAP,
+    STALE_MARKET,
+    _bot_drawdown_pct,
+)
 from .limits import Limits
 from .money import ProductSpec
 from .reconcile import reconcile
@@ -96,6 +112,18 @@ UNALLOCATED_PREFIX = "unallocated negative: "
 RECENTER_SETTLE_TRIES = 10
 RECENTER_SETTLE_WAIT_S = 1.0
 RECENTER_NOTE = "recentered"
+# The kv key holding the epoch (epoch seconds) a bot's current grid started at,
+# written by a recenter so the replaced grid's rows stop counting as today's.
+INIT_SINCE_PREFIX = "runner:init_since:"
+
+# Refusals that clear by themselves: the level they held back is placed again on
+# a later cycle, so the first book is not settled by them.
+TRANSIENT_REFUSALS = frozenset(
+    {HALTED, CLOCK_SKEW, STALE_MARKET, DRAWDOWN_STOP, DAILY_CAP, RATE_CAP}
+)
+
+# Failures in a row after which the loop raises instead of retrying for ever.
+MAX_CONSECUTIVE_FAILURES = 5
 
 HEARTBEAT_TMP_SUFFIX = ".tmp"
 
@@ -303,11 +331,12 @@ class Runner:
                 gateway=self.gateway,
             )
             self._check_drawdowns()  # 4
+            errors: list[str] = []
             if not self.gateway.is_halted():  # 5
-                self._run_bots()
+                errors = self._run_bots()
             self._ratchet_marks()  # 6
             self._check_unallocated()  # 7
-            return self._heartbeat()  # 8
+            return self._heartbeat(errors)  # 8
 
     # ------------------------------------------------ step 1: the book
     def _poll_markets(self) -> None:
@@ -418,15 +447,28 @@ class Runner:
             self.store.event("ALERT", message)
 
     def _mid(self, product: str) -> Optional[D]:
-        """The product's mid price from its snapshot, or None with no snapshot."""
+        """The product's mid price, or None when its snapshot cannot price it.
+
+        Usability is the gateway's own rule (`_is_unusable`), not a copy of it: a
+        missing snapshot, a bid at or below zero, a crossed book, a timestamp
+        from the future or one past the staleness window all answer None, so a
+        caller skips its mark rather than valuing anything off a book no order
+        could be checked against.
+        """
         snap = self.snapshots.get(product)
-        if snap is None:
+        if snap is None or self.gateway._is_unusable(snap):
             return None
         return (snap.bid + snap.ask) / 2
 
     # ------------------------------------------------ step 5: the bots
-    def _run_bots(self) -> None:
-        """Give each bot its turn, so one bot's failure cannot stop the others."""
+    def _run_bots(self) -> list[str]:
+        """Give each bot its turn; return the ids that raised, in processing order.
+
+        One bot's failure cannot stop the others: it is logged and recorded
+        against that bot, and the id comes back so the heartbeat can name it
+        rather than leave the reader to reconstruct the cycle from the events.
+        """
+        failed: list[str] = []
         for row in self.store.list_bots():
             try:
                 self._process_bot(row["id"])
@@ -435,6 +477,8 @@ class Runner:
                 self.store.event(
                     "error", f"bot {row['id']}: cycle failed: {error}"
                 )
+                failed.append(row["id"])
+        return failed
 
     def _process_bot(self, bot_id: str) -> None:
         """One bot's turn: heal, read, decide, send, then record what it decided.
@@ -442,6 +486,13 @@ class Runner:
         The row is read again here, because step 4 may have paused it since the
         list was taken: a PAUSED or STOPPED bot gets no strategy call and no
         order, while the reconcile, the poll and the marks still cover it.
+
+        The first book is recorded as done only in a turn where the strategy
+        paused it for nothing and no place was refused for a reason that clears
+        by itself.  Such a retry is safe: `_without_placed_levels` drops the
+        levels already on the book, and a recenter's epoch keeps the replaced
+        grid's rows out of that filter.  A benchmark baseline waits for a usable
+        snapshot instead of being taken off a book nothing could be priced from.
         """
         bot = self.store.get_bot(bot_id)
         if bot is None or bot["status"] != ACTIVE:
@@ -458,7 +509,7 @@ class Runner:
             self.store.event("warn", f"bot {bot_id}: no snapshot for {product}")
             return
 
-        self._heal(bot_id)
+        self._heal(bot_id, bot)
         holding = self.ledger.holding(bot_id, product)
         view = BotView(
             bot_id=bot_id,
@@ -472,17 +523,21 @@ class Runner:
             spec=self.spec_for(product),
             now=self.now(),
         )
-        self.benchmark.start(
-            bot_id,
-            base=holding.base,
-            quote=holding.quote,
-            price=(snap.bid + snap.ask) / 2,
-        )
+        mid = self._mid(product)
+        if mid is not None:
+            self.benchmark.start(
+                bot_id,
+                base=holding.base,
+                quote=holding.quote,
+                price=mid,
+            )
 
         init = not bot["init_done"]
         decision = self._decision(bot, strategy, snap, view, init=init)
-        self._submit_decision(bot, decision, product, init=init)
-        if init and decision.pause_reason is None:
+        transient_refusal = self._submit_decision(
+            bot, decision, product, init=init
+        )
+        if init and decision.pause_reason is None and not transient_refusal:
             self.store.set_init_done(bot_id)
         self._merge_state(bot, decision.state_update)
         if decision.pause_reason:
@@ -503,10 +558,11 @@ class Runner:
         """The first book once per bot, otherwise one tick's answer.
 
         While `init_done` is 0 the first book may already be partly on the book
-        (a crash mid-init), so a place intent for a (side, level) that has a
-        pending, resting or filled row is dropped: re-placing it would double a
-        level.  Rows retired by a recenter are ignored: they belong to the old
-        grid, whose levels say nothing about the new one.
+        (a crash mid-init, or a refusal the next cycle retries), so a place intent
+        for a (side, level) that this bot already holds today is dropped:
+        re-placing it would double a level.  "Today" starts at the bot's init
+        epoch, which a recenter stamps, so the replaced grid's rows say nothing
+        about the new one and every level of the new grid is free again.
         """
         if not init:
             return strategy.decide(snap, view)
@@ -519,18 +575,22 @@ class Runner:
     def _without_placed_levels(
         self, bot_id: str, intents: list[OrderIntent]
     ) -> list[OrderIntent]:
-        """*intents* without a place whose level this bot already holds.
+        """*intents* without a place whose level this bot already holds today.
 
-        A row retired by a recenter (`note` `recentered`) is left out: it
-        belongs to the grid that was replaced, so its level is free again on
-        the new one.
+        Today begins at the bot's init epoch (`runner:init_since:<bot_id>`): a row
+        older than that belongs to the grid a recenter replaced, so its level is
+        free again on the new one.  With no epoch on record (a bot that was never
+        recentered, or a value that is not a number) every row counts, which is
+        what a crash mid-init needs: the rows already on the book are the ones a
+        retried first book must not place twice.
         """
+        epoch = self._init_epoch(bot_id)
         taken = {
             (row["side"], row["level"])
             for row in self.store.orders(
                 owner=bot_id, statuses=(PENDING_SUBMIT, OPEN, FILLED)
             )
-            if row.get("note") != RECENTER_NOTE
+            if epoch is None or _stamp(row["created_at"]) >= epoch
         }
         kept: list[OrderIntent] = []
         for intent in intents:
@@ -546,6 +606,21 @@ class Runner:
             kept.append(intent)
         return kept
 
+    def _init_epoch(self, bot_id: str) -> Optional[float]:
+        """When this bot's current grid started, or None when nothing stamps it.
+
+        Read back from the kv table, so a value that is absent, or not a number
+        (a hand-edited file, an older key), means "no epoch": every row counts as
+        today's and the filter behaves as it did before recentering existed.
+        """
+        value = self.store.get(f"{INIT_SINCE_PREFIX}{bot_id}")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def _merge_state(self, bot: dict, state_update: Optional[dict]) -> None:
         """Fold a decision's state into the bot's own, key by key."""
         if state_update is None:
@@ -555,18 +630,42 @@ class Runner:
         )
 
     # ------------------------------------------------ step 5a: repairs
-    def _heal(self, bot_id: str) -> None:
-        """Repair the bookkeeping a crash between an accepted order and its mark left.
+    def _heal(self, bot_id: str, bot: dict) -> None:
+        """Repair the bookkeeping a crash or a refusal left, in two passes.
 
-        A row that names the fill it answers is the record of an accepted
+        First, a row that names the fill it answers is the record of an accepted
         follow-up, so the fill's own annotations (parent id, cost basis) are
-        written from it and the fill is retired when it is still pending.  This
-        runs before the view is built, so the next decision cannot place the
-        same follow-up a second time.
+        written from it and the fill is retired when it is still pending.  A SELL
+        row from the first book — no parent, no basis, a level above the center —
+        gets the grid's center as its basis, which is where its own profit starts;
+        without this the repair a crash needs would leave such a sell counted at
+        no known cost.
+
+        Second, a fill marked answered whose every follow-up is REJECTED or FAILED
+        was not answered at all (the exchange refused it, or it never landed), so
+        its mark goes back to `OPP_TODO` and the next decision offers it again.
+        A fill with no follow-up row yet, or with any follow-up in another status,
+        is left alone.
+
+        Both passes run before the view is built, so the next decision cannot
+        place the same follow-up a second time.  The first pass already refuses to
+        retire a fill whose only follow-up failed; the second is what un-marks
+        such a fill so it is offered again.
         """
         for row in self.store.orders(owner=bot_id):
             fill_cid = row["consumes_fill"]
             if not fill_cid:
+                if (
+                    row["side"] == money.SELL
+                    and row["parent_cid"] is None
+                    and row["basis_per_base"] is None
+                    and (row["level"] or 0) > 0
+                ):
+                    basis = self._init_basis(bot, row["side"])
+                    if basis is not None:
+                        self.store.update_order(
+                            row["client_order_id"], basis_per_base=basis
+                        )
                 continue
             parent = self.store.order(fill_cid)
             fields: dict[str, Any] = {}
@@ -589,6 +688,32 @@ class Runner:
                 FAILED,
             ):
                 self._retire_fill(fill_cid)
+
+        rows = self.store.orders(owner=bot_id)
+        children: dict[str, list[dict]] = {}
+        for row in rows:
+            for parent_cid in _parents_of(row):
+                children.setdefault(parent_cid, []).append(row)
+        for row in rows:
+            if row["opposite"] != OPP_PLACED:
+                continue
+            cid = row["client_order_id"]
+            follow_ups = children.get(cid)
+            if not follow_ups:
+                continue
+            if not all(
+                child["status"] in (REJECTED, FAILED) for child in follow_ups
+            ):
+                continue
+            self.store.update_order(cid, opposite=OPP_TODO)
+            message = (
+                f"bot {bot_id}: fill {cid} was marked answered, but every "
+                f"follow-up to it failed "
+                f"({', '.join(child['client_order_id'] for child in follow_ups)}); "
+                "offered again"
+            )
+            log.warning(message)
+            self.store.event("warn", message)
 
     # ------------------------------------------------ step 5b: pending fills
     def _pending_fills(self, bot_id: str) -> list[dict]:
@@ -626,7 +751,7 @@ class Runner:
     # ------------------------------------------------ step 5f: sending
     def _submit_decision(
         self, bot: dict, decision: Decision, product: str, *, init: bool
-    ) -> None:
+    ) -> bool:
         """Send one decision: the cancels first, then the places.
 
         A cancel that does not go through holds back every place in the same
@@ -634,11 +759,21 @@ class Runner:
         placed on that guess would double the position).  Held-back fills stay
         `OPP_TODO` and are retried on a later cycle; fills the strategy itself
         skipped are retired either way.
+
+        Returns True when a place in the FIRST book's decision was refused with a
+        transient code — halted, a stale, unusable or crossed snapshot, an
+        unknown clock skew, a drawdown stop, a spent cap — so the caller leaves
+        `init_done` at 0 and the next cycle offers the refused levels again.  Any
+        other refusal (an order too large, a product not allowed, a level the
+        sizing cannot fund) is settled: it would be refused just the same next
+        cycle, so it must not hold the first book open for ever.  A decision that
+        is not the first book always answers False.
         """
         bot_id = bot["id"]
         cancels = [i for i in decision.intents if i.action == "cancel"]
         places = [i for i in decision.intents if i.action != "cancel"]
         cancel_failed = False
+        transient_refusal = False
         for intent in cancels:
             result = self.gateway.submit("bot", bot_id, intent, product)
             if result.ok:
@@ -652,18 +787,23 @@ class Runner:
             self.store.event("warn", message)
         if not cancel_failed:
             for intent in places:
-                self._place(bot, intent, product, init=init)
+                refusal = self._place(bot, intent, product, init=init)
+                if init and refusal in TRANSIENT_REFUSALS:
+                    transient_refusal = True
         self._skip_fills(decision.skipped_fills)
+        return transient_refusal
 
     def _place(
         self, bot: dict, intent: OrderIntent, product: str, *, init: bool
-    ) -> None:
+    ) -> Optional[str]:
         """Send one place intent through the gateway and record the answer.
 
         A refusal is a warning and nothing else: the fill it would have answered
-        stays pending, so the order is retried rather than lost.  An acceptance
-        retires the fill it consumes and takes the annotations the gateway has no
-        parameter for.
+        stays pending, so the order is retried rather than lost.  The refusal
+        code goes back to the caller, which is what tells a transient one (worth
+        another cycle for the first book) from a settled one; None means the
+        order was accepted.  An acceptance retires the fill it consumes and takes
+        the annotations the gateway has no parameter for.
         """
         bot_id = bot["id"]
         result = self.gateway.submit("bot", bot_id, intent, product)
@@ -681,11 +821,12 @@ class Runner:
                 )
             log.warning(message)
             self.store.event("warn", message)
-            return
+            return result.refusal
         if result.cid:
             self._annotate(bot, intent, result.cid)
         if intent.consumes_fill:
             self._retire_fill(intent.consumes_fill)
+        return None
 
     def _annotate(self, bot: dict, intent: OrderIntent, cid: str) -> None:
         """Write the parent id and the cost basis the gateway cannot take.
@@ -702,7 +843,9 @@ class Runner:
                 basis_per_base=self._parent_basis(intent),
             )
             return
-        self.store.update_order(cid, basis_per_base=self._init_basis(bot, intent))
+        self.store.update_order(
+            cid, basis_per_base=self._init_basis(bot, intent.side)
+        )
 
     def _parent_basis(self, intent: OrderIntent) -> Optional[D]:
         """The cost per unit of the parent fill, for a follow-up sell."""
@@ -719,9 +862,13 @@ class Runner:
             return None
         return (parent["filled_value"] + parent["fees"]) / parent["filled_size"]
 
-    def _init_basis(self, bot: dict, intent: OrderIntent) -> Optional[D]:
-        """An initial sell's basis: the configured center, when it has one."""
-        if intent.side != money.SELL:
+    def _init_basis(self, bot: dict, side: Optional[str]) -> Optional[D]:
+        """An initial sell's basis: the configured center, when it has one.
+
+        A buy has nothing to mark at all, and params without a usable center
+        answer None rather than an invented cost per unit.
+        """
+        if side != money.SELL:
             return None
         try:
             return D(str((bot["params"] or {}).get("center")))
@@ -797,12 +944,15 @@ class Runner:
         self.store.put(UNALLOCATED_KEY, short)
 
     # ------------------------------------------------ step 8: heartbeat
-    def _heartbeat(self) -> dict:
+    def _heartbeat(self, errors: Optional[list[str]] = None) -> dict:
         """Write the heartbeat atomically and return the same payload.
 
         Written only by a cycle that reached this step: an exception earlier
         leaves the previous file in place, so the heartbeat's age is the honest
-        measure of how long the engine has been failing.
+        measure of how long the engine has been failing.  `errors` names the bots
+        that raised in this cycle's own step 5, in processing order: it is `[]`
+        when every bot got through and also when a halt skipped that step, so a
+        reader can tell one bot's failure from a cycle that never got there.
         """
         payload = {
             "ts": self.now(),
@@ -812,6 +962,7 @@ class Runner:
                 for bot in self.store.list_bots()
                 if bot["status"] == ACTIVE
             ),
+            "errors": list(errors or []),
         }
         path = self.heartbeat_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -828,10 +979,15 @@ class Runner:
         anything is touched, so a center that cannot build a grid changes nothing
         at all.  Then, in order:
         the bot is paused (no cycle may place while the book is in pieces), its
-        orders are swept off the exchange, reconcile is run until none of its
-        rows is live, every fill still pending is retired as `recentered` (an old
-        fill must never be answered on the new grid), and the params, `init_done`
-        and status are written together so the next cycle lays the new book.
+        orders are swept off the exchange and reconciled until none of its rows is
+        live, every fill still pending is retired as `recentered` (an old fill
+        must never be answered on the new grid), and the params, the new grid's
+        epoch, `init_done` and the bot's own prior status are written together so
+        the next cycle lays the new book, and a bot that was already paused is
+        still paused afterwards.
+
+        An abort (the book never settles) leaves the bot paused with its old
+        params and grid in place, so the recenter can simply be retried.
         """
         with self.gateway.lock:
             bot = self.store.get_bot(bot_id)
@@ -848,12 +1004,14 @@ class Runner:
             new_params = self._recentered_params(
                 bot, strategy, recenter, new_center
             )
+            prior_status = bot["status"]
 
             self.store.set_bot_status(bot_id, PAUSED)
-            self.gateway.cancel_all(scope="owner", owner=bot_id)
             self._settle_recenter(bot_id)
             self._retire_pending_fills(bot_id)
-            self._write_recentered(bot_id, new_params, new_center)
+            self._write_recentered(
+                bot_id, new_params, new_center, prior_status
+            )
 
     def _recentered_params(
         self,
@@ -885,12 +1043,17 @@ class Runner:
         return new_params
 
     def _settle_recenter(self, bot_id: str) -> None:
-        """Reconcile until none of the bot's rows is live, or give up.
+        """Sweep, reconcile, and repeat until none of the bot's rows is live.
 
-        The cancelled rows settle from the exchange on a later reconcile, so the
-        loop reads the book back instead of assuming the sweep took effect.
+        Every pass asks the kill path again, because one sweep is not a promise:
+        the exchange may take only part of it, and the rows settle from the
+        exchange on the reconcile that follows rather than from the sweep's own
+        answer.  A book still live after `RECENTER_SETTLE_TRIES` passes aborts the
+        recenter (the bot stays paused on its old grid) and says so in terms of
+        retrying it.
         """
         for attempt in range(RECENTER_SETTLE_TRIES):
+            self.gateway.cancel_all(scope="owner", owner=bot_id)
             reconcile(
                 self.store,
                 self.exchange,
@@ -901,7 +1064,10 @@ class Runner:
                 return
             if attempt < RECENTER_SETTLE_TRIES - 1:
                 self.sleep(RECENTER_SETTLE_WAIT_S)
-        raise RuntimeError("recenter aborted: orders still live")
+        raise RuntimeError(
+            "recenter aborted: orders still live after "
+            f"{RECENTER_SETTLE_TRIES} sweeps; retry the recenter"
+        )
 
     def _retire_pending_fills(self, bot_id: str) -> None:
         """Retire every fill still waiting for an opposite, as `recentered`."""
@@ -915,13 +1081,28 @@ class Runner:
             )
 
     def _write_recentered(
-        self, bot_id: str, new_params: dict, new_center: Any
+        self, bot_id: str, new_params: dict, new_center: Any, status: str
     ) -> None:
-        """Write the new params and re-arm the first book, in one transaction."""
+        """Write the new params, the new grid's epoch and the bot's status, once.
+
+        One transaction on purpose: a reader that saw the new center without the
+        epoch (or the other way round) could count the replaced grid's rows as
+        today's and hold a level of the new one back.  The epoch is stored as
+        `runner:init_since:<id>` with the same JSON encoding `store.put` uses, so
+        `store.get` hands `_init_epoch` the float back; it is on the same clock
+        that stamps a row's `created_at`, which is what the level filter compares.
+        """
         with self.store.tx() as db:
             db.execute(
                 "UPDATE bots SET params_json=?, init_done=0, status=? WHERE id=?",
-                (json.dumps(new_params), ACTIVE, bot_id),
+                (json.dumps(new_params), status, bot_id),
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)",
+                (
+                    f"{INIT_SINCE_PREFIX}{bot_id}",
+                    json.dumps(self.now()),
+                ),
             )
         message = f"bot {bot_id}: recentered on {new_center}; the book re-inits"
         log.info(message)
@@ -942,22 +1123,33 @@ class Runner:
         poll_seconds: Optional[float] = None,
         stop: Optional[threading.Event] = None,
     ) -> None:
-        """Cycle until *stop* is set, surviving any single cycle's failure.
+        """Cycle until *stop* is set, retrying a failed cycle up to a limit.
 
         A failed cycle is logged and recorded, then the loop waits and tries
         again: the heartbeat it did not write is what tells the watchdog (and the
-        healthcheck) that the engine is not getting through.
+        healthcheck) that the engine is not getting through, so the heartbeat
+        stays the watchdog's signal for a hiccup.  The raise here is the restart
+        path for a loop that is not getting through at all: after
+        `MAX_CONSECUTIVE_FAILURES` failures in a row the exception is re-raised,
+        which ends the thread and lets the container start it again.  A cycle that
+        succeeds resets the count, so an occasional failure never adds up.
         """
         poll = self.limits.poll_seconds if poll_seconds is None else poll_seconds
         event = stop if stop is not None else threading.Event()
+        consecutive_failures = 0
         while not event.is_set():
             try:
                 self.cycle()
-            except Exception as error:  # noqa: BLE001 - the loop must survive
+            except Exception as error:  # noqa: BLE001 - survive a hiccup, not a wall
+                consecutive_failures += 1
                 log.exception("cycle %s failed", self.cycle_count)
                 self.store.event(
                     "error", f"cycle {self.cycle_count} failed: {error}"
                 )
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    raise
+            else:
+                consecutive_failures = 0
             event.wait(poll)
 
 
@@ -984,3 +1176,17 @@ def _stamp(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parents_of(row: dict) -> tuple[str, ...]:
+    """The fills one follow-up row answers: its `consumes_fill` and `parent_cid`.
+
+    Both name the same fill once the repair has run, and either may be the only
+    one a half-written row carries, so the child index counts each parent once.
+    """
+    parents: list[str] = []
+    for name in ("consumes_fill", "parent_cid"):
+        cid = row.get(name)
+        if isinstance(cid, str) and cid and cid not in parents:
+            parents.append(cid)
+    return tuple(parents)

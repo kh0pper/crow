@@ -28,7 +28,13 @@ from crow_coinbase import money, runner as runner_module
 from crow_coinbase.benchmark import Benchmark
 from crow_coinbase.exchange import DryRunExchange
 from crow_coinbase.gateway import (
+    CLOCK_SKEW,
+    DAILY_CAP,
+    DRAWDOWN_STOP,
+    HALTED,
     PORTFOLIO_OWNER,
+    RATE_CAP,
+    STALE_MARKET,
     UNALLOCATED_NEGATIVE,
     GatewayResult,
     OrderGateway,
@@ -47,6 +53,7 @@ from crow_coinbase.runner import (
 )
 from crow_coinbase.store import (
     ACTIVE,
+    FAILED,
     FILLED,
     LIVE_STATUSES,
     OPEN,
@@ -55,6 +62,7 @@ from crow_coinbase.store import (
     OPP_TODO,
     PAUSED,
     PENDING_SUBMIT,
+    REJECTED,
     STOPPED,
     Store,
 )
@@ -100,6 +108,17 @@ REBALANCE_PARAMS = {
     "min_trade_quote": 2,
     "reprice_after_s": 600,
 }
+
+# Refusals that leave the first book unsettled, so the next cycle retries the
+# levels they held back.  Every other refusal counts as answered-and-done.
+TRANSIENT_REFUSALS = (
+    HALTED,
+    CLOCK_SKEW,
+    STALE_MARKET,
+    DRAWDOWN_STOP,
+    DAILY_CAP,
+    RATE_CAP,
+)
 
 # The levels a recentered grid (center 1.1) puts down.
 RECENTERED_LEVELS = {
@@ -540,6 +559,41 @@ def prime_snapshots(env):
     env.snapshots.set_clock(now, now)
 
 
+def answered_buy(env, **kwargs):
+    """A FILLED buy at level -1 whose opposite order was accepted, plus coverage.
+
+    The fill is written straight to the store, so the simulated account has to be
+    given the base it produced: the ledger counts the filled base as the owner's,
+    and a short exchange would refuse the follow-up sell.
+    """
+    env.store.set_init_done(BOT)
+    env.exchange.deposit("XRP", D("10"), "cover the synthetic fill")
+    return filled_row(
+        env.store,
+        side="BUY",
+        level=-1,
+        price=D("0.9852"),
+        size=D("10"),
+        filled_size=D("10"),
+        filled_value=D("9.852"),
+        fees=D("0.04926"),
+        opposite=OPP_PLACED,
+        **kwargs,
+    )
+
+
+def children_of(env, parent_cid, *, live_only=False):
+    """The rows that answer the fill *parent_cid*, optionally only the usable ones."""
+    rows = [
+        row
+        for row in orders(env.store, BOT)
+        if row["consumes_fill"] == parent_cid
+    ]
+    if live_only:
+        rows = [row for row in rows if row["status"] not in (FAILED, REJECTED)]
+    return rows
+
+
 # ---------------------------------------------------------------- start-up
 
 
@@ -772,6 +826,94 @@ def test_init_done_only_after_every_intent_resolved(envs):
     assert bot_row(paused_env)["status"] == PAUSED
     assert orders(paused_env.store, BOT) == []
 
+    # A transient refusal is not a settlement either: the levels it held back are
+    # placed by the next cycle, and only then is the first book done.
+    for refusal in TRANSIENT_REFUSALS:
+        retried = envs()
+        real_submit = retried.gateway.submit
+
+        def refusing(source, owner, intent, product=None, code=refusal):
+            return GatewayResult(False, None, code)
+
+        retried.gateway.submit = refusing
+        retried.runner.cycle()
+
+        assert bot_row(retried)["init_done"] is False, refusal
+        assert orders(retried.store, BOT) == [], refusal
+        assert any(
+            refusal in message for message in messages(retried.store, "warn")
+        ), refusal
+
+        retried.gateway.submit = real_submit
+        retried.runner.cycle()
+
+        assert len(orders(retried.store, BOT)) == 6, refusal
+        assert bot_row(retried)["init_done"] is True, refusal
+
+    # Partly settled: the two places that went through stand, the four refused
+    # ones are retried, and no level ends up on the book twice.
+    mixed = envs()
+    real_submit = mixed.gateway.submit
+    placed = []
+
+    def partly_refusing(source, owner, intent, product=None):
+        if len(placed) < 2:
+            placed.append(intent)
+            return real_submit(source, owner, intent, product)
+        return GatewayResult(False, None, DAILY_CAP)
+
+    mixed.gateway.submit = partly_refusing
+    mixed.runner.cycle()
+
+    assert bot_row(mixed)["init_done"] is False
+    assert len(orders(mixed.store, BOT)) == 2
+
+    mixed.gateway.submit = real_submit
+    mixed.runner.cycle()
+
+    rows = orders(mixed.store, BOT)
+    assert len(rows) == 6
+    assert len({(row["side"], row["level"]) for row in rows}) == 6
+    assert bot_row(mixed)["init_done"] is True
+
+
+def test_kill_during_first_cycle_then_clear_halt_gives_full_init(envs):
+    env = envs()
+    real_submit = env.gateway.submit
+    places = []
+
+    def halting_submit(source, owner, intent, product=None):
+        result = real_submit(source, owner, intent, product)
+        if result.ok:
+            places.append(intent)
+            env.gateway.halt("kill during init")
+        return result
+
+    env.gateway.submit = halting_submit
+    env.runner.cycle()
+
+    assert env.gateway.is_halted() is True
+    assert len(places) == 1
+    assert len(orders(env.store, BOT)) == 1
+    assert bot_row(env)["init_done"] is False
+    assert any(HALTED in message for message in messages(env.store, "warn"))
+
+    env.gateway.clear_halt()
+    env.gateway.submit = real_submit
+    env.runner.cycle()
+
+    rows = orders(env.store, BOT)
+    assert len(rows) == 6
+    assert {(row["side"], row["level"]) for row in rows} == {
+        ("BUY", -3),
+        ("BUY", -2),
+        ("BUY", -1),
+        ("SELL", 1),
+        ("SELL", 2),
+        ("SELL", 3),
+    }
+    assert bot_row(env)["init_done"] is True
+
 
 # ---------------------------------------------------------------- follow-ups
 
@@ -874,6 +1016,137 @@ def test_crash_after_follow_up_accepted_before_mark_is_healed(envs):
     assert env.store.order(parent)["opposite"] == OPP_PLACED
     assert len(orders(env.store, BOT)) == rows_before
     assert len([row for row in orders(env.store, BOT) if row["consumes_fill"]]) == 1
+
+
+def test_heal_unmarks_parent_whose_follow_up_failed(envs):
+    env = envs()
+    parent = answered_buy(env)
+    failed = insert_order_row(
+        env.store,
+        side="SELL",
+        level=0,
+        price=D("1.0"),
+        size=D("10"),
+        status=FAILED,
+    )
+    env.store.update_order(failed, consumes_fill=parent, parent_cid=parent)
+    assert children_of(env, parent, live_only=True) == []
+
+    env.runner.cycle()
+
+    # The fill nobody answered was offered again, once, and answered this time.
+    live = children_of(env, parent, live_only=True)
+    assert len(live) == 1
+    assert live[0]["client_order_id"] != failed
+    assert live[0]["side"] == "SELL"
+    assert live[0]["level"] == 0
+    assert live[0]["status"] == OPEN
+    assert live[0]["parent_cid"] == parent
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+
+    # The dead child is still there and still counts as a child of the parent, so
+    # a second cycle neither re-places the level nor loses the answered mark.
+    rows_after = len(orders(env.store, BOT))
+    env.runner.cycle()
+
+    assert children_of(env, parent, live_only=True) == live
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    assert len(orders(env.store, BOT)) == rows_after
+
+
+def test_follow_up_stuck_pending_submit_expired_then_placed_again_once(envs):
+    env = envs()
+    parent = answered_buy(env)
+    stuck = insert_order_row(
+        env.store,
+        side="SELL",
+        level=0,
+        price=D("1.0"),
+        size=D("10"),
+        status=PENDING_SUBMIT,
+    )
+    env.store.update_order(stuck, consumes_fill=parent, parent_cid=parent)
+    # It never reached the exchange and nobody answers for it: age it past
+    # reconcile's window so the next cycle has to give up on it.
+    env.store.conn().execute(
+        "UPDATE orders SET created_at=? WHERE client_order_id=?",
+        (time.time() - 1000, stuck),
+    )
+
+    env.runner.cycle()
+
+    assert env.store.order(stuck)["status"] == FAILED
+    live = children_of(env, parent, live_only=True)
+    assert len(live) == 1
+    assert live[0]["client_order_id"] != stuck
+    assert live[0]["status"] == OPEN
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+
+    rows_after = len(orders(env.store, BOT))
+    env.runner.cycle()
+
+    assert children_of(env, parent, live_only=True) == live
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    assert len(orders(env.store, BOT)) == rows_after
+
+
+def test_heal_leaves_parent_with_live_child_alone(envs):
+    env = envs()
+    parent = answered_buy(env)
+    failed = insert_order_row(
+        env.store,
+        side="SELL",
+        level=0,
+        price=D("1.0"),
+        size=D("10"),
+        status=FAILED,
+    )
+    env.store.update_order(failed, consumes_fill=parent, parent_cid=parent)
+    open_child = insert_order_row(
+        env.store,
+        side="SELL",
+        level=0,
+        price=D("1.0"),
+        size=D("10"),
+        status=OPEN,
+    )
+    env.store.update_order(open_child, consumes_fill=parent, parent_cid=parent)
+    rows_before = len(orders(env.store, BOT))
+
+    env.runner.cycle()
+
+    # One child is still usable, so the fill was answered: nothing is re-placed.
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    assert env.store.order(open_child)["status"] == OPEN
+    assert len(orders(env.store, BOT)) == rows_before
+
+
+def test_heal_repairs_init_sell_basis(envs):
+    env = envs()
+    env.store.set_init_done(BOT)
+    sell = insert_order_row(
+        env.store,
+        side="SELL",
+        level=1,
+        price=D("1.015"),
+        size=D("16.6"),
+        status=OPEN,
+    )
+    buy = insert_order_row(
+        env.store,
+        side="BUY",
+        level=-1,
+        price=D("0.9852"),
+        size=D("10"),
+        status=OPEN,
+    )
+    assert env.store.order(sell)["basis_per_base"] is None
+
+    env.runner.cycle()
+
+    # An init sell starts its profit at the grid's center, a buy has no basis.
+    assert env.store.order(sell)["basis_per_base"] == D("1.0")
+    assert env.store.order(buy)["basis_per_base"] is None
 
 
 def test_skipped_fill_not_retried_forever(envs):
@@ -1367,6 +1640,56 @@ def test_none_portfolio_equity_neither_halts_nor_ratchets(envs):
     assert env.gateway.is_halted() is False
 
 
+def test_mid_is_none_for_unusable_snapshots(envs):
+    env = envs()
+    now = time.time()
+    poll = env.limits.poll_seconds
+
+    def put(bid, ask, ts):
+        env.snapshots.put(
+            MarketSnapshot(PRODUCT, D(bid), D(ask), D(bid), D(ask), ts)
+        )
+
+    assert env.runner._mid(PRODUCT) is None  # no snapshot at all
+
+    put("1.00", "0.99", now)  # crossed: the ask sits under the bid
+    assert env.runner._mid(PRODUCT) is None
+
+    put("0", "1.00", now)  # no bid to price from
+    assert env.runner._mid(PRODUCT) is None
+
+    put("0.99", "1.00", now - 10 * poll)  # older than the staleness window
+    assert env.runner._mid(PRODUCT) is None
+
+    put("0.99", "1.00", now + 10 * poll)  # stamped ahead of our clock
+    assert env.runner._mid(PRODUCT) is None
+
+    put("0.98", "1.00", now)
+    assert env.runner._mid(PRODUCT) == D("0.99")
+
+
+def test_unusable_snapshot_means_no_pause_ratchet_or_benchmark(envs):
+    crossed = FakeMarket(bid=D("1.05"), ask=D("1.00"))
+    env = envs(market=crossed)
+    env.store.update_hwm(BOT, D("1000"))
+    assert env.store.get("benchmark:b1") is None
+
+    env.runner.cycle()
+
+    # The cycle really did poll that crossed book, so nothing below is a missing
+    # snapshot in disguise.
+    snap = env.snapshots.get(PRODUCT)
+    assert snap is not None and snap.bid > snap.ask
+    assert bot_row(env)["status"] == ACTIVE
+    assert env.store.hwm(BOT) == D("1000")
+    assert env.store.get("benchmark:b1") is None
+    assert not [
+        message
+        for message in messages(env.store, "ALERT")
+        if "drawdown" in message.lower()
+    ]
+
+
 @pytest.mark.parametrize("capital_base", [D("5"), D("0")])
 def test_held_but_stopped_product_still_polled(envs, capital_base):
     env = envs()
@@ -1508,19 +1831,22 @@ def test_heartbeat_written_each_cycle(envs):
     env.runner.cycle()
     t1 = time.time()
     first = heartbeat(env)
-    assert set(first) == {"ts", "cycle", "bots_active"}
+    assert set(first) == {"ts", "cycle", "bots_active", "errors"}
     assert first["cycle"] == 1
     assert first["bots_active"] == 2
+    assert first["errors"] == []
     assert t0 - 1 <= first["ts"] <= t1 + 1
 
     env.runner.cycle()
     assert heartbeat(env)["cycle"] == 2
+    assert heartbeat(env)["errors"] == []
     env.runner.cycle()
     assert heartbeat(env)["cycle"] == 3
 
     env.store.set_bot_status("b2", PAUSED)
     env.runner.cycle()
     assert heartbeat(env)["bots_active"] == 1
+    assert heartbeat(env)["errors"] == []
 
     leftovers = [p.name for p in Path(env.root).iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []
@@ -1534,6 +1860,38 @@ def test_heartbeat_written_each_cycle(envs):
     with pytest.raises(RuntimeError):
         env.runner.cycle()
     assert Path(env.heartbeat).read_text() == before
+
+
+def test_heartbeat_errors_lists_bots_that_raised(envs):
+    boom = SpyStrategy(name="boom", init_decision=Decision([]), raise_in_decide=True)
+    grid = SpyStrategy(inner=GridStrategy())
+    env = envs(
+        strategy="boom",
+        strategies={"boom": boom, "grid": grid, "rebalance": RebalanceStrategy()},
+    )
+    env.add_bot(
+        "b2",
+        strategy="grid",
+        capital_quote=D("100"),
+        capital_base=D("50"),
+        seed=True,
+    )
+
+    env.runner.cycle()  # b1 answers its first book without deciding
+    assert heartbeat(env)["errors"] == []
+
+    env.runner.cycle()  # b1 raises in decide, b2 gets its turn anyway
+
+    payload = heartbeat(env)
+    assert payload["errors"] == [BOT]
+    assert payload["bots_active"] == 2
+    assert grid.decide_calls == 1
+    assert any(BOT in message for message in messages(env.store, "error"))
+
+    boom.raise_in_decide = False
+    env.runner.cycle()
+
+    assert heartbeat(env)["errors"] == []
 
 
 def test_poll_failure_keeps_other_products_and_warns(envs):
@@ -1603,6 +1961,9 @@ def test_recenter_retires_old_opp_todo_rows_and_reinits(envs):
 
     env.runner.recenter(BOT, "1.1")
 
+    init_since = env.store.get("runner:init_since:b1")
+    assert isinstance(init_since, (int, float))
+
     old = [env.store.order(cid) for cid in old_cids]
     assert env.exchange.list_open_orders(None) == []
     assert not [row for row in old if row["status"] in LIVE_STATUSES]
@@ -1630,6 +1991,113 @@ def test_recenter_retires_old_opp_todo_rows_and_reinits(envs):
     assert [
         row for row in orders(env.store, BOT) if row["consumes_fill"] in old_cids
     ] == []
+
+
+def test_recenter_reinit_ignores_answered_fills_from_old_grid(envs):
+    env = envs()
+    env.runner.cycle()
+    fill_a_buy(env.market)
+    env.exchange.advance(time.time())
+    reconcile(env.store, env.exchange, now=time.time())
+    env.runner.cycle()
+
+    filled = [
+        row
+        for row in orders(env.store, BOT)
+        if row["side"] == "BUY" and row["status"] == FILLED
+    ]
+    assert len(filled) == 1
+    parent = filled[0]["client_order_id"]
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    follow_ups = [row for row in orders(env.store, BOT) if row["consumes_fill"]]
+    assert len(follow_ups) == 1
+    assert follow_ups[0]["consumes_fill"] == parent
+
+    before = {row["client_order_id"] for row in orders(env.store, BOT)}
+    env.runner.recenter(BOT, "1.1")
+
+    init_since = env.store.get("runner:init_since:b1")
+    assert isinstance(init_since, (int, float))
+
+    env.market.set_book(D("1.09"), D("1.10"))
+    env.runner.cycle()
+
+    # The answered fill belongs to the grid that was replaced, so every level of
+    # the new one is laid down, level -1 included.
+    new_rows = [
+        row
+        for row in orders(env.store, BOT)
+        if row["client_order_id"] not in before
+    ]
+    assert len(new_rows) == 6
+    assert {(row["side"], row["level"]) for row in new_rows} == {
+        ("BUY", -3),
+        ("BUY", -2),
+        ("BUY", -1),
+        ("SELL", 1),
+        ("SELL", 2),
+        ("SELL", 3),
+    }
+    assert {row["status"] for row in new_rows} == {OPEN}
+    assert bot_row(env)["init_done"] is True
+
+
+def test_recenter_settle_sweeps_again_each_pass(envs):
+    env = envs()
+    env.runner.cycle()
+    assert len(orders(env.store, BOT, OPEN)) == 6
+
+    real_cancel_all = env.gateway.cancel_all
+    sweeps = []
+
+    def first_sweep_misses(scope, owner=None):
+        sweeps.append((scope, owner))
+        if len(sweeps) == 1:
+            return 0  # the first sweep cancels nothing at all
+        return real_cancel_all(scope=scope, owner=owner)
+
+    env.gateway.cancel_all = first_sweep_misses
+
+    env.runner.recenter(BOT, "1.1")
+
+    assert len(sweeps) >= 2
+    assert all(scope == "owner" and owner == BOT for scope, owner in sweeps)
+    assert env.exchange.list_open_orders(None) == []
+    assert orders(env.store, BOT, LIVE_STATUSES) == []
+    assert D(bot_row(env)["params"]["center"]) == D("1.1")
+
+
+def test_recenter_restores_prior_status(envs):
+    # A bot that was already paused is paused again afterwards, and stays paused
+    # while its book is in pieces.
+    paused_env = envs()
+    paused_env.runner.cycle()
+    paused_env.store.set_bot_status(BOT, PAUSED)
+    real_cancel_all = paused_env.gateway.cancel_all
+    seen = []
+
+    def watching_cancel_all(scope, owner=None):
+        seen.append(bot_row(paused_env)["status"])
+        return real_cancel_all(scope=scope, owner=owner)
+
+    paused_env.gateway.cancel_all = watching_cancel_all
+    paused_env.runner.recenter(BOT, "1.1")
+
+    assert seen
+    assert set(seen) == {PAUSED}
+    after = bot_row(paused_env)
+    assert after["status"] == PAUSED
+    assert after["init_done"] is False
+    assert D(after["params"]["center"]) == D("1.1")
+
+    # An active bot comes back active.
+    active_env = envs()
+    active_env.runner.cycle()
+    active_env.runner.recenter(BOT, "1.1")
+    active = bot_row(active_env)
+    assert active["status"] == ACTIVE
+    assert active["init_done"] is False
+    assert D(active["params"]["center"]) == D("1.1")
 
 
 def test_recenter_refuses_bad_input_and_changes_nothing(envs):
@@ -1672,11 +2140,19 @@ def test_recenter_aborts_when_orders_stay_live(envs):
     env = envs()
     env.runner.cycle()
     assert len(orders(env.store, BOT)) == 6
-    env.gateway.cancel_all = lambda scope, owner=None: 0
+    sweeps = []
 
-    with pytest.raises(RuntimeError):
+    def never_sweeps(scope, owner=None):
+        sweeps.append((scope, owner))
+        return 0
+
+    env.gateway.cancel_all = never_sweeps
+
+    with pytest.raises(RuntimeError) as abort:
         env.runner.recenter(BOT, "1.1")
 
+    assert "retry" in str(abort.value).lower()
+    assert len(sweeps) == runner_module.RECENTER_SETTLE_TRIES
     assert bot_row(env)["status"] == PAUSED
     assert D(bot_row(env)["params"]["center"]) == D("1.0")
     assert bot_row(env)["init_done"] is True
@@ -1712,22 +2188,55 @@ def test_run_forever_survives_cycle_errors_and_stops(envs):
 
     def flaky_cycle():
         calls.append(1)
-        if len(calls) == 1:
-            raise RuntimeError("cycle exploded")
-        stop.set()
+        if len(calls) <= 4 or 5 < len(calls) <= 9:
+            raise RuntimeError(f"cycle {len(calls)} exploded")
+        if len(calls) == 10:
+            stop.set()
         return {"cycle": 99, "bots_active": 0}
 
     env.runner.cycle = flaky_cycle
+    # The good cycle at call 5 resets the running count, so the four failures
+    # after it are not a fifth consecutive one.
     env.runner.run_forever(poll_seconds=0, stop=stop)
 
-    assert len(calls) == 2
-    assert messages(env.store, "error")
+    assert len(calls) == 10
+    errors = messages(env.store, "error")
+    assert len(errors) == 8
+    assert all("exploded" in message for message in errors)
 
     already = threading.Event()
     already.set()
     calls.clear()
     env.runner.run_forever(poll_seconds=0, stop=already)
     assert calls == []
+
+
+def test_run_forever_raises_after_five_consecutive_failures(envs):
+    class CycleBoom(RuntimeError):
+        """What one failing cycle raises here."""
+
+    env = envs()
+    stop = threading.Event()
+    calls = []
+
+    def always_failing():
+        calls.append(1)
+        # A runner without the failure limit would loop here for ever; setting
+        # stop lets it leave the loop so the raises assertion below fails.
+        if len(calls) >= 50:
+            stop.set()
+        raise CycleBoom(f"cycle {len(calls)} exploded")
+
+    env.runner.cycle = always_failing
+
+    with pytest.raises(CycleBoom):
+        env.runner.run_forever(poll_seconds=0, stop=stop)
+
+    assert len(calls) == 5
+    # Every failure is recorded, the fifth one included, before the raise.
+    errors = messages(env.store, "error")
+    assert len(errors) == 5
+    assert any("cycle 5 exploded" in message for message in errors)
 
 
 # ---------------------------------------------------------------- static guard
