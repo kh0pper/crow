@@ -11,6 +11,11 @@
  * overwritten or deleted. The proof that old chats survive is the resume
  * path itself: <new root>/sessions must list the waiting transcript.
  *
+ * A failed Turn on rolls back what the request made: the carry-over links and
+ * the empty bots dirs, the project row and its history, and the project folder
+ * createProjectSpace made — rmdir only, never recursive, and only when this
+ * request created the workspace and both folders are now empty.
+ *
  * Also: the POST goes through the real CSRF rail (403 without the token).
  */
 import { test, before, after } from "node:test";
@@ -283,7 +288,26 @@ test("rollback on a lost compare-and-swap removes every link and the empty bots 
   assert.deepEqual(linksUnder(projectsDir()).filter((l) => l.includes("cas-bot")), [], "no link left behind");
   const ws = readdirSync(projectsDir()).filter((d) => d.startsWith(slugify("Cas Bot's board")));
   for (const d of ws) assert.ok(!existsSync(join(projectsDir(), d, "workspace", "bots")), "the bots dir it made is removed");
+  assert.deepEqual(ws, [], "the workspace creation made, and the project folder it sat in, are gone too (both were empty)");
   assert.ok(existsSync(join(oldRoot, "sessions", "a_sess-1.jsonl")), "the old world is untouched");
+});
+
+test("rollback leaves an empty workspace folder this request did NOT create alone", async () => {
+  const def = BASE_DEF();
+  await addBot("pre-bot", "Pre Bot", def);
+  // Predict the new project's folder (project_spaces.id is a plain INTEGER PRIMARY KEY: MAX+1) and
+  // make the workspace itself, empty, BEFORE the request: creation then finds it and does not own it.
+  const nextId = Number((await db.execute({ sql: "SELECT COALESCE(MAX(id),0) AS m FROM project_spaces", args: [] })).rows[0].m) + 1;
+  const projectDir = join(projectsDir(), `${slugify("Pre Bot's board")}-${nextId}`);
+  mkdirSync(join(projectDir, "workspace"), { recursive: true });
+  const before = await projectCount();
+  const broken = dbWith(async () => { throw new Error("disk full"); });
+  const to = await post({ bot_id: "pre-bot" }, broken);
+  assert.match(to, /error=/);
+  assert.equal(await projectCount(), before, "the row was rolled back");
+  assert.ok(lstatSync(join(projectDir, "workspace")).isDirectory(),
+    "the folder was already on disk, so it is not the creation's to remove (rmdir only ever runs on its own)");
+  rmSync(projectDir, { recursive: true, force: true });
 });
 
 test("a failed Turn on from the board (return=board) fails back to the board, error attached", async () => {
@@ -307,6 +331,8 @@ test("rollback when the write throws midway: no links remain", async () => {
   assert.match(to, /error=/);
   assert.equal(await projectCount(), before);
   assert.deepEqual(linksUnder(projectsDir()).filter((l) => l.includes("throw-bot")), []);
+  assert.deepEqual(readdirSync(projectsDir()).filter((d) => d.startsWith(slugify("Throw Bot's board"))), [],
+    "the project folder creation made is removed with it");
   assert.ok(existsSync(join(oldRoot, "sessions", "a_sess-1.jsonl")));
 });
 

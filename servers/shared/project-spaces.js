@@ -51,7 +51,10 @@ const pathExists = (p) => { try { lstatSync(p); return true; } catch { return fa
  *   @param {string}  [opts.originInstanceId]
  *   @param {string}  [opts.explicitSlug]      skip slug derivation, use as-is
  *   @param {boolean} [opts.ownerMember]       default true; false to omit member row
- * @returns {{ id: number, slug: string, workspaceDir: string, storagePrefix: string }}
+ * @returns {{ id: number, slug: string, workspaceDir: string, storagePrefix: string,
+ *            workspaceCreated: boolean }} `workspaceCreated` is true only when THIS call made the
+ *   workspace folder (see ensureWorkspace): a caller that has to roll the creation back knows
+ *   whether the folder is its own to remove.
  */
 export async function createProjectSpace(db, opts = {}) {
   const {
@@ -119,10 +122,10 @@ export async function createProjectSpace(db, opts = {}) {
       });
     }
 
-    await ensureWorkspace(workspaceDir, dataDir, type);
+    const workspaceCreated = await ensureWorkspace(workspaceDir, dataDir, type);
     await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
-    return { id, slug: explicitSlug, workspaceDir, storagePrefix };
+    return { id, slug: explicitSlug, workspaceDir, storagePrefix, workspaceCreated };
   }
 
   // --- Default slug mode ---
@@ -166,10 +169,10 @@ export async function createProjectSpace(db, opts = {}) {
   const workspaceDir = workspacePathFor(dataDir, slug);
   const storagePrefix = storagePrefixFor(slug);
 
-  await ensureWorkspace(workspaceDir, dataDir, type);
+  const workspaceCreated = await ensureWorkspace(workspaceDir, dataDir, type);
   await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
-  return { id, slug, workspaceDir, storagePrefix };
+  return { id, slug, workspaceDir, storagePrefix, workspaceCreated };
 }
 
 /**
@@ -184,13 +187,19 @@ export async function createProjectSpace(db, opts = {}) {
  * @param {string} workspaceDir — the exact folder this project's row names
  * @param {string} dataDir      — the data dir this creation already resolved
  * @param {string} [type]       — a learner profile has no files of its own (like its history)
+ * @returns {boolean} true only when this call CREATED the folder (it was absent, and the
+ *   fd-relative creation in project-files.js succeeded). A caller undoing the creation removes the
+ *   folder only when this is true: a folder that was already there is not its to remove.
  */
 function ensureWorkspace(workspaceDir, dataDir, type) {
-  if (type === "learner_profile") return;
+  if (type === "learner_profile") return false;
+  if (pathExists(workspaceDir)) return false;
   try {
     ensureWorkspaceDir(workspaceDir, dataDir);
+    return true;
   } catch (err) {
     console.warn("[project-spaces] the project's workspace folder was not created:", err?.message || err);
+    return false;
   }
 }
 
