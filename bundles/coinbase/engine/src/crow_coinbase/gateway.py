@@ -3,12 +3,14 @@
 `OrderGateway.check()` answers one question — may this intent go out? — and stops
 at the first refusal.  For a place intent the order is fixed:
 
-    BAD_INTENT -> HALTED -> LIVE_DISABLED -> PRODUCT_NOT_ALLOWED -> OWNER_PAUSED
-    -> STALE_MARKET -> CLOCK_SKEW -> TOO_SMALL -> ORDER_TOO_LARGE -> DAILY_CAP
-    -> RATE_CAP -> INSUFFICIENT_HOLDING -> UNALLOCATED_NEGATIVE -> DRAWDOWN_STOP
+    BAD_INTENT -> WRONG_OWNER -> HALTED -> LIVE_DISABLED -> PRODUCT_NOT_ALLOWED
+    -> OWNER_PAUSED -> STALE_MARKET -> CLOCK_SKEW -> TOO_SMALL -> ORDER_TOO_LARGE
+    -> DAILY_CAP -> RATE_CAP -> INSUFFICIENT_HOLDING -> UNALLOCATED_NEGATIVE
+    -> DRAWDOWN_STOP
 
-A cancel intent is answered by ownership alone (NOT_OWNER) and skips every other
-check, so a halt or a spent budget never blocks taking an order off the book.
+A cancel intent is answered by its shape (BAD_INTENT) and then by ownership
+alone (NOT_OWNER): it skips every other check, so a halt or a spent budget never
+blocks taking an order off the book.
 
 `check()` is read-only: it writes no order row and never moves a high-water mark,
 and it never calls the exchange — the exchange handed to the constructor is kept
@@ -21,6 +23,7 @@ is refused while `live_enabled` is false.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,18 +35,20 @@ from .ledger import Ledger
 from .limits import CapWindow, Limits
 from .money import ProductSpec
 from .snapshot import SnapshotCache
-from .store import ACTIVE, Store
+from .store import ACTIVE, RESERVED_OWNERS, Store
 from .strategies.base import MarketSnapshot, OrderIntent
 
 D = Decimal
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- refusal codes
-BAD_INTENT = "BAD_INTENT"  # not a place/cancel, or a place missing its numbers
+BAD_INTENT = "BAD_INTENT"  # malformed: wrong shape, missing or unusable numbers
+WRONG_OWNER = "WRONG_OWNER"  # a source acting as an owner it cannot be
 HALTED = "HALTED"  # the halt flag is set
 LIVE_DISABLED = "LIVE_DISABLED"  # a live route while live trading is off
 PRODUCT_NOT_ALLOWED = "PRODUCT_NOT_ALLOWED"  # unresolved, or outside the allow-list
-OWNER_PAUSED = "OWNER_PAUSED"  # a bot source whose bot is absent or not ACTIVE
-STALE_MARKET = "STALE_MARKET"  # no snapshot, or one older than 2 poll windows
+OWNER_PAUSED = "OWNER_PAUSED"  # a bot source whose bot is not ACTIVE
+STALE_MARKET = "STALE_MARKET"  # no snapshot, or an unusable or old one
 CLOCK_SKEW = "CLOCK_SKEW"  # the skew is unknown or beyond the tolerance
 TOO_SMALL = "TOO_SMALL"  # below the product's base or quote minimum
 ORDER_TOO_LARGE = "ORDER_TOO_LARGE"  # over the per-source single-order cap
@@ -55,14 +60,21 @@ DRAWDOWN_STOP = "DRAWDOWN_STOP"  # the owner's or the portfolio's drawdown stop
 NOT_OWNER = "NOT_OWNER"  # a cancel of an order this owner does not own
 
 # The high-water mark key the portfolio drawdown stop reads and the runner
-# ratchets with `portfolio_equity()`.
-PORTFOLIO_OWNER = "portfolio"
+# ratchets with `portfolio_equity()`.  The leading underscore puts it outside the
+# bot id grammar (`[a-z0-9]{1,16}`), so it can never name a bot.
+PORTFOLIO_OWNER = "_portfolio"
+
+# Owners a "bot" source may never act as: the reserved non-bot owners and the
+# portfolio's own mark key.
+NOT_BOT_OWNERS = frozenset(RESERVED_OWNERS) | {PORTFOLIO_OWNER}
 
 # A snapshot is stale once it is older than this many poll windows.
 STALE_WINDOWS = 2
 # The most clock skew tolerated, in seconds (either direction).
 MAX_CLOCK_SKEW_S = 5.0
-# A bot's own drawdown stop when its params do not name one (percent).
+# How far a snapshot's timestamp may run ahead of our clock, in seconds.
+MAX_FUTURE_S = 5.0
+# A bot's own drawdown stop when its params do not name a usable one (percent).
 DEFAULT_DRAWDOWN_PCT = 20
 
 
@@ -127,30 +139,36 @@ class OrderGateway:
         """Return the first refusal for *intent*, or None when it may go out.
 
         Place intents run the whole chain in the module docstring's order; cancel
-        intents run the ownership check alone.  `source` is "bot" or "ai".
-        `product` defaults to the owner's bot row product and must be given when
-        the owner has no bot row ("ai").  Reads store, caps, ledger and snapshots;
-        calls no exchange method and writes nothing.
+        intents run the shape check and then the ownership check alone.  `source`
+        is "bot" or "ai", and it has to match the owner: "ai" only ever acts as
+        the `ai` owner, "bot" only as a real bot.  `product` defaults to the
+        owner's bot row product and must be given when the owner has no bot row
+        ("ai").  Reads store, caps, ledger and snapshots; calls no exchange method
+        and writes nothing.
         """
         if intent.action == "cancel":
+            if self._is_bad_cancel(intent):
+                return BAD_INTENT
             return self._check_cancel(owner, intent)
 
         if self._is_bad_place(intent):
             return BAD_INTENT
+        bot = self.store.get_bot(owner)
+        if not self._is_bound(source, owner, bot):
+            return WRONG_OWNER
         if self.is_halted():
             return HALTED
         if self.route_for(owner) != "dry" and not self.live_enabled:
             return LIVE_DISABLED
 
-        bot = self.store.get_bot(owner)
         resolved = self._resolve_product(bot, product)
         if resolved is None:
             return PRODUCT_NOT_ALLOWED
-        if source == "bot" and (bot is None or bot["status"] != ACTIVE):
+        if source == "bot" and bot["status"] != ACTIVE:
             return OWNER_PAUSED
 
         snap = self.snapshots.get(resolved)
-        if snap is None or self._is_stale(snap):
+        if snap is None or self._is_unusable(snap):
             return STALE_MARKET
         skew = self.snapshots.skew_s()
         if skew is None or abs(skew) > MAX_CLOCK_SKEW_S:
@@ -172,7 +190,7 @@ class OrderGateway:
     def _check_cancel(self, owner: str, intent: OrderIntent) -> Optional[str]:
         """NOT_OWNER unless the id is shaped for *owner* and the row says so."""
         cid = intent.cancel_cid
-        if not cid or not cid.startswith(f"cb-{owner}-"):
+        if not cid.startswith(f"cb-{owner}-"):
             return NOT_OWNER
         row = self.store.order(cid)
         if row is None or row["owner"] != owner:
@@ -182,14 +200,51 @@ class OrderGateway:
     # ------------------------------------------------ step helpers
     @staticmethod
     def _is_bad_place(intent: OrderIntent) -> bool:
-        """True when the intent is not a well-formed place (missing side/size/price)."""
+        """True when the intent is not a well-formed place.
+
+        A place needs a known side and a strictly positive, finite `Decimal` size
+        and limit price, and it carries no cancellation id: a float, an int or a
+        string is refused rather than coerced, because a price that quietly lost
+        precision would slip past every cap and minimum downstream.
+        """
         if intent.action != "place":
             return True
         if intent.side not in (money.BUY, money.SELL):
             return True
-        if intent.size is None or intent.limit_price is None:
+        if intent.cancel_cid is not None:
             return True
-        return intent.size <= 0 or intent.limit_price <= 0
+        if not _is_positive_decimal(intent.size):
+            return True
+        return not _is_positive_decimal(intent.limit_price)
+
+    @staticmethod
+    def _is_bad_cancel(intent: OrderIntent) -> bool:
+        """True when the intent is not a bare cancellation.
+
+        A cancel names one order id and nothing else: a side, a size or a price on
+        it means the caller built a place intent by mistake, and an empty id could
+        never match a row.
+        """
+        if intent.side is not None or intent.size is not None:
+            return True
+        if intent.limit_price is not None:
+            return True
+        cid = intent.cancel_cid
+        return not isinstance(cid, str) or not cid
+
+    @staticmethod
+    def _is_bound(source: str, owner: str, bot: Optional[dict]) -> bool:
+        """True when *source* and *owner* belong together.
+
+        "ai" acts only as the `ai` owner.  "bot" acts only as a real bot: not one
+        of the reserved non-bot owners, not the portfolio's own mark key, and the
+        bot row has to exist.  An unknown source binds to nothing.
+        """
+        if source == "ai":
+            return owner == "ai"
+        if source == "bot":
+            return bot is not None and owner not in NOT_BOT_OWNERS
+        return False
 
     def _resolve_product(
         self, bot: Optional[dict], product: Optional[str]
@@ -207,9 +262,20 @@ class OrderGateway:
             return None
         return product if product in self.limits.products else None
 
-    def _is_stale(self, snap: MarketSnapshot) -> bool:
-        """True when the snapshot is older than twice the poll interval."""
-        return self.now() - snap.ts > STALE_WINDOWS * self.limits.poll_seconds
+    def _is_unusable(self, snap: MarketSnapshot) -> bool:
+        """True when the snapshot cannot price an order.
+
+        Unusable is: a bid at or below zero, an ask at or below the bid (an empty
+        or crossed book, from which neither side of the spread can be trusted), a
+        timestamp ahead of our clock by more than the tolerance, or one older than
+        twice the poll interval.
+        """
+        now = self.now()
+        if snap.bid <= 0 or snap.ask <= snap.bid:
+            return True
+        if snap.ts > now + MAX_FUTURE_S:
+            return True
+        return now - snap.ts > STALE_WINDOWS * self.limits.poll_seconds
 
     def _check_size_and_caps(
         self,
@@ -251,17 +317,26 @@ class OrderGateway:
         intent: OrderIntent,
         price: Decimal,
     ) -> Optional[str]:
-        """INSUFFICIENT_HOLDING, then UNALLOCATED_NEGATIVE for a buy."""
+        """INSUFFICIENT_HOLDING, then UNALLOCATED_NEGATIVE for the spent currency.
+
+        A buy spends the product's quote currency and a sell spends its base, so
+        the unallocated check looks at whichever of the two this order draws on: a
+        short exchange is exactly the case where one owner's order would spend
+        another owner's money.
+        """
+        base, quote = product.split("-", 1)
         holding = self.ledger.holding(owner, product)
         if intent.side == money.BUY:
             cost = money.buy_cost(intent.size, price, self.fee_rate)
             if cost > holding.available_quote:
                 return INSUFFICIENT_HOLDING
-            quote = product.split("-")[1]
-            if self.ledger.unallocated(self.totals()).get(quote, D(0)) < 0:
-                return UNALLOCATED_NEGATIVE
-        elif intent.size > holding.available_base:
-            return INSUFFICIENT_HOLDING
+            spent = quote
+        else:
+            if intent.size > holding.available_base:
+                return INSUFFICIENT_HOLDING
+            spent = base
+        if self.ledger.unallocated(self.totals()).get(spent, D(0)) < 0:
+            return UNALLOCATED_NEGATIVE
         return None
 
     def _check_drawdown(
@@ -275,40 +350,43 @@ class OrderGateway:
         """DRAWDOWN_STOP for the owner (bots only), then for the whole portfolio.
 
         The owner's high-water mark is read here, never ratcheted: the runner
-        moves it.
+        moves it.  The portfolio half only runs when a portfolio mark exists, and
+        an unknown portfolio valuation there refuses: a stop that cannot be
+        measured must never step out of the way.
         """
         mid = (snap.bid + snap.ask) / 2
         if source == "bot":
             hwm = self.store.hwm(owner)
             if hwm is not None and hwm > 0:
-                pct = D(str(_params(bot).get("drawdown_pct", DEFAULT_DRAWDOWN_PCT)))
+                pct = _bot_drawdown_pct(bot)
                 equity = self.ledger.equity(owner, {product: mid}, product)
                 if equity < hwm * (1 - pct / 100):
                     return DRAWDOWN_STOP
         hwm = self.store.hwm(PORTFOLIO_OWNER)
         if hwm is not None and hwm > 0:
+            equity = self.portfolio_equity()
             floor = hwm * (1 - self.limits.portfolio_drawdown_pct / 100)
-            if self.portfolio_equity() < floor:
+            if equity is None or equity < floor:
                 return DRAWDOWN_STOP
         return None
 
     # ------------------------------------------------ portfolio mark
-    def portfolio_equity(self) -> Decimal:
-        """Every bot's equity, marked at the snapshot mid of its own product.
+    def portfolio_equity(self) -> Optional[Decimal]:
+        """Every bot's equity at the snapshot mid of its own product, or None.
 
-        A bot whose product has no snapshot is valued at its quote balance only,
-        which can only understate the portfolio: an unknown price never makes the
-        drawdown stop looser.
+        None means at least one bot's product has no snapshot, or only an unusable
+        one (stale, crossed, empty or stamped ahead of our clock): part of the
+        portfolio is then unpriced, and a partial sum would let the drawdown stop
+        read low enough to pass.  The caller treats None as unknown, not as zero.
         """
         total = D(0)
         for bot in self.store.list_bots():
             product = bot["product"]
             snap = self.snapshots.get(product)
-            if snap is None:
-                total += self.ledger.holding(bot["id"], product).quote
-            else:
-                mid = (snap.bid + snap.ask) / 2
-                total += self.ledger.equity(bot["id"], {product: mid}, product)
+            if snap is None or self._is_unusable(snap):
+                return None
+            mid = (snap.bid + snap.ask) / 2
+            total += self.ledger.equity(bot["id"], {product: mid}, product)
         return total
 
 
@@ -328,3 +406,38 @@ def _always_dry(owner: str) -> str:
 def _params(bot: Optional[dict]) -> dict:
     """A bot row's params, or an empty mapping when there is no row."""
     return (bot or {}).get("params") or {}
+
+
+def _is_positive_decimal(value) -> bool:
+    """True for a strictly positive, finite `Decimal` (and nothing else).
+
+    Floats, ints and strings are refused rather than converted: a money value
+    that arrives as a float has already lost precision, and `NaN` compares false
+    against every bound, so it has to be excluded before any comparison.
+    """
+    if not isinstance(value, Decimal) or not value.is_finite():
+        return False
+    return value > 0
+
+
+def _bot_drawdown_pct(bot: Optional[dict]) -> Decimal:
+    """A bot's own drawdown stop, or the default when its params are unusable.
+
+    The stored value has to be a finite `Decimal` strictly between 0 and 100: a
+    stop of 0 would refuse every order and a stop over 100 could never trip, so
+    both fall back to the default instead of silently changing the bot's risk.
+    """
+    raw = _params(bot).get("drawdown_pct", DEFAULT_DRAWDOWN_PCT)
+    try:
+        pct = D(str(raw))
+    except (ArithmeticError, ValueError, TypeError):
+        pct = None
+    if pct is None or not pct.is_finite() or pct <= 0 or pct > 100:
+        log.warning(
+            "bot %s: unusable drawdown_pct %r, using the default %s%%",
+            (bot or {}).get("id"),
+            raw,
+            DEFAULT_DRAWDOWN_PCT,
+        )
+        return D(DEFAULT_DRAWDOWN_PCT)
+    return pct

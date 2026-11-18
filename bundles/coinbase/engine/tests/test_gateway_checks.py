@@ -3,13 +3,15 @@
 Every test runs on the real wall clock: `store.insert_order` stamps `created_at`
 with `time.time()`, so the `CapWindow` is built with the same clock and the
 snapshots are stamped with it too.  Staleness gets an explicit older timestamp
-instead of a fake clock.
+instead of a fake clock.  The exception is the skew expiry, which is about ages
+rather than timestamps: those tests hand `SnapshotCache` a mutable clock.
 
 The gateway holds an `exchange` for Task 3c; `check()` must never call it, so a
 `RecordingExchange` records any attribute access and every refusal asserts the
 list is still empty.
 """
 
+import logging
 import time
 from decimal import Decimal as D
 
@@ -32,6 +34,7 @@ from crow_coinbase.gateway import (
     STALE_MARKET,
     TOO_SMALL,
     UNALLOCATED_NEGATIVE,
+    WRONG_OWNER,
     OrderGateway,
 )
 from crow_coinbase.ledger import Ledger
@@ -208,6 +211,24 @@ def cancel(cid):
     )
 
 
+CANCEL_CID = "cb-b1-B0-000000000001"
+
+
+def cancel_shaped(**overrides):
+    """A cancel intent, with whatever field the test wants wrong."""
+    fields = dict(
+        action="cancel",
+        side=None,
+        size=None,
+        limit_price=None,
+        level=None,
+        cancel_cid=CANCEL_CID,
+        reason="test",
+    )
+    fields.update(overrides)
+    return OrderIntent(**fields)
+
+
 def seed_order(
     store,
     owner="b1",
@@ -290,6 +311,27 @@ def test_snapshot_set_clock_skew_value():
     assert cache.skew_s() == -6.0
 
 
+def test_snapshot_skew_expires_after_two_poll_windows():
+    clock = [1000.0]
+    cache = SnapshotCache(poll_seconds=POLL_SECONDS, now=lambda: clock[0])
+
+    cache.set_clock(1003.0, 1000.0)  # 3 s ahead, measured at 1000
+    assert cache.skew_s() == 3.0
+
+    clock[0] = 1000.0 + 2 * POLL_SECONDS - 1  # just inside the window
+    assert cache.skew_s() == 3.0
+
+    clock[0] = 1000.0 + 2 * POLL_SECONDS  # exactly at the edge, not past it
+    assert cache.skew_s() == 3.0
+
+    clock[0] = 1000.0 + 2 * POLL_SECONDS + 1  # past it: unknown again
+    assert cache.skew_s() is None
+
+    # Re-measuring makes it known again.
+    cache.set_clock(clock[0] + 3.5, clock[0])
+    assert cache.skew_s() == 3.5
+
+
 # ---------------------------------------------------------------- place: the chain
 
 
@@ -308,6 +350,16 @@ BAD_INTENTS = (
     ("zero_size", intent(size=D("0"))),
     ("negative_size", intent(size=D("-10"))),
     ("zero_price", intent(limit_price=D("0"))),
+    ("negative_price", intent(limit_price=D("-0.95"))),
+    ("nan_size", intent(size=D("NaN"))),
+    ("nan_price", intent(limit_price=D("NaN"))),
+    ("infinite_size", intent(size=D("Infinity"))),
+    ("infinite_price", intent(limit_price=D("-Infinity"))),
+    ("float_size", intent(size=10.0)),
+    ("float_price", intent(limit_price=0.95)),
+    ("int_size", intent(size=10)),
+    ("string_price", intent(limit_price="0.95")),
+    ("place_with_cancel_cid", intent(cancel_cid=CANCEL_CID)),
     ("unknown_action", intent(action="hold")),
 )
 
@@ -318,6 +370,30 @@ def test_bad_intent(store, case, bad):
     gw = make_gateway(store, exchange=exchange)
 
     assert gw.check("bot", "b1", bad) == BAD_INTENT
+    assert exchange.calls == []
+    assert store.orders() == []
+
+
+BAD_CANCEL_SHAPES = (
+    ("with_side", dict(side="BUY")),
+    ("with_size", dict(size=D("10"))),
+    ("with_price", dict(limit_price=D("0.95"))),
+    ("empty_cancel_cid", dict(cancel_cid="")),
+    ("missing_cancel_cid", dict(cancel_cid=None)),
+)
+
+
+@pytest.mark.parametrize(
+    "case,bad", BAD_CANCEL_SHAPES, ids=[c[0] for c in BAD_CANCEL_SHAPES]
+)
+def test_bad_cancel_shape(store, case, bad):
+    exchange = RecordingExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    assert gw.check("bot", "b1", cancel_shaped(**bad)) == BAD_INTENT
+    # The shape is answered before ownership: another owner's id still comes
+    # back as a shape problem.
+    assert gw.check("bot", "b2", cancel_shaped(**bad)) == BAD_INTENT
     assert exchange.calls == []
     assert store.orders() == []
 
@@ -380,6 +456,7 @@ def test_product_not_allowed(store):
 
 
 def test_owner_paused(store):
+    """OWNER_PAUSED is about a bot that exists but is not ACTIVE."""
     exchange = RecordingExchange()
     gw = make_gateway(store, exchange=exchange)
 
@@ -392,10 +469,48 @@ def test_owner_paused(store):
     store.set_bot_status("b1", ACTIVE)
     assert gw.check("bot", "b1", place()) is None
 
-    # A bot source with no bot row at all is refused the same way.
-    assert gw.check("bot", "ghost", place(), product=PRODUCT) == OWNER_PAUSED
+    assert exchange.calls == []
+
+
+def test_ai_source_cannot_use_bot_owner(store):
+    exchange = RecordingExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    assert gw.check("ai", "b1", place(), product=PRODUCT) == WRONG_OWNER
+    assert exchange.calls == []
+    assert store.orders() == []
+
+
+def test_bot_source_cannot_use_ai_owner(store):
+    exchange = RecordingExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    assert gw.check("bot", "ai", place(), product=PRODUCT) == WRONG_OWNER
+    assert exchange.calls == []
+    assert store.orders() == []
+
+
+def test_orphan_owner_refused_for_both_sources(store):
+    exchange = RecordingExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    for source in ("bot", "ai"):
+        assert gw.check(source, "orphan", place(), product=PRODUCT) == WRONG_OWNER
+    # The portfolio's own mark key is outside the bot id grammar either way.
+    assert gw.check("bot", PORTFOLIO_OWNER, place(), product=PRODUCT) == WRONG_OWNER
 
     assert exchange.calls == []
+    assert store.orders() == []
+
+
+def test_bot_source_unknown_owner_refused(store):
+    exchange = RecordingExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    # No bot row: there is no owner to bind the source to.
+    assert gw.check("bot", "ghost", place(), product=PRODUCT) == WRONG_OWNER
+    assert exchange.calls == []
+    assert store.orders() == []
 
 
 def test_stale_market(store):
@@ -431,6 +546,32 @@ def test_stale_market(store):
     assert store.orders() == []
 
 
+def test_stale_market_rejects_unusable_quotes(store):
+    exchange = RecordingExchange()
+    env = {POLL: str(POLL_SECONDS)}
+
+    def verdict(bid, ask, ts=None):
+        gw = make_gateway(
+            store,
+            env=env,
+            snapshots=cache_with(snapshot(ts, bid=bid, ask=ask)),
+            exchange=exchange,
+        )
+        return gw.check("bot", "b1", place())
+
+    assert verdict(D("0"), ASK) == STALE_MARKET  # no bid at all
+    assert verdict(D("-0.5"), ASK) == STALE_MARKET  # a bid below zero
+    assert verdict(ASK, BID) == STALE_MARKET  # crossed
+    assert verdict(D("1"), D("1")) == STALE_MARKET  # an empty spread
+    assert verdict(BID, ASK, time.time() + 60) == STALE_MARKET  # stamped ahead
+
+    # A stamp a few seconds ahead is tolerated, and this book is usable.
+    assert verdict(BID, ASK, time.time() + 3) is None
+
+    assert exchange.calls == []
+    assert store.orders() == []
+
+
 def test_clock_skew(store):
     exchange = RecordingExchange()
 
@@ -445,6 +586,24 @@ def test_clock_skew(store):
 
     unknown = make_gateway(store, snapshots=ready_cache(skew=None), exchange=exchange)
     assert unknown.check("bot", "b1", place()) == CLOCK_SKEW
+
+    assert exchange.calls == []
+
+
+def test_stale_clock_measurement_refuses_clock_skew(store):
+    exchange = RecordingExchange()
+    clock = [1000.0]
+    cache = SnapshotCache(poll_seconds=POLL_SECONDS, now=lambda: clock[0])
+    cache.put(snapshot())  # fresh and sane on the gateway's own clock
+    cache.set_clock(1001.0, 1000.0)
+    gw = make_gateway(store, snapshots=cache, exchange=exchange)
+
+    assert gw.check("bot", "b1", place()) is None
+
+    # The measurement is now two poll windows old: the skew is unknown again.
+    clock[0] += 2 * POLL_SECONDS + 1
+    assert cache.skew_s() is None
+    assert gw.check("bot", "b1", place()) == CLOCK_SKEW
 
     assert exchange.calls == []
 
@@ -558,47 +717,110 @@ def test_insufficient_holding_sell(make_store):
     assert s.orders() == []
 
 
-def test_unallocated_negative_refuses_buys_not_sells(store):
+def test_unallocated_negative_buy_checks_quote_sell_checks_base(store):
     exchange = RecordingExchange()
 
-    def short():
-        """10 quote less than b1 holds."""
-        return {QUOTE: D("90"), BASE: D("50")}
+    # Quote short: a buy would spend currency the owners do not have.
+    quote_short = make_gateway(
+        store, exchange=exchange, totals=lambda: {QUOTE: D("90"), BASE: D("50")}
+    )
+    assert quote_short.check("bot", "b1", place()) == UNALLOCATED_NEGATIVE
+    # ... while a sell draws on the base currency, which is fully allocated.
+    assert quote_short.check("bot", "b1", place(side="SELL", size=D("10"))) is None
 
-    gw = make_gateway(store, exchange=exchange, totals=short)
-    assert gw.check("bot", "b1", place()) == UNALLOCATED_NEGATIVE
-    assert exchange.calls == []
+    # Base short: the mirror case.
+    base_short = make_gateway(
+        store, exchange=exchange, totals=lambda: {QUOTE: D("100"), BASE: D("40")}
+    )
+    assert base_short.check("bot", "b1", place(side="SELL", size=D("10"))) == (
+        UNALLOCATED_NEGATIVE
+    )
+    assert base_short.check("bot", "b1", place()) is None
 
-    # The same short exchange does not stop a sell.
-    assert gw.check("bot", "b1", place(side="SELL", size=D("10"))) is None
-
-    # With matching totals the same buy is allowed.
+    # With matching totals both sides pass.
     balanced = make_gateway(store, exchange=exchange)
     assert balanced.check("bot", "b1", place()) is None
+    assert balanced.check("bot", "b1", place(side="SELL", size=D("10"))) is None
+
+    assert exchange.calls == []
+    assert store.orders() == []
+
+
+def test_unallocated_negative_sell_short(make_store):
+    exchange = RecordingExchange()
+    s = make_store("sell-short.db", capital_quote=D("100"), capital_base=D("20"))
+    gw = make_gateway(
+        s, exchange=exchange, totals=lambda: {QUOTE: D("100"), BASE: D("15")}
+    )
+
+    # 20 base held, 15 on the exchange: the base currency is 5 short.
+    assert gw.check("bot", "b1", place(side="SELL", size=D("10"))) == (
+        UNALLOCATED_NEGATIVE
+    )
+    # The owner's own holding is answered first: 30 > the 20 available.
+    assert gw.check("bot", "b1", place(side="SELL", size=D("30"))) == (
+        INSUFFICIENT_HOLDING
+    )
+    # And with a matching exchange the same sell passes.
+    balanced = make_gateway(
+        s, exchange=exchange, totals=lambda: {QUOTE: D("100"), BASE: D("20")}
+    )
+    assert balanced.check("bot", "b1", place(side="SELL", size=D("10"))) is None
+
+    assert exchange.calls == []
+    assert s.orders() == []
 
 
 def test_drawdown_stop_bot(make_store):
     exchange = RecordingExchange()
-    params = {"drawdown_pct": 10}
-    equity = D("100") + D("50") * MID  # quote + base at the mid price
+    equity = D("100") + D("50") * MID  # quote + base at the mid price, 149.75
 
-    stopped = make_store("dd-bot.db", params=params)
-    gw = make_gateway(stopped, exchange=exchange)
-    stopped.update_hwm("b1", D("200"))  # 200 * (1 - 10/100) = 180 > equity
-    assert gw.check("bot", "b1", place()) == DRAWDOWN_STOP
-    assert stopped.hwm("b1") == D("200")  # the mark is read, never ratcheted
+    # drawdown_pct 10: 170 * (1 - 10/100) = 153, above the 149.75 equity.
+    tight = make_store("dd-bot-10.db", params={"drawdown_pct": 10})
+    gw_tight = make_gateway(tight, exchange=exchange)
+    tight.update_hwm("b1", D("170"))
+    assert gw_tight.check("bot", "b1", place()) == DRAWDOWN_STOP
+    assert tight.hwm("b1") == D("170")  # the mark is read, never ratcheted
     assert exchange.calls == []
 
-    # equity == hwm is above the threshold, so the same intent passes.
-    running = make_store("dd-bot-ok.db", params=params)
+    # drawdown_pct 20: 170 * (1 - 20/100) = 136, below the same equity, so the
+    # same intent on the same mark passes: the bot's own params decide.
+    loose = make_store("dd-bot-20.db", params={"drawdown_pct": 20})
+    gw_loose = make_gateway(loose, exchange=exchange)
+    loose.update_hwm("b1", D("170"))
+    assert gw_loose.check("bot", "b1", place()) is None
+
+    # equity == hwm is above any threshold.
+    running = make_store("dd-bot-ok.db", params={"drawdown_pct": 10})
     gw_ok = make_gateway(running, exchange=exchange)
     running.update_hwm("b1", equity)
     assert gw_ok.check("bot", "b1", place()) is None
 
     assert running.hwm("b1") == equity
     assert exchange.calls == []
-    assert stopped.orders() == []
+    assert tight.orders() == []
+    assert loose.orders() == []
     assert running.orders() == []
+
+
+@pytest.mark.parametrize("bad", ["abc", 0, 150, "NaN"])
+def test_invalid_drawdown_pct_falls_back_to_default(make_store, caplog, bad):
+    exchange = RecordingExchange()
+    s = make_store("dd-bad.db", params={"drawdown_pct": bad})
+    gw = make_gateway(s, exchange=exchange)
+    # The default of 20 puts the floor at 136, below the 149.75 equity, so the
+    # order may go out even under a 170 mark.
+    s.update_hwm("b1", D("170"))
+
+    with caplog.at_level(logging.WARNING, logger="crow_coinbase.gateway"):
+        assert gw.check("bot", "b1", place()) is None
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "drawdown_pct" in r.getMessage() and "b1" in r.getMessage() for r in warnings
+    )
+    assert exchange.calls == []
+    assert s.orders() == []
 
 
 def test_drawdown_stop_portfolio(make_store):
@@ -617,6 +839,64 @@ def test_drawdown_stop_portfolio(make_store):
     s.update_hwm(PORTFOLIO_OWNER, D("200"))
     assert gw.check("bot", "b1", place()) == DRAWDOWN_STOP
     assert s.hwm(PORTFOLIO_OWNER) == D("200")
+
+    assert exchange.calls == []
+    assert s.orders() == []
+
+
+def test_portfolio_equity_sums_every_priced_bot(make_store):
+    exchange = RecordingExchange()
+    s = make_store("pf-priced.db")
+    s.create_bot("b2", "BTC-USDC", "grid", {}, D("30"), D("2"))
+    cache = cache_with(
+        snapshot(),
+        snapshot(bid=D("10"), ask=D("10.2"), product="BTC-USDC"),
+    )
+    gw = make_gateway(s, snapshots=cache, exchange=exchange)
+
+    # b1 at the XRP mid, b2 at the BTC mid.
+    assert gw.portfolio_equity() == D("149.75") + D("30") + D("2") * D("10.1")
+    assert exchange.calls == []
+
+
+def test_portfolio_equity_unknown_when_a_snapshot_is_missing(make_store):
+    exchange = RecordingExchange()
+    s = make_store("pf-missing.db")
+    # A second bot on a product nothing has polled yet, with no capital of its
+    # own so the rest of b1's chain is untouched.
+    s.create_bot("b2", "BTC-USDC", "grid", {}, D("0"), D("0"))
+    gw = make_gateway(s, exchange=exchange)
+
+    assert gw.portfolio_equity() is None
+    # With no portfolio mark there is nothing to compare against: allowed.
+    assert gw.check("bot", "b1", place()) is None
+
+    # With one, an unpriceable portfolio refuses rather than reading low.
+    s.update_hwm(PORTFOLIO_OWNER, D("200"))
+    assert gw.check("bot", "b1", place()) == DRAWDOWN_STOP
+
+    assert exchange.calls == []
+    assert s.orders() == []
+
+
+def test_portfolio_equity_unknown_when_a_snapshot_is_stale(make_store):
+    exchange = RecordingExchange()
+    s = make_store("pf-stale.db")
+    s.create_bot("b2", "BTC-USDC", "grid", {}, D("0"), D("0"))
+    stale_ts = time.time() - 2 * POLL_SECONDS - 60
+    cache = cache_with(
+        snapshot(),
+        snapshot(ts=stale_ts, bid=D("10"), ask=D("10.2"), product="BTC-USDC"),
+    )
+    gw = make_gateway(s, snapshots=cache, exchange=exchange)
+
+    # Both products have a snapshot, but b2's is too old to price with.
+    assert cache.get("BTC-USDC") is not None
+    assert gw.portfolio_equity() is None
+    assert gw.check("bot", "b1", place()) is None
+
+    s.update_hwm(PORTFOLIO_OWNER, D("200"))
+    assert gw.check("bot", "b1", place()) == DRAWDOWN_STOP
 
     assert exchange.calls == []
     assert s.orders() == []
@@ -808,6 +1088,25 @@ def test_ai_uses_ai_caps(store, make_store):
     assert exchange.calls == []
 
 
+def test_ai_rate_cap_trips_while_global_has_room(make_store):
+    exchange = RecordingExchange()
+    s = make_store("ai-rate.db")
+    for n in range(1, 11):  # the ai cap is ten orders an hour
+        seed_order(s, "ai", "ai", OPEN, D("1"), D("1"), n)
+
+    caps = CapWindow(s, time.time)
+    gw = make_gateway(s, env={ORDERS_HOUR: "30"}, caps=caps, exchange=exchange)
+
+    assert caps.orders_last_hour("ai") == 10
+    assert caps.orders_last_hour(None) == 10
+    # Ten of thirty: the global count still has plenty of room, so the refusal
+    # can only be the ai owner's own cap.
+    assert caps.orders_last_hour(None) + 1 <= 30
+    assert gw.check("ai", "ai", place(), product=PRODUCT) == RATE_CAP
+
+    assert exchange.calls == []
+
+
 # ---------------------------------------------------------------- chain order
 
 
@@ -943,6 +1242,28 @@ def test_chain_order_first_failure_wins(store, make_store, case, setup, expected
 
     assert gw.check("bot", "b1", intent_, product=product) == expected
     assert exchange.calls == []
+
+
+def test_wrong_owner_sits_between_bad_intent_and_halted(store):
+    exchange = RecordingExchange()
+    gw = make_gateway(
+        store,
+        exchange=exchange,
+        is_halted=lambda: True,
+        route_for=lambda owner: "live",
+        live_enabled=False,
+    )
+
+    # Halted, live-disabled and unbound at once: the owner binding is answered
+    # first.
+    assert gw.check("bot", "ghost", place(), product=PRODUCT) == WRONG_OWNER
+    # ... and a malformed intent still outranks both.
+    assert gw.check("bot", "ghost", intent(side=None), product=PRODUCT) == BAD_INTENT
+    # On a real bot the halt is the answer.
+    assert gw.check("bot", "b1", place()) == HALTED
+
+    assert exchange.calls == []
+    assert store.orders() == []
 
 
 # ---------------------------------------------------------------- maker pricing
