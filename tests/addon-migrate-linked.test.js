@@ -603,6 +603,47 @@ test("funkwhale: a URL naming this computer is repointed to its local port; anot
   assert.equal(readFileSync(addonsPath, "utf8"), before, "another host's URL is untouched");
 });
 
+// ── the first-party guard ───────────────────────────────────────────────────
+
+test("--undo refuses an id installed.json records as a first-party bundle (a link back into the checkout)", async (t) => {
+  const root = scratch(t, "undo-firstparty");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "acme");
+  linkBundle(crowHome, "acme", source);
+  writeAddons(addonsPath, { acme: { command: "node", args: ["server/index.js"] } });
+
+  const migrated = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF, runner: fakeRunner(), now: NOW, log: () => {},
+  });
+  assert.deepEqual(migrated.migrated, ["acme"]);
+  const entryBefore = readFileSync(addonsPath, "utf8");
+
+  // Crow installs it as its own bundle: an installed.json record of type "bundle".
+  writeFileSync(join(crowHome, "installed.json"), JSON.stringify([{ id: "acme", type: "bundle", version: "1.1.0" }], null, 2), { mode: 0o600 });
+  const installedBefore = readFileSync(join(crowHome, "installed.json"), "utf8");
+
+  const refused = await undoMigration({
+    crowHome, ids: ["acme"], mcpAddonsPath: addonsPath, now: () => new Date("2026-02-03T04:05:06Z"), log: () => {},
+  });
+  assert.deepEqual(refused.restored, []);
+  assert.equal(refused.skipped.length, 1);
+  assert.equal(refused.skipped[0].id, "acme");
+  assert.match(refused.skipped[0].reason, /Crow's own bundle now/);
+  assert.match(refused.skipped[0].reason, /tracked checkout/);
+  assert.equal(lstatSync(join(crowHome, "bundles", "acme")).isSymbolicLink(), false, "the copy stays: no link back into the checkout");
+  assert.equal(readFileSync(addonsPath, "utf8"), entryBefore, "the entry is untouched");
+  assert.equal(readFileSync(join(crowHome, "installed.json"), "utf8"), installedBefore, "installed.json is untouched");
+  assert.deepEqual(backupsIn(crowHome), [`acme-${STAMP}.json`], "the backup stays live");
+
+  // Any other record type is not a first-party bundle, so the undo still works.
+  writeFileSync(join(crowHome, "installed.json"), JSON.stringify([{ id: "acme", type: "mcp-server", version: "1.1.0" }], null, 2), { mode: 0o600 });
+  const undone = await undoMigration({
+    crowHome, ids: ["acme"], mcpAddonsPath: addonsPath, now: () => new Date("2026-02-03T04:05:06Z"), log: () => {},
+  });
+  assert.deepEqual(undone.restored, ["acme"], JSON.stringify(undone.skipped));
+  assert.equal(lstatSync(join(crowHome, "bundles", "acme")).isSymbolicLink(), true, "the link is back");
+});
+
 // ── undo ────────────────────────────────────────────────────────────────────
 
 test("--undo restores the link and the entry, keeps the copy, and a second undo is a no-op", async (t) => {

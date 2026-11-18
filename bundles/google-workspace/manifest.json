@@ -1,7 +1,7 @@
 {
   "id": "google-workspace",
   "name": "Google Workspace",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "bundle",
   "description": "Google Workspace tools for the assistant — Drive, Docs, Sheets, Slides, Gmail, Calendar, Apps Script, Forms, BigQuery and Looker Studio — using your own Google sign-in.",
   "author": "Crow",
@@ -9,6 +9,7 @@
   "category": "productivity",
   "tags": ["google", "drive", "docs", "sheets", "slides", "gmail", "calendar", "mcp"],
   "icon": "file-text",
+  "refreshFiles": ["google_workspace_mcp", "apps-script-shim", "pyproject.toml", "uv.lock", "README.md", "README.es.md"],
   "server": {
     "command": "uv",
     "args": ["run", "--quiet", "--frozen", "google-workspace-mcp"],

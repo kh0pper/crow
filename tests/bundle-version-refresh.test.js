@@ -19,7 +19,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, openSync, closeSync, readdirSync, symlinkSync, lstatSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, openSync, closeSync, readdirSync, symlinkSync, lstatSync, cpSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -1793,5 +1793,163 @@ describe("installed.json version follows the installed manifest", () => {
     assert.equal(after[0], str, "a string record is written back exactly as it was");
     assert.equal(after[1].version, "1.1.0");
     assert.deepEqual(versionLines(repaired), [`${obj}: installed.json version 1.0.0 -> 1.1.0`]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Manifest-DECLARED code roots, for every bundle type (not only a docker one):
+// a non-docker bundle's code can live outside the fixed dirs the refresh knows
+// (google-workspace's google_workspace_mcp/ and apps-script-shim/), so a version
+// bump would otherwise ship the new manifest over stale Python. Each declared
+// path is copied through the build-context skip filter, a declared DIRECTORY is
+// pruned to the repo's own contents (never outside itself, never .env/data/
+// node_modules/.git), and no symlink is ever followed.
+// ---------------------------------------------------------------------------
+describe("manifest.refreshFiles — declared code roots of a non-docker bundle", () => {
+  function setup(id) {
+    const repoRoot = freshRoot(`crowrepo-roots-${id}-`);
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "GWS", version: "2.0.0", type: "bundle", category: "misc", description: "d",
+      server: { command: "uv", args: ["run", "pkg"] },
+      refreshFiles: ["pkg", "shim", "pyproject.toml", "README.md"],
+    }));
+    put(repoRoot, `${id}/pkg/a.py`, "a v2\n");
+    put(repoRoot, `${id}/pkg/sub/b.py`, "b v2\n");
+    // Dev droppings inside the declared root: never copied.
+    put(repoRoot, `${id}/pkg/__pycache__/a.cpython.pyc`, "pyc\n");
+    put(repoRoot, `${id}/pkg/.venv/lib/site.py`, "venv\n");
+    put(repoRoot, `${id}/pkg/.pytest_cache/CACHEDIR.TAG`, "tag\n");
+    put(repoRoot, `${id}/shim/forms.gs`, "// shim v2\n");
+    put(repoRoot, `${id}/pyproject.toml`, "[project]\nname = 'v2'\n");
+    put(repoRoot, `${id}/README.md`, "readme v2\n");
+    put(repoRoot, `${id}/tests/test_a.py`, "# v2 tests\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/pkg/a.py`, "a v1\n");
+    put(CROW_HOME, `bundles/${id}/pkg/sub/b.py`, "b v1\n");
+    // Dest-only entries: code is pruned, instance-local state is not.
+    put(CROW_HOME, `bundles/${id}/pkg/gone.py`, "# removed upstream\n");
+    put(CROW_HOME, `bundles/${id}/pkg/data/state.db`, "live data\n");
+    put(CROW_HOME, `bundles/${id}/pkg/.env`, "SECRET=live\n");
+    put(CROW_HOME, `bundles/${id}/pkg/node_modules/dep/index.js`, "// dep\n");
+    put(CROW_HOME, `bundles/${id}/pkg/__pycache__/old.pyc`, "live pyc\n");
+    put(CROW_HOME, `bundles/${id}/pyproject.toml`, "[project]\nname = 'v1'\n");
+    put(CROW_HOME, `bundles/${id}/README.md`, "readme v1\n");
+    put(CROW_HOME, `bundles/${id}/notes.txt`, "notes stay\n");
+    setInstalled([id]);
+    return repoRoot;
+  }
+
+  test("a version bump copies the declared dirs and files recursively, through the skip filter, and prunes what the repo dropped", async () => {
+    const id = "roots-gws";
+    const repoRoot = setup(id);
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+
+    // Declared code roots, recursively.
+    assert.equal(readAt(destBundleDir(id), "pkg/a.py"), "a v2\n");
+    assert.equal(readAt(destBundleDir(id), "pkg/sub/b.py"), "b v2\n");
+    assert.equal(readAt(destBundleDir(id), "shim/forms.gs"), "// shim v2\n");
+    assert.equal(readAt(destBundleDir(id), "pyproject.toml"), "[project]\nname = 'v2'\n");
+    assert.equal(readAt(destBundleDir(id), "README.md"), "readme v2\n");
+    const refreshLine = repaired.find((line) => line.startsWith(`${id}: refreshed 1.0.0 -> 2.0.0`)) || "";
+    assert.ok(refreshLine.includes("refresh:pkg") && refreshLine.includes("refresh:shim"), JSON.stringify(repaired));
+
+    // Build-context droppings are never copied in.
+    for (const rel of ["pkg/.venv", "pkg/.pytest_cache", "pkg/__pycache__/a.cpython.pyc"]) {
+      assert.equal(existsSync(join(destBundleDir(id), rel)), false, `${rel} must not be copied`);
+    }
+
+    // A declared DIR is exact: the module the repo no longer ships is gone...
+    assert.equal(existsSync(join(destBundleDir(id), "pkg/gone.py")), false, "a file removed upstream does not linger");
+    // ...but instance-local state inside it is never removed.
+    assert.equal(readAt(destBundleDir(id), "pkg/data/state.db"), "live data\n");
+    assert.equal(readAt(destBundleDir(id), "pkg/.env"), "SECRET=live\n");
+    assert.equal(readAt(destBundleDir(id), "pkg/node_modules/dep/index.js"), "// dep\n");
+    assert.equal(readAt(destBundleDir(id), "pkg/__pycache__/old.pyc"), "live pyc\n", "a dropping left by the install is not pruned");
+
+    // An undeclared path is neither copied nor pruned.
+    assert.equal(existsSync(join(destBundleDir(id), "tests")), false, "an undeclared dir is not copied");
+    assert.equal(readAt(destBundleDir(id), "notes.txt"), "notes stay\n");
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, "2.0.0");
+  });
+
+  test("no symlink is followed: one inside a declared root is recreated, a declared root that is itself a link is skipped", async () => {
+    const id = "roots-link";
+    const repoRoot = freshRoot(`crowrepo-roots-link-${id}-`);
+    put(repoRoot, "outside.txt", "outside bytes\n");
+    put(repoRoot, "elsewhere/keep.txt", "keep\n");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "L", version: "2.0.0", type: "bundle", category: "misc", description: "d",
+      refreshFiles: ["pkg", "linked"],
+    }));
+    put(repoRoot, `${id}/pkg/real.py`, "v2\n");
+    symlinkSync(join(repoRoot, "outside.txt"), join(repoRoot, id, "pkg", "alias.txt"));
+    symlinkSync(join(repoRoot, "elsewhere"), join(repoRoot, id, "linked"));
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle" }));
+    put(CROW_HOME, `bundles/${id}/pkg/real.py`, "v1\n");
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "pkg/real.py"), "v2\n");
+    const link = join(destBundleDir(id), "pkg", "alias.txt");
+    assert.equal(lstatSync(link).isSymbolicLink(), true, "a link is copied AS a link");
+    assert.equal(readlinkSync(link), join(repoRoot, "outside.txt"), "with its own text, not followed");
+    assert.equal(readAt(repoRoot, "outside.txt"), "outside bytes\n", "the target is never written through");
+    assert.equal(existsSync(join(destBundleDir(id), "linked")), false, "a declared root that resolves outside the bundle is skipped");
+    assert.equal(readAt(repoRoot, "elsewhere/keep.txt"), "keep\n");
+  });
+
+  test("the real google-workspace bundle declares its code roots, and a version bump ships them", async () => {
+    const id = "google-workspace";
+    const repoManifest = JSON.parse(readFileSync(join(import.meta.dirname, "..", "bundles", id, "manifest.json"), "utf8"));
+    for (const rel of ["google_workspace_mcp", "apps-script-shim", "pyproject.toml", "uv.lock", "README.md", "README.es.md"]) {
+      assert.ok((repoManifest.refreshFiles || []).includes(rel), `bundles/${id}/manifest.json refreshFiles must declare ${rel}`);
+    }
+
+    // A copy of the REAL bundle as the repo side, and a stale installed copy.
+    const repoRoot = freshRoot(`crowrepo-roots-${id}-`);
+    cpSync(join(import.meta.dirname, "..", "bundles", id), join(repoRoot, id), { recursive: true });
+    cpSync(join(import.meta.dirname, "..", "bundles", id), destBundleDir(id), { recursive: true });
+    put(destBundleDir(id), "manifest.json", JSON.stringify({ ...repoManifest, version: "1.2.0" }));
+    assert.ok(existsSync(join(destBundleDir(id), "google_workspace_mcp", "server.py")));
+    writeFileSync(join(destBundleDir(id), "google_workspace_mcp", "server.py"), "# STALE SERVER\n");
+    rmSync(join(destBundleDir(id), "apps-script-shim"), { recursive: true, force: true });
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(
+      readFileSync(join(destBundleDir(id), "google_workspace_mcp", "server.py"), "utf8"),
+      readFileSync(join(repoRoot, id, "google_workspace_mcp", "server.py"), "utf8"),
+      "a version bump ships the Python package, not just the new manifest",
+    );
+    assert.ok(existsSync(join(destBundleDir(id), "apps-script-shim", "forms-destination-shim.gs")), "and the Apps Script shim");
+    assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, repoManifest.version);
+  });
+
+  test("a non-docker bundle's declared compose file is skipped (code roots still refresh)", async () => {
+    const id = "roots-nondocker-compose";
+    const repoRoot = freshRoot(`crowrepo-roots-${id}-`);
+    // Seven non-docker bundles declare their compose file in refreshFiles; it is
+    // not refreshed for them (no owner-edit check outside catchUpInstalledCompose).
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "R", version: "2.0.0", type: "mcp-server", category: "misc", description: "d",
+      refreshFiles: ["docker-compose.yml", "pkg"],
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, "services:\n  app:\n    image: x:v2\n");
+    put(repoRoot, `${id}/pkg/a.py`, "a v2\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    const ownerEdited = "services:\n  app:\n    image: x:v1\n    # owner edit\n";
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, ownerEdited);
+    put(CROW_HOME, `bundles/${id}/pkg/a.py`, "a v1\n");
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "pkg/a.py"), "a v2\n", "the declared code root still refreshes");
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), ownerEdited, "the owner-edited compose is left byte-identical");
   });
 });

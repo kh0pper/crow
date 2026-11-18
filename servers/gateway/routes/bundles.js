@@ -493,13 +493,30 @@ function replaceFileAtomic(src, dst) {
 /**
  * Copy a directory tree the way cpSync recursive does, but every file is
  * replaced atomically (see replaceFileAtomic) and symlinks are recreated rather
- * than followed. Files the destination has and the source does not are left
- * alone, exactly as cpSync leaves them.
+ * than followed.
+ *
+ * By default files the destination has and the source does not are left alone,
+ * exactly as cpSync leaves them — the fixed refresh dirs (server/, panel/,
+ * vendor/ …) are additive on purpose. `prune` is for a manifest-declared refresh
+ * root (copyBundleRefreshItem): there the repo copy IS the whole content, so a
+ * module deleted upstream must not linger in the installed copy, where an import
+ * would still find it. Pruning never removes a name REFRESH_FILES_NEVER matches
+ * (.env*, data, node_modules, .git) at any depth — that is instance-local state,
+ * not code — and never anything `skip` refuses.
+ *
+ * `skip(name)` is the build-context filter (BUILD_CONTEXT_SKIP: .venv,
+ * __pycache__, .pytest_cache, node_modules, .git): such a name is neither copied
+ * nor pruned.
+ *
+ * Nothing here follows a symlink: a link in the source is recreated with its own
+ * text, and a destination that is a link where the source has a directory is
+ * replaced, never written through.
  * @param {string} src
  * @param {string} dst
+ * @param {{prune?: boolean, skip?: ((name: string) => boolean) | null}} [opts]
  * @returns {void}
  */
-function replaceTreeAtomic(src, dst) {
+function replaceTreeAtomic(src, dst, { prune = false, skip = null } = {}) {
   // A destination that is a symlink (or a file) where the source has a
   // directory is replaced, never followed: writing through it would land the
   // copy wherever the link points. A directory made here takes the source
@@ -510,7 +527,10 @@ function replaceTreeAtomic(src, dst) {
     mkdirSync(dirname(dst), { recursive: true });
     mkdirSync(dst, { mode: statSync(src).mode & 0o777 });
   }
+  const wanted = new Set();
   for (const entry of readdirSync(src, { withFileTypes: true })) {
+    if (skip && skip(entry.name)) continue;
+    wanted.add(entry.name);
     const from = join(src, entry.name);
     const to = join(dst, entry.name);
     if (entry.isSymbolicLink()) {
@@ -519,27 +539,44 @@ function replaceTreeAtomic(src, dst) {
       mkdirSync(dirname(to), { recursive: true });
       symlinkSync(target, to);
     } else if (entry.isDirectory()) {
-      replaceTreeAtomic(from, to);
+      replaceTreeAtomic(from, to, { prune, skip });
     } else if (entry.isFile()) {
       replaceFileAtomic(from, to);
     }
+  }
+  if (!prune) return;
+  // Only what is INSIDE this declared root: the parent dirs (the bundle folder,
+  // another declared root) are never touched from here.
+  for (const name of readdirSync(dst)) {
+    if (wanted.has(name) || (skip && skip(name)) || REFRESH_FILES_NEVER.test(name)) continue;
+    rmSync(join(dst, name), { recursive: true, force: true });
   }
 }
 
 /**
  * Copy one explicit-include item (a top-level file or a directory) from a
  * bundle's repo source into its installed dest dir. No-op (returns false) if
- * the item doesn't exist in the repo source. Additive: dest-only files not
- * present in the source survive. Never rewrites a destination file in place —
- * a temp file beside each is renamed into place, so a library under `vendor/`
- * that a running process has mapped keeps its old inode and bytes.
+ * the item doesn't exist in the repo source. Additive by default: dest-only
+ * files not present in the source survive. Never rewrites a destination file in
+ * place — a temp file beside each is renamed into place, so a library under
+ * `vendor/` that a running process has mapped keeps its old inode and bytes.
+ *
+ * `prune` (a manifest-declared refresh root) makes a directory copy exact: an
+ * entry the repo no longer ships is removed from the installed dir, and only
+ * from inside that dir (see replaceTreeAtomic).
+ *
+ * @param {string} appSrc
+ * @param {string} destDir
+ * @param {string} item       bundle-relative path
+ * @param {{prune?: boolean, skip?: ((name: string) => boolean) | null}} [opts]
+ * @returns {boolean} whether the item existed in the repo copy
  */
-function copyBundleRefreshItem(appSrc, destDir, item) {
+function copyBundleRefreshItem(appSrc, destDir, item, { prune = false, skip = null } = {}) {
   const src = join(appSrc, item);
   if (!existsSync(src)) return false;
   const dst = join(destDir, item);
   if (statSync(src).isDirectory()) {
-    replaceTreeAtomic(src, dst);
+    replaceTreeAtomic(src, dst, { prune, skip });
   } else {
     replaceFileAtomic(src, dst);
   }
@@ -717,12 +754,16 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
 /** Never refreshed through manifest.refreshFiles, at any depth: instance-local secrets and state. */
 const REFRESH_FILES_NEVER = /^(\.env.*|data|node_modules|\.git)$/i;
 
+/** A compose file by basename (docker-compose.yml, docker-compose.override.yaml, …). */
+const COMPOSE_FILE_NAME = /^docker-compose(\..+)?\.ya?ml$/;
+
 /**
  * manifest.refreshFiles (Crow Workspace W2, F4): an OPT-IN list of bundle-relative paths a docker bundle wants
  * re-copied on a version change — e.g. ["docker-compose.yml", "onlyoffice-plugin"]: the compose that adds a
  * read-only plugin mount, and the plugin directory it mounts. The running containers are NOT recreated (they keep
- * the old compose until the bundle is restarted). An entry is copied only when it is a plain relative path inside
- * the bundle (no absolute path, "..", "\\" or "$"; never manifest.json, which is the refresh's commit marker), names
+ * the old compose until the bundle is restarted). A NON-docker bundle never gets a compose file this way: it has no
+ * owner-edit check (catchUpInstalledCompose only runs for docker bundles), so its declared compose entry is skipped.
+ * An entry is copied only when it is a plain relative path inside the bundle (no absolute path, "..", "\\" or "$"; never manifest.json, which is the refresh's commit marker), names
  * no .env*, data, node_modules or .git at any depth, exists in the repo copy (realpath inside the bundle), and does
  * not overlap a READ-WRITE bind mount of the installed compose or its overrides (that is data). Returns the
  * bundle-relative paths to copy.
@@ -741,11 +782,15 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
   }
   const projectDir = join(destReal, composeRel ? dirname(composeRel) : ".");
   const rwBinds = texts.flatMap((t) => composeBindSources(t, projectDir, env, { rwOnly: true })).map(realOrSelf);
+  const isDocker = !!manifest?.docker;
   const out = new Set();
   for (const p of list.slice(0, 50)) {
     if (typeof p !== "string" || !p || isAbsolute(p) || p.includes("\\") || p.includes("$")) continue;
     const rel = relativePath(".", p);
     if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    // A non-docker bundle's compose is not refreshed here: only catchUpInstalledCompose
+    // (docker bundles) has the owner-edit check, so this is the old behaviour for it.
+    if (!isDocker && COMPOSE_FILE_NAME.test(basename(rel))) continue;
     // The installed compose's bookkeeping is Crow's own record, never a repo file.
     if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE || rel === COMPOSE_STATE_FILE || rel === COMPOSE_NEEDS_CONFIG_FILE || rel === COMPOSE_IMAGE_CHANGE_FILE) continue;
     if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
@@ -760,8 +805,13 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
   return [...out];
 }
 
-/** Local dev/test droppings never copied with a build context. */
-const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "node_modules", ".git"]);
+/**
+ * Local dev/test droppings never copied with a build context — and never copied
+ * into an installed copy by the google-workspace migration either
+ * (scripts/addon-sandbox/migrate-gws-firstparty.mjs, which imports this set from
+ * the install path).
+ */
+export const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "node_modules", ".git"]);
 
 /**
  * N8-1: bring an installed docker bundle's compose file up to the repo's copy,
@@ -1002,7 +1052,10 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  *   2. Re-copies the served PANELS_DIR artifacts (<id>.js, <id>-routes.js),
  *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
  *      symlink exists (install-parity — an April-era install may predate it).
- *   3. For a docker bundle, manifest.refreshFiles is copied as before. The compose
+ *   3. manifest.refreshFiles (see manifestRefreshFiles: never .env*, data or a
+ *      read-write mount, and never a compose file on a NON-docker bundle) is
+ *      copied for EVERY bundle type, a declared directory pruned to the repo's
+ *      contents. The compose
  *      file itself is NOT part of this version-keyed step: it is caught up on every
  *      boot at any version by catchUpInstalledCompose, which never overwrites an
  *      owner edit and never breaks Start on a missing required key. The running
@@ -1097,11 +1150,28 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
     if (contexts.length) {
       console.log(`[bundles] ${id}: build source refreshed (${contexts.join(", ")}) — Restart/Start it in Extensions to rebuild the image`);
     }
-    const opted = manifestRefreshFiles(repoManifest, appSrc, destDir).filter((rel) => copyBundleRefreshItem(appSrc, destDir, rel));
-    for (const rel of opted) touched.push(`refresh:${rel}`);
-    if (opted.length) {
-      console.log(`[bundles] ${id}: refreshFiles copied (${opted.join(", ")}) — running containers keep the old files/compose until the bundle is restarted`);
-    }
+  }
+
+  // manifest.refreshFiles is copied for EVERY bundle type, not only a docker one:
+  // a non-docker bundle's code can live outside the fixed dirs above —
+  // google-workspace's Python package (google_workspace_mcp/) and its Apps Script
+  // shim (apps-script-shim/) are named exactly that way, or a version bump would
+  // ship the new manifest over stale code. A non-docker bundle's declared compose
+  // entry is skipped (manifestRefreshFiles) — no owner-edit check exists there.
+  // Each item goes through the
+  // build-context skip filter (no .venv/__pycache__/.pytest_cache/node_modules/
+  // .git), and a declared DIRECTORY is pruned to the repo's own contents so a
+  // module deleted upstream does not keep living in the installed copy.
+  const opted = manifestRefreshFiles(repoManifest, appSrc, destDir)
+    .filter((rel) => copyBundleRefreshItem(appSrc, destDir, rel, {
+      prune: true,
+      skip: (name) => BUILD_CONTEXT_SKIP.has(name),
+    }));
+  for (const rel of opted) touched.push(`refresh:${rel}`);
+  if (opted.length) {
+    console.log(`[bundles] ${id}: refreshFiles copied (${opted.join(", ")})${isDocker
+      ? " — running containers keep the old files/compose until the bundle is restarted"
+      : ""}`);
   }
 
   // Served panel artifacts — exactly as install does (bundles.js ~:1170-1184),
