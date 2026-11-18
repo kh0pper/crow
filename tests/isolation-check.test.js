@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { canOpen, probeForeignProc, processFacts, secretEnvNames, formatIsolationLine, formatSecretsAncestorsLine } from "../servers/shared/isolation-check.js";
+import { canOpen, probeForeignProc, processFacts, secretEnvNames, formatIsolationLine, formatSecretsAncestorsLine, defaultSensitivePaths } from "../servers/shared/isolation-check.js";
 import { checkSecretsAncestors } from "../servers/shared/secrets-ancestors.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-iso-")));
@@ -79,6 +79,16 @@ test("the secrets dir ancestors boot line: ok, a finding count, and refused once
   assert.equal(formatSecretsAncestorsLine({ ok: false, findings: [...finding, ...finding], refused: true }),
     "[isolation] secrets dir ancestors: refused (2 findings)");
   assert.equal(formatSecretsAncestorsLine(null), "[isolation] secrets dir ancestors: ok", "never throws on no report");
+});
+
+test("defaultSensitivePaths: the operator's key dirs and the Google Cloud CLI's credentials are in the boot report list", () => {
+  const home = join(scratch, "iso-home");
+  mkdirSync(join(home, ".crow", "data"), { recursive: true });
+  const paths = defaultSensitivePaths({ home, crowHome: join(home, ".crow") });
+  for (const rel of [[".ssh"], [".gnupg"], [".config", "gcloud"]]) {
+    assert.ok(paths.includes(join(home, ...rel)), "sensitive path listed: " + join(...rel));
+  }
+  assert.ok(!paths.includes(join(home, ".crow")), "never this instance's own home");
 });
 
 test("a scratch tree this process owns reads ok on a real host (/tmp's sticky bit is why)", () => {

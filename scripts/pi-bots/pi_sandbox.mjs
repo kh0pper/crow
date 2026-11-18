@@ -79,7 +79,10 @@
  *    .env, and every .env / .env.* file in a bundle folder of each Crow home
  *    and of the app root, except the browser and workspace bundles'. They read
  *    empty inside. ~/.ssh is hidden as a dir always (created 0700 when it is
- *    missing), and so are the instance's env/ and android-keystore/ folders.
+ *    missing), and so are the instance's env/ and android-keystore/ folders,
+ *    and the operator's Google Cloud CLI folder ~/.config/gcloud (its
+ *    application-default credentials, credentials.db, access_tokens.db and
+ *    legacy_credentials/; hidden when it exists and never created).
  *    A git-enabled bot's own key dir under the secrets dir is bound back
  *    read-only inside the tmpfs (--ro-bind-fd; see servers/shared/bot-git).
  *    Still readable, because something inside the sandbox reads each one:

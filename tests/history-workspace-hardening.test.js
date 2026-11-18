@@ -44,10 +44,13 @@ test("a bot's carried entries are denied, except the user's own outputs", () => 
 });
 
 test("ssh, cloud, gpg, kube, docker and password-vault secrets are denied", () => {
-  for (const rel of [".ssh", ".aws", ".gnupg", ".kube", "home/.ssh", "deep/.AWS"]) {
+  for (const rel of [".ssh", ".aws", ".gnupg", ".kube", "home/.ssh", "deep/.AWS", "gcloud", "deep/gcloud",
+    "home/.config/gcloud", "legacy_credentials", "deep/legacy_credentials"]) {
     assert.equal(isDeniedEntry(rel, true), true, `${rel}/ must be denied`);
   }
-  for (const rel of ["credentials.json", "deep/credentials.json", "vault.kdbx", "a/Vault.KDBX", ".docker/config.json", "deep/.docker/config.json"]) {
+  for (const rel of ["credentials.json", "deep/credentials.json", "vault.kdbx", "a/Vault.KDBX", ".docker/config.json", "deep/.docker/config.json",
+    "home/.config/gcloud/application_default_credentials.json", "application_default_credentials.json",
+    "credentials.db", "access_tokens.db"]) {
     assert.equal(isDeniedEntry(rel, false), true, `${rel} must be denied`);
   }
   // Only Docker's one credentials file is a secret, not the folder or its siblings.

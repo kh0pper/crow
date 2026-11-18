@@ -38,7 +38,8 @@
  *               work without touching the cache unsandboxed processes run
  *
  * Never bound, whatever a policy says: ~/.ssh, ~/.gnupg, ~/.claude, ~/.config
- * /systemd, the whole $HOME, other /home users, other Crow instance homes,
+ * /gcloud (the Google Cloud CLI's credentials), ~/.config/systemd, the whole
+ * $HOME, other /home users, other Crow instance homes,
  * a bot's git key dir (the contain tier has no git in v1), /etc/crow,
  * /run/credentials, /run/user, docker sockets; nor is the checkout
  * or engine ever writable. "/" in write_paths/read_paths (permissionMode
@@ -122,7 +123,8 @@ export function packageRoot(file, exists = existsSync) {
 
 /** Paths a bot may never see, for a given home. */
 export function neverBound(home) {
-  return [join(home, ".ssh"), join(home, ".gnupg"), join(home, ".claude"), join(home, ".config", "systemd"),
+  return [join(home, ".ssh"), join(home, ".gnupg"), join(home, ".claude"), join(home, ".config", "gcloud"),
+    join(home, ".config", "systemd"),
     join(home, ".local", "share", "systemd"), "/etc/crow", "/run/credentials", "/run/user", "/run/docker.sock", "/var/run/docker.sock"];
 }
 

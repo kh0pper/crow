@@ -12,7 +12,12 @@
  *                                    `.npmrc`, `.pypirc`, `.git-credentials`,
  *                                    `credentials.json`, `*.kdbx`, and the
  *                                    folders `.ssh`, `.aws`, `.gnupg`, `.kube`,
- *                                    and `.docker/config.json`
+ *                                    `gcloud` (the Google Cloud CLI's folder,
+ *                                    `.config/gcloud` in a home), and
+ *                                    `.docker/config.json`; a copied-out
+ *                                    `application_default_credentials.json` or
+ *                                    `legacy_credentials/` folder is denied by
+ *                                    name too (its `*.db` stores already are)
  *   keys                             `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`,
  *                                    `id_ecdsa*`, `*.p12`, `*.pfx`
  *   a bot's own private world        `.pi` (pi session files)
@@ -61,6 +66,12 @@ export const DENIED_ANY_NAME = Object.freeze([
   ".aws",
   ".gnupg",
   ".kube",
+  // The Google Cloud CLI's credentials folder (~/.config/gcloud) and the files
+  // inside it an operator may have copied into a workspace. `credentials.db`
+  // and `access_tokens.db` are already covered by the `*.db` file rule.
+  "gcloud",
+  "application_default_credentials.json",
+  "legacy_credentials",
   "credentials.json",
   "*.kdbx",
 ]);

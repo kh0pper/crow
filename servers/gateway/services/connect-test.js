@@ -306,7 +306,7 @@ function realOr(p) {
  *    bundles' .env files, data/crow.db) or any other Crow home's secrets dir on this host
  *    (checkedInstanceSecretsDirs: the scan plus every other-instance dir this instance hid before, the same rule the bot launcher uses). A scan that can't be completed, or a remembered dir that is gone or replaced, refuses (fail closed);
  *    Also always guarded: /proc, /sys and /dev (a link to /proc/<pid>/environ would hand a child
- *    the gateway's environment), the user's ~/.ssh (env.HOME, else the OS home), and the Crow
+ *    the gateway's environment), the user's ~/.ssh and ~/.config/gcloud (env.HOME, else the OS home), and the Crow
  *    source dir's .env plus CROW_APP_ENV_PATH when set (SYSTEM_GUARDED / guardedFiles below);
  *  - `not_a_vault`: `expectEntry` given and not present (a name, never a path).
  * Options: `crowHome`, `env` and `instanceScan` (passed to checkedInstanceSecretsDirs), or
@@ -322,7 +322,12 @@ const REPO_ENV = fileURLToPath(new URL("../../../.env", import.meta.url));
 
 /** The same-user secrets outside any Crow home that a folder may never reach. */
 function guardedExtras(env) {
-  const out = [...SYSTEM_GUARDED, join(env.HOME || homedir(), ".ssh"), REPO_ENV];
+  const home = env.HOME || homedir();
+  const out = [...SYSTEM_GUARDED, join(home, ".ssh"),
+    // The Google Cloud CLI's credentials folder: a folder service rooted there
+    // would hand a bot or add-on the operator's application-default
+    // credentials, credentials.db and access_tokens.db.
+    join(home, ".config", "gcloud"), REPO_ENV];
   if (typeof env.CROW_APP_ENV_PATH === "string" && isAbsolute(env.CROW_APP_ENV_PATH)) out.push(env.CROW_APP_ENV_PATH);
   return out;
 }

@@ -146,7 +146,8 @@ function looksLikeInstanceHome(p) {
   return false;
 }
 
-/** Default sensitive paths: the other ~/.crow* homes, ~/.ssh, ~/.gnupg. */
+/** Default sensitive paths: the other ~/.crow* homes, ~/.ssh, ~/.gnupg, and the
+ *  Google Cloud CLI's credential folder ~/.config/gcloud. */
 export function defaultSensitivePaths({ home = homedir(), crowHome = process.env.CROW_HOME || join(homedir(), ".crow") } = {}) {
   const own = resolve(crowHome);
   const parent = dirname(own);
@@ -159,5 +160,10 @@ export function defaultSensitivePaths({ home = homedir(), crowHome = process.env
     }
   } catch {}
   for (const d of [".ssh", ".gnupg"]) paths.push(join(home, d));
+  // The Google Cloud CLI's credentials (application_default_credentials.json,
+  // credentials.db, access_tokens.db, legacy_credentials/): operator secrets,
+  // reported like ~/.ssh. Listed whether or not it exists, like the two above;
+  // canOpen only ever names a path it really opened.
+  paths.push(join(home, ".config", "gcloud"));
   return [...new Set(paths)];
 }

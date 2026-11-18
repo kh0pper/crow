@@ -2,8 +2,9 @@
 
 The point of every refusal below: the path is decided BEFORE any Google client is
 built, so a refused local path makes no API call at all — and the sign-in folder
-(the OAuth token and credentials), ~/.ssh and ~/.gnupg are refused whatever else is
-configured. The service objects are mocks, so nothing leaves the process.
+(the OAuth token and credentials), ~/.ssh, ~/.gnupg and ~/.config/gcloud are
+refused whatever else is configured. The service objects are mocks, so nothing
+leaves the process.
 
 Every scratch path lives under a temporary folder; the tests that go through the
 tools point HOME and the two sign-in variables at it too, so no real home path is
@@ -44,12 +45,14 @@ def scratch():
     ``home/files`` is the files folder, ``home/.config/google-workspace-mcp`` holds
     the token and credentials, ``home/elsewhere`` is a plain folder the tools may
     reach only with no files folder set (the pre-existing behaviour), and
-    ``home/.ssh`` / ``home/.gnupg`` exist so the always-refused rules can be tested.
+    ``home/.ssh``, ``home/.gnupg`` and ``home/.config/gcloud`` exist so the
+    always-refused rules can be tested.
     """
     with tempfile.TemporaryDirectory() as tmp:
         home = os.path.realpath(tmp)
         files = os.path.join(home, "files")
         signin = os.path.join(home, ".config", "google-workspace-mcp")
+        gcloud = os.path.join(home, ".config", "gcloud")
         elsewhere = os.path.join(home, "elsewhere")
         for path in (
             files,
@@ -57,6 +60,7 @@ def scratch():
             elsewhere,
             os.path.join(home, ".ssh"),
             os.path.join(home, ".gnupg"),
+            gcloud,
         ):
             os.makedirs(path, exist_ok=True)
         token = os.path.join(signin, TOKEN_NAME)
@@ -70,10 +74,14 @@ def scratch():
             fh.write("k")
         with open(os.path.join(home, ".gnupg", "pubring.gpg"), "w", encoding="utf-8") as fh:
             fh.write("k")
+        adc = os.path.join(gcloud, "application_default_credentials.json")
+        with open(adc, "w", encoding="utf-8") as fh:
+            fh.write('{"fake": "application-default-credentials"}')
         yield {
             "home": home,
             "files": files,
             "signin": signin,
+            "gcloud": gcloud,
             "token": token,
             "credentials": credentials,
             "elsewhere": elsewhere,
@@ -345,6 +353,46 @@ class AlwaysRefusedTests(unittest.TestCase):
                     with self.assertRaises(local_paths.PathRefused) as caught:
                         resolve(paths, target)
                     self.assertIn("never reads or writes", str(caught.exception))
+
+    def test_the_gcloud_config_folder_is_refused(self):
+        # The Google Cloud CLI keeps application-default credentials and service
+        # account keys here, so an unwalled add-on must never be handed a path in
+        # it — with the guard off, with no folder, and even when the files folder
+        # is the home that contains it.
+        with scratch() as paths:
+            for target in (
+                os.path.join(paths["gcloud"], "application_default_credentials.json"),
+                os.path.join(paths["gcloud"], "anything.txt"),
+            ):
+                with self.subTest(path=target):
+                    with self.assertRaises(local_paths.PathRefused) as caught:
+                        resolve(paths, target)
+                    self.assertIn("~/.config/gcloud", str(caught.exception))
+                    self.assertIn("never reads or writes", str(caught.exception))
+            with self.assertRaises(local_paths.PathRefused) as caught:
+                resolve(
+                    paths,
+                    os.path.join(paths["gcloud"], "application_default_credentials.json"),
+                    GWS_FILES_DIR=paths["home"],
+                )
+            self.assertIn("~/.config/gcloud", str(caught.exception))
+
+    def test_a_symlinked_gcloud_config_folder_protects_both_ends(self):
+        with scratch() as paths:
+            real = os.path.join(paths["home"], "real-gcloud")
+            os.makedirs(real)
+            write_file(os.path.join(real, "access_tokens.db"), b"fake")
+            os.remove(os.path.join(paths["gcloud"], "application_default_credentials.json"))
+            os.rmdir(paths["gcloud"])
+            os.symlink(real, paths["gcloud"])
+            for target in (
+                os.path.join(real, "access_tokens.db"),
+                os.path.join(paths["gcloud"], "access_tokens.db"),
+            ):
+                with self.subTest(path=target):
+                    with self.assertRaises(local_paths.PathRefused) as caught:
+                        resolve(paths, target)
+                    self.assertIn("~/.config/gcloud", str(caught.exception))
 
     def test_the_signin_folder_wins_over_a_files_folder_that_contains_it(self):
         with scratch() as paths:

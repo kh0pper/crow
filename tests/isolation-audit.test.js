@@ -45,6 +45,8 @@ test("defaultSensitivePaths: other .crow* homes beside this one, plus key dirs; 
   assert.ok(!p.includes(join(home, ".crowbar")) && !p.includes(join(home, "crow")));
   assert.ok(!p.includes(join(home, ".crow-backups")), "a .crow-* dir that is not an instance home is skipped");
   assert.ok(p.includes(join(home, ".ssh")) && p.includes(join(home, ".gnupg")));
+  // The Google Cloud CLI's credential folder is operator secret material too.
+  assert.ok(p.includes(join(home, ".config", "gcloud")), "~/.config/gcloud is reported as sensitive");
 });
 
 test("auditInstanceFiles: modes of the instance's own secret files, existing ones only", () => {

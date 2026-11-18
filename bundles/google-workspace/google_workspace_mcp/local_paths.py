@@ -14,8 +14,9 @@ Three rules, in the order they are checked:
 
 1. **The sign-in folder is never a local path.** Always — guard on or off, files
    folder set or not. The real and the named parent folders of
-   ``GOOGLE_TOKEN_FILE`` and ``GOOGLE_CREDENTIALS_FILE``, ``~/.ssh``, ``~/.gnupg``
-   and any ``~/.config/google-workspace-mcp*`` sibling are refused, and so are the
+   ``GOOGLE_TOKEN_FILE`` and ``GOOGLE_CREDENTIALS_FILE``, ``~/.ssh``, ``~/.gnupg``,
+   ``~/.config/gcloud`` (the Google Cloud CLI's credentials) and any
+   ``~/.config/google-workspace-mcp*`` sibling are refused, and so are the
    token and credentials files themselves (they are inside those folders). Every
    one of them is compared after ``os.path.realpath``, so a symlink pointing into
    them is refused too, and a file opened for reading is compared by
@@ -32,7 +33,7 @@ Three rules, in the order they are checked:
    existing file, a default output name is unique (repeated exports create new
    files), a missing parent folder is refused, a non-regular file is refused for
    reading, a local image's first bytes must really be an image, and the sign-in
-   folder, ``~/.ssh`` and ``~/.gnupg`` are refused always.
+   folder, ``~/.ssh``, ``~/.gnupg`` and ``~/.config/gcloud`` are refused always.
 
 3. **With a files folder set**, a path must land *strictly inside* it after
    ``os.path.realpath`` — never on the folder itself. A relative path is relative
@@ -97,10 +98,15 @@ _DEFAULT_SIGNIN_FILES = {
 
 # Folders that are never a files folder, whatever else is configured. The pattern
 # covers a sibling sign-in directory (`google-workspace-mcp-old`, a second
-# account's copy) as well as the one the defaults name.
+# account's copy) as well as the one the defaults name. `~/.config/gcloud` is the
+# Google Cloud CLI's credential folder (`application_default_credentials.json`,
+# `credentials.db`, `access_tokens.db`, `legacy_credentials/`): a service-account
+# key and an application-default credential both live there, so a tool call must
+# never be handed a path inside it.
 _PRIVATE_PATTERNS = (
     ("~/.ssh", "~/.ssh"),
     ("~/.gnupg", "~/.gnupg"),
+    ("~/.config/gcloud", "~/.config/gcloud"),
     ("~/.config/google-workspace-mcp*", "~/.config/google-workspace-mcp* (a sign-in folder)"),
 )
 
@@ -274,9 +280,9 @@ def _protected(env: Mapping[str, str], home: str
         if real_file is None:
             raise PathRefused(
                 f"This tool call is refused — the folders this server protects (the "
-                f"Google sign-in folder, ~/.ssh, ~/.gnupg) cannot be resolved right "
-                f"now, so no local path is allowed. Fix the filesystem (a broken "
-                f"symbolic link can cause this) and try again."
+                f"Google sign-in folder, ~/.ssh, ~/.gnupg, ~/.config/gcloud) cannot "
+                f"be resolved right now, so no local path is allowed. Fix the "
+                f"filesystem (a broken symbolic link can cause this) and try again."
             )
         files.append((real_file, _SIGNIN_LABEL))
         candidates.append((os.path.dirname(given), _SIGNIN_LABEL))
@@ -301,9 +307,9 @@ def _protected(env: Mapping[str, str], home: str
         if real is None:
             raise PathRefused(
                 f"This tool call is refused — the folders this server protects (the "
-                f"Google sign-in folder, ~/.ssh, ~/.gnupg) cannot be resolved right "
-                f"now, so no local path is allowed. Fix the filesystem (a broken "
-                f"symbolic link can cause this) and try again."
+                f"Google sign-in folder, ~/.ssh, ~/.gnupg, ~/.config/gcloud) cannot "
+                f"be resolved right now, so no local path is allowed. Fix the "
+                f"filesystem (a broken symbolic link can cause this) and try again."
             )
         if (real, label) in seen:
             continue

@@ -747,16 +747,19 @@ test("I1: the shared tool cache is sanitized with the WRITER's values: A's token
   }
 });
 
-test("I2a: links into /proc, /sys, /dev, ~/.ssh, the app .env, or an unreadable subfolder are refused", async () => {
+test("I2a: links into /proc, /sys, /dev, ~/.ssh, ~/.config/gcloud, the app .env, or an unreadable subfolder are refused", async () => {
   const { folderRefusal, SYSTEM_GUARDED } = await import("../servers/gateway/services/connect-test.js");
   assert.deepEqual([...SYSTEM_GUARDED], ["/proc", "/sys", "/dev"]);
   const USER = mkdtempSync(join(tmpdir(), "crow-svcchild-user-"));
   try {
     mkdirSync(join(USER, ".ssh"));
+    // The Google Cloud CLI's credentials: a folder service may never root there.
+    mkdirSync(join(USER, ".config", "gcloud"), { recursive: true });
     writeFileSync(join(USER, "app.env"), "X=1\n");
     const env = { HOME: USER, CROW_APP_ENV_PATH: join(USER, "app.env") };
     const opts = { crowHome: HOME, expectEntry: ".obsidian", otherSecretsDirs: [], scanLinks: true, env };
-    const cases = { proc: "/proc/self/environ", sys: "/sys/kernel", dev: "/dev/null", ssh: join(USER, ".ssh"), appenv: join(USER, "app.env") };
+    const cases = { proc: "/proc/self/environ", sys: "/sys/kernel", dev: "/dev/null", ssh: join(USER, ".ssh"),
+      gcloud: join(USER, ".config", "gcloud"), appenv: join(USER, "app.env") };
     for (const [name, target] of Object.entries(cases)) {
       const v = vault(`g-${name}`);
       symlinkSync(target, join(v, "note.md"));
@@ -765,8 +768,10 @@ test("I2a: links into /proc, /sys, /dev, ~/.ssh, the app .env, or an unreadable 
     assert.equal(folderRefusal(vault("g-plain"), opts), null, "a plain vault still passes");
     // The Crow source dir's .env: a folder containing it is refused (path rule, file or not).
     assert.equal(folderRefusal(REPO, { ...opts, expectEntry: null, scanLinks: false }), "forbidden_target");
-    // A folder holding ~/.ssh is refused even without the walk.
+    // A folder holding ~/.ssh (and therefore ~/.config/gcloud) is refused even without the walk.
     assert.equal(folderRefusal(USER, { ...opts, expectEntry: null, scanLinks: false }), "forbidden_target");
+    // The gcloud folder itself, named directly as a folder service root.
+    assert.equal(folderRefusal(join(USER, ".config", "gcloud"), { ...opts, expectEntry: null, scanLinks: false }), "forbidden_target");
     // An unreadable subfolder: fail closed.
     const locked = vault("g-locked");
     mkdirSync(join(locked, "private"));
