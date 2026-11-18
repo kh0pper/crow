@@ -32,10 +32,12 @@ Every `.env` file in a tree the wall binds is masked at any depth, and so is eve
 Three manifest fields name files and folders the owner chooses:
 
 - `sandbox.files.read` — each path is bound read-only (a read grant is never widened to a write).
-- `sandbox.files.write` — each path is bound read-write.
+- `sandbox.files.write` — each path is bound read-write. `google-workspace`'s `"write": ["env:GWS_FILES_DIR"]` is the pattern: the one folder the owner typed is the only place its local-file tools may read from or write to, and with the variable unset no folder is bound at all.
 - `sandbox.files.oauthDir` — the **folder** holding an owner-named token file is bound read-write, so an app can add files beside its token.
 
 Each bound path is the value of an environment field the owner typed. A value that is only a manifest default is refused rather than bound. Every one of these is opened by fd, and a `.env` inside a folder bound this way is masked like any other.
+
+The one reviewed token folder is `google-workspace`'s. Its usual sign-in folder, `~/.config/google-workspace-mcp`, sits under a hidden top-level entry of the home, which is never writable otherwise, so core lists that one exact home-relative folder in `ADDON_TOKEN_DIRS`. The grant exists because an OAuth refresh writes a temp file in that folder and renames it, so the folder itself — not just the token file its `oauthDir` names — has to be writable. The entry is one exact name, never a pattern; it applies only when the profile comes from Crow's own checkout (an installed manifest is never trusted to widen it), and the folder is opened by fd like every other writable bind.
 
 ### Its own `.env`
 
