@@ -75,6 +75,13 @@ uv run google-workspace-mcp-authorize            # abre un navegador
 uv run google-workspace-mcp-authorize --manual   # flujo de copiar y pegar, sin navegador
 ```
 
+El comando lee `GOOGLE_CREDENTIALS_FILE` y `GOOGLE_TOKEN_FILE` del shell en el
+que corre, no del formulario de Extensiones, y por defecto usa esa carpeta
+(`~/.config/google-workspace-mcp/credentials.json` y
+`~/.config/google-workspace-mcp/token.json`). Si elegiste otras rutas en el paso
+3, corre `export GOOGLE_CREDENTIALS_FILE=… GOOGLE_TOKEN_FILE=…` en la misma
+terminal antes.
+
 Inicia sesión con tu cuenta de Google y otorga los permisos. Esto escribe
 `token.json` junto a las credenciales. Es un paso único: después el servidor
 renueva el token solo.
@@ -145,7 +152,10 @@ Google:
   esa carpeta, así que primero se leen sus dueños y permisos (una llamada a
   Drive) y la escritura se rechaza si alguien de esa lista no está en la lista
   blanca. Tu propia dirección siempre cuenta como permitida, y una escritura sin
-  carpeta (la raíz de Mi unidad) no necesita comprobación.
+  carpeta (la raíz de Mi unidad) no necesita comprobación. Una carpeta compartida
+  por enlace (cualquiera con el enlace) o con un dominio entero se rechaza
+  siempre —ninguna lista blanca admite eso— y una escritura se rechaza cuando no
+  se puede leer con quién está compartida la carpeta.
 - **Gmail** — la dirección de reenvío de un filtro.
 - **Apps Script** — escribir o ejecutar el script de un proyecto se rechaza sin
   más: el código publicado puede enviar correo, compartir archivos de Drive o
@@ -173,7 +183,8 @@ Si eso importa en una cuenta, reduce lo que la cuenta puede hacer con
 Una instalación hecha antes de que existiera este bundle sigue lanzando el
 servidor viejo `uvx --from git+…`, y su carpeta es poco más que un resto. Hay un
 script de migración que la pasa al bundle. Córrelo desde el checkout del propio
-gateway, con el gateway detenido:
+gateway. Detén el gateway primero (recomendado): el script no lo comprueba, pero
+un gateway en marcha podría reescribir los mismos archivos.
 
 ```bash
 node scripts/addon-sandbox/migrate-gws-firstparty.mjs --dry-run   # imprime el plan, no cambia nada
@@ -184,6 +195,9 @@ node scripts/addon-sandbox/migrate-gws-firstparty.mjs             # hazlo
   real, en `main` y con `bundles/google-workspace` limpio. `--repo-root <path>`
   nombra otro checkout que pasa las mismas tres comprobaciones, así que la
   carpeta del script puede ser un worktree.
+- Se niega si la entrada existente del complemento no lleva ya un valor para
+  `GOOGLE_CREDENTIALS_FILE` y para `GOOGLE_TOKEN_FILE` (ponlos primero en
+  Extensiones); con uno sin definir se niega y no cambia nada.
 - Primero respalda todo, en
   `<CROW_HOME>/addon-walls-migrate/google-workspace-<stamp>/`, copia la carpeta
   vieja a un lado como
@@ -201,6 +215,9 @@ node scripts/addon-sandbox/migrate-gws-firstparty.mjs             # hazlo
   cd ~/.crow/bundles/google-workspace
   UV_PROJECT_ENVIRONMENT=~/.crow/data/google-workspace/.venv uv sync --frozen
   ```
+  Las dos rutas son las de por defecto: `CROW_HOME` y `CROW_DATA_DIR` las mueven,
+  y la carpeta de datos es `<CROW_DATA_DIR>/google-workspace`, que por defecto es
+  `<CROW_HOME>/data/google-workspace`.
 - Para volver atrás: `node scripts/addon-sandbox/migrate-gws-firstparty.mjs --undo`
   (la copia más nueva) o `--undo <stamp>`. Devuelve la entrada, la carpeta vieja e
   `installed.json` byte por byte, y se niega con código `3` cuando el home cambió

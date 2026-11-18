@@ -72,6 +72,13 @@ uv run google-workspace-mcp-authorize            # opens a browser
 uv run google-workspace-mcp-authorize --manual   # copy-paste flow, no browser
 ```
 
+The command reads `GOOGLE_CREDENTIALS_FILE` and `GOOGLE_TOKEN_FILE` from the
+shell it runs in, not from the Extensions form, and it uses that folder by
+default (`~/.config/google-workspace-mcp/credentials.json` and
+`~/.config/google-workspace-mcp/token.json`). If you chose other paths in step 3,
+run `export GOOGLE_CREDENTIALS_FILE=… GOOGLE_TOKEN_FILE=…` in the same terminal
+first.
+
 Sign in with your Google account and grant the scopes. This writes `token.json`
 beside the credentials. It is a one-time step: the server refreshes the token
 itself from then on.
@@ -138,7 +145,9 @@ nothing:
   that folder, so the folder's owners and permissions are read first (one Drive
   call) and the write is refused if anyone on them is off the allowlist. Your own
   address always counts as allowed, and a write with no folder (My Drive root)
-  needs no check.
+  needs no check. A folder shared by link (anyone with the link) or with a whole
+  domain is always refused — no allowlist admits those — and a write is refused
+  when the folder's sharing cannot be read at all.
 - **Gmail** — a filter's forwarding address.
 - **Apps Script** — writing or running a project's script is refused outright:
   pushed script can send mail, share Drive files or call any API the token can
@@ -164,8 +173,9 @@ If that matters for an account, narrow what the account can do with
 
 An install made before this bundle existed still launches the old
 `uvx --from git+…` server, and its folder is little more than a stub. A migration
-script moves it onto the bundle. Run it from the gateway's own checkout, with the
-gateway stopped:
+script moves it onto the bundle. Run it from the gateway's own checkout. Stop the
+gateway first (recommended): the script itself doesn't check, but a running
+gateway could rewrite the same files.
 
 ```bash
 node scripts/addon-sandbox/migrate-gws-firstparty.mjs --dry-run   # print the plan, change nothing
@@ -176,6 +186,9 @@ node scripts/addon-sandbox/migrate-gws-firstparty.mjs             # do it
   checkout, on `main`, with `bundles/google-workspace` clean. `--repo-root <path>`
   names a different checkout that passes the same three checks, so the script's
   own folder may be a worktree.
+- It refuses unless the existing add-on entry already carries a value for both
+  `GOOGLE_CREDENTIALS_FILE` and `GOOGLE_TOKEN_FILE` (set them in Extensions
+  first); with either unset it refuses and changes nothing.
 - It backs everything up first, under
   `<CROW_HOME>/addon-walls-migrate/google-workspace-<stamp>/`, copies the old
   install folder aside as
@@ -193,6 +206,9 @@ node scripts/addon-sandbox/migrate-gws-firstparty.mjs             # do it
   cd ~/.crow/bundles/google-workspace
   UV_PROJECT_ENVIRONMENT=~/.crow/data/google-workspace/.venv uv sync --frozen
   ```
+  Both paths are the defaults: `CROW_HOME` and `CROW_DATA_DIR` move them, and the
+  data folder is `<CROW_DATA_DIR>/google-workspace`, which defaults to
+  `<CROW_HOME>/data/google-workspace`.
 - To go back: `node scripts/addon-sandbox/migrate-gws-firstparty.mjs --undo`
   (newest backup) or `--undo <stamp>`. It puts the entry, the old folder and
   `installed.json` back byte for byte, and refuses with exit `3` when the home
