@@ -14,9 +14,16 @@
  * Review round fixes carry their ids: B1 (the peer that reaches the file tools through /router/mcp,
  * where it exists only as a forwarded `_meta`; kind "peer" and the remote-bot form), I1 (a bot may
  * not write or delete a dot-entry, or an agent instruction/config file at any depth — folded
- * spellings and the owner included), I3 (parseRelPath
+ * spellings, the exact names AND the runner STEMS, and the owner included), I3 (parseRelPath
  * directly, and a hook that moves a folder out BETWEEN component opens so the post-open kernel-path
  * check is what refuses), N2 (the empty-folder delete re-checks its parent), N6 (hard-linked read).
+ *
+ * Two follow-ups have their own block: a project whose workspace folder is missing (only a WRITE
+ * creates it, one 0700 component at a time, fd-relative, refusing a symlinked projects folder, a
+ * symlinked project folder and a file where `workspace` should be — a listing answers empty and a
+ * read/delete not-found, creating nothing — while the data dir itself is the trusted ANCHOR, so a
+ * symlinked data dir and one owned by another user are both created into), and the bot name rules
+ * beyond the first list, including the stem rule's last-component and loader-extension scope.
  *
  * Scratch CROW_HOME + data dir with a real crow.db from scripts/init-db.js: nothing here touches
  * ~/.crow. The files are real files under a real workspace folder.
@@ -24,12 +31,13 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
-  linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync,
+  chownSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync,
   symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 
 const REPO = join(import.meta.dirname, "..");
 const dir = mkdtempSync(join(tmpdir(), "project-files-"));
@@ -74,6 +82,18 @@ const refused = async (r, re) => {
   return text(r);
 };
 const ws = (project, ...names) => join(project.workspaceDir, ...names);
+
+/** Run `fn` with CROW_DATA_DIR pointing at `dataDir` (both project creation and the file tools read it live). */
+async function withDataDir(dataDir, fn) {
+  const prev = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = dataDir;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DATA_DIR;
+    else process.env.CROW_DATA_DIR = prev;
+  }
+}
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env }, stdio: "pipe", cwd: REPO });
@@ -688,13 +708,233 @@ test("an archived project is refused", async () => {
   assert.equal(readFileSync(join(workspaceDir, "x.txt"), "utf8"), "x\n");
 });
 
-test("a project with no workspace folder yet says so instead of creating one", async () => {
+test("a missing workspace folder is created by a WRITE (0700 per component) and only by a write", async () => {
+  // The live repro: a project created over MCP never got its folders, so `<data>/projects` itself was
+  // absent and every write failed with "This instance's projects folder is not available".
+  const fresh = join(dir, "fresh-data");
+  mkdirSync(fresh, { recursive: true });
+  const c = await owner();
+  await withDataDir(fresh, async () => {
+    const { id, workspaceDir } = await createProjectSpace(db, { name: "Files Fresh Root" });
+    const projectDir = dirname(workspaceDir);
+    // Creation makes the folders; the older (or hand-emptied) case is what the write path must handle.
+    rmSync(join(fresh, "projects"), { recursive: true, force: true });
+    assert.throws(() => lstatSync(join(fresh, "projects")));
+
+    // A listing is an EMPTY workspace, a read and a delete are not-found, and none of them creates.
+    const listed = await call(c, "crow_project_file_list", { project_id: Number(id), recursive: true });
+    assert.ok(!listed.isError, text(listed));
+    assert.match(text(listed), /0 entries/);
+    assert.throws(() => lstatSync(join(fresh, "projects")), "a listing never creates a folder");
+    await refused(await call(c, "crow_project_file_read", { project_id: Number(id), path: "a.txt" }), /There is nothing at that path/);
+    await refused(await call(c, "crow_project_file_delete", { project_id: Number(id), path: "a.txt" }), /There is nothing at that path/);
+    assert.throws(() => lstatSync(join(fresh, "projects")), "nor does a read or a delete");
+
+    const wrote = await call(c, "crow_project_file_write", { project_id: Number(id), path: "deep/notes.md", content: "made\n" });
+    assert.ok(!wrote.isError, text(wrote));
+    assert.equal(readFileSync(join(workspaceDir, "deep", "notes.md"), "utf8"), "made\n");
+    assert.equal(lstatSync(join(fresh, "projects")).mode & 0o777, 0o700, "projects/ is 0700");
+    assert.equal(lstatSync(projectDir).mode & 0o777, 0o700, "the project folder is 0700");
+    assert.equal(lstatSync(workspaceDir).mode & 0o777, 0o700, "the workspace is 0700");
+    assert.ok(lstatSync(join(workspaceDir, "deep")).isDirectory(), "a folder the write made is a real folder");
+
+    // A bot that may not write cannot trigger the creation: the share gate answers first.
+    const shared = await createProjectSpace(db, { name: "Files Fresh Read Only" });
+    await db.execute({
+      sql: "INSERT INTO project_bot_shares (project_id, bot_id, level) VALUES (?,?,'read')",
+      args: [Number(shared.id), BOT_RO],
+    });
+    rmSync(dirname(shared.workspaceDir), { recursive: true, force: true });
+    const bot = await clientFor({ kind: "bot", id: BOT_RO });
+    await refused(await call(bot, "crow_project_file_write", { project_id: Number(shared.id), path: "pwn.txt", content: "pwn" }), /read-only/);
+    assert.throws(() => lstatSync(shared.workspaceDir), "a refused bot write created nothing");
+
+    // A bot that MAY write does create it, exactly like the owner.
+    await db.execute({
+      sql: "INSERT INTO project_bot_shares (project_id, bot_id, level) VALUES (?,?,'read_write')",
+      args: [Number(shared.id), BOT_RW],
+    });
+    const writer = await clientFor({ kind: "bot", id: BOT_RW });
+    const made = await call(writer, "crow_project_file_write", { project_id: Number(shared.id), path: "by-bot.txt", content: "bot\n" });
+    assert.ok(!made.isError, text(made));
+    assert.equal(readFileSync(join(shared.workspaceDir, "by-bot.txt"), "utf8"), "bot\n");
+  });
+});
+
+test("a symlinked data dir is the anchor: creation works there, and nothing is created outside it", async () => {
+  // The repro: `~/.crow/data` moved to a bigger disk (`data` a symlink). The anchor's lstat saw a
+  // link rather than a folder, so creation refused and every project went without its folders.
+  const realData = join(dir, "sym-data-real");
+  const linkData = join(dir, "sym-data-link");
+  const outside = join(dir, "sym-data-outside");
+  mkdirSync(realData, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(realData, linkData);
+  const c = await owner();
+  await withDataDir(linkData, async () => {
+    const madeProject = await createProjectSpace(db, { name: "Files Symlinked Data" });
+    const { id, workspaceDir } = madeProject;
+    // The project row spells the path through the link, as the DB always does; the folders are made.
+    assert.ok(workspaceDir.startsWith(join(linkData, "projects") + sep), workspaceDir);
+    assert.equal(madeProject.workspaceCreated, true, "creation made the folders through the symlinked data dir");
+    assert.ok(lstatSync(workspaceDir).isDirectory(), "the workspace exists under the link");
+    assert.equal(lstatSync(join(realData, "projects")).mode & 0o777, 0o700, "projects/ is 0700 at the real location");
+    assert.equal(lstatSync(join(realData, "projects", madeProject.slug, "workspace")).mode & 0o777, 0o700);
+
+    // The write path (folders removed by hand) resolves the same anchor and creates them again.
+    rmSync(join(realData, "projects"), { recursive: true, force: true });
+    const wrote = await call(c, "crow_project_file_write", { project_id: Number(id), path: "kept.txt", content: "kept\n" });
+    assert.ok(!wrote.isError, text(wrote));
+    assert.equal(readFileSync(join(realData, "projects", madeProject.slug, "workspace", "kept.txt"), "utf8"), "kept\n");
+    assert.equal(readFileSync(join(workspaceDir, "kept.txt"), "utf8"), "kept\n", "the same file, read through the link");
+    assert.deepEqual(readdirSync(outside), [], "nothing was created outside the data dir");
+  });
+});
+
+test("the data dir is the trusted anchor: another user's folder is accepted, and only the components below are uid-checked", (t) => {
+  if (typeof process.getuid !== "function") return t.skip("no uid on this platform");
+  const me = process.getuid();
+  const fresh = join(dir, "uid-anchor-data");
+  mkdirSync(fresh, { recursive: true });
+  // The container shape: the process is one user and the data dir belongs to another (root over a
+  // uid-1000 bind mount, or the reverse). A faked process uid stages exactly that — the data dir is
+  // owned by `me`, so to the call it is somebody else's folder.
+  t.mock.method(process, "getuid", () => me + 1);
+  return import("../servers/shared/project-files.js").then(({ ensureWorkspaceDir }) => {
+    assert.throws(
+      () => ensureWorkspaceDir(join(fresh, "projects", "uid-project-1", "workspace"), fresh),
+      (err) => {
+        // It gets PAST the anchor (no ownership rule there any more) and refuses at the first
+        // component it would have to create — which is still uid-checked.
+        assert.equal(err.code, "forbidden", err.message);
+        assert.match(err.message, /A part of this project's workspace path is not owned by the process running Crow/);
+        return true;
+      },
+    );
+    assert.throws(() => lstatSync(join(fresh, "projects", "uid-project-1", "workspace")), "nothing was created");
+  });
+});
+
+test("a data dir the process does not own is really created into (the bind-mounted container data dir)", (t) => {
+  if (typeof process.getuid !== "function") return t.skip("no uid on this platform");
+  const me = process.getuid();
+  const slug = `crow-anchor-probe-${randomBytes(6).toString("hex")}-1`;
+  // Two ways to stage "the data dir belongs to another user": as root, chown a scratch folder (root
+  // may); otherwise use a world-writable folder somebody else owns (a normal box's /tmp is root's).
+  // The container shape is exactly this: a process allowed to create INSIDE the data dir while the
+  // dir itself belongs to the host user.
+  let anchor = join(dir, `uid-anchor-${randomBytes(6).toString("hex")}`);
+  mkdirSync(anchor);
+  let cleanup = () => rmSync(anchor, { recursive: true, force: true });
+  let foreign = false;
+  try {
+    chownSync(anchor, me === 0 ? 1000 : 1, -1); // EPERM unless this process is root
+    foreign = true;
+  } catch { /* not root: fall back to a folder that is already somebody else's */ }
+  if (!foreign) {
+    rmSync(anchor, { recursive: true, force: true });
+    anchor = ["/tmp", "/var/tmp"].find((p) => {
+      try {
+        const st = lstatSync(p);
+        // World-writable and sticky (what a normal box's /tmp is) and somebody else's: the one
+        // shape a non-root process can create INSIDE a folder it does not own.
+        return st.isDirectory() && st.uid !== me && (st.mode & 0o1002) === 0o1002;
+      } catch { return false; }
+    });
+    if (!anchor) return t.skip("no world-writable folder owned by another user on this host");
+    try {
+      lstatSync(join(anchor, "projects"));
+      return t.skip(`${anchor}/projects is already taken`);
+    } catch { /* free */ }
+    cleanup = () => rmSync(join(anchor, "projects"), { recursive: true, force: true });
+  }
+  return import("../servers/shared/project-files.js").then(({ ensureWorkspaceDir }) => {
+    const workspaceDir = join(anchor, "projects", slug, "workspace");
+    try {
+      assert.equal(lstatSync(anchor).uid === me, false, "the anchor really belongs to another user");
+      assert.equal(ensureWorkspaceDir(workspaceDir, anchor), workspaceDir, "creation goes ahead with a foreign anchor");
+      assert.equal(lstatSync(workspaceDir).mode & 0o777, 0o700);
+      assert.equal(lstatSync(workspaceDir).uid, me, "the components below the anchor are this process's");
+      assert.deepEqual(readdirSync(workspaceDir), []);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test("creating a missing workspace refuses a symlinked projects folder, a symlinked project folder and a file at workspace", async () => {
+  const outside = join(dir, "create-outside");
+  mkdirSync(outside, { recursive: true });
+  const c = await owner();
+  const PLAIN = /not a plain folder/;
+
+  // (1) <data>/projects itself is a link to a folder outside the data dir.
+  const linkProjects = join(dir, "data-link-projects");
+  mkdirSync(linkProjects, { recursive: true });
+  symlinkSync(outside, join(linkProjects, "projects"));
+  await withDataDir(linkProjects, async () => {
+    const { id, workspaceDir } = await createProjectSpace(db, { name: "Files Linked Projects" });
+    assert.ok(workspaceDir.startsWith(join(linkProjects, "projects") + sep), workspaceDir);
+    await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "pwn.txt", content: "pwn" }), PLAIN);
+  });
+  assert.deepEqual(readdirSync(outside), [], "nothing was created through the linked projects folder");
+
+  // (2) the project's own folder is a link to a folder outside.
+  const linkProject = join(dir, "data-link-project");
+  mkdirSync(linkProject, { recursive: true });
+  await withDataDir(linkProject, async () => {
+    const { id, workspaceDir } = await createProjectSpace(db, { name: "Files Linked Project" });
+    const projectDir = dirname(workspaceDir);
+    rmSync(projectDir, { recursive: true, force: true });
+    symlinkSync(outside, projectDir);
+    await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "pwn.txt", content: "pwn" }), PLAIN);
+    assert.ok(lstatSync(projectDir).isSymbolicLink(), "the link was never replaced");
+  });
+  assert.deepEqual(readdirSync(outside), [], "nothing was created through the linked project folder");
+
+  // (3) a regular FILE sits where the workspace folder should be.
+  const fileWorkspace = join(dir, "data-file-workspace");
+  mkdirSync(fileWorkspace, { recursive: true });
+  await withDataDir(fileWorkspace, async () => {
+    const { id, workspaceDir } = await createProjectSpace(db, { name: "Files File Workspace" });
+    rmSync(workspaceDir, { recursive: true, force: true });
+    writeFileSync(workspaceDir, "not a folder\n");
+    // The root is not a folder, so it cannot be opened OR created: either refusal is the answer.
+    await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "pwn.txt", content: "pwn" }),
+      /not a plain folder|cannot be opened/);
+    assert.equal(readFileSync(workspaceDir, "utf8"), "not a folder\n", "the file was left exactly as it was");
+    assert.deepEqual(readdirSync(dirname(workspaceDir)), ["workspace"], "nothing was created beside it");
+  });
+
+  // (4) the legitimate counterpart: the data dir is reached through a symlinked ancestor (/tmp on
+  // macOS). That is still this instance's own folder, so the write creates the workspace normally.
+  const realParent = join(dir, "data-through-real");
+  const linkParent = join(dir, "data-through-link");
+  mkdirSync(realParent, { recursive: true });
+  symlinkSync(realParent, linkParent);
+  const linkedData = join(linkParent, "instance");
+  mkdirSync(linkedData, { recursive: true });
+  await withDataDir(linkedData, async () => {
+    const { id, workspaceDir } = await createProjectSpace(db, { name: "Files Via Link Ancestor" });
+    rmSync(join(linkedData, "projects"), { recursive: true, force: true });
+    const w = await call(c, "crow_project_file_write", { project_id: Number(id), path: "kept.txt", content: "kept\n" });
+    assert.ok(!w.isError, text(w));
+    assert.equal(readFileSync(join(workspaceDir, "kept.txt"), "utf8"), "kept\n");
+    assert.equal(lstatSync(join(realParent, "instance", "projects")).mode & 0o777, 0o700);
+  });
+});
+
+test("a project whose workspace folder is missing lists as empty, reads as not found, and is never created by a read", async () => {
   const { id, workspaceDir } = await createProjectSpace(db, { name: "Files No Workspace" });
   rmSync(workspaceDir, { recursive: true, force: true });
+  assert.throws(() => lstatSync(workspaceDir));
   const c = await owner();
-  await refused(await call(c, "crow_project_file_list", { project_id: Number(id) }), /workspace folder/);
-  await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "a.txt", content: "a" }));
-  assert.throws(() => lstatSync(workspaceDir), "the tools never create the workspace folder");
+  const listed = await call(c, "crow_project_file_list", { project_id: Number(id), recursive: true });
+  assert.ok(!listed.isError, text(listed));
+  assert.match(text(listed), /0 entries/);
+  await refused(await call(c, "crow_project_file_read", { project_id: Number(id), path: "a.txt" }), /There is nothing at that path/);
+  await refused(await call(c, "crow_project_file_delete", { project_id: Number(id), path: "a.txt" }), /There is nothing at that path/);
+  assert.throws(() => lstatSync(workspaceDir), "no read path creates the workspace folder");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -770,6 +1010,109 @@ test("I1: the refused agent names hold at any depth and in a folded spelling, an
   assert.equal(readFileSync(ws(B, "CLAUDE.md "), "utf8"), "# CLAUDE.md \n");
   await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path: "a/b/AGENTS.md" }), BOT_PATH_RE);
   assert.equal(readFileSync(ws(B, "a", "b", "AGENTS.md"), "utf8"), "# a/b/AGENTS.md\n", "the owner's file survived the bot's delete");
+});
+
+test("I1: the runner names beyond the first list are refused — exact names, stems and dot-dirs — while look-alikes are allowed", async () => {
+  const bot = await clientFor({ kind: "bot", id: BOT_RW });
+  const BOT_PATH_RE = /dot-file or dot-folder/;
+
+  // The names added to the exact list, at depth.
+  const exact = [
+    "runners/QWEN.md", "runners/CRUSH.md", "runners/agents.override.md", "runners/cline_docs",
+    ".windsurfrules", ".clinerules", ".goosehints",
+  ];
+  // Stems: the part before the FIRST dot, compared exactly, for the LAST component only and only
+  // when the extension (the part after the last dot) is one a runner loads. None of these is on the
+  // exact list, so only the stem rule can refuse them.
+  const stems = [
+    "runners/CLAUDE.override.md", "a/b/AGENTS.backup.md", "runners/Gemini.config.yaml",
+    "runners/opencode.local.json", "runners/qwen.toml", "runners/crush.yaml",
+    "runners/copilot-instructions.json", "runners/cursor.json", "runners/windsurf.toml",
+    "runners/cline.yaml", "runners/goose.md", "runners/codex.toml", "runners/continue.config.json",
+    "runners/\uff23LAUDE.override.md", // a FULLWIDTH C, folded by NFKC before the stem is taken
+    ".aider.conf.yml",
+  ];
+  // A dot-DIRECTORY named for a runner is refused too (the dot rule, with the stem rule behind it).
+  const dotDirs = [".cursor/rules.md", ".codex/config.toml", "deep/.claude/settings.json"];
+
+  for (const path of [...exact, ...stems, ...dotDirs]) {
+    const w = await refused(await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "pwn" }), BOT_PATH_RE);
+    assert.match(w, /agent instruction or config file/, "one fixed refusal for every shape");
+    await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path }), BOT_PATH_RE);
+  }
+  assert.throws(() => lstatSync(ws(B, "runners")), "a refused write made neither the file nor its folder");
+  assert.throws(() => lstatSync(ws(B, ".cursor")));
+  assert.throws(() => lstatSync(ws(B, "deep")));
+
+  // An ordinary name that merely BEGINS with a stem is the bot's to write: the stem is exact.
+  for (const path of [
+    "agenda.md", "continuing.md", "notes/claude-notes.md",
+    "runners/agents-of-shield.md", "runners/cursor-notes.txt", "runners/encrypted.md",
+  ]) {
+    const fine = await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "fine\n" });
+    assert.ok(!fine.isError, text(fine));
+  }
+  assert.equal(readFileSync(ws(B, "runners", "cursor-notes.txt"), "utf8"), "fine\n");
+  assert.equal(readFileSync(ws(B, "continuing.md"), "utf8"), "fine\n");
+
+  // The owner is unchanged by either rule.
+  const own = await owner();
+  const owners = await call(own, "crow_project_file_write", { project_id: B.id, path: "runners/CLAUDE.override.md", content: "# mine\n" });
+  assert.ok(!owners.isError, text(owners));
+  assert.equal(readFileSync(ws(B, "runners", "CLAUDE.override.md"), "utf8"), "# mine\n");
+  await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path: "runners/CLAUDE.override.md" }), BOT_PATH_RE);
+  assert.equal(readFileSync(ws(B, "runners", "CLAUDE.override.md"), "utf8"), "# mine\n", "the owner's file survived the bot's delete");
+});
+
+test("I1: the stem rule is for the LAST component only, and only an extension a loader reads — plus warp.md and the widened invisible set", async () => {
+  const bot = await clientFor({ kind: "bot", id: BOT_RW });
+  const BOT_PATH_RE = /dot-file or dot-folder/;
+
+  // Allowed: a FOLDER named for a runner is not a file the runner loads, and neither is a file whose
+  // extension a runner does not read. Both are ordinary content to a bot.
+  const allowed = [
+    "stem/agents/plan.md",                 // `agents` is not the last component
+    "stem/agent/x.md",
+    "stem/goose.jpg", "stem/cursor.png", "stem/codex.pdf",
+    "stem/copilot-instructions.xml",        // a loader's stem, an extension no loader reads
+    "stem/claude.yml.gz",                  // the extension is the part after the LAST dot
+    "stem/warpaint.md", "stem/warplane/notes.txt", // merely begins with a refused name
+  ];
+  for (const path of allowed) {
+    const w = await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "fine\n" });
+    assert.ok(!w.isError, `${path}: ${text(w)}`);
+    assert.ok(!(await call(bot, "crow_project_file_delete", { project_id: B.id, path })).isError, `${path} may be deleted too`);
+  }
+
+  // Refused: the same stems as a last component the runner WOULD load, an extensionless name, the
+  // newly listed warp.md, and the widened invisible-character set.
+  const refusedNames = [
+    "stem2/CLAUDE.override.md",     // a stem plus an extension a loader reads
+    "stem2/AGENTS.backup.md",
+    "stem2/claude",                  // extensionless
+    "stem2/agents",
+    "stem2/warp.md", "stem2/WARP.MD", "stem2/Sub/Warp.Md",
+    "stem2/claude\u034f.md",          // a COMBINING GRAPHEME JOINER inside the name
+    "stem2/agents\u180e.md",          // a MONGOLIAN VOWEL SEPARATOR
+    "stem2/qwen\u061c.md",            // an ARABIC LETTER MARK
+    ".aider.conf.yml",               // the dot rule covers the last component
+  ];
+  for (const path of refusedNames) {
+    const w = await refused(await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "pwn" }), BOT_PATH_RE);
+    assert.match(w, /dot-file or dot-folder/, path);
+    await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path }), BOT_PATH_RE);
+  }
+  assert.throws(() => lstatSync(ws(B, "stem2")), "a refused write made neither the file nor its folder");
+
+  // The owner is bound by none of it: warp.md and every refused shape is theirs to write.
+  const own = await owner();
+  for (const path of refusedNames) {
+    const w = await call(own, "crow_project_file_write", { project_id: B.id, path, content: "# mine\n" });
+    assert.ok(!w.isError, `${path}: ${text(w)}`);
+  }
+  assert.equal(readFileSync(ws(B, "stem2", "warp.md"), "utf8"), "# mine\n");
+  await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path: "stem2/warp.md" }), BOT_PATH_RE);
+  assert.equal(readFileSync(ws(B, "stem2", "warp.md"), "utf8"), "# mine\n", "the owner's file survived the bot's delete");
 });
 
 // ---------------------------------------------------------------------------------------------

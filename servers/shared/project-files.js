@@ -14,6 +14,21 @@
  * are no project's workspace: a row naming `/etc`, or `<data>/history` (a
  * hand-edited DB, a restored backup), is refused rather than read.
  *
+ * A MISSING FOLDER. A project row can name a workspace that is not on disk at
+ * all (a project created over MCP never got its folders, so `<data>/projects`
+ * itself may be absent). Reading is no reason to create anything: a listing of
+ * such a project answers an empty workspace, and a read or a delete answers not
+ * found — the tools never bring a folder into being on a read path. A WRITE does
+ * create it: `projects/`, the project folder and `workspace/`, one component at
+ * a time at 0700, each one created and checked through its PARENT's already-open
+ * fd — no symlink anywhere, nothing outside the computed path below
+ * `<data>/projects` (ensureWorkspaceDir). The data dir itself is the trusted
+ * anchor: it may be a symlink (`<home>/data` moved to a bigger disk) and it may
+ * belong to another user (a container's bind mount), because that is the
+ * operator's own layout; every component BELOW it must be a real folder owned by
+ * this process. The ordinary O_NOFOLLOW and kernel-path checks take over as soon
+ * as the root is open.
+ *
  * PATH RULES. A caller's `path` is relative to that folder and is checked as a
  * list of components: no absolute path, no NUL, no backslash, no empty
  * component (so no trailing slash and no `//`), no `.` or `..`, no control
@@ -25,15 +40,28 @@
  *
  * BOT WRITES. A store built with `bot: true` (the caller is a bot, not the
  * operator) refuses a write or a delete in which ANY component starts with `.`
- * — no `.mcp.json`, `.claude/`, `.pi/`, `.envrc`, `.vscode/` — or in which ANY
- * component, at ANY depth, names an agent instruction or config file the
- * operator's own runner or editor reads: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`,
- * `opencode.json` and the rest of BOT_REFUSED_NAMES. A bot may not plant those
- * in a workspace the operator opens. The name is compared FOLDED — Unicode
- * NFKC, invisible/format characters dropped, trailing whitespace trimmed,
- * case-insensitive — so `CLAUDE.md `, a fullwidth spelling or a zero-width
- * spelling is refused rather than created. Reads and listings are unchanged,
- * and every shape gets the same fixed refusal.
+ * — no `.mcp.json`, `.claude/`, `.cursor/`, `.codex/`, `.pi/`, `.envrc`,
+ * `.vscode/` — or in which ANY component, at ANY depth, is an agent instruction
+ * or config file the operator's own runner or editor reads. That is both an
+ * exact-name set (BOT_REFUSED_NAMES: `CLAUDE.md`, `AGENTS.md`, `QWEN.md`,
+ * `opencode.json`, `cline_docs`, `warp.md` and the rest) and a STEM rule
+ * (BOT_REFUSED_STEMS). The stem rule is about a FILE a runner loads, so it looks
+ * at the LAST component only, and only when that name is extensionless or its
+ * extension — the part after its last dot — is one a loader reads
+ * (BOT_STEM_EXTENSIONS: `.md`, `.mdc`, `.txt`, `.json`, `.jsonc`, `.toml`,
+ * `.yaml`, `.yml`, `.rules`): `CLAUDE.override.md` and `AGENTS.backup.md` are
+ * refused (their stem is `claude` / `agents`, their extension `.md`), while a
+ * folder or a picture that merely carries a stem is the bot's to write —
+ * `agents/plan.md`, `agent/x.md`, `goose.jpg`, `cursor.png`, `codex.pdf`. The
+ * name is compared FOLDED — Unicode NFKC, invisible/format characters
+ * (U+00AD, the U+200B–U+200F range, U+034F, U+061C, U+180E, the U+2060–U+2064
+ * range and a BOM) dropped, trailing whitespace trimmed, case-insensitive — so
+ * `CLAUDE.md `, a fullwidth spelling or a zero-width spelling is refused rather
+ * than created. A directory component (`.claude/`, `.cursor/`, `.codex/`) is
+ * refused by the dot rule (and by the exact-name rule). An ordinary name that
+ * merely begins with a stem — `notes/claude-notes.md`, `agenda.md`,
+ * `continuing.md` — is untouched: the stem is compared exactly. Reads and
+ * listings are unchanged, and every shape gets the same fixed refusal.
  *
  * RACE SAFETY. Realpath-then-open is a two-step, and a path component can be
  * swapped for a symlink in between. So no path is ever resolved twice:
@@ -89,7 +117,7 @@ import {
   writeSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveDataDir } from "../db.js";
 
 /** Every limit a call obeys. Sized for an MCP round trip, not for bulk sync. */
@@ -131,34 +159,96 @@ export const PROJECTS_DIR = "projects";
  * the operator's next session:
  *
  *   claude.md, claude.local.md   — Claude Code's project memory (and its machine-local override)
- *   agents.md, agent.md          — the AGENTS.md convention (Codex CLI, Cursor, Amp, Gemini CLI, …)
- *   gemini.md                    — Gemini CLI's project context file
+ *   agents.md, agents.override.md, agent.md — the AGENTS.md convention (Codex CLI, Cursor, Amp, …)
+ *   gemini.md, qwen.md           — Gemini CLI's and Qwen Code's project context files
+ *   crush.md, crush.json         — Crush's project instructions and config
  *   opencode.json, .jsonc        — OpenCode's project config (agents, permissions, MCP servers)
- *   crush.json                   — Crush's project config
  *   copilot-instructions.md      — GitHub Copilot's `.github/copilot-instructions.md`
  *   conventions.md               — aider's read-only conventions file
- *   .cursorrules                 — Cursor's legacy project rules file (dot-prefixed, so the dot rule
- *                                  below already covers it; listed so this one list reads whole)
+ *   cline_docs                   — Cline's rules folder
+ *   warp.md                      — Warp's project rules file
+ *   .cursorrules, .windsurfrules, .clinerules — Cursor's, Windsurf's and Cline's rules files
+ *                                  (dot-prefixed, so the dot rule below already covers them;
+ *                                  listed so this one list reads whole)
+ *   .goosehints                  — Goose's hints file (dot-prefixed for the same reason)
  */
 export const BOT_REFUSED_NAMES = Object.freeze([
   "claude.md",
   "claude.local.md",
   "agents.md",
+  "agents.override.md",
   "agent.md",
   "gemini.md",
+  "qwen.md",
+  "crush.md",
   "opencode.json",
   "opencode.jsonc",
   "crush.json",
-  ".cursorrules",
   "copilot-instructions.md",
   "conventions.md",
+  "warp.md",
+  ".cursorrules",
+  ".windsurfrules",
+  ".clinerules",
+  ".goosehints",
+  "cline_docs",
+]);
+
+/**
+ * The folded STEMS a bot may never create or delete in a workspace: a FILE name whose stem — its
+ * folded name up to the first dot — is one of these is refused when the name is extensionless or
+ * carries an extension a runner loads (BOT_STEM_EXTENSIONS). An exact-name list alone misses the
+ * runner's alternative spellings and backups (`CLAUDE.override.md`, `AGENTS.backup.md`), each of
+ * which the runner would still load.
+ *
+ * The comparison is EXACT (`notes/claude-notes.md`, `agenda.md`, `continuing.md` are ordinary), and
+ * it is for the LAST component of a path only: a folder named for a runner (`agents/plan.md`,
+ * `agent/x.md`) is not a file the runner reads, and a picture or a PDF is not one either
+ * (`goose.jpg`, `cursor.png`, `codex.pdf` are the bot's to write). Only a name the runner could
+ * actually load — an extensionless `claude`, or one of BOT_STEM_EXTENSIONS — is refused.
+ */
+export const BOT_REFUSED_STEMS = Object.freeze([
+  "claude",
+  "agents",
+  "agent",
+  "gemini",
+  "qwen",
+  "crush",
+  "opencode",
+  "copilot-instructions",
+  "cursor",
+  "windsurf",
+  "cline",
+  "goose",
+  "codex",
+  "aider",
+  "continue",
+]);
+
+/**
+ * The extensions a runner loads a project instruction file under. The stem rule applies to a name
+ * that is either extensionless or ends in one of these; anything else (`goose.jpg`, `codex.pdf`) is
+ * not a file a runner would read, so it is ordinary content to a bot.
+ */
+export const BOT_STEM_EXTENSIONS = Object.freeze([
+  ".md",
+  ".mdc",
+  ".txt",
+  ".json",
+  ".jsonc",
+  ".toml",
+  ".yaml",
+  ".yml",
+  ".rules",
 ]);
 
 /**
  * Invisible and format characters a refused name can be spelled around: the U+200B–U+200F range, the
- * U+2060–U+2064 word-joiner/invisible-operator range, a BOM (U+FEFF) and a soft hyphen (U+00AD).
+ * U+2060–U+2064 word-joiner/invisible-operator range, a combining grapheme joiner (U+034F), an
+ * Arabic letter mark (U+061C), a Mongolian vowel separator (U+180E), a BOM (U+FEFF) and a soft
+ * hyphen (U+00AD).
  */
-const INVISIBLE_NAME_CHARS = /[\u00ad\u200b-\u200f\u2060-\u2064\ufeff]/g;
+const INVISIBLE_NAME_CHARS = /[\u00ad\u034f\u061c\u180e\u200b-\u200f\u2060-\u2064\ufeff]/g;
 
 /**
  * A path component folded to the key the bot rule compares: NFKC (which folds fullwidth and other
@@ -166,6 +256,12 @@ const INVISIBLE_NAME_CHARS = /[\u00ad\u200b-\u200f\u2060-\u2064\ufeff]/g;
  */
 function botNameKey(name) {
   return String(name).normalize("NFKC").replace(INVISIBLE_NAME_CHARS, "").trim().toLowerCase();
+}
+
+/** The folded stem of a component: its botNameKey up to the first dot (`CLAUDE.override.md` → `claude`). */
+function botNameStem(key) {
+  const dot = key.indexOf(".");
+  return dot === -1 ? key : key.slice(0, dot);
 }
 
 /** A fixed, project-name-free message per code; the tool result carries `.message`. */
@@ -185,9 +281,12 @@ const MESSAGES = Object.freeze({
   invalid_argument: "That argument is not valid for this call.",
   bot_path:
     "A bot may not write or delete a dot-file or dot-folder (any name starting with \".\"), " +
-    "or an agent instruction or config file (CLAUDE.md, AGENTS.md, AGENT.md, GEMINI.md, " +
-    "opencode.json, opencode.jsonc, crush.json, copilot-instructions.md, conventions.md, " +
-    ".cursorrules) at any depth in a project's workspace.",
+    "or an agent instruction or config file (CLAUDE.md, AGENTS.md, AGENT.md, GEMINI.md, QWEN.md, " +
+    "CRUSH.md, opencode.json, opencode.jsonc, crush.json, copilot-instructions.md, conventions.md, " +
+    "warp.md, cline_docs, .cursorrules, .windsurfrules, .clinerules, .goosehints, or a file whose " +
+    "stem is claude, agents, agent, gemini, qwen, crush, opencode, copilot-instructions, cursor, " +
+    "windsurf, cline, goose, codex, aider or continue and whose extension is empty or one of .md, " +
+    ".mdc, .txt, .json, .jsonc, .toml, .yaml, .yml, .rules) at any depth in a project's workspace.",
 });
 
 /** A refusal the tools turn into `Error: <message>`; `code` is for logs and tests. */
@@ -232,15 +331,30 @@ export function isInternalName(name, { top = false } = {}) {
 
 /**
  * The bot rule for a write or a delete (I1): no component may start with `.` — the dot-entries an
- * editor, a shell or an agent runner picks up (`.mcp.json`, `.claude/`, `.pi/`, `.envrc`,
- * `.vscode/`) — and no component, at ANY depth, may name an agent instruction or config file
- * (BOT_REFUSED_NAMES), compared folded by botNameKey. Only a store built for a bot call applies it:
- * an owner or an unidentified local caller is unchanged.
+ * editor, a shell or an agent runner picks up (`.mcp.json`, `.claude/`, `.cursor/`, `.codex/`,
+ * `.pi/`, `.envrc`, `.vscode/`) — and no component, at ANY depth, may be an agent instruction or
+ * config file, compared folded by botNameKey: either an exact name (BOT_REFUSED_NAMES) or a name
+ * whose stem is a runner's own (BOT_REFUSED_STEMS). A directory component therefore cannot be
+ * `.claude/`, `.cursor/` or `.codex/` either.
+ *
+ * The stem rule is narrower than the exact-name rule, because it is about a FILE a runner loads:
+ * it applies to the LAST component only, and only when that name is extensionless or ends in one of
+ * BOT_STEM_EXTENSIONS. So `CLAUDE.override.md` and `AGENTS.backup.md` are refused, while a folder
+ * (`agents/plan.md`, `agent/x.md`) or a picture (`goose.jpg`, `cursor.png`, `codex.pdf`) is not.
+ * Only a store built for a bot call applies any of it: an owner or an unidentified local caller is
+ * unchanged.
  */
 function refuseBotTarget(parts) {
-  for (const part of parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
     if (part.startsWith(".")) fail("bot_path");
-    if (BOT_REFUSED_NAMES.includes(botNameKey(part))) fail("bot_path");
+    const key = botNameKey(part);
+    if (BOT_REFUSED_NAMES.includes(key)) fail("bot_path");
+    if (i === parts.length - 1 && BOT_REFUSED_STEMS.includes(botNameStem(key))) {
+      const dot = key.lastIndexOf(".");
+      const ext = dot === -1 ? "" : key.slice(dot);
+      if (ext === "" || BOT_STEM_EXTENSIONS.includes(ext)) fail("bot_path");
+    }
   }
 }
 
@@ -287,6 +401,15 @@ export function normalizeSha256(value) {
 }
 
 const errnoOf = (err) => (err && typeof err.code === "string" ? err.code : "");
+
+/**
+ * The uid this process runs as, or null where the platform has none (Windows). Read per call rather
+ * than captured at load, so a test can stage a host whose data folder belongs to another user by
+ * mocking `process.getuid` (tests/project-file-tools.test.js, the container bind-mount case).
+ */
+function processUid() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
 
 /** `child` is `parent` or below it (both absolute, neither trailing-slashed). */
 function inside(child, parent) {
@@ -345,8 +468,12 @@ class FdSet {
 /**
  * The workspace root for one call: realpath'd, checked inside this instance's
  * `<data>/projects` folder, opened O_DIRECTORY|O_NOFOLLOW with its kernel path confirmed.
+ *
+ * With `missingOk`, a folder that is not on disk yet answers `null` instead of refusing — a read
+ * path's "this project has no files yet" — while a folder that exists OUTSIDE `<data>/projects`
+ * still refuses: a missing folder can be created, a wrong one never can.
  */
-function openWorkspaceRoot(workspaceDir, dataDir) {
+function openWorkspaceRoot(workspaceDir, dataDir, { missingOk = false } = {}) {
   if (typeof workspaceDir !== "string" || workspaceDir.trim() === "") fail("no_workspace");
   if (!isAbsolute(workspaceDir)) fail("no_workspace", "This project's workspace folder is not an absolute path.");
   const dataReal = realOf(resolve(String(dataDir || ".")));
@@ -354,9 +481,15 @@ function openWorkspaceRoot(workspaceDir, dataDir) {
   // The data dir is not enough: `history/`, `datasets/` and add-on folders live there too, and none
   // of them is a project's workspace. Project creation puts every workspace under projects/.
   const parentReal = realOf(join(dataReal, PROJECTS_DIR));
-  if (!parentReal) fail("no_workspace", "This instance's projects folder is not available.");
+  if (!parentReal) {
+    if (missingOk) return null;
+    fail("no_workspace", "This instance's projects folder is not available.");
+  }
   const rootReal = realOf(resolve(workspaceDir));
-  if (!rootReal) fail("no_workspace", "This project's workspace folder is missing.");
+  if (!rootReal) {
+    if (missingOk) return null;
+    fail("no_workspace", "This project's workspace folder is missing.");
+  }
   if (!strictlyInside(rootReal, parentReal)) {
     fail("outside_root", "This project's workspace folder is outside this instance's projects folder.");
   }
@@ -371,6 +504,181 @@ function openWorkspaceRoot(workspaceDir, dataDir) {
     fail("outside_root", "This project's workspace folder moved while it was opened.");
   }
   return { fd, real: rootReal };
+}
+
+/** lstat one absolute path: the entry, or null when nothing is there. */
+function lstatOrNull(path) {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false }) || null;
+  } catch {
+    fail("unavailable", "That path could not be read.");
+  }
+}
+
+/**
+ * Create one project's workspace folder when it is missing — for a WRITE only, never for a
+ * listing, a read or a delete.
+ *
+ * A project created over MCP may name a workspace whose folders were never made, `<data>/projects`
+ * included. Creating it is safe only when the path is exactly the one the project row names: below
+ * `<data>/projects` (never that folder itself, never the data dir), with every component made
+ * through an ALREADY-OPEN parent folder's fd and checked on that fd.
+ *
+ * THE ANCHOR. The data dir is the one path this function trusts: it is realpath'd first and checked
+ * there, so an install whose data lives on another disk (`<home>/data` a symlink to a bigger
+ * volume) is created into normally instead of being refused for "not a directory". No ownership
+ * rule applies to it either: the stock container runs Crow as root over a bind-mounted data dir
+ * owned by the host user, and the data dir is the operator's own arrangement, not something this
+ * code can be tricked into. Every component BELOW it is another matter (see below).
+ *
+ * THE COMPONENTS. Each one is created and opened relative to a fd that is already open — `mkdir`
+ * and the open both go through `/proc/self/fd/<parent fd>/<name>` — so no parent is ever re-resolved
+ * between the check and the use: a folder swapped for a symlink in that window cannot redirect the
+ * mkdir. A new component is fchmod'd to 0700 on its own fd (never narrowed back by the umask), and
+ * every component is checked with `fstat` on the fd that was opened: it must be a folder, owned by
+ * the process running Crow, and its kernel path (`/proc/self/fd/<fd>`) must still be the computed
+ * one. A symlink, a file, a foreign folder or a folder renamed out refuses the write, so nothing
+ * further is created and nothing is created anywhere but at the computed path. A kernel without
+ * `/proc/self/fd` cannot do any of that, and a path-based fallback is exactly the hole this closes,
+ * so creation is refused with a clear message there instead. Once the root exists the ordinary
+ * O_NOFOLLOW and kernel-path checks of openWorkspaceRoot take over unchanged.
+ *
+ * @param {string} workspaceDir  the project row's workspace_dir: the exact path to make
+ * @param {string} dataDir       this instance's data dir
+ * @returns {string} the absolute path that was ensured
+ */
+export function ensureWorkspaceDir(workspaceDir, dataDir) {
+  if (typeof workspaceDir !== "string" || workspaceDir.trim() === "") fail("no_workspace");
+  if (!isAbsolute(workspaceDir)) fail("no_workspace", "This project's workspace folder is not an absolute path.");
+  const dataPath = resolve(String(dataDir || "."));
+  // The anchor: realpath first (a symlinked data dir is the operator's own layout), then the
+  // is-a-directory check on that realpath. Deliberately no uid rule here — see the docstring.
+  const dataReal = realOf(dataPath);
+  if (!dataReal) fail("no_workspace", "This instance's data folder is not available.");
+  const anchorStat = lstatOrNull(dataReal);
+  if (!anchorStat || !anchorStat.isDirectory()) {
+    fail("no_workspace", "This instance's data folder is not available.");
+  }
+  const target = resolve(workspaceDir);
+  // Two spellings of the same place: the data dir as the DB names it (dataPath, possibly reached
+  // through a symlinked ancestor — /tmp on macOS) and its realpath. The workspace must be strictly
+  // inside one of them; the components are then taken from that same relative path, so they are the
+  // canonical ones, which is what openWorkspaceRoot realpaths anyway.
+  let rel = null;
+  if (strictlyInside(target, dataPath)) rel = relative(dataPath, target);
+  else if (strictlyInside(target, dataReal)) rel = relative(dataReal, target);
+  if (rel === null) {
+    fail("outside_root", "This project's workspace folder is outside this instance's data folder.");
+  }
+  // Exactly the components of THIS project's computed path: projects/, the project folder,
+  // workspace/. A `..` here would make the join lie, so it is refused rather than joined.
+  const names = rel.split(sep);
+  for (const name of names) {
+    if (name === "" || name === "." || name === "..") {
+      fail("outside_root", "This project's workspace folder is not a plain path below this instance's projects folder.");
+    }
+  }
+  // Not the data dir itself, and not `<data>/projects` itself: a project's workspace is below it.
+  if (names[0] !== PROJECTS_DIR || names.length < 2) {
+    fail("outside_root", "This project's workspace folder is outside this instance's projects folder.");
+  }
+
+  const uid = processUid();
+  let dirFd;
+  try {
+    dirFd = openSync(dataReal, FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NOFOLLOW);
+  } catch {
+    fail("no_workspace", "This instance's data folder cannot be opened.");
+  }
+  try {
+    // The fd-relative recipe needs /proc/self/fd. Without it there is no safe way to create a
+    // component from its parent's fd, and a path-based mkdir re-resolves every parent — refuse.
+    const anchorSeen = kernelPath(dirFd);
+    if (anchorSeen === null) {
+      fail("unavailable",
+        "This platform cannot create a project workspace folder safely (no usable /proc/self/fd), so nothing was created.");
+    }
+    if (anchorSeen !== dataReal) {
+      fail("no_workspace", "This instance's data folder moved while it was opened.");
+    }
+    let expected = dataReal;
+    for (const name of names) {
+      expected = join(expected, name);
+      // lstat through the parent's fd: the entry itself, never a link's target.
+      const existed = statEntry(dirFd, name) !== null;
+      if (!existed) {
+        try {
+          mkdirSync(fdPath(dirFd, name), { mode: 0o700 });
+        } catch (err) {
+          const code = errnoOf(err);
+          // EEXIST: something appeared between the lstat and the mkdir. The
+          // open below decides whether it may be used; a link never is.
+          if (code === "EACCES" || code === "EPERM") {
+            fail("forbidden", "This project's workspace folder could not be created.");
+          }
+          if (code !== "EEXIST") fail("unavailable", "This project's workspace folder could not be created.");
+        }
+      }
+      let child;
+      try {
+        child = openSync(fdPath(dirFd, name), FS.O_RDONLY | FS.O_DIRECTORY | FS.O_NOFOLLOW);
+      } catch (err) {
+        const code = errnoOf(err);
+        if (code === "ELOOP" || code === "ENOTDIR") {
+          // O_NOFOLLOW on a link answers ELOOP, and with O_DIRECTORY in the flags
+          // Linux answers ENOTDIR (the link itself is not a folder). Either way a
+          // component that is not a plain folder refuses the creation.
+          fail("outside_root", "A part of this project's workspace path is not a plain folder, so nothing was created.");
+        }
+        if (code === "EACCES" || code === "EPERM") {
+          fail("forbidden", "A part of this project's workspace path could not be opened, so nothing was created.");
+        }
+        fail("unavailable", "This project's workspace folder could not be created.");
+      }
+      try {
+        // fstat/fchmod on the fd that was opened, so the thing checked, the thing
+        // narrowed and the thing kept open can never be different objects.
+        const st = fstatSync(child);
+        if (!st.isDirectory()) {
+          fail("outside_root", "A part of this project's workspace path is not a plain folder, so nothing was created.");
+        }
+        if (uid !== null && st.uid !== uid) {
+          fail("forbidden", "A part of this project's workspace path is not owned by the process running Crow, so nothing was created.");
+        }
+        if (!existed) {
+          // 0700 exactly, never narrowed back by the umask: a private folder for one project.
+          try {
+            fchmodSync(child, 0o700);
+          } catch {
+            fail("unavailable", "This project's workspace folder could not be created.");
+          }
+        }
+        const seen = kernelPath(child);
+        if (seen === null || seen !== expected) {
+          fail("outside_root", "A part of this project's workspace path leads somewhere else, so nothing was created.");
+        }
+      } catch (err) {
+        try { closeSync(child); } catch { /* closed */ }
+        throw err;
+      }
+      try { closeSync(dirFd); } catch { /* closed */ }
+      dirFd = child;
+    }
+    return target;
+  } finally {
+    try { closeSync(dirFd); } catch { /* closed */ }
+  }
+}
+
+/**
+ * The workspace root for a WRITE: made when it is missing, then opened exactly like any other
+ * call — so the folder about to be written in has passed both this and the kernel-path checks.
+ */
+function openWorkspaceRootForWrite(workspaceDir, dataDir) {
+  const existing = openWorkspaceRoot(workspaceDir, dataDir, { missingOk: true });
+  if (existing !== null) return existing;
+  ensureWorkspaceDir(workspaceDir, dataDir);
+  return openWorkspaceRoot(workspaceDir, dataDir);
 }
 
 /** Open one directory component from its parent's fd, never following a link. */
@@ -540,15 +848,27 @@ const looksBinary = (buf) => buf.includes(0);
  *   the post-open kernel-path check of what is opened next is what refuses.
  *   `bot: true` marks the call as a bot's: writes and deletes then obey the bot
  *   path rule (refuseBotTarget), reads and listings are unchanged.
+ *   A workspace folder that is not on disk yet is created by a WRITE only (see
+ *   ensureWorkspaceDir); a listing answers an empty workspace and a read or a
+ *   delete answers not found, so no read path ever brings a folder into being.
  */
 export function createProjectFileStore({ workspaceDir, dataDir, env = process.env, hooks = {}, bot = false } = {}) {
   const hook = hooks && typeof hooks.beforeOpen === "function" ? hooks.beforeOpen : null;
   const afterComponentOpen = hooks && typeof hooks.afterComponentOpen === "function" ? hooks.afterComponentOpen : null;
   const botCaller = bot === true;
 
-  /** Open the root (and run the hook), returning the fd set the caller closes. */
-  async function begin(kind, relPath) {
-    const root = openWorkspaceRoot(workspaceDir, dataDir);
+  /**
+   * Open the root (and run the hook), returning the fd set the caller closes.
+   *
+   * `create: true` (a WRITE only) makes a missing workspace folder; `missingOk: true` (a read path)
+   * answers `root: null` for a project whose workspace is not on disk, so the caller can say
+   * "empty" or "not found" and create nothing.
+   */
+  async function begin(kind, relPath, { create = false, missingOk = false } = {}) {
+    const root = create
+      ? openWorkspaceRootForWrite(workspaceDir, dataDir)
+      : openWorkspaceRoot(workspaceDir, dataDir, { missingOk });
+    if (root === null) return { root: null, fds: null, ctx: null };
     const fds = new FdSet();
     fds.track(root.fd);
     if (hook) {
@@ -607,7 +927,10 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       const parts = parseRelPath(path, { allowEmpty: true });
       const max = clampInt(limit, { min: 1, max: PROJECT_FILE_LIMITS.listEntries, fallback: 200 });
       const base = parts.join("/");
-      const { root, fds, ctx } = await begin("list", base);
+      const { root, fds, ctx } = await begin("list", base, { missingOk: true });
+      // A project whose workspace folder is not on disk yet is an EMPTY workspace to a listing:
+      // only a write creates the folder, never a read.
+      if (root === null) return { entries: [], truncated: false, path: base };
       try {
         const dirFd = await openFolder(ctx, fds, root, parts);
         const entries = [];
@@ -670,7 +993,9 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       const want = clampInt(maxBytes, { min: 1, max: PROJECT_FILE_LIMITS.readBytes, fallback: PROJECT_FILE_LIMITS.readBytes });
       const name = parts[parts.length - 1];
       const rel = parts.join("/");
-      const { root, fds, ctx } = await begin("read", rel);
+      const { root, fds, ctx } = await begin("read", rel, { missingOk: true });
+      // No workspace folder yet means there is nothing at any path in it.
+      if (root === null) fail("not_found");
       try {
         const parentFd = await openFolder(ctx, fds, root, parts.slice(0, -1));
         const st = statRegularFile(parentFd, name);
@@ -739,7 +1064,7 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       }
       const name = parts[parts.length - 1];
       const rel = parts.join("/");
-      const { root, fds, ctx } = await begin("write", rel);
+      const { root, fds, ctx } = await begin("write", rel, { create: true });
       let tmpName = null;
       let parentFd = null;
       try {
@@ -823,7 +1148,8 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       const expect = normalizeSha256(ifMatchSha256);
       const name = parts[parts.length - 1];
       const rel = parts.join("/");
-      const { root, fds, ctx } = await begin("delete", rel);
+      const { root, fds, ctx } = await begin("delete", rel, { missingOk: true });
+      if (root === null) fail("not_found");
       try {
         const parentFd = await openFolder(ctx, fds, root, parts.slice(0, -1));
         const st = statEntry(parentFd, name);

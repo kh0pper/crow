@@ -6,6 +6,9 @@
  * Preserves redirectAfterPost semantics exactly.
  */
 
+import { rmdirSync } from "node:fs";
+import { dirname } from "node:path";
+
 import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
   loadModelOptions, loadRoleRefs, remoteInvocationOn, defaultDefinition,
@@ -118,7 +121,10 @@ async function handleBoardOn(req, res, { db }) {
   let created = null, carried = [], carry = null, madePaths = [];
   // Removes what THIS request made: the carry-over links/dirs, then the
   // project row (nothing references it yet) and its just-made file history,
-  // which creation set up beside the data dir.
+  // which creation set up beside the data dir, and the workspace folder
+  // createProjectSpace made — rmdir only, never recursive, and only when the
+  // folder is EMPTY, so anything that ended up in it stays put (and only when
+  // this request created it: a folder that was already on disk is not ours).
   const undo = async () => {
     undoCarryOver(madePaths);
     madePaths = [];
@@ -130,6 +136,12 @@ async function handleBoardOn(req, res, { db }) {
       const { removeWorkspaceHistory } = await import("../../../../shared/history/workspace-history.js");
       await removeWorkspaceHistory(created.id);
     } catch { /* the id is not reused for a history dir, so a leftover is harmless */ }
+    if (created.workspaceCreated) {
+      // The workspace goes first, then the project folder it sat in, each only if
+      // it is now empty. A non-empty folder (a racing write, a storage dir) stays.
+      try { rmdirSync(created.workspaceDir); } catch { /* not empty, or already gone */ }
+      try { rmdirSync(dirname(created.workspaceDir)); } catch { /* not empty, or already gone */ }
+    }
   };
   if (projectId == null) {
     const crowHome = resolveCrowHome();

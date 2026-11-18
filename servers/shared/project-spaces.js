@@ -7,12 +7,14 @@
  * project_spaces row.
  *
  * Exported functions:
- *   createProjectSpace(db, opts)      — insert ps row + owner member row, one batch
+ *   createProjectSpace(db, opts)      — insert ps row + owner member row, one batch; then
+ *                                       make the project's workspace folder (best effort)
  *   updateProjectSpaceMeta(db, id, patch) — update meta columns, no re-slug
  */
 
 import { slugify, workspacePathFor, storagePrefixFor } from "./slugify.js";
 import { resolveDataDir } from "../db.js";
+import { ensureWorkspaceDir } from "./project-files.js";
 import { resolve } from "node:path";
 import { lstatSync } from "node:fs";
 
@@ -49,7 +51,10 @@ const pathExists = (p) => { try { lstatSync(p); return true; } catch { return fa
  *   @param {string}  [opts.originInstanceId]
  *   @param {string}  [opts.explicitSlug]      skip slug derivation, use as-is
  *   @param {boolean} [opts.ownerMember]       default true; false to omit member row
- * @returns {{ id: number, slug: string, workspaceDir: string, storagePrefix: string }}
+ * @returns {{ id: number, slug: string, workspaceDir: string, storagePrefix: string,
+ *            workspaceCreated: boolean }} `workspaceCreated` is true only when THIS call made the
+ *   workspace folder (see ensureWorkspace): a caller that has to roll the creation back knows
+ *   whether the folder is its own to remove.
  */
 export async function createProjectSpace(db, opts = {}) {
   const {
@@ -117,9 +122,10 @@ export async function createProjectSpace(db, opts = {}) {
       });
     }
 
+    const workspaceCreated = await ensureWorkspace(workspaceDir, dataDir, type);
     await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
-    return { id, slug: explicitSlug, workspaceDir, storagePrefix };
+    return { id, slug: explicitSlug, workspaceDir, storagePrefix, workspaceCreated };
   }
 
   // --- Default slug mode ---
@@ -163,9 +169,38 @@ export async function createProjectSpace(db, opts = {}) {
   const workspaceDir = workspacePathFor(dataDir, slug);
   const storagePrefix = storagePrefixFor(slug);
 
+  const workspaceCreated = await ensureWorkspace(workspaceDir, dataDir, type);
   await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
-  return { id, slug, workspaceDir, storagePrefix };
+  return { id, slug, workspaceDir, storagePrefix, workspaceCreated };
+}
+
+/**
+ * Give a freshly created project its workspace folder on disk (best effort).
+ *
+ * `crow_create_project` used to record `workspace_dir` and never make the folder, so every file
+ * write then failed with "This instance's projects folder is not available" until someone created
+ * it by hand. The folder is made here now, through project-files.js's ensureWorkspaceDir (0700 per
+ * component, no symlink, below `<data>/projects` only). This can NEVER fail the creation: the
+ * write path makes the folder on demand anyway, so a refusal here is only logged.
+ *
+ * @param {string} workspaceDir — the exact folder this project's row names
+ * @param {string} dataDir      — the data dir this creation already resolved
+ * @param {string} [type]       — a learner profile has no files of its own (like its history)
+ * @returns {boolean} true only when this call CREATED the folder (it was absent, and the
+ *   fd-relative creation in project-files.js succeeded). A caller undoing the creation removes the
+ *   folder only when this is true: a folder that was already there is not its to remove.
+ */
+function ensureWorkspace(workspaceDir, dataDir, type) {
+  if (type === "learner_profile") return false;
+  if (pathExists(workspaceDir)) return false;
+  try {
+    ensureWorkspaceDir(workspaceDir, dataDir);
+    return true;
+  } catch (err) {
+    console.warn("[project-spaces] the project's workspace folder was not created:", err?.message || err);
+    return false;
+  }
 }
 
 /**
