@@ -10,10 +10,12 @@
  * What they cover: the inline-script rules, a song with sections giving one
  * block per section, placements grouped by the scene their clip plays, the bars
  * outside every section, a placement split around a section, an earlier scene
- * keeping bars a later one also covers, whole bars, blocks in order and never
- * overlapping, a null or nonsense snapshot reading as an empty plan, and the two
- * rulers — the block a bar falls in and the block after it, with a bar at an
- * end_bar belonging to the block that starts there.
+ * keeping bars a later one also covers, the shorter one of two blocks that start
+ * on the same bar winning the bars they share (for sections and for placements,
+ * in either map order), a strip asking for the placements alone, whole bars,
+ * blocks in order and never overlapping, a null or nonsense snapshot reading as
+ * an empty plan, and the two rulers — the block a bar falls in and the block
+ * after it, with a bar at an end_bar belonging to the block that starts there.
  */
 
 import { test } from "node:test";
@@ -171,6 +173,109 @@ test("two scenes over the same bars give the earlier one the bars", () => {
   assert.deepEqual(planOf(covered), [
     { start_bar: 0, end_bar: 8, label: "A", scene_id: "a", section_id: null },
   ]);
+});
+
+test("scene plan: two sections that begin together are ordered by end, then id", () => {
+  const page = pageApi();
+  const longFirst = snapshot({
+    sections: {
+      x: { id: "x", start_bar: 0, end_bar: 8, name: "X" },
+      y: { id: "y", start_bar: 0, end_bar: 4, name: "Y" },
+    },
+  });
+  const shortFirst = snapshot({
+    sections: {
+      y: { id: "y", start_bar: 0, end_bar: 4, name: "Y" },
+      x: { id: "x", start_bar: 0, end_bar: 8, name: "X" },
+    },
+  });
+  const blocks = [
+    { start_bar: 0, end_bar: 4, label: "Y", scene_id: null, section_id: "y" },
+    { start_bar: 4, end_bar: 8, label: "X", scene_id: null, section_id: "x" },
+  ];
+  assert.deepEqual(planOf(longFirst), blocks, "the shorter section keeps the bars they share");
+  assert.deepEqual(planOf(shortFirst), blocks, "and the order the map was read in changes nothing");
+  assert.deepEqual(page.planOf(shortFirst), blocks, "the page draws the same plan");
+
+  // Two sections over exactly the same bars are decided by their id, so the
+  // plan still never depends on the map's order.
+  const same = {};
+  const flipped = {};
+  for (const key of ["a", "b", "c"]) same[key] = { id: key, start_bar: 0, end_bar: 4, name: key };
+  for (const key of ["c", "b", "a"]) flipped[key] = { id: key, start_bar: 0, end_bar: 4, name: key };
+  // The first id keeps the bars; the ones that would start where it ended have
+  // nothing left of themselves, so one block is the whole plan.
+  const winner = [
+    { start_bar: 0, end_bar: 4, label: "a", scene_id: null, section_id: "a" },
+  ];
+  assert.deepEqual(planOf(snapshot({ sections: same })), winner, "the first id keeps the bars");
+  assert.deepEqual(planOf(snapshot({ sections: flipped })), winner, "in either key order");
+});
+
+test("scene plan: on a tie the shorter placement wins", () => {
+  const page = pageApi();
+  const scenes = [{ id: "a", name: "A" }, { id: "b", name: "B" }];
+  const clips = {
+    ca: { id: "ca", track_id: "gtr", scene_id: "a", name: "A clip" },
+    cb: { id: "cb", track_id: "keys", scene_id: "b", name: "B clip" },
+  };
+  const longFirst = snapshot({
+    scenes,
+    clips,
+    placements: {
+      a: { clip_id: "ca", start_bar: 0, bars: 8 },
+      b: { clip_id: "cb", start_bar: 0, bars: 4 },
+    },
+  });
+  const shortFirst = snapshot({
+    scenes,
+    clips,
+    placements: {
+      b: { clip_id: "cb", start_bar: 0, bars: 4 },
+      a: { clip_id: "ca", start_bar: 0, bars: 8 },
+    },
+  });
+  const blocks = [
+    { start_bar: 0, end_bar: 4, label: "B", scene_id: "b", section_id: null },
+    { start_bar: 4, end_bar: 8, label: "A", scene_id: "a", section_id: null },
+  ];
+  assert.deepEqual(planOf(longFirst), blocks, "the shorter placement keeps the bars they share");
+  assert.deepEqual(planOf(shortFirst), blocks, "and the order the map was read in changes nothing");
+  assert.deepEqual(page.planOf(shortFirst), blocks, "the page draws the same plan");
+});
+
+test("a strip can ask for the placements alone, without the section blocks", () => {
+  const page = pageApi();
+  const snap = snapshot({
+    scenes: [{ id: "verse", name: "Verse" }],
+    clips: { v1: { id: "v1", track_id: "gtr", scene_id: "verse", name: "Verse guitar" } },
+    placements: { p1: { clip_id: "v1", start_bar: 0, bars: 12 } },
+    sections: { s1: { id: "s1", start_bar: 4, end_bar: 8, name: "Chorus" } },
+  });
+  const all = [
+    { start_bar: 0, end_bar: 4, label: "Verse", scene_id: "verse", section_id: null },
+    { start_bar: 4, end_bar: 8, label: "Chorus", scene_id: null, section_id: "s1" },
+    { start_bar: 8, end_bar: 12, label: "Verse", scene_id: "verse", section_id: null },
+  ];
+  assert.deepEqual(planOf(snap), all, "by default a section is a block of the plan");
+  assert.deepEqual(
+    planOf(snap).filter((block) => block.section_id !== null).map((block) => block.section_id),
+    ["s1"],
+    "and a section block says so with its section_id",
+  );
+
+  const placements = [
+    { start_bar: 0, end_bar: 4, label: "Verse", scene_id: "verse", section_id: null },
+    { start_bar: 8, end_bar: 12, label: "Verse", scene_id: "verse", section_id: null },
+  ];
+  assert.deepEqual(planOf(snap, { sections: false }), placements, "a strip that draws its own sections asks them away");
+  assert.deepEqual(page.planOf(snap, { sections: false }), placements, "and the page agrees");
+
+  // Only an explicit false leaves the sections out: no options, a missing
+  // member and any other value all answer the plan they always did.
+  for (const options of [null, undefined, {}, { sections: true }, { sections: 0 }, { sections: "no" }]) {
+    assert.deepEqual(planOf(snap, options), all, `only an explicit false leaves the sections out (${String(options)})`);
+  }
 });
 
 test("blocks never overlap and are sorted", () => {

@@ -24,13 +24,22 @@
  *
  * - `planOf(snap)` answers the plan: an array of `{start_bar, end_bar, label,
  *   scene_id, section_id}` blocks with `end_bar` exclusive, sorted by
- *   `start_bar`, whole bars and never overlapping. A song with sections gives
+ *   `start_bar`, then `end_bar` (the shorter block first), then the section or
+ *   scene the block comes from, whole bars and never overlapping — so the plan
+ *   never depends on the order a map was read in. A song with sections gives
  *   one block per section, labelled by its name and carrying its
  *   `section_id`; the bars outside every section that a placement covers are
  *   gathered by the scene of the clip that placement plays, so a scene placed
  *   twice in a row (or on two tracks over the same bars) is one block. A
  *   placement with no scene, and a placement whose clip is missing, is keyed
- *   by its clip and labelled by the clip's name.
+ *   by its clip and labelled by the clip's name. On a tie in start the shorter
+ *   placement wins, then the key, and the longer one is trimmed to what is left
+ *   of it.
+ * - `planOf(snap, options)` with `options.sections === false` answers the same
+ *   plan without its section blocks: a strip or a ruler that draws the song's
+ *   sections itself asks for the placements alone. Either way a block says
+ *   which it is with its two ids — a section block carries a `section_id` and
+ *   no `scene_id`, a placement block carries no `section_id`.
  * - `blockAt(blocks, bar)` is the block covering a bar, `end_bar` exclusive, so
  *   a bar that is one block's `end_bar` and the next block's `start_bar`
  *   belongs to the next block. `nextBlock(blocks, bar)` is the first block that
@@ -129,6 +138,11 @@ export const SCENE_PLAN_SCRIPT = [
   "   * (data from a peer that overlapped them) has its start moved up to that",
   "   * end, or goes away when nothing is left of it — blocks never overlap.",
   "   *",
+  "   * Two sections that start on the same bar are ordered by their end (the",
+  "   * shorter one first) and then by their id, so the order their map was read",
+  "   * in never shows: the shorter section keeps its bars and the longer one",
+  "   * starts where it ended.",
+  "   *",
   "   * @param {object} sections - the snapshot's section map",
   "   * @returns {Array<object>} the section blocks, in bar order",
   "   */",
@@ -153,7 +167,12 @@ export const SCENE_PLAN_SCRIPT = [
   "        section_id: id ? id : String(key)",
   "      });",
   "    }",
-  "    found.sort(function (a, b) { return a.start_bar - b.start_bar; });",
+  "    found.sort(function (a, b) {",
+  "      if (a.start_bar !== b.start_bar) return a.start_bar - b.start_bar;",
+  "      if (a.end_bar !== b.end_bar) return a.end_bar - b.end_bar;",
+  "      if (a.section_id === b.section_id) return 0;",
+  "      return a.section_id < b.section_id ? -1 : 1;",
+  "    });",
   "    var out = [];",
   "    var edge = null;",
   "    for (var at = 0; at < found.length; at += 1) {",
@@ -209,13 +228,14 @@ export const SCENE_PLAN_SCRIPT = [
   "   *",
   "   * Each placement is keyed by the scene of the clip it plays, or by the clip",
   "   * itself when that scene is empty or the clip is gone. The segments are read",
-  "   * in bar order against a cursor, so two placements over the same bars give",
-  "   * the earlier one the bars and trim the later one to what is left, often",
-  "   * nothing at all. A segment that carries on exactly where the block before",
-  "   * it ended, with the same key, extends that block instead of starting",
-  "   * another:",
-  "   * one scene played twice in a row, or on two tracks over the same bars, is",
-  "   * one block.",
+  "   * in bar order against a cursor, so a placement that starts first keeps its",
+  "   * bars and a placement that starts later is trimmed to what is left of it,",
+  "   * often nothing at all. On a tie in start the shorter placement wins, then",
+  "   * the key, so the same placements handed over in another order draw the same",
+  "   * plan. A segment that carries on exactly where the block before it ended,",
+  "   * with the same key, extends that block instead of starting another: one",
+  "   * scene played twice in a row, or on two tracks over the same bars, is one",
+  "   * block.",
   "   *",
   "   * @param {object} snap - the song snapshot",
   "   * @param {Array<object>} sections - the section blocks, in bar order",
@@ -284,15 +304,27 @@ export const SCENE_PLAN_SCRIPT = [
   "   * The plan: one block per section, then the placements by scene outside",
   "   * every section, in bar order.",
   "   *",
+  "   * The sections came in first, so a stable sort keeps a section before a",
+  "   * placement that starts on the same bar with the same end.",
+  "   *",
   "   * @param {object} snap - the song snapshot, read and never changed",
+  "   * @param {object} [options] - sections: false leaves the sections out",
   "   * @returns {Array<object>} the blocks, or [] for no arrangement at all",
   "   */",
-  "  function planOf(snap) {",
+  "  function planOf(snap, options) {",
+  "    var settings = entryOf(options);",
   "    var sections = sectionBlocks(arrangementOf(snap).sections);",
-  "    var blocks = sections.slice(0);",
+  "    var blocks = [];",
+  "    var at = 0;",
+  "    if (!settings || settings.sections !== false) {",
+  "      for (at = 0; at < sections.length; at += 1) blocks.push(sections[at]);",
+  "    }",
   "    var filled = placementBlocks(snap, sections);",
-  "    for (var at = 0; at < filled.length; at += 1) blocks.push(filled[at]);",
-  "    blocks.sort(function (a, b) { return a.start_bar - b.start_bar; });",
+  "    for (at = 0; at < filled.length; at += 1) blocks.push(filled[at]);",
+  "    blocks.sort(function (a, b) {",
+  "      if (a.start_bar !== b.start_bar) return a.start_bar - b.start_bar;",
+  "      return a.end_bar - b.end_bar;",
+  "    });",
   "    return blocks;",
   "  }",
   "",
@@ -387,10 +419,12 @@ export const CLIP_KEY_PREFIX = scenePlanApi.CLIP_KEY_PREFIX;
 /**
  * The plan: sections first, then the bars outside them by scene.
  * @param {object} snap - the song snapshot
+ * @param {object} [options] - `sections: false` leaves the section blocks out,
+ *   for a strip or a ruler that draws the sections itself
  * @returns {Array<{start_bar: number, end_bar: number, label: string, scene_id: string|null, section_id: string|null}>}
  */
-export function planOf(snap) {
-  return scenePlanApi.planOf(snap);
+export function planOf(snap, options) {
+  return scenePlanApi.planOf(snap, options);
 }
 
 /**
