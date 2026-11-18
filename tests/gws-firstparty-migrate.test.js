@@ -10,6 +10,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
@@ -21,8 +22,24 @@ import { dirname, join } from "node:path";
 
 const HOME = mkdtempSync(join(tmpdir(), "gws-firstparty-home-"));
 const SCRATCH_REPO = mkdtempSync(join(tmpdir(), "gws-firstparty-repo-"));
+const REPO = join(import.meta.dirname, "..");
+const SCRIPT = join(REPO, "scripts", "addon-sandbox", "migrate-gws-firstparty.mjs");
 process.env.CROW_HOME = HOME;
 process.env.CROW_DATA_DIR = join(HOME, "data");
+
+/**
+ * git without the host's own config: a scratch repo here must be on `main`, have a
+ * commit, and stay clean whatever ~/.gitconfig says (a `commit.gpgsign` there would
+ * otherwise fail every commit).
+ */
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+const GIT_CONFIG = [
+  "-c", "user.name=crow test", "-c", "user.email=test@example.invalid",
+  "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+];
+function git(cwd, ...args) {
+  return execFileSync("git", [...GIT_CONFIG, "-C", cwd, ...args], { env: GIT_ENV, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
 
 const NOW = () => new Date("2026-01-02T03:04:05Z");
 const NOW_ISO = "2026-01-02T03:04:05.000Z";
@@ -103,12 +120,25 @@ put(BUNDLES, "google-workspace/pyproject.toml", "[project]\nname = \"google-work
 put(BUNDLES, "google-workspace/uv.lock", "version = 1\n");
 // A package folder no version-refresh list names: only a whole-tree install copy has it.
 put(BUNDLES, "google-workspace/google_workspace_mcp/__init__.py", "# package\n");
+// Dev/test droppings in the checkout: the install's skip filter must never copy them
+// (git-ignored below, so the checkout stays clean).
+put(BUNDLES, "google-workspace/.venv/lib/site.py", "# venv\n");
+put(BUNDLES, "google-workspace/__pycache__/x.pyc", "pyc\n");
+put(BUNDLES, "google-workspace/.pytest_cache/v/cache/lastfailed", "{}\n");
+put(BUNDLES, "google-workspace/google_workspace_mcp/__pycache__/server.pyc", "pyc\n");
+put(SCRATCH_REPO, ".gitignore", ".venv/\n__pycache__/\n.pytest_cache/\n");
 // A sibling first-party bundle that IS installed, so the boot pass has real work to do.
 put(BUNDLES, "overlay/manifest.json", `${JSON.stringify({ id: "overlay", name: "Overlay", type: "bundle", version: "1.0.0" }, null, 2)}\n`);
 put(BUNDLES, "overlay/panel/overlay.js", "// panel\n");
 // A fake launcher pair: uv sits next to uvx, exactly like ~/.local/bin on a real host.
 put(LAUNCHER_DIR, "uv", "#!/bin/sh\nexit 0\n", 0o755);
 put(LAUNCHER_DIR, "uvx", "#!/bin/sh\nexit 0\n", 0o755);
+
+// The scratch repo is a real checkout on `main`, committed and clean: the migration
+// refuses to copy from anything else (S1).
+git(SCRATCH_REPO, "init", "-q", "-b", "main");
+git(SCRATCH_REPO, "add", "-A");
+git(SCRATCH_REPO, "commit", "-q", "-m", "scratch checkout");
 
 after(() => {
   rmSync(HOME, { recursive: true, force: true });
@@ -118,7 +148,7 @@ after(() => {
 });
 
 // Project modules read CROW_HOME at import time: import them only after it is set.
-const { migrateGwsFirstparty, undoGwsFirstparty } = await import("../scripts/addon-sandbox/migrate-gws-firstparty.mjs");
+const { migrateGwsFirstparty, undoGwsFirstparty, checkGatewayCheckout } = await import("../scripts/addon-sandbox/migrate-gws-firstparty.mjs");
 const { repairInstalledBundleAssets } = await import("../servers/gateway/routes/bundles.js");
 const { addonLauncherStatus, checkLauncherArgs, resolveAddonCommand } = await import("../servers/shared/resolve-command.js");
 const { addonWallMode } = await import("../scripts/addon-sandbox/spawn.mjs");
@@ -317,6 +347,25 @@ test("--dry-run prints the plan and changes nothing at all", async () => {
   assert.ok(text.includes(UV), "the plan names the uv it would launch");
   assert.ok(text.includes("--frozen"), "and the args from the manifest");
   assert.ok(text.includes(`--undo ${STAMP}`), "and how to undo");
+  // N3: the plan prints env KEY NAMES only — a plan gets pasted into an issue.
+  for (const value of Object.values(OLD_ENTRY().env)) {
+    assert.equal(text.includes(value), false, `the plan must not print the value ${value}`);
+  }
+  for (const key of ["GOOGLE_CREDENTIALS_FILE", "GOOGLE_TOKEN_FILE", "GMAIL_SEND_TO_SELF_ALLOWLIST", "UV_NO_CACHE", "UV_PROJECT_ENVIRONMENT"]) {
+    assert.ok(text.includes(key), `the plan names ${key}`);
+  }
+});
+
+test("N4: the copy goes through the install path's skip filter — dev droppings in the checkout stay out", async () => {
+  const baseline = fixture();
+  assert.equal((await runMigration()).status, "migrated");
+
+  for (const rel of [".venv", "__pycache__", ".pytest_cache", "google_workspace_mcp/__pycache__"]) {
+    assert.equal(existsSync(join(DEST, rel)), false, `${rel} must not be copied into the Crow home`);
+  }
+  assert.equal(readAt(STUB_COPY, "manifest.json"), baseline.stubText, "the stub copy is intact");
+  assert.equal(readAt(DEST, "google_workspace_mcp/__init__.py"), "# package\n", "the real package is copied");
+  assert.equal(readAt(DEST, "uv.lock"), "version = 1\n");
 });
 
 test("an entry without GOOGLE_TOKEN_FILE is refused, and nothing changes", async () => {
@@ -421,4 +470,235 @@ test("the boot after the migration raises no card, refreshes nothing, and leaves
     "the installed copy is Crow's copy");
   assert.equal(profile.files.oauthDir?.path, OLD_ENTRY().env.GOOGLE_TOKEN_FILE, "the token folder, owner-typed");
   assert.equal(profile.network.internet, true);
+});
+
+// ── S1: the checkout a run copies from ─────────────────────────────────────
+
+/** A real, committed, clean `main` checkout holding one minimal google-workspace bundle. */
+function makeGitRepo(name) {
+  const root = mkdtempSync(join(tmpdir(), `gws-firstparty-git-${name}-`));
+  const repo = join(root, "repo");
+  put(repo, "bundles/google-workspace/manifest.json", `${JSON.stringify(MANIFEST, null, 2)}\n`);
+  put(repo, "bundles/google-workspace/pyproject.toml", "[project]\nname = \"google-workspace-mcp\"\n");
+  put(repo, ".gitignore", ".venv/\n__pycache__/\n");
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "scratch bundle");
+  return { root, repo };
+}
+
+test("S1: only a real checkout, on main, with bundles/google-workspace clean is accepted", async (t) => {
+  const { root, repo } = makeGitRepo("checks");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const ok = await checkGatewayCheckout({ repoRoot: repo });
+  assert.equal(ok.ok, true, ok.reason);
+  assert.equal(ok.branch, "main");
+
+  // A linked git worktree: `.git` is a FILE, and its branch's code is not the gateway's.
+  const worktreePath = join(root, "wt");
+  git(repo, "worktree", "add", "-q", worktreePath, "-b", "feat/x");
+  const worktree = await checkGatewayCheckout({ repoRoot: worktreePath });
+  assert.equal(worktree.ok, false);
+  assert.match(worktree.reason, /linked git worktree/);
+
+  // Another branch, in a plain checkout.
+  git(repo, "checkout", "-q", "-b", "feat/y");
+  const wrongBranch = await checkGatewayCheckout({ repoRoot: repo });
+  assert.equal(wrongBranch.ok, false);
+  assert.match(wrongBranch.reason, /feat\/y, not main/);
+  git(repo, "checkout", "-q", "main");
+
+  // An uncommitted change under the bundle it would copy.
+  put(repo, "bundles/google-workspace/README.md", "work in progress\n");
+  const dirty = await checkGatewayCheckout({ repoRoot: repo });
+  assert.equal(dirty.ok, false);
+  assert.match(dirty.reason, /uncommitted change/);
+  rmSync(join(repo, "bundles", "google-workspace", "README.md"), { force: true });
+  assert.equal((await checkGatewayCheckout({ repoRoot: repo })).ok, true, "clean again");
+
+  // Not a checkout at all.
+  const plain = join(root, "plain");
+  mkdirSync(plain, { recursive: true });
+  const notGit = await checkGatewayCheckout({ repoRoot: plain });
+  assert.equal(notGit.ok, false);
+  assert.match(notGit.reason, /not a git checkout/);
+});
+
+test("S1: a linked worktree is refused and nothing is touched; the same checkout named by --repo-root is accepted", async (t) => {
+  const baseline = fixture();
+  const { root, repo } = makeGitRepo("gate");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const worktreePath = join(root, "wt");
+  git(repo, "worktree", "add", "-q", worktreePath, "-b", "feat/gate");
+  const before = homeTree();
+
+  const refused = await migrateGwsFirstparty({
+    crowHome: HOME, repoRoot: worktreePath, uvPath: UV, env: {}, now: NOW, log: () => {},
+  });
+  assert.equal(refused.status, "refused");
+  assert.match(refused.reason, /linked git worktree/);
+  assert.deepEqual(homeTree(), before, "a refused run changes nothing");
+  assert.equal(readAt(HOME, "mcp-addons.json"), baseline.addonsText);
+
+  // The gateway's own checkout (main, clean) passes the same gate.
+  const ok = await migrateGwsFirstparty({
+    crowHome: HOME, repoRoot: repo, uvPath: UV, env: {}, now: NOW, log: () => {},
+  });
+  assert.equal(ok.status, "migrated", ok.reason);
+  assert.equal(readAt(HOME, "mcp-addons.json").includes("git+"), false);
+  assert.equal(existsSync(join(DEST, "pyproject.toml")), true);
+});
+
+test("S1: the CLI's --repo-root is the only way to name another checkout, and it passes the same checks", async (t) => {
+  const { root, repo } = makeGitRepo("cli");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const elsewhereHome = mkdtempSync(join(tmpdir(), "gws-firstparty-cli-home-"));
+  t.after(() => rmSync(elsewhereHome, { recursive: true, force: true }));
+  const env = { ...process.env, HOME: dirname(elsewhereHome), CROW_HOME: elsewhereHome, CROW_DATA_DIR: join(elsewhereHome, "data") };
+
+  // A main, clean checkout named explicitly: the repo gate passes, and the run then
+  // refuses on the empty home (there is no mcp-addons.json) — never on the checkout.
+  const named = spawnSync(process.execPath, [SCRIPT, "--repo-root", repo], { env, encoding: "utf8", timeout: 120_000 });
+  assert.equal(named.status, 1, named.stderr);
+  assert.match(named.stdout, /mcp-addons\.json does not exist/);
+
+  // The very same path, one branch off main: refused, with the checkout named.
+  git(repo, "checkout", "-q", "-b", "feat/named");
+  const bad = spawnSync(process.execPath, [SCRIPT, "--repo-root", repo], { env, encoding: "utf8", timeout: 120_000 });
+  assert.equal(bad.status, 1, bad.stderr);
+  assert.match(bad.stdout, /not main/);
+  git(repo, "checkout", "-q", "main");
+
+  // And with no --repo-root at all: the script's own checkout is what it checks.
+  const own = spawnSync(process.execPath, [SCRIPT], { env, encoding: "utf8", timeout: 120_000 });
+  assert.equal(own.status, 1, own.stderr);
+  assert.equal(/migrated onto the first-party bundle/.test(own.stdout), false, "nothing was migrated");
+});
+
+// ── S2: the migrate-linked backups a live install still carries ─────────────
+
+test("S2: a live migrate-linked backup is superseded, and --undo renames it back", async () => {
+  const baseline = fixture();
+  const linkedName = "google-workspace-20251231T235959Z.json";
+  const consumedName = "google-workspace-20251230T101010Z.undone.json";
+  mkdirSync(BACKUP_ROOT, { recursive: true, mode: 0o700 });
+  put(BACKUP_ROOT, linkedName, `${JSON.stringify({ v: 1, id: "google-workspace", kind: "migrate-stub", entry: { command: "uvx" } }, null, 2)}\n`, 0o600);
+  put(BACKUP_ROOT, consumedName, "{}\n", 0o600);
+
+  const lines = [];
+  const r = await runMigration({ log: (line) => lines.push(String(line)) });
+  assert.equal(r.status, "migrated", r.reason);
+
+  const superseded = "google-workspace-20251231T235959Z.superseded-by-firstparty.json";
+  assert.equal(existsSync(join(BACKUP_ROOT, linkedName)), false, "the live backup is no longer under its own name");
+  assert.ok(existsSync(join(BACKUP_ROOT, superseded)), "it is renamed, never deleted");
+  assert.ok(existsSync(join(BACKUP_ROOT, consumedName)), "a consumed backup is left alone");
+  const written = JSON.parse(readAt(BACKUP_DIR, "written.json"));
+  assert.deepEqual(written.superseded, [{ from: linkedName, to: superseded }]);
+  assert.ok(lines.some((line) => line.includes(superseded)), "the run says what it superseded");
+
+  const undo = await undoGwsFirstparty({ crowHome: HOME, log: () => {} });
+  assert.equal(undo.status, "restored", undo.reason);
+  assert.ok(existsSync(join(BACKUP_ROOT, linkedName)), "--undo puts the migrate-linked backup back");
+  assert.equal(existsSync(join(BACKUP_ROOT, superseded)), false);
+  assert.equal(readAt(HOME, "mcp-addons.json"), baseline.addonsText);
+});
+
+// ── N1: backup.json records the read the writes merge into ──────────────────
+
+test("N1: a concurrent change to another add-on's entry is merged into, backed up and kept by --undo", async () => {
+  const baseline = fixture();
+  const sibling = { command: "node", args: ["server/index.js"], env: { OVERLAY_KEY: "keep me" } };
+  const r = await runMigration({
+    afterInspect: () => {
+      const doc = JSON.parse(readAt(HOME, "mcp-addons.json"));
+      doc.overlay = sibling;
+      put(HOME, "mcp-addons.json", `${JSON.stringify(doc, null, 2)}\n`, 0o600);
+    },
+  });
+  assert.equal(r.status, "migrated", r.reason);
+
+  // The write merged into the fresh read: the other add-on's entry survived.
+  const doc = JSON.parse(readAt(HOME, "mcp-addons.json"));
+  assert.deepEqual(doc.overlay, sibling);
+
+  // The backup is of THAT read, not of the earlier inspection read.
+  const backup = JSON.parse(readAt(BACKUP_DIR, "backup.json"));
+  assert.deepEqual(JSON.parse(backup.addons.text).overlay, sibling, "backup.json holds the file the run started from");
+  assert.equal(backup.restore, "surgical");
+  assert.deepEqual(JSON.parse(backup.addons.text)["google-workspace"], baseline.entry);
+  assert.equal(JSON.parse(readAt(BACKUP_DIR, "written.json")).restore, "surgical");
+
+  // A whole-file restore would drop the concurrent entry, so --undo is surgical.
+  const forced = await undoGwsFirstparty({ crowHome: HOME, force: true, log: () => {} });
+  assert.equal(forced.status, "restored", forced.reason);
+  const after = JSON.parse(readAt(HOME, "mcp-addons.json"));
+  assert.deepEqual(after.overlay, sibling, "the other add-on's entry is never clobbered");
+  assert.deepEqual(after["google-workspace"], baseline.entry, "this add-on's entry is back");
+  assert.deepEqual(installedNow().map((row) => row.id), [SIBLING.id]);
+});
+
+// ── N5: "already migrated" only when it really is ──────────────────────────
+
+test("N5: an entry that launches uv over the stub is refused (a half-state is not a migration)", async () => {
+  const entry = { ...OLD_ENTRY(), command: UV, args: MANIFEST.server.args };
+  fixture({ entry });
+  const before = homeTree();
+
+  const r = await runMigration();
+  assert.equal(r.status, "refused");
+  assert.match(r.reason, /still the 0\.0\.0-local stub/);
+  assert.deepEqual(homeTree(), before, "nothing changed");
+});
+
+test("N5: an entry that launches uv without an installed.json record is refused", async () => {
+  const entry = { ...OLD_ENTRY(), command: UV, args: MANIFEST.server.args };
+  fixture({ entry });
+  // Crow's copy of the bundle, but no record of installing it.
+  put(HOME, "bundles/google-workspace/manifest.json", readAt(BUNDLES, "google-workspace/manifest.json"));
+  const before = homeTree();
+
+  const r = await runMigration();
+  assert.equal(r.status, "refused");
+  assert.match(r.reason, /installed\.json has no record/);
+  assert.deepEqual(homeTree(), before, "nothing changed");
+});
+
+// ── N6: a failed run leaves nothing behind, --undo restores the mode ────────
+
+test("N6: a failed run removes the empty data folder it made and the backup of that attempt", async () => {
+  const baseline = fixture();
+  const r = await runMigration({
+    afterStep: ({ step }) => {
+      if (step === "data-dir") throw new Error("the registry write failed");
+    },
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.reason, /the registry write failed/);
+  assert.equal(existsSync(join(HOME, "data", "google-workspace")), false, "the empty data folder is gone again");
+  assert.equal(readAt(HOME, "mcp-addons.json"), baseline.addonsText, "mcp-addons.json is byte-identical");
+  assert.equal(readAt(HOME, "installed.json"), baseline.installedText, "installed.json is byte-identical");
+  assert.equal(readAt(DEST, "manifest.json"), baseline.stubText, "the stub is back");
+  assert.deepEqual(readdirSync(DEST), ["manifest.json"]);
+  assert.equal(existsSync(BACKUP_ROOT) ? readdirSync(BACKUP_ROOT).length : 0, 0, "the backup of the failed attempt is gone");
+  assert.equal(existsSync(STUB_COPY), false, "and so is the folder copy");
+});
+
+test("N6: --undo --force restores installed.json with its backed-up mode", async () => {
+  fixture();
+  chmodSync(INSTALLED, 0o640);
+  assert.equal((await runMigration()).status, "migrated");
+  assert.equal(mode(INSTALLED), 0o640, "the migration keeps the file's own mode");
+
+  // Another writer touches installed.json afterwards: a new record and the umask's mode.
+  const rows = JSON.parse(readAt(HOME, "installed.json"));
+  rows.push({ id: "later-addon", type: "bundle", version: "9.9.9", installedAt: NOW_ISO });
+  put(HOME, "installed.json", `${JSON.stringify(rows, null, 2)}\n`, 0o600);
+
+  const forced = await undoGwsFirstparty({ crowHome: HOME, force: true, log: () => {} });
+  assert.equal(forced.status, "restored", forced.reason);
+  const after = installedNow();
+  assert.deepEqual(after.map((row) => row.id), [SIBLING.id, "later-addon"], "only this add-on's record is removed");
+  assert.equal(mode(INSTALLED), 0o640, "the backed-up mode is put back");
 });

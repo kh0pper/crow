@@ -36,6 +36,10 @@
  * It reads CROW_HOME (default ~/.crow), CROW_DATA_DIR (default <crowHome>/data)
  * and uses the checkout it sits in as the app root.
  *
+ * `--undo` refuses an id installed.json records with `type: "bundle"`: it is a
+ * first-party bundle now, and restoring its link would point it back into the
+ * tracked checkout.
+ *
  * Design notes: the private engineering notes.
  */
 import { execFile } from "node:child_process";
@@ -713,10 +717,16 @@ function isOwnLinkName(id, name) {
  * Newest backup first, each one restoring the folder it recorded, and finally
  * the entry of the OLDEST live backup: that is the state before the first
  * change, so a repoint followed by a migration comes back in one step.
+ *
+ * ONE refusal: an id installed.json records with `type: "bundle"`. That id is a
+ * first-party bundle now — its code is Crow's own copy, no longer a checkout
+ * link — and putting the link back would restore a symlink into the tracked
+ * repo. Such an id is skipped with a message; nothing about it is touched.
  */
-export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, now = () => new Date(), log = console.log } = {}) {
+export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, installedPath = null, now = () => new Date(), log = console.log } = {}) {
   const bundlesDir = join(crowHome, "bundles");
   const addonsPath = mcpAddonsPath || join(crowHome, "mcp-addons.json");
+  const installedJsonPath = installedPath || join(crowHome, "installed.json");
   const stamp = utcStamp(now());
   const live = liveBackups(join(crowHome, BACKUP_DIR));
   const wanted = Array.isArray(ids) && ids.length ? ids : [...live.keys()];
@@ -725,8 +735,24 @@ export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, now =
   let addons = null;
   try { addons = JSON.parse(readFileSync(addonsPath, "utf8")); } catch { addons = null; }
 
+  // The ids Crow installed as its own bundles: never linked into the checkout again.
+  const firstParty = new Set();
+  try {
+    const records = JSON.parse(readFileSync(installedJsonPath, "utf8"));
+    for (const r of Array.isArray(records) ? records : []) {
+      if (r && typeof r === "object" && typeof r.id === "string" && r.type === "bundle") firstParty.add(r.id);
+    }
+  } catch { /* no installed.json: nothing is recorded as a bundle */ }
+
   for (const id of wanted) {
     if (!SLUG.test(String(id))) { out.skipped.push({ id, reason: "not an add-on id" }); continue; }
+    if (firstParty.has(id)) {
+      out.skipped.push({
+        id,
+        reason: "it is Crow's own bundle now (installed.json records type \"bundle\"), so undoing this would point it back into the tracked checkout; nothing done",
+      });
+      continue;
+    }
     const backups = live.get(id) || [];
     if (!backups.length) { out.skipped.push({ id, reason: "no backup to undo" }); continue; }
     if (backups.some((b) => !b.data || typeof b.data !== "object")) {

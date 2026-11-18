@@ -15,12 +15,19 @@
  *   a. reads and checks everything, and changes NOTHING if any check fails;
  *   b. backs up, inside `<crowHome>/addon-walls-migrate/google-workspace-<stamp>/`:
  *      `backup.json` (the whole entry, and the byte-for-byte text + mode of
- *      mcp-addons.json and installed.json), and copies the installed folder
+ *      mcp-addons.json and installed.json AS READ IMMEDIATELY BEFORE THE WRITES
+ *      — the same read the writes merge into), and copies the installed folder
  *      aside to `<crowHome>/bundles/google-workspace.pre-firstparty-<stamp>`;
+ *      every live `migrate-linked` backup for this id is renamed
+ *      `<name>.superseded-by-firstparty.json` (`written.json` records the pairs,
+ *      and `--undo` renames them back): a `migrate-linked --undo` after this
+ *      migration would otherwise put a symlink into the tracked checkout back;
  *   c. copies the repo bundle into `<crowHome>/bundles/google-workspace` the way
  *      an install does — `snapshotInstallDir` (routes/bundles.js:2499, the
- *      install's own pre-copy snapshot + rollback) followed by the identical
- *      `cpSync(bundleSource, destDir, { recursive: true })` (routes/bundles.js:3686);
+ *      install's own pre-copy snapshot + rollback) followed by the same
+ *      whole-tree copy the install path makes (routes/bundles.js:3686), through
+ *      the install path's own skip filter (`BUILD_CONTEXT_SKIP`: .venv,
+ *      __pycache__, .pytest_cache, node_modules, .git are never copied);
  *   d. adds the installed.json record the way an install does, through
  *      `writeInstalled` (bundle-core.js:97 — the install path's own writer);
  *   e. rewrites the entry: `command` = the absolute `uv`, `args` = the repo
@@ -40,30 +47,47 @@
  * `migrate-linked --undo google-workspace` and never creates a symlink into the
  * tracked checkout.
  *
+ * The checkout a run copies from must be the GATEWAY's own — refuse, exit 1,
+ * unless: the repo root is a real checkout (`.git` a directory, never a linked
+ * worktree's `.git` file), it is on `main`, and `git status --porcelain
+ * bundles/google-workspace` is empty. A branch worktree is deleted when the
+ * branch is, and an edited checkout ships code nobody reviewed; the bundle a run
+ * copies must be the one the gateway itself runs. `--repo-root <path>` names a
+ * DIFFERENT checkout (the script's own may be a worktree) that passes exactly
+ * the same three checks.
+ *
  * `--undo [<stamp>]` (no stamp = the newest live backup) puts back the entry,
  * the installed folder (byte-for-byte, from the folder copy) and installed.json
- * (byte-for-byte, from the recorded text). It refuses unless the current state
+ * (byte-for-byte, from the recorded text, with the recorded mode), while a
+ * `--force` restore of installed.json is surgical and still puts the recorded
+ * mode back. It refuses unless the current state
  * is still exactly what the migration wrote — the whole file texts and the
  * installed copy's manifest must be unchanged — and `--force` restores anyway
  * (surgically: the entry key and this add-on's installed.json record only, so
- * another add-on's later change is never clobbered). A consumed backup is
- * renamed `<name>.undone` and never deleted; neither is the folder copy.
+ * another add-on's later change is never clobbered). A run whose reads found the
+ * two files already changed by someone else also records surgical restores in
+ * `written.json`, so a whole-file restore is never attempted for them. A consumed
+ * backup is named `<name>.undone` and never deleted; neither is the folder copy.
  *
  * Exit codes:
- *   0  done: migrated, already migrated (no-op), --dry-run printed, or restored
+ *   0  done: migrated, already migrated (the install really is Crow's copy, with
+ *      its installed.json record), --dry-run printed, or restored
  *   1  refused or failed before/while changing anything — the home is as it was
- *      (a backup folder is kept only when a restore step itself failed)
+ *      (a backup folder is kept only when a restore step itself failed). An
+ *      "already migrated" entry over the 0.0.0-local stub, or without its
+ *      installed.json record, is a half-state and refuses here too
  *   2  usage
  *   3  --undo refused: the home changed since the migration (nothing done; add
  *      --force to restore anyway)
  *
  * CLI: node scripts/addon-sandbox/migrate-gws-firstparty.mjs
- *        [--dry-run | --undo [<stamp>] [--force]]
+ *        [--dry-run | --undo [<stamp>] [--force]] [--repo-root <path>]
  * Reads CROW_HOME (default ~/.crow) and CROW_DATA_DIR (default <crowHome>/data)
- * and uses the checkout it sits in as the repo root.
+ * and, without --repo-root, uses the checkout it sits in as the repo root.
  *
  * Design notes: the private engineering notes.
  */
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
@@ -101,6 +125,15 @@ const OPTIONAL_OWNER_KEYS = ["GWS_FILES_DIR", "GWS_OUTBOUND_ALLOWLIST", "GWS_OUT
 const REQUIRED_ENV_KEYS = ["GOOGLE_CREDENTIALS_FILE", "GOOGLE_TOKEN_FILE"];
 
 const BACKUP_RE = /^google-workspace-(\d{8}T\d{6}Z)(?:-(\d+))?$/;
+
+/**
+ * A live `migrate-linked` backup FILE for this add-on (that script writes one
+ * `<id>-<stamp>[-N].json` file per run, beside this migration's backup folders).
+ */
+const MIGRATE_LINKED_BACKUP_RE = /^google-workspace-\d{8}T\d{6}Z(?:-\d+)?\.json$/;
+
+/** What a superseding first-party migration renames such a file to (base name + this). */
+const SUPERSEDED_SUFFIX = ".superseded-by-firstparty.json";
 
 const deepCopy = (v) => JSON.parse(JSON.stringify(v));
 
@@ -228,6 +261,86 @@ export function resolveUvPath({ entry, uvPath = null, env = process.env } = {}) 
     if (isExecutableFile(p)) return { path: p, from: "PATH" };
   }
   return { error: "uv was not found next to the entry's launcher or on PATH — install uv first, then run this again" };
+}
+
+// ── the checkout this copies from ───────────────────────────────────────────
+
+/** The branch the gateway's own checkout runs. */
+export const GATEWAY_BRANCH = "main";
+
+/** The first line of an error, for a refusal sentence. */
+function firstLine(err) {
+  const text = String(err?.stderr || err?.message || err || "").trim();
+  return text.split("\n")[0].slice(0, 200);
+}
+
+/** `git <args>` in `cwd`: stdout/stderr, or a rejection carrying both. */
+function defaultGit(cwd, args) {
+  return new Promise((ok, fail) => {
+    execFile("git", ["-C", cwd, ...args], {
+      timeout: 60_000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        fail(err);
+        return;
+      }
+      ok({ stdout, stderr });
+    });
+  });
+}
+
+/**
+ * The checkout a run copies from must be the GATEWAY's own: the folder the
+ * gateway process runs out of. Three checks, all read-only, all before anything
+ * is written:
+ *
+ *   1. it is a real checkout — `.git` a directory. A linked git worktree (`.git`
+ *      a FILE pointing into another checkout's .git/worktrees/) carries one
+ *      branch's code, is deleted when that branch is done, and may be edited by
+ *      whoever is working on it: never a source to copy a launcher's code from;
+ *   2. it is on `main` — the branch the gateway's checkout follows;
+ *   3. `git status --porcelain -- bundles/google-workspace` is empty — the copy is
+ *      the committed bundle, not somebody's work in progress.
+ *
+ * `--repo-root <path>` is the one way to name another checkout, and it passes
+ * exactly the same three checks.
+ *
+ * @returns {Promise<{ok: true, branch: string}|{ok: false, reason: string}>}
+ */
+export async function checkGatewayCheckout({ repoRoot, git = defaultGit, id = ADDON_ID } = {}) {
+  if (typeof repoRoot !== "string" || repoRoot === "") return refuse("no repo root given");
+  let st = null;
+  try { st = lstatSync(join(repoRoot, ".git")); } catch { st = null; }
+  if (!st) {
+    return refuse(`${repoRoot} is not a git checkout (no .git); nothing done — run this from the Crow checkout the gateway runs from`);
+  }
+  if (!st.isDirectory()) {
+    return refuse(`${repoRoot} is a linked git worktree, not the gateway's own checkout; nothing done — run this from the Crow checkout the gateway runs from, or name one with --repo-root <path>`);
+  }
+  let branch;
+  try {
+    branch = String((await git(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"])).stdout || "").trim();
+  } catch (err) {
+    return refuse(`git could not tell which branch ${repoRoot} is on (${firstLine(err)}); nothing done`);
+  }
+  if (branch !== GATEWAY_BRANCH) {
+    return refuse(`${repoRoot} is on ${branch && branch !== "HEAD" ? branch : "a detached HEAD"}, not ${GATEWAY_BRANCH}; nothing done — check out ${GATEWAY_BRANCH} in the gateway's checkout, or name one with --repo-root <path>`);
+  }
+  let dirty = "";
+  try {
+    dirty = String((await git(repoRoot, ["status", "--porcelain", "--", `bundles/${id}`])).stdout || "").trim();
+  } catch (err) {
+    return refuse(`git could not read the state of bundles/${id} in ${repoRoot} (${firstLine(err)}); nothing done`);
+  }
+  if (dirty !== "") {
+    const count = dirty.split("\n").length;
+    return refuse(`bundles/${id} in ${repoRoot} has ${count} uncommitted change(s); nothing done — commit or stash them and run this again`);
+  }
+  return { ok: true, branch };
 }
 
 // ── installed.json ──────────────────────────────────────────────────────────
@@ -424,21 +537,47 @@ function planLines({ crowHome, state, stamp, at }) {
     entry, uv, args: repoArgs, destDir, dataRoot, repoManifest,
   });
   const record = installedRecordFor({ installed: state.installed, repoManifest, at });
+  const supersede = liveMigrateLinkedBackups(crowHome);
   return [
     `[gws-firstparty] plan (dry run — nothing is written):`,
     `  1. back up -> ${join(crowHome, BACKUP_DIR, `${ADDON_ID}-${stamp}`)}/ (the entry, mcp-addons.json and installed.json texts)`,
     `     and the installed folder -> ${join(crowHome, "bundles", `${ADDON_ID}.pre-firstparty-${stamp}`)}`,
-    `  2. copy ${bundleDir} -> ${destDir} (version ${repoManifest.version ?? "(none)"}, the install's own copy)`,
+    ...(supersede.length
+      ? [`  1b. supersede ${supersede.length} live migrate-linked backup(s): ${supersede.join(", ")}`
+        + ` -> *${SUPERSEDED_SUFFIX} (so migrate-linked --undo cannot link the checkout back)`]
+      : []),
+    `  2. copy ${bundleDir} -> ${destDir} (version ${repoManifest.version ?? "(none)"}, the install's own copy,`
+      + ` without .venv/__pycache__/.pytest_cache/node_modules/.git)`,
     `  3. installed.json += ${JSON.stringify(record)}`,
     `  4. mcp-addons.json entry ${ADDON_ID}:`,
     `     command: ${next.command}   (uv from ${uvFrom})`,
     `     args:    ${JSON.stringify(next.args)}`,
     `     command_sha256: ${next.command_sha256 ?? "(none: root-owned launcher)"}`,
-    `     env:     ${JSON.stringify(next.env)}`,
+    // KEY NAMES ONLY: a plan can be pasted into an issue, and the values are the owner's secrets.
+    `     env:     ${Object.keys(next.env).sort().join(", ")}   (these keys; values kept as they are)`,
     `     ownerSet: ${JSON.stringify(next.ownerSet)}`,
     `  unchanged: the wall mode, GWS_FILES_DIR, GWS_OUTBOUND_GUARD/ALLOWLIST, the token files`,
     `  undo:     node scripts/addon-sandbox/migrate-gws-firstparty.mjs --undo ${stamp}`,
   ];
+}
+
+/**
+ * The live `migrate-linked` backup FILES this add-on still has (newest name first
+ * is not needed: all of them are superseded). Each is
+ * `<crowHome>/addon-walls-migrate/google-workspace-<stamp>[-N].json`; a consumed
+ * one is `.undone.json` and a superseded one carries the suffix, so neither
+ * matches.
+ */
+function liveMigrateLinkedBackups(crowHome) {
+  const root = join(crowHome, BACKUP_DIR);
+  let names = [];
+  try { names = readdirSync(root); } catch { return []; }
+  return names.filter((name) => MIGRATE_LINKED_BACKUP_RE.test(name)).sort();
+}
+
+/** What a superseded backup file is renamed to: its base name plus the suffix. */
+function supersededName(name) {
+  return `${name.replace(/\.json$/, "")}${SUPERSEDED_SUFFIX}`;
 }
 
 // ── the migration ───────────────────────────────────────────────────────────
@@ -448,6 +587,10 @@ function planLines({ crowHome, state, stamp, at }) {
  * writes nothing. Every refusal and every failure leaves the Crow home as it
  * was (a backup folder survives only when a restore step itself failed).
  *
+ * Before anything is read, the repo root must be the gateway's own clean `main`
+ * checkout (checkGatewayCheckout); `afterInspect` and `afterStep` are the test
+ * seams for "something else wrote these files while this ran".
+ *
  * @returns {{status: "migrated"|"already-migrated"|"dry-run"|"refused"|"failed",
  *            reason?: string, notes?: string[], stamp?: string, backupDir?: string,
  *            next?: object, record?: object, lines?: string[]}}
@@ -455,7 +598,12 @@ function planLines({ crowHome, state, stamp, at }) {
 export async function migrateGwsFirstparty({
   crowHome, repoRoot, dataDir = null, mcpAddonsPath = null, installedPath = null,
   uvPath = null, env = process.env, now = () => new Date(), dryRun = false, log = console.log,
+  git = defaultGit, afterInspect = null, afterStep = null,
 } = {}) {
+  // S1: the code this copies must be the gateway's own committed bundle.
+  const checkout = await checkGatewayCheckout({ repoRoot, git });
+  if (!checkout.ok) return { status: "refused", reason: checkout.reason };
+
   const state = inspectGwsAddon({ crowHome, repoRoot, dataDir, mcpAddonsPath, installedPath, uvPath, env });
   if (!state.ok) return { status: "refused", reason: state.reason };
 
@@ -464,11 +612,25 @@ export async function migrateGwsFirstparty({
   const at = new Date(when).toISOString();
 
   // A migrated entry is the whole job: this is the idempotent no-op (`--dry-run`
-  // included — there is nothing to preview).
+  // included — there is nothing to preview). It is only a no-op when the install
+  // really is complete: an entry that launches `uv run` over the 0.0.0-local stub,
+  // or without its installed.json record, is a half-state (it would run whatever
+  // is in that folder) and refuses here.
   if (state.shape === "migrated") {
+    const launches = `its entry already launches ${basename(state.entry.command)} ${JSON.stringify(state.entry.args)}`;
+    if (state.copyState !== "repo") {
+      return {
+        status: "refused",
+        reason: `${launches}, but the installed folder ${state.destDir} is still the ${STUB_VERSION} stub — reinstall ${ADDON_ID} from Extensions (or run migrate-linked) and then this again; nothing done`,
+      };
+    }
+    if (!state.priorRecord) {
+      return {
+        status: "refused",
+        reason: `${launches}, but installed.json has no record for ${ADDON_ID} — reinstall it from Extensions and then run this again; nothing done`,
+      };
+    }
     const notes = [];
-    if (state.copyState !== "repo") notes.push("the installed folder is not Crow's copy yet");
-    if (!state.priorRecord) notes.push("installed.json has no record for it");
     if (state.uv) {
       const want = nextEntryFor({
         entry: state.entry, uv: state.uv, args: state.repoArgs,
@@ -480,7 +642,7 @@ export async function migrateGwsFirstparty({
     } else {
       notes.push(`its uv launcher does not resolve (${state.uvError})`);
     }
-    log(`[gws-firstparty] ${ADDON_ID}: already migrated (its entry launches ${basename(state.entry.command)} ${JSON.stringify(state.entry.args)}); nothing done`);
+    log(`[gws-firstparty] ${ADDON_ID}: already migrated (${launches}); nothing done`);
     for (const note of notes) log(`  note: ${note}`);
     return { status: "already-migrated", stamp: null, notes, next: state.entry };
   }
@@ -497,16 +659,29 @@ export async function migrateGwsFirstparty({
     return { status: "dry-run", stamp, lines, next, record };
   }
 
-  const result = await applyMigration({ crowHome: state.crowHome, state, next, record, stamp, at, log });
+  // A hook between the inspection and the writes (tests only): whatever it
+  // changes is what the run must merge into, and backup.
+  if (typeof afterInspect === "function") await afterInspect({ state, stamp, at });
+
+  const result = await applyMigration({ crowHome: state.crowHome, state, stamp, at, log, afterStep });
   for (const line of result.lines || []) log(line);
   return result;
 }
 
-/** Steps b-f of one run, with a rollback that puts everything back on any failure. */
-async function applyMigration({ crowHome, state, next, record, stamp, at, log }) {
+/**
+ * Steps b-f of one run, with a rollback that puts everything back on any failure.
+ *
+ * The two files are read ONCE, here, and every write merges into that same read:
+ * the gateway and the Extensions page write them too, so `backup.json` has to
+ * record the state the run actually started from. When that read differs from
+ * the inspection read, the run still migrates (merging, never overwriting) but
+ * `written.json` records `restore: "surgical"`: `--undo` then puts back this
+ * add-on's own key and record instead of a whole file it did not read alone.
+ */
+async function applyMigration({ crowHome, state, stamp, at, log, afterStep }) {
   const {
     addonsPath, installedJsonPath, dataRoot, destDir, bundleDir,
-    addonsMode, installedMode, installedExisted,
+    addonsMode, installedMode,
   } = state;
   const bundlesDir = join(crowHome, "bundles");
   const backupRoot = join(crowHome, BACKUP_DIR);
@@ -514,8 +689,33 @@ async function applyMigration({ crowHome, state, next, record, stamp, at, log })
   const stubCopyName = freeName(bundlesDir, `${ADDON_ID}.pre-firstparty-${stamp}`);
   const stubCopyPath = join(bundlesDir, stubCopyName);
 
+  // N1: the state the writes merge into — read once, before anything is written.
+  const freshAddonsText = readTextOrNull(addonsPath);
+  const freshAddonsDoc = parseJsonOrNull(freshAddonsText || "");
+  if (!freshAddonsDoc || typeof freshAddonsDoc !== "object" || Array.isArray(freshAddonsDoc)) {
+    throw new Error(`${addonsPath} changed while this ran and can no longer be read`);
+  }
+  const freshEntry = freshAddonsDoc[ADDON_ID];
+  if (!freshEntry || typeof freshEntry !== "object" || Array.isArray(freshEntry) || entryShape(freshEntry) !== state.shape) {
+    throw new Error(`the ${ADDON_ID} entry in ${addonsPath} changed while this ran (it is no longer the ${state.shape} shape)`);
+  }
+  const freshInstalled = readInstalledStrict(installedJsonPath);
+  if (freshInstalled.entries === null) throw new Error(`${installedJsonPath} changed while this ran and can no longer be read`);
+  const freshAddonsMode = modeOrNull(addonsPath) ?? addonsMode ?? 0o600;
+  const freshInstalledMode = modeOrNull(installedJsonPath) ?? installedMode ?? 0o600;
+  const surgical = freshAddonsText !== state.addonsText
+    || (freshInstalled.text ?? null) !== (state.installedText ?? null);
+
+  // The entry and the record, built from that fresh read: a value another writer
+  // put in the entry while this ran is carried over, never reverted.
+  const next = nextEntryFor({
+    entry: freshEntry, uv: state.uv, args: state.repoArgs,
+    destDir, dataRoot, repoManifest: state.repoManifest,
+  });
+  const record = installedRecordFor({ installed: freshInstalled.entries, repoManifest: state.repoManifest, at });
+
   const undoState = {
-    backupDir: false, stubCopy: false,
+    backupDir: false, stubCopy: false, dataDir: false, superseded: [],
     addonsWritten: null, installedWritten: null,
   };
   let snap = null;
@@ -527,9 +727,9 @@ async function applyMigration({ crowHome, state, next, record, stamp, at, log })
     // 2. installed.json, only when the bytes on disk are still ours.
     if (undoState.installedWritten !== null) {
       try {
-        const now = readTextOrNull(installedJsonPath);
-        if (now === undoState.installedWritten) {
-          if (installedExisted) writeAtomicPrivate(installedJsonPath, state.installedText, installedMode ?? 0o600);
+        const nowText = readTextOrNull(installedJsonPath);
+        if (nowText === undoState.installedWritten) {
+          if (freshInstalled.existed) writeAtomicPrivate(installedJsonPath, freshInstalled.text, freshInstalledMode);
           else rmSync(installedJsonPath, { force: true });
         } else problems.push("installed.json (changed again while this ran; left as it is)");
       } catch (err) { problems.push(`installed.json: ${err?.message || err}`); }
@@ -537,10 +737,24 @@ async function applyMigration({ crowHome, state, next, record, stamp, at, log })
     // 3. mcp-addons.json, the same way.
     if (undoState.addonsWritten !== null) {
       try {
-        const now = readTextOrNull(addonsPath);
-        if (now === undoState.addonsWritten) writeAtomicPrivate(addonsPath, state.addonsText, addonsMode ?? 0o600);
+        const nowText = readTextOrNull(addonsPath);
+        if (nowText === undoState.addonsWritten) writeAtomicPrivate(addonsPath, freshAddonsText, freshAddonsMode);
         else problems.push("mcp-addons.json (changed again while this ran; left as it is)");
       } catch (err) { problems.push(`mcp-addons.json: ${err?.message || err}`); }
+    }
+    // 3b. the migrate-linked backups this attempt superseded get their names back.
+    for (const pair of undoState.superseded) {
+      try {
+        const to = join(backupRoot, pair.to);
+        if (lexists(to) && !lexists(join(backupRoot, pair.from))) renameSync(to, join(backupRoot, pair.from));
+      } catch (err) { problems.push(`the migrate-linked backup ${pair.from}: ${err?.message || err}`); }
+    }
+    // 3c. the empty data folder this attempt made is not left behind.
+    if (undoState.dataDir) {
+      try {
+        const folder = join(dataRoot, ADDON_ID);
+        if (lexists(folder) && readdirSync(folder).length === 0) rmSync(folder, { recursive: true, force: true });
+      } catch { /* gone, or not ours to judge any more */ }
     }
     // 4. what this attempt created: the folder copy and the backup, when nothing
     //    is left to restore from them.
@@ -552,7 +766,8 @@ async function applyMigration({ crowHome, state, next, record, stamp, at, log })
   };
 
   try {
-    // b. The backup, before a single thing changes.
+    // b. The backup, before a single thing changes — of the FRESH read above, the
+    //    one every write below merges into.
     mkdirSync(backupDir, { recursive: true, mode: 0o700 });
     undoState.backupDir = true;
     try { chmodSync(backupDir, 0o700); } catch { /* just made */ }
@@ -564,52 +779,69 @@ async function applyMigration({ crowHome, state, next, record, stamp, at, log })
       kind: "gws-firstparty",
       at,
       stamp,
-      entry: deepCopy(state.entry),
+      entry: deepCopy(freshEntry),
       stubName: stubCopyName,
       repo: { root: state.bundleDir, version: state.repoManifest?.version ?? null, manifestSha: sha256OfFile(join(bundleDir, "manifest.json")) },
-      addons: { path: addonsPath, text: state.addonsText, mode: addonsMode },
-      installed: { path: installedJsonPath, text: state.installedText, existed: installedExisted, mode: installedMode },
+      addons: { path: addonsPath, text: freshAddonsText, mode: freshAddonsMode },
+      installed: { path: installedJsonPath, text: freshInstalled.text, existed: freshInstalled.existed, mode: freshInstalledMode },
+      // "surgical": the two files had already changed since the inspection read, so
+      // --undo puts back this add-on's own key / record rather than the whole file.
+      restore: surgical ? "surgical" : "whole",
     }, null, 2)}\n`);
 
     // c. The copy, exactly the install path's two steps (routes/bundles.js:3684-3686)
-    //    — the pre-copy snapshot (its `settle()` is the rollback) and the copy.
-    const { snapshotInstallDir } = await import("../../servers/gateway/routes/bundles.js");
+    //    — the pre-copy snapshot (its `settle()` is the rollback) and the copy —
+    //    through the install path's own skip filter, so a .venv, __pycache__ or
+    //    .pytest_cache sitting in the checkout never lands in the Crow home.
+    const { snapshotInstallDir, BUILD_CONTEXT_SKIP } = await import("../../servers/gateway/routes/bundles.js");
     snap = snapshotInstallDir(bundleDir, destDir, { backupRoot: join(backupDir, "install-rollback") });
     mkdirSync(destDir, { recursive: true });
-    cpSync(bundleDir, destDir, { recursive: true });
+    cpSync(bundleDir, destDir, { recursive: true, filter: (src) => !BUILD_CONTEXT_SKIP.has(basename(src)) });
 
-    // d. installed.json, through the install path's own writer.
-    const freshState = readInstalledStrict(installedJsonPath);
-    if (freshState.entries === null) throw new Error(`${installedJsonPath} changed while this ran and can no longer be read`);
-    const arr = freshState.entries.filter((r) => !(r && typeof r === "object" && r.id === ADDON_ID)).concat([record]);
+    // d. installed.json, through the install path's own writer, merged into the
+    //    fresh read.
+    const arr = freshInstalled.entries.filter((r) => !(r && typeof r === "object" && r.id === ADDON_ID)).concat([record]);
     writeInstalled(installedJsonPath, arr);
     // The writer's own temp file carries the umask's mode; keep the file's own.
-    try { chmodSync(installedJsonPath, installedMode ?? 0o600); } catch { /* the boot pass tightens it */ }
+    try { chmodSync(installedJsonPath, freshInstalledMode); } catch { /* the boot pass tightens it */ }
     undoState.installedWritten = JSON.stringify(arr, null, 2);
 
     // e. the data folder the entry's UV_PROJECT_ENVIRONMENT lives in (the same
     //    `<data>/<id>` the wall binds), then the entry itself.
     mkdirSync(join(dataRoot, ADDON_ID), { recursive: true, mode: 0o700 });
+    undoState.dataDir = true;
+    if (typeof afterStep === "function") await afterStep({ step: "data-dir" });
 
-    const freshDoc = parseJsonOrNull(readTextOrNull(addonsPath) || "");
-    if (!freshDoc || typeof freshDoc !== "object" || Array.isArray(freshDoc)) {
-      throw new Error(`${addonsPath} changed while this ran and can no longer be read`);
-    }
-    const doc = { ...freshDoc, [ADDON_ID]: next };
+    // The entry, merged into the same fresh document: another add-on's entry that
+    // changed while this ran stays exactly as that writer left it.
+    const doc = { ...freshAddonsDoc, [ADDON_ID]: next };
     const addonsText = JSON.stringify(doc, null, 2);
     // 0600 in every case (the file can hold plain secret values on a legacy install);
     // the original mode is in the backup, and --undo puts it back.
     writeAtomicPrivate(addonsPath, addonsText, 0o600);
     undoState.addonsWritten = addonsText;
 
+    // e2. Every live migrate-linked backup of this add-on is superseded: that
+    //     script's --undo restores a SYMLINK into the tracked checkout, which is
+    //     the one thing this migration exists to end. `--undo` renames them back.
+    const superseded = [];
+    for (const name of liveMigrateLinkedBackups(crowHome)) {
+      const to = supersededName(name);
+      renameSync(join(backupRoot, name), join(backupRoot, to));
+      undoState.superseded.push({ from: name, to });
+      superseded.push({ from: name, to });
+    }
+
     // f. What it wrote, LAST: `--undo` refuses without it.
     writeAtomicPrivate(join(backupDir, "written.json"), `${JSON.stringify({
       at,
+      restore: surgical ? "surgical" : "whole",
       entry: deepCopy(next),
       installedRecord: record,
       addonsText,
       installedText: undoState.installedWritten,
       bundleManifestSha: sha256OfFile(join(destDir, "manifest.json")),
+      superseded,
     }, null, 2)}\n`);
 
     // The pre-copy snapshot is committed, so the copy stays; the temp folder the
@@ -639,9 +871,15 @@ async function applyMigration({ crowHome, state, next, record, stamp, at, log })
       `  installed folder: ${destDir} (the ${STUB_VERSION} stub is kept at ${stubCopyName})`,
       `  installed.json:   ${JSON.stringify(record)}`,
       `  entry:            command ${next.command}, args ${JSON.stringify(next.args)}, ${next.command_sha256 ? `pinned ${next.command_sha256}` : "no pin needed (root-owned launcher)"}`,
-      `  env:              kept ${Object.keys(state.entryEnv).length} value(s); added UV_NO_CACHE and UV_PROJECT_ENVIRONMENT`,
+      `  env:              kept ${Object.keys(freshEntry.env || {}).length} value(s); added UV_NO_CACHE and UV_PROJECT_ENVIRONMENT`,
       `  ownerSet:         ${JSON.stringify(next.ownerSet)}`,
       `  unchanged:        wall mode, GWS_FILES_DIR, the outbound guard, your token files (the wall window's job)`,
+      ...(undoState.superseded.length
+        ? [`  superseded:       ${undoState.superseded.map((p) => p.to).join(", ")} (migrate-linked's own backups; --undo renames them back)`]
+        : []),
+      ...(surgical
+        ? [`  note:             both files had changed since this run read them; --undo restores this add-on's entry and record only`]
+        : []),
       `  backup:           ${backupDir}`,
       `  undo:             node scripts/addon-sandbox/migrate-gws-firstparty.mjs --undo ${stamp}`,
     ],
@@ -678,7 +916,13 @@ function liveBackups(crowHome) {
  * migration wrote: both files' bytes and the installed copy's manifest must be
  * the ones `written.json` names. With `force` it restores anyway, surgically for
  * a file that changed (this add-on's key / record only) so a later change to
- * another add-on is never clobbered.
+ * another add-on is never clobbered — and a surgical restore of installed.json
+ * still puts the recorded file mode back. A run that recorded
+ * `restore: "surgical"` (its own reads found the files already changed) always
+ * restores that way.
+ *
+ * The migrate-linked backups the run superseded get their names back: the state
+ * being restored is the one they apply to.
  *
  * @returns {{status: "restored"|"refused"|"no-backup", reason?: string, diffs?: string[],
  *            restored?: string[], problems?: string[], backupDir?: string}}
@@ -740,8 +984,10 @@ export async function undoGwsFirstparty({
     }
   }
 
-  // 2. mcp-addons.json: the recorded bytes when nothing has changed, else (forced) the key only.
-  const wholeFile = typeof written?.addonsText === "string" && currentAddons === written.addonsText;
+  // 2. mcp-addons.json: the recorded bytes when nothing has changed (and the run
+  //    itself saw both files alone), else (forced) the key only.
+  const surgical = written?.restore === "surgical";
+  const wholeFile = !surgical && typeof written?.addonsText === "string" && currentAddons === written.addonsText;
   try {
     if (wholeFile && typeof backup.addons?.text === "string") {
       writeAtomicPrivate(addonsPath, backup.addons.text, backup.addons.mode ?? 0o600);
@@ -758,8 +1004,9 @@ export async function undoGwsFirstparty({
     problems.push(`mcp-addons.json: ${err?.message || err}`);
   }
 
-  // 3. installed.json: the recorded bytes when nothing has changed, else (forced) this record only.
-  const installedWhole = (currentInstalled ?? null) === (written?.installedText ?? null) && !!written;
+  // 3. installed.json: the recorded bytes when nothing has changed, else (forced) this record only
+  //    — with the backup's file mode, which a surgical write must put back itself.
+  const installedWhole = !surgical && !!written && (currentInstalled ?? null) === (written.installedText ?? null);
   try {
     if (installedWhole) {
       if (backup.installed?.existed) writeAtomicPrivate(installedJsonPath, backup.installed.text, backup.installed.mode ?? 0o600);
@@ -767,11 +1014,31 @@ export async function undoGwsFirstparty({
       restored.push("installed.json (byte-for-byte)");
     } else {
       const arr = readInstalled(installedJsonPath).filter((r) => !(r && typeof r === "object" && r.id === ADDON_ID));
-      if (arr.length > 0 || lexists(installedJsonPath)) writeInstalled(installedJsonPath, arr);
+      if (backup.installed?.existed === false && arr.length === 0) {
+        rmSync(installedJsonPath, { force: true });
+      } else {
+        writeInstalled(installedJsonPath, arr);
+        // The writer's temp file carries the umask's mode; put the recorded one back.
+        try { chmodSync(installedJsonPath, backup.installed?.mode ?? 0o600); } catch { /* the boot pass tightens it */ }
+      }
       restored.push("installed.json (its record removed, the rest of the file kept)");
     }
   } catch (err) {
     problems.push(`installed.json: ${err?.message || err}`);
+  }
+
+  // 4. The migrate-linked backups this run superseded are live again, under their
+  //    own names (the pairs are the only names used: from = the recorded file name,
+  //    to = that same name plus the suffix).
+  const unSuperseded = [];
+  for (const pair of Array.isArray(written?.superseded) ? written.superseded : []) {
+    if (!pair || typeof pair.from !== "string" || !MIGRATE_LINKED_BACKUP_RE.test(pair.from)) continue;
+    if (pair.to !== supersededName(pair.from)) continue;
+    const to = join(join(crowHome, BACKUP_DIR), pair.to);
+    const from = join(join(crowHome, BACKUP_DIR), pair.from);
+    try {
+      if (lexists(to) && !lexists(from)) { renameSync(to, from); unSuperseded.push(pair.from); }
+    } catch (err) { problems.push(`the migrate-linked backup ${pair.from}: ${err?.message || err}`); }
   }
 
   if (problems.length > 0) {
@@ -785,6 +1052,9 @@ export async function undoGwsFirstparty({
 
   for (const line of [
     `[gws-firstparty] ${ADDON_ID}: restored (${restored.join(", ")})`,
+    ...(unSuperseded.length
+      ? [`  migrate-linked backups live again: ${unSuperseded.join(", ")}`]
+      : []),
     `  the backup stays at ${backupDir}.undone, and the folder copy at bundles/${backup.stubName ?? "(none)"}`,
     `  the data folder ${join(crowHome, "data", ADDON_ID)} is left alone (uv rebuilds its .venv)`,
   ]) log(line);
@@ -794,33 +1064,41 @@ export async function undoGwsFirstparty({
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 export const USAGE = "usage: node scripts/addon-sandbox/migrate-gws-firstparty.mjs"
-  + " [--dry-run | --undo [<stamp>] [--force]]";
+  + " [--dry-run | --undo [<stamp>] [--force]] [--repo-root <path>]";
 
 async function main(argv) {
-  const undo = argv.includes("--undo");
-  const dryRun = argv.includes("--dry-run");
-  const force = argv.includes("--force");
-  const rest = argv.filter((a) => a !== "--undo" && a !== "--dry-run" && a !== "--force");
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(USAGE);
     return 0;
   }
-  if (dryRun && undo) {
-    console.log(USAGE);
-    return 2;
+  const undo = argv.includes("--undo");
+  const dryRun = argv.includes("--dry-run");
+  const force = argv.includes("--force");
+  // The checkout to copy from, when it is not the one this script sits in. It
+  // passes the SAME checks (a real checkout, on main, bundles/google-workspace
+  // clean) — this is a way to point at the gateway's checkout, not around the rule.
+  let repoRootArg = null;
+  let misuse = false;
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--undo" || arg === "--dry-run" || arg === "--force") continue;
+    if (arg === "--repo-root" || arg.startsWith("--repo-root=")) {
+      const value = arg === "--repo-root" ? argv[++i] : arg.slice("--repo-root=".length);
+      if (typeof value !== "string" || value === "" || repoRootArg !== null) { misuse = true; break; }
+      repoRootArg = value;
+      continue;
+    }
+    rest.push(arg);
   }
-  if (rest.some((a) => a.startsWith("-"))) {
-    console.log(USAGE);
-    return 2;
-  }
-  if (!undo && rest.length > 0) {
+  if (misuse || (dryRun && undo) || rest.some((a) => a.startsWith("-")) || (!undo && rest.length > 0)) {
     console.log(USAGE);
     return 2;
   }
 
   const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
   const dataDir = process.env.CROW_DATA_DIR || join(crowHome, "data");
-  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const repoRoot = repoRootArg ? resolve(repoRootArg) : resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
   if (undo) {
     if (rest.length > 1) { console.log(USAGE); return 2; }
