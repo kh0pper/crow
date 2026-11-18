@@ -6596,6 +6596,144 @@ test("R15 r4: a take over a clip that keeps sounding is written from its own bar
   await hubApply(ui, sent);
 });
 
+test("R15 r5 fix 1: a toggle click mid-take takes nothing away from the take's own collection", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  const toggle = () => ui.document.querySelector("[data-act=rec-timeline]");
+  const view = viewOf(ui);
+  await standPlayheadAt(ui, 4);
+  await addTrackWithClip(ui, "keys", "c-keys");
+  assert.equal(view.recTimeline.on, false, "the operator left the toggle off");
+  assert.equal(toggle().disabled, false, "and it is a live control");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  // The keys are launched from session bar 0 while the toggle is off, so nothing
+  // collected them: they are what plays across the press.
+  await launchOnBar(ui, 0, { track: "keys", clip: "c-keys" });
+  await transportOnBar(ui, 13);
+  loopStartOnBar(ui, 16);
+  await pressRecord(ui);
+  await ui.settle(24);
+  assert.ok(view.rec, "the take is open");
+  assert.equal(view.rec.active, true, "and armed on the loop start the engine named");
+  assert.equal(view.recTimeline.on, true, "the take collects what it plays");
+  assert.equal(view.recTimeline.forced, true, "because the take is what turned the toggle on");
+  assert.equal(view.recTimeline.base_bar, 4, "from the bar the playhead stood on");
+  assert.equal(toggle().getAttribute("aria-pressed"), "true", "and the toggle shows it");
+  assert.equal(toggle().disabled, true, "while it is drawn disabled for the take");
+  assert.ok(
+    String(toggle().title).includes("stop the take first"),
+    `its title says what has to happen first (got: ${toggle().title})`,
+  );
+
+  const collected = JSON.parse(JSON.stringify(view.recTimeline.launches));
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+
+  assert.equal(view.recTimeline.on, true, "a click mid-take leaves the collection on");
+  assert.equal(view.recTimeline.forced, true, "still the take's own");
+  assert.deepEqual(view.recTimeline.launches, collected, "and takes nothing it collected away");
+  assert.equal(toggle().getAttribute("aria-pressed"), "true", "the button still shows the collection");
+  assert.ok(
+    toastText(ui).includes("Stop the take first."),
+    `and the page says why (got: ${toastText(ui)})`,
+  );
+
+  // The take carries on: a tap on the keys four bars in, and Stop on session
+  // bar 24.
+  await launchOnBar(ui, 20, { track: "keys", clip: "c-keys" });
+  await transportOnBar(ui, 24);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the whole take is one record_performance");
+  assert.deepEqual(
+    placementsInOrder(sent[0].args.placements),
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 8 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 4, bars: 4 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 8, bars: 4 },
+    ],
+    "nothing the click could have dropped is missing from it",
+  );
+  await hubApply(ui, sent);
+
+  // Stop puts the toggle back where the operator had it, and the button is a
+  // live control again.
+  assert.equal(view.recTimeline.on, false, "the toggle is off again");
+  assert.equal(view.recTimeline.forced, false, "with no take holding it");
+  assert.equal(toggle().disabled, false, "so the button is live again");
+  assert.equal(toggle().getAttribute("aria-pressed"), "false", "with nothing pressed");
+  assert.ok(
+    String(toggle().title).includes("Collect the scene launches"),
+    `and its own title back (got: ${toggle().title})`,
+  );
+});
+
+test("R15 r5 fix 1: a toggle click during the count-in takes nothing away, and Stop still writes the take", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
+  const toggle = () => ui.document.querySelector("[data-act=rec-timeline]");
+  const view = viewOf(ui);
+  await standPlayheadAt(ui, 4);
+  await pressRecord(ui);
+  assert.ok(view.rec, "the take is open");
+  assert.equal(view.rec.counting, true, "and counting in");
+  assert.equal(view.recTimeline.on, true, "the take turned the collection on");
+  assert.equal(view.recTimeline.forced, true, "for its own duration");
+  assert.equal(toggle().disabled, true, "so the toggle is drawn disabled, the count-in included");
+
+  // The clicks run; a click on the toggle while they do changes nothing.
+  ui.engine.countIn({ type: "count_in_start", play_frame: 96000 });
+  await ui.settle();
+  const collected = JSON.parse(JSON.stringify(view.recTimeline.launches));
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  assert.equal(view.recTimeline.on, true, "a click while the clicks run leaves the collection on");
+  assert.equal(view.recTimeline.forced, true, "still the take's own");
+  assert.deepEqual(view.recTimeline.launches, collected, "and holds what it held");
+  assert.ok(
+    toastText(ui).includes("Stop the take first."),
+    `and the page says why (got: ${toastText(ui)})`,
+  );
+
+  // The last click arms the take on the count-in's downbeat, and the launch the
+  // downbeat plays is the one the plan gets.
+  clockAtFrame(ui, LAST_CLICK_FRAME);
+  ui.engine.countIn({ type: "count_in", beat: 4, beats: 4, frame: LAST_CLICK_FRAME, play_frame: 96000 });
+  await ui.settle(24);
+  assert.equal(view.rec.active, true, "the take is armed on the downbeat the count-in announced");
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: CLIP, scene_id: SCENE, bar: 0, frame: 96000 }),
+  );
+  await ui.settle();
+  ui.engine.countIn({ type: "count_in_done", frame: 96000 });
+  await ui.settle(24);
+  assert.equal(view.rec.preroll, false, "the take begins on the downbeat");
+
+  // A tap four bars in, and Stop on session bar 10.
+  await launchOnBar(ui, 4);
+  await transportOnBar(ui, 10);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 8, bars: 6 },
+    ],
+    "the take begins on the playhead's bar 4, so the tap at session bar 4 lands on bar 8",
+  );
+  await hubApply(ui, sent);
+
+  assert.equal(view.recTimeline.on, false, "Stop puts the toggle back to off");
+  assert.equal(view.recTimeline.forced, false, "with no take holding it");
+  assert.equal(toggle().disabled, false, "so it is a live control again");
+  assert.equal(toggle().getAttribute("aria-pressed"), "false", "with nothing pressed");
+});
+
 test("R15 r4: the Session note says it writes into the plan from a bar only while the toggle is off", async () => {
   const ui = await bootPanel({ clip: true, lengthBars: 4 });
   assert.equal(viewOf(ui).mode, "session", "the page opens in the Session view");
@@ -6623,6 +6761,23 @@ test("R15 r4: the Session note says it writes into the plan from a bar only whil
   assert.ok(
     planModeNoteText(ui).includes("Writes into the plan from bar"),
     `brings the note back (got: ${planModeNoteText(ui)})`,
+  );
+
+  // A by-hand take turns the collection on for its own duration, and what it
+  // writes is written from the playhead's bar: the note names it while the take
+  // runs, and once it is over.
+  await pressRecord(ui);
+  assert.equal(viewOf(ui).recTimeline.forced, true, "the take turned the toggle on");
+  assert.ok(
+    planModeNoteText(ui).includes("Writes into the plan from bar"),
+    `the note names the bar the take writes from (got: ${planModeNoteText(ui)})`,
+  );
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+  assert.equal(viewOf(ui).rec, null, "the take is over");
+  assert.ok(
+    planModeNoteText(ui).includes("Writes into the plan from bar"),
+    `and it still names it (got: ${planModeNoteText(ui)})`,
   );
 });
 

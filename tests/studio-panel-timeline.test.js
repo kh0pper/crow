@@ -1386,6 +1386,10 @@ test("stopping the transport another way closes the performance", async () => {
   const toggle = () => ui.document.querySelector("[data-act=rec-timeline]");
   assert.equal(toggle().getAttribute("aria-pressed"), "false", "the toggle is left Off");
 
+  // The playhead is left past the fixture's own audio placement (bars 4 to 8),
+  // so what the take writes is a song the timeline can hold.
+  await playheadLeftAt(ui, 8);
+
   // Record is pressed by hand in the Session view: the take turns the collection
   // on for its own duration, and it begins on a launch of the track it records.
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
@@ -1418,10 +1422,25 @@ test("stopping the transport another way closes the performance", async () => {
   assert.deepEqual(
     sent[0].args.placements,
     [
-      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 0, bars: 4 },
-      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 4, bars: 2 },
+      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 8, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 12, bars: 2 },
     ],
-    "each launch closed by the next one, the last by the stop bar",
+    "each launch closed by the next one, the last by the stop bar, both moved to the playhead's bar",
+  );
+
+  // The write is a song the timeline can hold: the hub's own command is what says
+  // so, and the recorded clip's placements are in it afterwards.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  runCommand(ui.doc, sent[0].command, sent[0].args);
+  const placed = Object.values(snapshot(ui.doc).arrangement.placements)
+    .filter((placement) => placement.clip_id === AUDIO_CLIP)
+    .map((placement) => [placement.start_bar, placement.bars])
+    .sort((a, b) => a[0] - b[0]);
+  assert.deepEqual(
+    placed,
+    [[4, 4], [8, 4], [12, 2]],
+    "the recorded clip's three placements are in the song, beside the fixture's own",
   );
 });
 
