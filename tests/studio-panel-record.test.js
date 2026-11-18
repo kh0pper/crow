@@ -3299,11 +3299,13 @@ test("R7: Pause during the count-in from paused leaves it paused at the same pos
 test("R7: Pause cancels a count-in with view.recTimeline.on forced true (the By-hand case)", async () => {
   // By hand (C3) forces the performance collection on for the take, and a
   // performance being collected is only ever ended with Stop. A count-in is not
-  // that: the counting branch runs before the performance's own guard.
+  // that: the counting branch runs before the performance's own guard. The
+  // toggle is off at the press, which is the only way a by-hand take starts
+  // (R15 fix 4): the take is what turns the collection on.
   const ui = await bootPanel({ storage: makeStorage() });
   const view = ui.page.__studioTest.view;
-  view.recTimeline.on = true;
   await pressRecord(ui);
+  assert.equal(view.recTimeline.on, true, "the take turned the collection on for its own duration");
 
   ui.click("[data-act=pause]");
   await ui.settle(24);
@@ -6051,49 +6053,6 @@ test("R15 fix 3: a scene tapped just before Record that plays before the anchor 
     sent[0].args.placements.some((placement) => Number(placement.start_bar) === 18),
     false,
     "session bar 14 is not written as a placement of its own",
-  );
-});
-
-test("R15 fix 3 (pin): launches the toggle collected before the press keep their own bars", async () => {
-  const ui = await bootPanel({ clip: true, lengthBars: 4 });
-  await addTrackWithClip(ui, "keys", "c-keys");
-  // An engine behind a transport that stands still: what a launch is reported
-  // through, without a run of its own.
-  ui.click("[data-act=play]");
-  await ui.settle(24);
-  ui.click("[data-act=pause]");
-  await ui.settle();
-  assert.equal(viewOf(ui).paused, true, "the transport stands paused");
-  ui.click("[data-act=rec-timeline]");
-  await ui.settle();
-  assert.equal(viewOf(ui).recTimeline.on, true, "the operator turned the toggle on");
-
-  // The keys were heard at session bar 0 while the toggle was on, before any
-  // take existed: that launch belongs to the toggle's own collection, and its
-  // frame is far below the anchor a take is armed on.
-  await launchOnBar(ui, 0, { track: "keys", clip: "c-keys" });
-  assert.equal(viewOf(ui).recTimeline.launches.length, 1, "the toggle collected it");
-
-  await pressRecord(ui);
-  await reportLaunch(ui);
-  // A tap on the keys after the take armed, and Stop two bars later.
-  await launchOnBar(ui, 4, { track: "keys", clip: "c-keys" });
-  await transportOnBar(ui, 6);
-  ui.click("[data-act=stop]");
-  await ui.settle(24);
-
-  const sent = performances(ui);
-  assert.equal(sent.length, 1, "the take is one record_performance");
-  const keys = placementsInOrder(
-    sent[0].args.placements.filter((placement) => placement.track_id === "keys"),
-  );
-  assert.deepEqual(
-    keys,
-    [
-      { track_id: "keys", clip_id: "c-keys", start_bar: 0, bars: 4 },
-      { track_id: "keys", clip_id: "c-keys", start_bar: 4, bars: 2 },
-    ],
-    "the launch collected before the press keeps its own bar, and the take's floor does not drop it",
   );
 });
 

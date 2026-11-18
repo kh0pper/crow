@@ -1383,23 +1383,33 @@ test("a refused performance can still be placed", async () => {
 
 test("stopping the transport another way closes the performance", async () => {
   const ui = await bootTimeline();
-  ui.click("[data-act=rec-timeline]");
-  ui.click("[data-act=play]");
-  await ui.settle(24);
-  ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 0, frame: 0 });
-  ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 4, frame: 4 * 96000 });
-  ui.position({ bar: 7, beat: 1, sixteenth: 1 });
+  const toggle = () => ui.document.querySelector("[data-act=rec-timeline]");
+  assert.equal(toggle().getAttribute("aria-pressed"), "false", "the toggle is left Off");
 
-  // A take on the audio track. Its input goes away, so the take ends by
-  // itself — and that ends the transport, which is the other way to stop it.
+  // Record is pressed by hand in the Session view: the take turns the collection
+  // on for its own duration, and it begins on a launch of the track it records.
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
   await ui.settle();
   ui.click("[data-act=record]");
   await ui.settle(24);
   const recorder = ui.engine.recorders[0];
   assert.ok(recorder, "Record built the recorder");
-  assert.notEqual(recorder.armed, null, "and armed it on the next bar");
+  assert.equal(recorder.armed, null, "the take waits for a launch on its own track");
+  assert.equal(
+    toggle().getAttribute("aria-pressed"),
+    "true",
+    "the take collects what it plays, and the toggle shows it",
+  );
 
+  // The launch that starts the take, and one four bars into it.
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 0, frame: 48000 });
+  await ui.settle();
+  assert.equal(recorder.armed, 48000, "the take is armed on the frame the launch named");
+  ui.launch({ track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, scene_id: SCENE, bar: 4, frame: 4 * 96000 });
+  ui.position({ bar: 7, beat: 1, sixteenth: 1 });
+
+  // The take's input goes away, so the take ends by itself — and that ends the
+  // transport, which is the other way to stop it.
   recorder.done({ segments: [] });
   await ui.settle();
 
@@ -1408,8 +1418,8 @@ test("stopping the transport another way closes the performance", async () => {
   assert.deepEqual(
     sent[0].args.placements,
     [
-      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 0, bars: 4 },
-      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 4, bars: 2 },
+      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 0, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 4, bars: 2 },
     ],
     "each launch closed by the next one, the last by the stop bar",
   );
