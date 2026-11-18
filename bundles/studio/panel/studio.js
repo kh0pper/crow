@@ -1226,8 +1226,10 @@ const STYLES = `
   /* The punch range (B7) on the record target's lane: a shaded band over the
      clip's own beats that says it applies on every pass. It is a picture, so a
      press goes through it to the lane under it, and that lane body is the 44 px
-     surface a drag across it sets another range on. */
-  .studio .st-rec-lane-punch { min-height: 44px; touch-action: none; cursor: crosshair; }
+     surface a drag across it sets another range on. The drag itself is
+     horizontal, so the page keeps a vertical swipe: pan-y lets a thumb that
+     starts on the lane still scroll the page. */
+  .studio .st-rec-lane-punch { min-height: 44px; touch-action: pan-y; cursor: crosshair; }
   .studio .st-rec-punch {
     position: absolute; top: 0; bottom: 0; box-sizing: border-box;
     min-height: 44px; padding: 2px 6px; overflow: hidden;

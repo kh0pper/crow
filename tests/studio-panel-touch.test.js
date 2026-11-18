@@ -1152,13 +1152,15 @@ test("the punch band and its Clear button are 44 px targets on a phone", async (
 
   const surface = rules.filter((rule) => rule.selectors.includes(".studio .st-rec-lane-punch"));
   assert.ok(surface.length > 0, "the lane body a range is dragged on has a rule of its own");
+  // A drag across the lane is horizontal, so the lane keeps a vertical swipe:
+  // pan-y lets a thumb that starts on it still scroll the page (S10).
   assert.ok(
     surface.some(
       (rule) =>
         /(?:^|;|\s)min-height\s*:\s*44px/.test(rule.body) &&
-        /(?:^|;|\s)touch-action\s*:\s*none/.test(rule.body),
+        /(?:^|;|\s)touch-action\s*:\s*pan-y/.test(rule.body),
     ),
-    "and it is a 44 px surface that does not scroll the page under a drag",
+    "and it is a 44 px surface whose vertical swipes still scroll the page",
   );
 
   // A phone gives the row a line of its own, so the reading and the button fit

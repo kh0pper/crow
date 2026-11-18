@@ -1591,6 +1591,35 @@ test("on a phone the ruler drops its side column so the bars line up with the la
   assert.doesNotMatch(phone, /116px/, "the 116 px side column is gone");
 });
 
+/** The studio sheet's whole text. */
+function studioRules(html) {
+  const style = /<style>([\s\S]*?)<\/style>/.exec(String(html));
+  assert.ok(style, "the page carries the studio sheet");
+  return style[1];
+}
+
+test("the lane's punch surface lets a vertical swipe scroll the page", async () => {
+  const res = {
+    html: "",
+    send(body) {
+      this.html = String(body);
+    },
+  };
+  await (await import("../bundles/studio/panel/studio.js")).default.handler(
+    { query: { song: "song-1" }, headers: {} },
+    res,
+    { db: panelDb(), layout: minimalLayout },
+  );
+  const found = /\.studio \.st-rec-lane-punch \{[^}]*\}/.exec(studioRules(res.html));
+  assert.ok(found, "the record target's punch surface has a rule of its own");
+  assert.match(
+    found[0],
+    /touch-action: pan-y;/,
+    "a swipe up or down the lane scrolls the page instead of being swallowed",
+  );
+  assert.doesNotMatch(found[0], /touch-action: none;/, "and nothing turns the whole gesture off");
+});
+
 // ---- the punch range (B7) -------------------------------------------------
 //
 // A punch is a stretch of the clip a take lands in, counted in CLIP beats:
