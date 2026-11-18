@@ -344,6 +344,8 @@ The `notifications` table stores all notifications:
 - **`createNotification(db, opts)`** — Creates a notification after checking user preferences. Returns `{ id, delivery }` or `null` if the type is disabled. With `deliver: false` it writes the row and refreshes the badge but sends nothing (no push, ntfy or email); `delivery` is the payload to pass to `deliverNotification` later, for example after a transaction commits. Always wrap calls in `try/catch` to prevent notification failures from breaking primary actions.
 - **`cleanupNotifications(db)`** — Removes expired notifications and enforces a 500-notification retention limit. Called by the scheduler tick and the REST GET endpoint.
 
+It also exports the preference gate as a pure predicate, **`notificationTypeEnabled(prefsValue, type)`**, for a writer that is not an async gateway process: the bot bridge (`scripts/pi-bots/hidden-dir-alert.mjs`) writes one `source: "bot-sandbox"`, `priority: high` row when a spawn is refused by the hidden-entry rule, because that refusal stops every bot on the instance and the operator must see it in the bell. That row is deduped per entry per 24 h and falls back to the alert spool (`alerts/pending`, drained at the next boot) when `crow.db` cannot be opened.
+
 ### User Preferences
 
 Users configure which notification types are enabled in Settings → Notifications. Preferences are stored as a JSON object in `dashboard_settings` under the key `notification_prefs`:

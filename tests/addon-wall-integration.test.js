@@ -124,6 +124,12 @@ async function buildRig() {
   // The Google Cloud CLI's credentials folder: operator secrets, like ~/.ssh.
   mkdirSync(join(home, ".config", "gcloud"), { recursive: true });
   writeFileSync(join(home, ".config", "gcloud", "application_default_credentials.json"), "fixture adc\n");
+  // Two more entries of the operator credential list
+  // (servers/shared/operator-secret-paths.js): a folder hidden whole and a file
+  // masked with an empty one, both denied to a walled add-on.
+  mkdirSync(join(home, ".aws"), { recursive: true });
+  writeFileSync(join(home, ".aws", "credentials"), "[default]\naws_access_key_id = fixture\n");
+  writeFileSync(join(home, ".netrc"), "machine example.invalid login fixture password fixture\n", { mode: 0o600 });
   mkdirSync(join(crowHome, "secrets"), { recursive: true });
   writeFileSync(join(crowHome, "secrets", "keychain.key"), "fixture key material\n");
   writeFileSync(join(crowHome, "mcp-addons.json"), JSON.stringify({}), { mode: 0o600 });
@@ -278,6 +284,8 @@ test("a walled hostile add-on reaches nothing it was not given", { skip, timeout
         join(rig.crowHome, "secrets", "keychain.key"),
         join(rig.home, ".ssh", "id_ed25519"),
         join(rig.home, ".config", "gcloud", "application_default_credentials.json"),
+        join(rig.home, ".aws", "credentials"),
+        join(rig.home, ".netrc"),
         "/var/run/docker.sock",
       ]) {
         const result = await rig.call("probe_read", { path });

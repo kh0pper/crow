@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { buildContainPlan, containSelected, ContainRefused, neverBound } from "../scripts/pi-bots/pi_contain.mjs";
+import { OPERATOR_SECRET_PATHS } from "../servers/shared/operator-secret-paths.js";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "crow-contain-plan-")));
 after(() => rmSync(T, { recursive: true, force: true }));
@@ -377,6 +378,45 @@ test("a co-hosted home is never bound: a symlinked one inside $HOME or a declare
       const hit = refused.find((r) => r.path === p);
       assert.ok(hit, list + " " + p + " is refused");
       assert.equal(hit.reason, "another Crow instance's home", "the reason names only the co-host rule");
+    }
+  }
+});
+
+// ---- the operator's credential folders AND files, from the one list ----
+
+test("every entry of the operator list is in neverBound and is refused as a bind source, folder or file, and so is anything inside a folder", () => {
+  // ONE list: servers/shared/operator-secret-paths.js. The contain tier refuses
+  // through neverBound, and the add-on wall builds its refuse list from the same
+  // function, so an entry added to the list is covered here without a new case.
+  const insideOf = {};
+  for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+    const p = join(H, rel);
+    if (kind === "dir") {
+      mkdirSync(p, { recursive: true });
+      insideOf[rel] = join(p, "fake-credential");
+      writeFileSync(insideOf[rel], "{}");
+    } else {
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, "{}");
+      insideOf[rel] = p;
+    }
+  }
+  const never = neverBound(H);
+  for (const { rel } of OPERATOR_SECRET_PATHS) {
+    assert.ok(never.includes(join(H, rel)), "~/" + rel + " is in the never-bound list");
+  }
+  const entries = OPERATOR_SECRET_PATHS.map(({ rel }) => join(H, rel));
+  const targets = OPERATOR_SECRET_PATHS.map(({ rel }) => insideOf[rel]);
+  const { args, refused } = buildContainPlan(base({ writePaths: targets, readPaths: [...entries, ...targets] }));
+  for (const { rel } of OPERATOR_SECRET_PATHS) {
+    const folder = join(H, rel);
+    for (const p of [folder, insideOf[rel]]) {
+      assert.ok(!pairs(args).some((q) => (q[0] === "--bind" || q[0] === "--ro-bind") && (q[1] === p || String(q[1]).startsWith(folder + "/"))),
+        p + " not bound");
+      const hit = refused.find((r) => r.path === p);
+      assert.ok(hit, p + " refused");
+      assert.match(hit.reason, /^a protected path \(/,
+        p + " is refused as a protected path (the list is why, not a missing path)");
     }
   }
 });

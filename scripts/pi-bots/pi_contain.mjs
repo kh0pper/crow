@@ -37,9 +37,12 @@
  *   cache       one per-instance bot cache (npm, uv) read-write, so npx/uv
  *               work without touching the cache unsandboxed processes run
  *
- * Never bound, whatever a policy says: ~/.ssh, ~/.gnupg, ~/.claude, ~/.config
- * /gcloud (the Google Cloud CLI's credentials), ~/.config/systemd, the whole
- * $HOME, other /home users, other Crow instance homes,
+ * Never bound, whatever a policy says: the operator's credential folders and
+ * files (~/.ssh, ~/.gnupg, ~/.config/gcloud, ~/.aws, ~/.azure, ~/.kube,
+ * ~/.config/gh, ~/.terraform.d, ~/.docker/config.json, ~/.netrc, ~/.npmrc,
+ * ~/.pgpass, ~/.config/containers/auth.json — one list,
+ * servers/shared/operator-secret-paths.js), ~/.claude, ~/.config/systemd, the
+ * whole $HOME, other /home users, other Crow instance homes,
  * a bot's git key dir (the contain tier has no git in v1), /etc/crow,
  * /run/credentials, /run/user, docker sockets; nor is the checkout
  * or engine ever writable. "/" in write_paths/read_paths (permissionMode
@@ -64,6 +67,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { buildContainedAgentDir } from "./pi_contain_agent.mjs";
+import { operatorSecretPaths } from "../../servers/shared/operator-secret-paths.js";
 
 export class ContainRefused extends Error {
   constructor(msg) { super(msg); this.name = "ContainRefused"; }
@@ -121,11 +125,20 @@ export function packageRoot(file, exists = existsSync) {
   return file;
 }
 
-/** Paths a bot may never see, for a given home. */
+/** Paths a bot may never see, for a given home: the operator's credential
+ *  folders and files from ONE list (servers/shared/operator-secret-paths.js),
+ *  plus the assistant config, the systemd/unit dirs and the docker sockets. The
+ *  operator's entries are matched at their RESOLVED path here, so a bind that
+ *  reaches one through a symlink is refused too; the bridge that builds this
+ *  plan also runs the shared resolveHiddenSecretPath check (hidden_files.mjs)
+ *  before the spawn, so a recorded entry that is now missing or replaced
+ *  refuses a contained spawn as well. The add-on wall builds its own refuse
+ *  list from this same function (makeBindPolicy), so a walled add-on cannot
+ *  bind one of these by path or by fd either. */
 export function neverBound(home) {
-  return [join(home, ".ssh"), join(home, ".gnupg"), join(home, ".claude"), join(home, ".config", "gcloud"),
-    join(home, ".config", "systemd"),
-    join(home, ".local", "share", "systemd"), "/etc/crow", "/run/credentials", "/run/user", "/run/docker.sock", "/var/run/docker.sock"];
+  return [...operatorSecretPaths(home),
+    join(home, ".claude"), join(home, ".config", "systemd"), join(home, ".local", "share", "systemd"),
+    "/etc/crow", "/run/credentials", "/run/user", "/run/docker.sock", "/var/run/docker.sock"];
 }
 
 /** Co-hosted homes named `$HOME/.crow*`, at their REAL paths (a home is often

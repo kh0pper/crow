@@ -16,6 +16,7 @@ import { closeSync, constants, openSync, readFileSync, readdirSync, statSync } f
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { SECRET_NAME_RE } from "./bot-env.js";
+import { operatorSecretPaths } from "./operator-secret-paths.js";
 
 /** True when `path` (file or directory) can be opened read-only by this process. */
 export function canOpen(path) {
@@ -146,8 +147,12 @@ function looksLikeInstanceHome(p) {
   return false;
 }
 
-/** Default sensitive paths: the other ~/.crow* homes, ~/.ssh, ~/.gnupg, and the
- *  Google Cloud CLI's credential folder ~/.config/gcloud. */
+/** Default sensitive paths: the other ~/.crow* homes, plus every one of the
+ *  operator's credential folders and files (one list:
+ *  servers/shared/operator-secret-paths.js — ~/.ssh, ~/.gnupg,
+ *  ~/.config/gcloud, ~/.aws, … and ~/.netrc, ~/.npmrc, …). All of them are
+ *  reported whether or not they exist, like the Crow homes; `canOpen` only ever
+ *  names a path it really opened. */
 export function defaultSensitivePaths({ home = homedir(), crowHome = process.env.CROW_HOME || join(homedir(), ".crow") } = {}) {
   const own = resolve(crowHome);
   const parent = dirname(own);
@@ -159,11 +164,9 @@ export function defaultSensitivePaths({ home = homedir(), crowHome = process.env
       if (/^\.crow(-|$)/.test(e) && p !== own && looksLikeInstanceHome(p)) paths.push(p);
     }
   } catch {}
-  for (const d of [".ssh", ".gnupg"]) paths.push(join(home, d));
-  // The Google Cloud CLI's credentials (application_default_credentials.json,
-  // credentials.db, access_tokens.db, legacy_credentials/): operator secrets,
-  // reported like ~/.ssh. Listed whether or not it exists, like the two above;
-  // canOpen only ever names a path it really opened.
-  paths.push(join(home, ".config", "gcloud"));
+  // The operator's own credentials: ssh keys, gpg, the cloud CLIs (gcloud, aws,
+  // azure, kubectl, gh, terraform) and the files that hold registry, http,
+  // npm and database passwords. Listed whether or not they exist.
+  paths.push(...operatorSecretPaths(home));
   return [...new Set(paths)];
 }

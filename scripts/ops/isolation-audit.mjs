@@ -10,8 +10,11 @@
  *
  *   --sensitive <path>  a path this process should NOT be able to open
  *                       (another instance's home, a key dir). Defaults: the
- *                       other ~/.crow* homes next to this instance's, ~/.ssh,
- *                       ~/.gnupg, ~/.config/gcloud.
+ *                       other ~/.crow* homes next to this instance's, plus every
+ *                       one of the operator's credential folders and files
+ *                       (~/.ssh, ~/.gnupg, ~/.config/gcloud, ~/.aws, … and
+ *                       ~/.netrc, ~/.npmrc, … — one list,
+ *                       servers/shared/operator-secret-paths.js).
  *   --check <path>      report the mode/owner of an operator file (e.g. a file
  *                       that may hold a credential) and whether it is group-
  *                       or world-accessible.

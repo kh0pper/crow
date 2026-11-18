@@ -38,7 +38,7 @@ import { stripContextEcho } from "../../servers/gateway/voice/context-echo.js";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
-import { chmodSync, closeSync, existsSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -52,8 +52,10 @@ import { wrapPiSpawn, piSandboxMode, probePiSandbox } from "./pi_sandbox.mjs";
 import { gitPreSpawn, gitPostLaunch, countEnabledPiBots } from "./bot_git_spawn.mjs";
 import { BOT_GIT_DIRNAME, checkKeyDir, gitAllowedForInstance, isSafeKeyPath, isValidGitBotId } from "../../servers/shared/bot-git/paths.js";
 import { botGitMeta, writeSpawnFiles } from "../../servers/shared/bot-git/store.js";
-import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
-  GCLOUD_DIR_REL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal } from "./hidden_files.mjs";
+import { secretFilesFor, secretPinDirsFor, unmaskableRefusal,
+  SSH_DIR_REL, HIDDEN_SECRET_DIRS, HIDDEN_SECRET_FILES, hiddenDirStateFile,
+  secretNotHiddenRefusal, secretDirNotHiddenRefusal, resolveHiddenSecretPath } from "./hidden_files.mjs";
+import { notifyHiddenDirRefusal } from "./hidden-dir-alert.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
@@ -1066,6 +1068,11 @@ export class PiRpc {
     };
     let launch;
     let hiddenCandidates = null;
+    // The Crow home the hidden-entry record belongs to, for the reset command a
+    // refusal and its bell name (co-hosted instances keep their own record). Set
+    // where the record is resolved, read again by the refusal check below the
+    // launch, which sits outside that block.
+    let hiddenDirCrowHome = null;
     // Folders this spawn hides WHOLE (a tmpfs): every secrets dir, plus env/ and
     // android-keystore/. Filled below with the launch's own plan; read by the
     // refusal check so a link into one gets its own plain sentence.
@@ -1108,61 +1115,130 @@ export class PiRpc {
       }
       const appReal = realRoot(BRIDGE_APP_ROOT);
       const otherHomesReal = otherHomes.map(realRoot).filter(Boolean);
-      const hideFileRoots = [homeReal, appReal, ...otherHomesReal].filter(Boolean);
+      // The operator's own home, for the credential FILES below (~/.netrc,
+      // ~/.npmrc, ~/.pgpass, ~/.docker/config.json,
+      // ~/.config/containers/auth.json): resolved, so a home reached through a
+      // link is masked at its real path. Every root here is trusted; nothing
+      // outside them is ever masked.
+      const operatorHomeReal = realRoot(HOME);
+      const hideFileRoots = [...new Set([homeReal, operatorHomeReal, appReal, ...otherHomesReal].filter(Boolean))];
       // Instance secret dirs no code inside the sandbox reads (env/ holds
       // compose env files the gateway reads; android-keystore/ the release
       // keys): hidden as dirs, tmpfs, when they exist.
       const instanceSecretDirs = [homeReal, ...otherHomesReal].filter(Boolean).flatMap((h) => [join(h, "env"), join(h, "android-keystore")]);
-      // The Google Cloud CLI's credential folder (~/.config/gcloud): the
-      // operator's application-default credentials, credentials.db,
-      // access_tokens.db and legacy_credentials/ live there, and no Crow code
-      // reads any of it. Hidden WHOLE (a dir, tmpfs) like ~/.ssh, but NEVER
-      // created: a host without the gcloud CLI is left exactly as it is, and
-      // the folder is hidden — or the spawn refused below — only when it really
-      // exists. A folder that is itself a SYMLINK refuses the spawn instead: the
-      // mask would follow the link and hide its target, but a bot can re-point
-      // the link (its parent ~/.config is writable inside the sandbox), so the
-      // next spawn would mask a decoy and leave the real folder readable.
-      let gcloudDir = null;
-      if (!contain) {
-        const named = join(HOME, GCLOUD_DIR_REL);
-        let gcloudIsLink = false;
-        try { gcloudIsLink = lstatSync(named).isSymbolicLink(); } catch { /* no gcloud CLI on this host */ }
-        if (gcloudIsLink) throw new Error(GCLOUD_LINK_REFUSAL);
-        const at = realRoot(named) || named;
-        try { if (statSync(at).isDirectory()) gcloudDir = at; } catch { /* no gcloud CLI on this host */ }
+      // The operator's credential folders and files are resolved by ONE helper
+      // (hidden_files.mjs resolveHiddenSecretPath), driven by ONE list
+      // (servers/shared/operator-secret-paths.js): ~/.ssh, ~/.gnupg,
+      // ~/.config/gcloud, ~/.aws, ~/.azure, ~/.kube, ~/.config/gh,
+      // ~/.terraform.d as folders hidden whole, and ~/.docker/config.json,
+      // ~/.netrc, ~/.npmrc, ~/.pgpass, ~/.config/containers/auth.json as files
+      // masked with an empty one. It walks every component below $HOME with
+      // lstat ($HOME itself may be a link: it is resolved once as the anchor),
+      // so a symlinked ~/.config or a symlinked folder refuses the spawn instead
+      // of redirecting the mask to a decoy a bot could plant and re-point. Each
+      // FOLDER's (dev, ino) is recorded the first time it is seen, in the
+      // instance's secrets dir (hidden from every bot, 0600); one that was
+      // hidden before and is now gone, or is a different entry, refuses the
+      // spawn until the operator re-confirms (delete the record, or run
+      // `node scripts/pi-bots/hidden-dir-memory.mjs --reset`), and an unreadable
+      // record refuses it too (fail closed). A FOLDER is also looked INTO on every
+      // spawn: a symlink at depth 1 refuses it (the tmpfs hides the link's name,
+      // never what it points at), which is also what keeps the first sight from
+      // recording a decoy a bot arranged. A FILE gets no identity memory: the
+      // same tool rewrite that an operator runs every day (`npm config set`,
+      // `docker login`) renames a new inode over it, and refusing every bot until
+      // a manual reset for that would be an availability bug, not a tamper
+      // signal — the link checks and the mask itself need no memory (a bind
+      // mount target cannot be unlinked or renamed over from inside the sandbox,
+      // and the next spawn masks whatever file holds the name). An absent entry
+      // is never created here (~/.ssh is made below, because its mask must always
+      // apply); absent and never seen is simply nothing to hide.
+      // The record is read and written through the anchored secrets dir, but a
+      // refusal names the plain path: the operator never has to read a
+      // /proc/self/fd number to act on it. One record per operator home.
+      // A refusal also RINGS THE BELL: the operator must see that bots are
+      // stopped, not only the failed turn in one channel (hidden-dir-alert.mjs;
+      // once per entry per 24 h, the alert spool when the store is unusable). The
+      // bell's reset command names THIS instance's home when it is not the default
+      // one (`--crow-home ~/.crow-<x>`), so the operator forgets the record that
+      // refused and not the default instance's.
+      const hiddenDirStateName = hiddenDirStateFile(HOME);
+      const hiddenDirStateReadPath = anchoredPath(process.env, hiddenDirStateName) || join(secretsHere, hiddenDirStateName);
+      const hiddenDirShownPath = join(homeReal || dirname(secretsHere), "secrets", hiddenDirStateName);
+      // The Crow home this record belongs to, for the reset command a refusal and
+      // its bell name: a co-hosted instance must tell the operator to forget ITS
+      // record (`--crow-home ~/.crow-<x>`), never the default instance's.
+      hiddenDirCrowHome = homeReal || dirname(secretsHere);
+      const resolveSecretPath = (rel, kind) => {
+        const r = resolveHiddenSecretPath(HOME, rel, { kind, statePath: hiddenDirStateReadPath, displayPath: hiddenDirShownPath, crowHome: hiddenDirCrowHome });
+        if (r.refusal) {
+          logUnhideableOnce(hiddenDirStateReadPath + "#" + rel, r.refusal);
+          notifyHiddenDirRefusal({ dbPath: CROW_DB, rel, kind, cause: r.cause, entry: r.innerName || null,
+            recordWhy: r.recordWhy || null, count: r.innerCount || null, crowHome: hiddenDirCrowHome });
+          throw new Error(r.refusal);
+        }
+        return r;
+      };
+      const resolveSecretDir = (rel) => resolveSecretPath(rel, "dir");
+      const secretDirs = HIDDEN_SECRET_DIRS.map(resolveSecretDir);
+      // ~/.ssh: hidden empty on every default-tier spawn, so it is created 0700
+      // when it is absent. A remembered folder that went missing refused above,
+      // before anything was made.
+      const sshAt = secretDirs.findIndex((r) => r.rel === SSH_DIR_REL);
+      if (sshAt >= 0 && secretDirs[sshAt].absent && !contain) {
+        try { mkdirSync(join(HOME, SSH_DIR_REL), { mode: 0o700 }); }
+        catch (e) { if (e && e.code !== "EEXIST") throw new Error("A bot could not start: Crow could not create ~/" + SSH_DIR_REL + " to keep it hidden."); }
+        secretDirs[sshAt] = resolveSecretDir(SSH_DIR_REL);
       }
+      // Every other folder is hidden WHOLE (a tmpfs) but NEVER created — a host
+      // without gpg, the gcloud CLI, aws, azure, kubectl, gh or terraform is
+      // left exactly as it is. The trailing FILES are masked with an empty file
+      // (--dev-bind /dev/null) and are never created either.
+      const secretFilesResolved = HIDDEN_SECRET_FILES.map((rel) => resolveSecretPath(rel, "file"));
+      const secretDirPaths = secretDirs.map((r) => r.dir).filter(Boolean);
+      const secretFilePaths = secretFilesResolved.map((r) => r.path).filter(Boolean);
       // Folders hidden WHOLE (a tmpfs), so a candidate inside one is already
       // unreachable and a link into one is refused with a plain "links into a
       // hidden folder" sentence instead of "sits behind a link".
-      hiddenWholeDirs = [...new Set([secretsHere, ...others, ...instanceSecretDirs, ...(gcloudDir ? [gcloudDir] : []),
+      hiddenWholeDirs = [...new Set([secretsHere, ...others, ...instanceSecretDirs,
+        ...secretDirPaths,
         ...(homeReal ? [join(homeReal, "secrets")] : []), ...otherHomesReal.map((h) => join(h, "secrets"))])].filter(Boolean);
       // Every home's list is built with the SAME trusted roots (this home, the
-      // repo checkout, the co-hosts' homes): a co-hosted home with a bundle link
-      // into appRoot/bundles is listed at its resolved path (and masked) rather
-      // than refused as "outside the Crow folders".
-      const hiddenDirsForListing = [...instanceSecretDirs, ...(gcloudDir ? [gcloudDir] : [])];
+      // repo checkout, the operator's home, the co-hosts' homes): a co-hosted
+      // home with a bundle link into appRoot/bundles is listed at its resolved
+      // path (and masked) rather than refused as "outside the Crow folders".
+      const hiddenDirsForListing = [...instanceSecretDirs, ...secretDirPaths];
       const hideFiles = [
         ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: appReal || undefined, hiddenDirs: hiddenDirsForListing }) : []),
         ...otherHomesReal.flatMap((h) => secretFilesFor({ crowHome: h, appRoot: appReal || undefined, hiddenDirs: hiddenDirsForListing })),
+        ...secretFilePaths,
       ];
       // Deduped: the app root's bundles dir and each of its real bundle dirs are
       // pinned for every home, and each root's listing adds the same paths twice.
       const hidePinDirs = [...new Set([homeReal, ...otherHomesReal].filter(Boolean)
         .flatMap((h) => secretPinDirsFor({ crowHome: h, appRoot: appReal || undefined })))];
-      hiddenCandidates = { hideFiles, hideFileRoots, homes: [homeReal, ...otherHomesReal].filter(Boolean), gcloudDir };
+      hiddenCandidates = { hideFiles, hideFileRoots, homes: [homeReal, ...otherHomesReal].filter(Boolean), secretDirs, secretFiles: secretFilesResolved };
       // The operator's ssh keys: no Crow code reads ~/.ssh. Always hidden (a dir,
       // tmpfs), so a bot cannot use the keys, or `ssh localhost`, to leave the
       // sandbox, nor plant authorized_keys under it. Created empty when absent,
-      // so the mask always applies. ~/.config/gcloud is the same dir mask without
-      // the creation: it is hidden when it exists and never made otherwise.
-      const sshDir = join(HOME, ".ssh");
-      if (!contain) {
-        try { mkdirSync(sshDir, { mode: 0o700 }); } catch (e) { if (e && e.code !== "EEXIST") throw new Error("A bot could not start: Crow could not create " + sshDir + " to keep it hidden."); }
-        hiddenCandidates.sshDir = sshDir;
-      }
+      // so the mask always applies. Every other credential folder on the list is
+      // the same dir mask without the creation: hidden when it exists, never
+      // made.
+      // THE CHECK-TO-MOUNT WINDOW. Everything above (the lstat walk, the identity
+      // record, the look inside each folder) measured the filesystem at one
+      // moment; the masks below are made when the child starts, in wrapPiSpawn.
+      // A writer with the operator's own uid can rename a folder away, swap a
+      // decoy in or add a link between the two — the checks approved an entry that
+      // is no longer the one mounted. Nothing here can close that: there is no
+      // atomic "check and mount this inode", and the default (bwrap) tier is a
+      // mask over paths inside the same uid and filesystem as the bot, NOT a
+      // boundary against a cooperating same-uid writer. What the checks give is
+      // detection across spawns: a swap that survives into the next spawn is
+      // refused by the identity memory and the look inside, and the operator gets
+      // the bell. The contain tier (an empty root, only named paths bound) is the
+      // one that closes the window.
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
-        hideDirs: [secretsHere, ...others, ...(contain ? [] : [sshDir, ...(gcloudDir ? [gcloudDir] : []), ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds,
+        hideDirs: [secretsHere, ...others, ...(contain ? [] : [...secretDirPaths, ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds,
         // The bot's OWN key dir, bound back inside the secrets tmpfs from the
         // already-open fd (null unless every check in gitPreSpawn passed).
         exposeInHidden: gitDir && gitFd != null ? [{ dir: gitDir, fd: gitFd, childFd: GIT_KEYDIR_FD }] : [] });
@@ -1244,18 +1320,22 @@ export class PiRpc {
         // the only name it has.
         refuse(f, unmaskableRefusal(why.name || rel || f, why.cause, { home: why.home }));
       }
-      if (hiddenCandidates.sshDir && !launch.masked.includes(hiddenCandidates.sshDir)) {
-        this._runContainCleanup();
-        throw new Error(SSH_NOT_HIDDEN_REFUSAL);
-      }
-      // Hidden-or-refuse, only for a folder that EXISTS: a bot never runs with
-      // the operator's gcloud credentials reachable inside it. The rule itself
-      // is gcloudNotHiddenRefusal (one place, unit-tested), so this only throws
-      // what it answers.
-      const gcloudRefusal = gcloudNotHiddenRefusal({ gcloudDir: hiddenCandidates.gcloudDir, masked: launch.masked });
-      if (gcloudRefusal) {
-        this._runContainCleanup();
-        throw new Error(gcloudRefusal);
+      // Hidden-or-refuse, for every operator credential FOLDER that exists: one
+      // this launch did not really mask refuses the spawn. The rule itself is
+      // secretDirNotHiddenRefusal (one place, unit-tested), so this only throws
+      // what it answers; ~/.ssh is in the same list (it is the entry whose mask
+      // is always made, by creating it empty first). A FILE on the list is
+      // covered by the loop above: it exists and was not masked, so it refuses.
+      for (const secret of hiddenCandidates.secretDirs) {
+        const refusal = secretDirNotHiddenRefusal({ dir: secret.dir, refusal: secretNotHiddenRefusal(secret.rel), masked: launch.masked });
+        if (refusal) {
+          // Bots are stopped for every channel here too: the operator sees it in
+          // the bell, once per entry per 24 h (same rail as the link/re-confirm
+          // refusals above).
+          notifyHiddenDirRefusal({ dbPath: CROW_DB, rel: secret.rel, kind: "dir", cause: "unmasked", crowHome: hiddenDirCrowHome });
+          this._runContainCleanup();
+          throw new Error(refusal);
+        }
       }
     }
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {
@@ -1324,6 +1404,11 @@ export class PiRpc {
     this.sandboxed = launch.sandboxed;
     this.sandboxWrapper = launch.wrapper;
     this.sandboxTier = launch.tier;
+    // Every path the launch really masks, and the single-FILE masks alone
+    // (pi_sandbox.mjs wrapPiSpawn). Two lists on purpose: a FOLDER is masked by a
+    // tmpfs, so it is only ever in `sandboxMasked` — reading one list for both
+    // kinds would report every masked folder as unmasked.
+    this.sandboxMasked = launch.masked || [];
     this.sandboxMaskedFiles = launch.maskedFiles || [];
     this.piPid = null;
     // Resolved for every non-pidns path (and unsandboxed). A pidns spawn makes it

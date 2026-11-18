@@ -79,10 +79,17 @@
  *    .env, and every .env / .env.* file in a bundle folder of each Crow home
  *    and of the app root, except the browser and workspace bundles'. They read
  *    empty inside. ~/.ssh is hidden as a dir always (created 0700 when it is
- *    missing), and so are the instance's env/ and android-keystore/ folders,
- *    and the operator's Google Cloud CLI folder ~/.config/gcloud (its
- *    application-default credentials, credentials.db, access_tokens.db and
- *    legacy_credentials/; hidden when it exists and never created).
+ *    missing), and so are the instance's env/ and android-keystore/ folders and
+ *    every operator credential folder that exists (~/.gnupg, ~/.config/gcloud,
+ *    ~/.aws, ~/.azure, ~/.kube, ~/.config/gh, ~/.terraform.d), never created;
+ *    the operator credential FILES (~/.docker/config.json, ~/.netrc, ~/.npmrc,
+ *    ~/.pgpass, ~/.config/containers/auth.json) are masked with an empty one.
+ *    That whole set is ONE list, servers/shared/operator-secret-paths.js. Each
+ *    entry is resolved by hidden_files.mjs resolveHiddenSecretPath: a symlink
+ *    anywhere on the way, or one directly INSIDE a folder (the mask covers the
+ *    link's name, not what it points at), refuses the spawn, and a FOLDER's
+ *    dev:ino is remembered so one that is later missing or replaced refuses it
+ *    too. A credential FILE carries no memory (a tool rewrite is a new inode).
  *    A git-enabled bot's own key dir under the secrets dir is bound back
  *    read-only inside the tmpfs (--ro-bind-fd; see servers/shared/bot-git).
  *    Still readable, because something inside the sandbox reads each one:

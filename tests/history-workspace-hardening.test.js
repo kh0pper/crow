@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 
 import { CARRIED_ENTRIES } from "../scripts/pi-bots/world-root.mjs";
 import { isDeniedEntry, MAX_FILE_BYTES } from "../servers/shared/history/workspace-deny.js";
+import { OPERATOR_SECRET_PATHS } from "../servers/shared/operator-secret-paths.js";
 import { HISTORY_SETTINGS } from "../servers/gateway/dashboard/settings/sections/history.js";
 import {
   SYNC_ALLOWLIST,
@@ -57,6 +58,30 @@ test("ssh, cloud, gpg, kube, docker and password-vault secrets are denied", () =
   assert.equal(isDeniedEntry(".docker", true), false);
   assert.equal(isDeniedEntry(".docker/other.json", false), false);
   assert.equal(isDeniedEntry("config.json", false), false);
+});
+
+test("every entry of the operator credential list is denied, at any depth, without denying ordinary content", () => {
+  // ONE list (servers/shared/operator-secret-paths.js). A top-level entry is
+  // denied by NAME at any depth; a nested one (.config/gh, .docker/config.json,
+  // .config/containers/auth.json) only in that exact path, because its leaf
+  // name on its own — gh, config.json, auth.json — is ordinary content.
+  for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+    const isDir = kind === "dir";
+    for (const prefix of ["", "home/", "deep/nested/"]) {
+      assert.equal(isDeniedEntry(prefix + rel, isDir), true, prefix + rel + " must be denied (kind " + kind + ")");
+    }
+    // A top-level (dotted) entry is denied whatever the entry's type — the
+    // documented rule, and the safe direction: a file named `.azure` is denied
+    // too, not just the folder.
+    if (!rel.includes("/")) assert.equal(isDeniedEntry(rel, !isDir), true, rel + " is denied whatever its type");
+  }
+  // A bare leaf name of a nested entry, and a bare name that only looks like a
+  // top-level one, are ordinary content.
+  for (const rel of ["gh", "config.json", "auth.json", "hosts.yml", "notes/config.json"]) {
+    assert.equal(isDeniedEntry(rel, false), false, rel + " must be recorded");
+    assert.equal(isDeniedEntry(rel, true), false, rel + "/ must be recorded");
+  }
+  assert.equal(isDeniedEntry("config.json", true), false, "a folder named config.json is content too");
 });
 
 test("credentials, keys, bot worlds and build output are denied at any depth", () => {

@@ -49,6 +49,7 @@ A few add-ons keep state directly in the Crow home (browser sessions, downloads,
 
 ### What is never a bind source
 
+- **The operator's credential folders and files** — `~/.ssh`, `~/.gnupg`, `~/.config/gcloud`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.config/gh`, `~/.terraform.d` (folders) and `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pgpass`, `~/.config/containers/auth.json` (files). They come from one list, `OPERATOR_SECRET_PATHS` in `servers/shared/operator-secret-paths.js`, which the bot sandbox, the contain tier's refuse list (`neverBound` in `scripts/pi-bots/pi_contain.mjs` — the function this plan refuses through), the project-file history and the boot isolation report read too, so the wall cannot drift from them. A bind at one, inside one, or over a folder that contains one is refused, whether it is a path bind or an fd bind, and whether the add-on named it as an owner-set file, read-only or read-write. The docker daemon socket (`/run/docker.sock`, `/var/run/docker.sock`) is refused separately; `~/.docker/config.json` holds registry logins, not daemon access.
 - The Crow home, outside this add-on's own folders: `secrets/`, `env/`, peer tokens and identity files stay out of reach.
 - Crow's add-on registry (`mcp-addons.json`) and the wall settings (`addon-walls.json`).
 - Anything under the data dir except this add-on's own folder. Another add-on's data is another add-on's, at either spelling of the path.

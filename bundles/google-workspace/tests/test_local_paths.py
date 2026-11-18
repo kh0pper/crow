@@ -2,8 +2,11 @@
 
 The point of every refusal below: the path is decided BEFORE any Google client is
 built, so a refused local path makes no API call at all — and the sign-in folder
-(the OAuth token and credentials), ~/.ssh, ~/.gnupg and ~/.config/gcloud are
-refused whatever else is configured. The service objects are mocks, so nothing
+(the OAuth token and credentials) and the operator's own credential folders and
+files (~/.ssh, ~/.gnupg, ~/.config/gcloud, ~/.aws, ~/.azure, ~/.kube,
+~/.config/gh, ~/.terraform.d, ~/.docker/config.json, ~/.netrc, ~/.npmrc,
+~/.pgpass, ~/.config/containers/auth.json) are refused whatever else is
+configured. The service objects are mocks, so nothing
 leaves the process.
 
 Every scratch path lives under a temporary folder; the tests that go through the
@@ -44,9 +47,11 @@ def scratch():
 
     ``home/files`` is the files folder, ``home/.config/google-workspace-mcp`` holds
     the token and credentials, ``home/elsewhere`` is a plain folder the tools may
-    reach only with no files folder set (the pre-existing behaviour), and
-    ``home/.ssh``, ``home/.gnupg`` and ``home/.config/gcloud`` exist so the
-    always-refused rules can be tested.
+    reach only with no files folder set (the pre-existing behaviour), and every
+    one of the operator's credential folders and files (``home/.ssh``,
+    ``home/.gnupg``, ``home/.config/gcloud``, ``home/.aws``, … and
+    ``home/.netrc``, …) exists with one fake credential in it, so the
+    always-refused rules can be tested from the same tree.
     """
     with tempfile.TemporaryDirectory() as tmp:
         home = os.path.realpath(tmp)
@@ -58,9 +63,6 @@ def scratch():
             files,
             signin,
             elsewhere,
-            os.path.join(home, ".ssh"),
-            os.path.join(home, ".gnupg"),
-            gcloud,
         ):
             os.makedirs(path, exist_ok=True)
         token = os.path.join(signin, TOKEN_NAME)
@@ -70,13 +72,32 @@ def scratch():
                 fh.write('{"installed": "client"}')
         with open(os.path.join(elsewhere, "note.txt"), "w", encoding="utf-8") as fh:
             fh.write("outside")
-        with open(os.path.join(home, ".ssh", "id_ed25519"), "w", encoding="utf-8") as fh:
-            fh.write("k")
-        with open(os.path.join(home, ".gnupg", "pubring.gpg"), "w", encoding="utf-8") as fh:
-            fh.write("k")
-        adc = os.path.join(gcloud, "application_default_credentials.json")
-        with open(adc, "w", encoding="utf-8") as fh:
-            fh.write('{"fake": "application-default-credentials"}')
+        # One fake credential per always-refused entry of Crow's own list
+        # (servers/shared/operator-secret-paths.js), so each one can be pointed at.
+        protected = []
+        for pattern, body in (
+            ("~/.ssh", None),
+            ("~/.gnupg", None),
+            ("~/.config/gcloud", None),
+            ("~/.aws", ".aws/credentials"),
+            ("~/.azure", ".azure/msal_token_cache.json"),
+            ("~/.kube", ".kube/config"),
+            ("~/.config/gh", ".config/gh/hosts.yml"),
+            ("~/.terraform.d", ".terraform.d/credentials.tfrc.json"),
+            ("~/.docker/config.json", ".docker/config.json"),
+            ("~/.netrc", ".netrc"),
+            ("~/.npmrc", ".npmrc"),
+            ("~/.pgpass", ".pgpass"),
+            ("~/.config/containers/auth.json", ".config/containers/auth.json"),
+        ):
+            rel = body or (pattern[2:] + ("/pubring.gpg" if pattern == "~/.gnupg"
+                                         else "/id_ed25519" if pattern == "~/.ssh"
+                                         else "/application_default_credentials.json"))
+            path = os.path.join(home, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('{"fake": "credential"}')
+            protected.append((pattern, path))
         yield {
             "home": home,
             "files": files,
@@ -85,6 +106,7 @@ def scratch():
             "token": token,
             "credentials": credentials,
             "elsewhere": elsewhere,
+            "protected": protected,
         }
 
 
@@ -376,6 +398,49 @@ class AlwaysRefusedTests(unittest.TestCase):
                     GWS_FILES_DIR=paths["home"],
                 )
             self.assertIn("~/.config/gcloud", str(caught.exception))
+
+    def test_every_operator_credential_entry_is_refused(self):
+        # The Python guard mirrors Crow's own list
+        # (servers/shared/operator-secret-paths.js, used by the bot sandbox, the
+        # contain tier, the add-on wall and the file history). A folder protects
+        # everything inside it, a file protects itself. A JS test parses
+        # _PRIVATE_PATTERNS and holds the two lists in step, so an entry added to
+        # only one side fails there.
+        with scratch() as paths:
+            for pattern, target in paths["protected"]:
+                with self.subTest(entry=pattern):
+                    with self.assertRaises(local_paths.PathRefused) as caught:
+                        resolve(paths, target)
+                    self.assertIn("never reads or writes", str(caught.exception))
+                    self.assertIn(pattern, str(caught.exception))
+                    # Even when the files folder is the home that contains it.
+                    with self.assertRaises(local_paths.PathRefused) as caught:
+                        resolve(paths, target, GWS_FILES_DIR=paths["home"])
+                    self.assertIn(pattern, str(caught.exception))
+            # A bare name that only LOOKS like one of those files is ordinary
+            # content: only the exact path (or everything below a folder) is
+            # refused.
+            for name in ("config.json", "auth.json", "credentials", "hosts.yml"):
+                plain = write_file(os.path.join(paths["files"], name), b"{}")
+                with self.subTest(name=name):
+                    self.assertEqual(resolve(paths, plain), os.path.realpath(plain))
+
+    def test_a_symlinked_operator_credential_folder_protects_both_ends(self):
+        # ~/.aws behind a link: the tool is refused whether it is handed the link
+        # spelling or the folder the link really is.
+        with scratch() as paths:
+            real = os.path.join(paths["home"], "real-aws")
+            os.makedirs(real)
+            write_file(os.path.join(real, "credentials"), b"[default]")
+            aws = os.path.join(paths["home"], ".aws")
+            os.remove(os.path.join(aws, "credentials"))
+            os.rmdir(aws)
+            os.symlink(real, aws)
+            for target in (os.path.join(real, "credentials"), os.path.join(aws, "credentials")):
+                with self.subTest(path=target):
+                    with self.assertRaises(local_paths.PathRefused) as caught:
+                        resolve(paths, target)
+                    self.assertIn("~/.aws", str(caught.exception))
 
     def test_a_symlinked_gcloud_config_folder_protects_both_ends(self):
         with scratch() as paths:
