@@ -5205,18 +5205,37 @@ test("Follow with nothing placed under the playhead behaves as today: it cancels
 // ---- By hand: what the take played is written into the plan (C3, R15) ------
 //
 // A take that plays scenes by hand is collected the way the Record to timeline
-// toggle collects a performance, whether or not the operator had the toggle on:
-// at Stop the launches it heard become placements, shifted to the arrangement
-// bar the playhead stood on when Record was pressed. The record clip's own
-// launch is one of them, so the clip the empty slot got is placed over the
-// passes it recorded. Overlaps are the existing command's refusal, and the
-// existing notice is where the operator is offered what fits.
+// toggle collects a performance, with the toggle off: a press with it on is
+// refused, because the take and the toggle write the plan from different bars.
+// At Stop the launches the take heard become placements, shifted to the
+// arrangement bar the playhead stood on when Record was pressed. The record
+// clip's own launch is one of them, so the clip the empty slot got is placed
+// over the passes it recorded. Overlaps are the existing command's refusal, and
+// the existing notice is where the operator is offered what fits.
 
 /** @returns {object[]} every record_performance the page sent, in order */
 function performances(ui) {
   return ui.sent.filter(
     (message) => message.type === "command" && message.command === "arrangement.record_performance",
   );
+}
+
+/**
+ * Apply every performance the page sent through the hub's own command registry,
+ * on the panel's own document: what a performance places has to be a song the
+ * timeline can hold. The document has to carry the tracks and clips the
+ * placements name (the fixture booted with a clip, and any track a case added).
+ *
+ * A refusal is thrown on, so the hub's own sentence is what fails the case.
+ * @param {object} ui a booted panel
+ * @param {object[]} list the record_performance messages, in the order sent
+ */
+async function hubApply(ui, list) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/arrangement.js");
+  for (const message of list) {
+    runCommand(ui.doc, message.command, message.args);
+  }
 }
 
 /**
@@ -5871,6 +5890,7 @@ test("R15 fix 1: a take pressed while the transport runs writes its launches fro
     ],
     "the take lands on the playhead's bar 4, and the tap at session bar 20 is four bars into it",
   );
+  await hubApply(ui, sent);
 });
 
 test("R15 fix 1: a take carried on from a pause writes its launches from the bar it began on, not from play()", async () => {
@@ -6087,11 +6107,6 @@ test("R15 fix 4: a take cancelled while the transport runs leaves the operator's
   await launchOnBar(ui, 4);
   assert.equal(viewOf(ui).recTimeline.launches.length, 2, "the toggle collected the two launches");
 
-  // The transport has played to session bar 6 when Record is pressed, so the
-  // toggle's own collection is written HERE, at that press, as one
-  // record_performance closed on the bar the press lands on (R15 fix 4).
-  await transportOnBar(ui, 6);
-
   // The recorder cannot be built: the take is cancelled, and the transport it
   // was pressed against keeps running.
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
@@ -6100,30 +6115,40 @@ test("R15 fix 4: a take cancelled while the transport runs leaves the operator's
     throw new Error("The input could not be opened.");
   };
   loopStartOnBar(ui, 16);
+  const before = commandsSent(ui);
+  const playsBefore = ui.engine.plays;
   ui.click("[data-act=record]");
   await ui.settle(24);
   assert.equal(viewOf(ui).rec, null, "the take was cancelled");
   assert.equal(viewOf(ui).playing, true, "and the transport keeps running");
-
-  const atPress = performances(ui);
-  assert.equal(atPress.length, 1, "the press wrote the operator's own collection, once");
-  assert.deepEqual(
-    atPress[0].args.placements,
-    [
-      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 4 },
-      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
-    ],
-    "the two launches closed by the next launch and by the bar the press landed on",
+  assert.equal(ui.engine.plays, playsBefore, "the click started no transport of its own");
+  assert.equal(commandsSent(ui), before, "and sent no command");
+  assert.equal(
+    ui.sent.filter((message) => message.command === "clip.add_audio").length,
+    0,
+    "so no clip was made for it",
+  );
+  assert.ok(
+    toastText(ui).includes("Turn off Record to timeline to record a performance by hand."),
+    `the page says why (got: ${toastText(ui)})`,
   );
 
-  await transportOnBar(ui, 6);
+  // The clip keeps sounding after the press, so Stop lands six bars later, and
+  // the toggle's own collection is written whole on its own bars.
+  await transportOnBar(ui, 10);
   ui.click("[data-act=stop]");
   await ui.settle(24);
 
-  const after = performances(ui);
-  assert.equal(after.length, 1, "the cancelled take adds no write of its own");
-  assert.equal(after[0], atPress[0], "and a later Stop sends nothing more");
-  assert.equal(viewOf(ui).recTimeline.launches.length, 0, "the collection is empty");
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "Stop wrote the operator's own collection, once");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 6 },
+    ],
+    "the two launches closed by the next launch and by the bar the transport stopped on",
+  );
 });
 
 test("R15 fix 6: a performance the wire could not carry is held, and Place what fits sends it once it is back", async () => {
@@ -6304,9 +6329,10 @@ test("R15 fix 10: the performance notice is hidden until a refusal gives it a re
 //
 // A take armed on a bar line (an empty slot, another clip playing, a paused
 // resume) heard its launches on the same session axis as one armed on a loop
-// start, so it has to be written from that bar too. And the launches the toggle
-// had already collected belong to the toggle's own axis: they are written before
-// the take's collection starts, never moved by the take's base bar.
+// start, so it has to be written from that bar too. The launches the toggle had
+// already collected belong to the toggle's own axis, so a take never moves them
+// to its base bar: the toggle keeps them, and a Stop writes them as it always
+// has.
 
 test("R15 r3 fix 1: a take armed on the next bar line writes from the session bar it began on", async () => {
   const ui = await bootPanel({ clip: true, lengthBars: 4 });
@@ -6478,88 +6504,166 @@ test("R15 r3 fix 3: a view switch leaves no launch behind to seed a take", async
   );
 });
 
-test("R15 r3 fix 4: the toggle's own launches are written at the press, on their own bars", async () => {
+test("R15 r4: Record by hand with the toggle on is refused at the click and writes nothing", async () => {
   const ui = await bootPanel({ clip: true, lengthBars: 4 });
-  await standPlayheadAt(ui, 4);
   await addTrackWithClip(ui, "keys", "c-keys");
+  await standPlayheadAt(ui, 4);
   ui.click("[data-act=rec-timeline]");
   await ui.settle();
   assert.equal(viewOf(ui).recTimeline.on, true, "the operator turned the toggle on");
   ui.click("[data-act=play]");
   await ui.settle(24);
-  // The toggle hears the keys at session bar 0, thirteen bars before the press.
+  // The keys are played by hand while the toggle collects performances, so its
+  // own collection has bars of its own and the take would write on another axis.
   await launchOnBar(ui, 0, { track: "keys", clip: "c-keys" });
-  assert.equal(viewOf(ui).recTimeline.launches.length, 1, "the toggle collected it");
+  await launchOnBar(ui, 4, { track: "keys", clip: "c-keys" });
+  const collected = JSON.parse(JSON.stringify(viewOf(ui).recTimeline.launches));
+  assert.equal(collected.length, 2, "the toggle collected the two launches");
 
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  loopStartOnBar(ui, 16);
+  const before = commandsSent(ui);
+  const playsBefore = ui.engine.plays;
+
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const view = viewOf(ui);
+  assert.equal(view.rec, null, "no take was started");
+  assert.equal(view.playing, true, "and the transport the operator runs is left running");
+  assert.equal(ui.engine.recorders.length, 0, "no recorder was built for a take");
+  assert.equal(countInPlays(ui).length, 0, "and no count-in was started");
+  assert.equal(ui.engine.plays, playsBefore, "the click moved no transport of its own");
+  assert.equal(commandsSent(ui), before, "it wrote nothing");
+  assert.equal(performances(ui).length, 0, "and no performance went on the wire");
+  assert.ok(
+    toastText(ui).includes("Turn off Record to timeline to record a performance by hand."),
+    `the page says why (got: ${toastText(ui)})`,
+  );
+  assert.equal(view.recTimeline.on, true, "the toggle is left where the operator put it");
+  assert.deepEqual(view.recTimeline.launches, collected, "and its collection is still whole");
+
+  // Stop is the toggle's own stop: the whole collection is written once, from
+  // the first launch to the bar the transport stopped on.
+  await transportOnBar(ui, 10);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "Stop wrote the toggle's collection, once");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: "keys", clip_id: "c-keys", start_bar: 0, bars: 4 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 4, bars: 6 },
+    ],
+    "each launch closed by the next one, the last by the stop bar",
+  );
+  await hubApply(ui, sent);
+});
+
+test("R15 r4: a take pressed on a running transport is written on its own axis, and the hub takes it", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  await addTrackWithClip(ui, "keys", "c-keys");
+  assert.equal(viewOf(ui).recTimeline.on, false, "the operator left the toggle off");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  // The keys are launched from session bar 0 while the toggle is off, so nothing
+  // collected them: they are what plays across the press.
+  await launchOnBar(ui, 0, { track: "keys", clip: "c-keys" });
   await transportOnBar(ui, 13);
   loopStartOnBar(ui, 16);
   await pressRecord(ui);
   await ui.settle(24);
+  const view = viewOf(ui);
+  assert.ok(view.rec, "the take is open");
+  assert.equal(view.rec.active, true, "and armed on the loop start the engine named");
+  assert.equal(view.rec.anchor, frameOfBar(16), "which is session bar 16's frame");
+  assert.equal(view.playhead, 4, "with the playhead still standing on arrangement bar 4");
 
-  // A tap on the keys four bars into the take, and Stop on session bar 24.
+  // A tap on the keys four bars into the take (session bar 20), and Stop on
+  // session bar 24.
   await launchOnBar(ui, 20, { track: "keys", clip: "c-keys" });
   await transportOnBar(ui, 24);
   ui.click("[data-act=stop]");
   await ui.settle(24);
 
   const sent = performances(ui);
-  assert.equal(sent.length, 2, "the toggle's collection is its own write, and the take is another");
+  assert.equal(sent.length, 1, "the take is one record_performance");
   assert.deepEqual(
     sent[0].args.placements,
-    [{ track_id: "keys", clip_id: "c-keys", start_bar: 0, bars: 13 }],
-    "the toggle's launch keeps its own bar 0, closed at the press bar",
-  );
-  assert.deepEqual(
-    placementsInOrder(sent[1].args.placements),
     [
-      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 8 },
       { track_id: "keys", clip_id: "c-keys", start_bar: 4, bars: 4 },
       { track_id: "keys", clip_id: "c-keys", start_bar: 8, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 8 },
     ],
-    "and the take writes the keys it heard from its own origin, not the toggle's bars",
+    "the take begins on arrangement bar 4, the tap at session bar 20 is eight, and Stop is twelve",
   );
+  // The recorded clip and the keys are placed on tracks of their own, so the
+  // song holds both: the hub's own command is what says so.
+  await hubApply(ui, sent);
 });
 
-test("R15 r3 fix 5: a Stop before the take arms writes the toggle's collection once and leaves none", async () => {
+test("R15 r4: a take over a clip that keeps sounding is written from its own bar, and the hub takes it", async () => {
   const ui = await bootPanel({ clip: true, lengthBars: 4 });
-  await standPlayheadAt(ui, 4);
-  ui.click("[data-act=rec-timeline]");
-  await ui.settle();
-  assert.equal(viewOf(ui).recTimeline.on, true, "the operator turned the toggle on");
+  assert.equal(viewOf(ui).recTimeline.on, false, "the operator left the toggle off");
+  assert.equal(viewOf(ui).playhead, 0, "the arrangement playhead stands on bar 1");
   ui.click("[data-act=play]");
   await ui.settle(24);
+  // The armed track's own clip is playing when Record is pressed, and keeps
+  // playing across the press.
   await launchOnBar(ui, 0);
-  await launchOnBar(ui, 4);
-  assert.equal(viewOf(ui).recTimeline.launches.length, 2, "the toggle collected both launches");
-
-  // Record is pressed on session bar 6, and the arm never answers: the take
-  // never becomes one, and Stop comes before it can.
   await transportOnBar(ui, 6);
-  ui.engine.nextLoopFrame = () => new Promise(() => {});
-  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
-  await ui.settle();
-  ui.click("[data-act=record]");
+  loopStartOnBar(ui, 8);
+  await pressRecord(ui);
   await ui.settle(24);
   assert.ok(viewOf(ui).rec, "the take is open");
-  assert.equal(viewOf(ui).rec.active, false, "and has not armed");
+  assert.equal(viewOf(ui).rec.active, true, "and armed on the loop start the engine named");
+  assert.equal(viewOf(ui).rec.anchor, frameOfBar(8), "which is session bar 8's frame");
 
+  await transportOnBar(ui, 12);
   ui.click("[data-act=stop]");
   await ui.settle(24);
 
   const sent = performances(ui);
-  assert.equal(sent.length, 1, "the toggle's own launches are written exactly once");
+  assert.equal(sent.length, 1, "the take is one record_performance");
   assert.deepEqual(
     sent[0].args.placements,
-    [
-      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 4 },
-      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
-    ],
-    "written the way a Stop of the toggle would write them, closed at the press bar",
+    [{ track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 4 }],
+    "the clip that played across the press is placed from the playhead's bar, four bars of it",
   );
+  await hubApply(ui, sent);
+});
+
+test("R15 r4: the Session note says it writes into the plan from a bar only while the toggle is off", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  assert.equal(viewOf(ui).mode, "session", "the page opens in the Session view");
+  assert.equal(viewOf(ui).planMode, "hand", "with By hand chosen");
+  assert.equal(viewOf(ui).recTimeline.on, false, "and the toggle off");
+  assert.ok(
+    planModeNoteText(ui).includes("Writes into the plan from bar"),
+    `the note names the bar the take is written from (got: ${planModeNoteText(ui)})`,
+  );
+
+  // With the toggle on, a take never runs, so the note stops promising a
+  // performance written from a bar.
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  assert.equal(viewOf(ui).recTimeline.on, true, "the operator turned the toggle on");
   assert.equal(
-    viewOf(ui).recTimeline.launches.length,
-    0,
-    "and nothing of them is left in memory for the next run",
+    planModeNoteText(ui).includes("Writes into the plan from bar"),
+    false,
+    `the note no longer promises a write from a bar (got: ${planModeNoteText(ui)})`,
+  );
+
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  assert.equal(viewOf(ui).recTimeline.on, false, "and turning it off again");
+  assert.ok(
+    planModeNoteText(ui).includes("Writes into the plan from bar"),
+    `brings the note back (got: ${planModeNoteText(ui)})`,
   );
 });
 
@@ -6721,4 +6825,37 @@ test("R15 r3 fix 9: a paused count-in whose loop question fails cancels the take
     toastText(ui).includes("The engine could not answer."),
     `the page says what went wrong (got: ${toastText(ui)})`,
   );
+});
+
+// ---- R15 review round 4: one write per run, and the song takes it -----------
+//
+// A take that plays scenes by hand and the operator's own Record to timeline
+// toggle write the plan from different bars, so a Record press that would have
+// to do both asks for the toggle to be turned off first. One press is one
+// performance, and every performance is applied through the hub's own command
+// here: a set of placements the song cannot hold fails the case that sent it.
+
+test("R15 r4: by-hand take placements are applied through the hub in the existing launch flow", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  assert.equal(viewOf(ui).recTimeline.on, false, "the take is pressed with the toggle off");
+
+  await pressRecord(ui);
+  await reportLaunch(ui);
+  await launchOnBar(ui, 2);
+  await transportOnBar(ui, 4);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 6, bars: 2 },
+    ],
+    "the record scene's launch and the tap, each closed by the next one and by the stop bar",
+  );
+  await hubApply(ui, sent);
 });

@@ -1400,37 +1400,18 @@ test("stopping the transport another way closes the performance", async () => {
   assert.ok(recorder, "Record built the recorder");
   assert.notEqual(recorder.armed, null, "and armed it on the next bar");
 
-  // The toggle's own collection is written at the press, on its own axis, and
-  // the take that press started begins with an empty collection (R15 fix 4).
-  const atPress = commands(ui, "arrangement.record_performance");
-  assert.equal(atPress.length, 1, "the press wrote the launches the toggle had collected");
+  recorder.done({ segments: [] });
+  await ui.settle();
+
+  const sent = commands(ui, "arrangement.record_performance");
+  assert.equal(sent.length, 1, "the transport's stop wrote one performance");
   assert.deepEqual(
-    atPress[0].args.placements,
+    sent[0].args.placements,
     [
       { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 0, bars: 4 },
       { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 4, bars: 2 },
     ],
     "each launch closed by the next one, the last by the stop bar",
-  );
-
-  recorder.done({ segments: [] });
-  await ui.settle();
-
-  const sent = commands(ui, "arrangement.record_performance");
-  assert.equal(sent.length, 2, "the transport's stop wrote the take's own performance");
-  assert.equal(sent[0], atPress[0], "the press's write came first");
-  assert.deepEqual(
-    sent[1].args.placements,
-    [
-      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 0, bars: 5 },
-      { track_id: AUDIO_TRACK, clip_id: AUDIO_CLIP, start_bar: 0, bars: 5 },
-    ],
-    "and the take's own is what was playing when it began, over the passes it recorded",
-  );
-  assert.equal(
-    ui.page.__studioTest.view.recTimeline.launches.length,
-    0,
-    "nothing is left in the collection",
   );
 });
 
