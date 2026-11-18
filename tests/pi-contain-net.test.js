@@ -104,18 +104,13 @@ process.stdin.resume();
     assert.match(r.proxy, /^HTTP\/1\.1 403/, "the proxy is the relay, and it refuses the cloud metadata address");
     assert.equal(r.proxyEnv, true);
     const { readFileSync } = await import("node:fs");
-    // The netns entry becomes pi a moment after the sandbox reports in; under CI load the
-    // pid can still be the entry when we first look, so poll its cmdline (bounded) instead
-    // of reading it once.
+    // The entry becomes pi a moment after the sandbox reports in. The product owns the
+    // bounded wait now (piPidReady settles on pi, on the fallback or on pi's exit), so this
+    // awaits it and reads the cmdline once instead of polling it from here.
+    await pi.piPidReady;
     const cmdOf = (pid) => { try { return readFileSync("/proc/" + pid + "/cmdline", "utf8"); } catch { return ""; } };
-    let piCmd = "";
-    for (let i = 0; i < 200; i++) {
-      if (pi.piPid && pi.piPid !== pi.sandboxInitPid) {
-        piCmd = cmdOf(pi.piPid);
-        if (piCmd.includes("stub-pi.mjs") && !piCmd.includes("pi_netns_entry.mjs")) break;
-      }
-      await new Promise((res) => setTimeout(res, 50));
-    }
+    assert.notEqual(pi.piPid, pi.sandboxInitPid, "piPid is past the sandbox init");
+    const piCmd = cmdOf(pi.piPid);
     assert.ok(piCmd.includes("stub-pi.mjs") && !piCmd.includes("pi_netns_entry.mjs"), "piPid is pi itself, past the entry: " + piCmd.replace(/\0/g, " "));
   } finally {
     await pi.close();

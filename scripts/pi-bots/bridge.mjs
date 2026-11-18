@@ -96,23 +96,68 @@ function processGroupAlive(pgid) {
   try { process.kill(-pgid, 0); return true; } catch (e) { return !!(e && e.code === "EPERM"); }
 }
 
+/** Wall-clock budget for resolving pi's outer PID, for the WHOLE descent: the
+ *  init forks pi right after bwrap reports it, but the contain tier's network
+ *  entry boots node, opens its relay listeners and only then spawns pi, which
+ *  is slow under load. A per-level try count ran out there and handed the
+ *  entry's pid to consumers as pi's. */
+export const SANDBOXED_PI_PID_BUDGET_MS = 15000;
+/** Poll interval while a child is not settled (not yet past fork/exec) yet. */
+export const SANDBOXED_PI_PID_INTERVAL_MS = 20;
+const childrenPath = (pid) => "/proc/" + pid + "/task/" + pid + "/children";
+const cmdlinePath = (pid) => "/proc/" + pid + "/cmdline";
 /** pi's outer PID inside a PID-namespace sandbox: the first child of the
- *  namespace's init. Polled briefly (init forks pi right after bwrap reports
- *  it); falls back to the init's pid, which is still inside the sandbox. */
-function resolveSandboxedPiPid(rpc, initPid, tries = 0) {
-  let kids = "";
-  try { kids = readFileSync("/proc/" + initPid + "/task/" + initPid + "/children", "utf8").trim(); } catch { /* not yet / gone */ }
-  const first = Number(kids.split(/\s+/)[0]);
-  if (Number.isInteger(first) && first > 0) {
-    // Contain's network tier runs pi under an entry process: step past it.
-    let cmd = "";
-    try { cmd = readFileSync("/proc/" + first + "/cmdline", "utf8"); } catch {}
-    if (cmd.includes(ENTRY_MARK)) return resolveSandboxedPiPid(rpc, first, tries);
-    rpc.piPid = first; return;
+ *  namespace's init, stepped past the contain tier's entry process, and
+ *  bounded by one wall-clock budget (SANDBOXED_PI_PID_BUDGET_MS) that the whole
+ *  descent shares — a slow entry level must not restart the clock. A child is
+ *  pi only when its cmdline is readable, non-empty, not the entry's and NOT a
+ *  copy of its parent's (a read right after fork, before exec, still shows the
+ *  parent's). On the deadline, or an rpc exit, it falls back to the deepest
+ *  process found so far, which is still inside the sandbox. rpc.piPidReady
+ *  resolves (never rejects) once the resolution has finished, so a consumer can
+ *  wait for it instead of polling. opts is the clock/fs seam a unit test drives;
+ *  the defaults are the real ones (the clock is monotonic: a wall-clock step mid
+ *  descent would move the deadline). */
+export function resolveSandboxedPiPid(rpc, initPid, opts = {}) {
+  const {
+    readFile = readFileSync,
+    now = () => performance.now(),
+    setTimer = (fn, ms) => { const t = setTimeout(fn, ms); if (t.unref) t.unref(); return t; },
+    budgetMs = SANDBOXED_PI_PID_BUDGET_MS,
+    intervalMs = SANDBOXED_PI_PID_INTERVAL_MS,
+  } = opts;
+  const read = (p) => { try { return readFile(p, "utf8"); } catch { return ""; } };
+  // A pidns spawn already made piPidReady PENDING in its constructor (with the
+  // resolver on rpc._piPidDone), before bwrap had reported anything: settle THAT
+  // promise, so a consumer that read it early sees the pid instead of null. Any
+  // other caller (a bare rpc object) gets its promise created here.
+  const pendingDone = typeof rpc._piPidDone === "function" ? rpc._piPidDone : null;
+  let finished = () => {};
+  if (pendingDone) {
+    finished = () => { if (rpc._piPidDone === pendingDone) rpc._piPidDone = null; pendingDone(); };
+  } else {
+    rpc.piPidReady = new Promise((resolve) => { finished = resolve; });
   }
-  if (tries >= 100 || rpc._exitCode != null) { if (rpc.piPid == null) rpc.piPid = initPid; return; }
-  const t = setTimeout(() => resolveSandboxedPiPid(rpc, initPid, tries + 1), 20);
-  if (t.unref) t.unref();
+  const deadline = now() + budgetMs;
+  // The fallback is the deepest process reached: still inside the sandbox.
+  const settleOn = (pid) => { if (rpc.piPid == null) rpc.piPid = pid; finished(); };
+  const step = (pid) => {
+    if (rpc.piPid != null) { finished(); return; }
+    if (rpc._exitCode != null || now() >= deadline) { settleOn(pid); return; }
+    const kids = read(childrenPath(pid)).trim();
+    const first = Number(kids.split(/\s+/)[0]);
+    if (Number.isInteger(first) && first > 0) {
+      const cmd = read(cmdlinePath(first));
+      // A cmdline equal to the parent's is a forked copy, not yet exec'd: not settled.
+      const settled = cmd !== "" && cmd !== read(cmdlinePath(pid));
+      if (settled && !cmd.includes(ENTRY_MARK)) { settleOn(first); return; }
+      // Contain's network tier runs pi under an entry process: step past it.
+      if (settled) { step(first); return; }
+    }
+    // Nothing settled yet: poll this same level again, on the shared budget.
+    setTimer(() => step(pid), intervalMs);
+  };
+  step(initPid);
 }
 import { TRUSTED_PEER_SQL } from "../../servers/shared/peer-trust.js";
 import { roleSnapshotPath } from "../../servers/shared/model-roles-env.js";
@@ -1250,6 +1295,16 @@ export class PiRpc {
     this.sandboxTier = launch.tier;
     this.sandboxMaskedFiles = launch.maskedFiles || [];
     this.piPid = null;
+    // Resolved for every non-pidns path (and unsandboxed). A pidns spawn makes it
+    // PENDING here, before bwrap has reported the namespace init: an awaiter that
+    // reads it early must wait for the answer rather than see piPid == null. It is
+    // settled by resolveSandboxedPiPid, or by the exit handler when the child goes
+    // away before fd 3 ever named a pid; the resolver is kept for that.
+    this.piPidReady = Promise.resolve();
+    this._piPidDone = null;
+    if (launch.pidNamespace === true) {
+      this.piPidReady = new Promise((resolve) => { this._piPidDone = resolve; });
+    }
     this.sandboxInitPid = null;
     // S6-CROW: in fd mode the child gets one more pipe at MCP_CONFIG_FD (4;
     // 3 is the sandbox's --info-fd, "ignore" when unsandboxed). bwrap and
@@ -1387,6 +1442,10 @@ export class PiRpc {
       // A child killed by a signal reports code null (-1 here): keep WHICH
       // signal so the exit text can say so instead of a bare -1.
       this._exitSignal = sig || null;
+      // Exited before fd 3 reported a child pid (or before pi was found): the
+      // resolution will never run, so settle piPidReady here — a consumer waiting
+      // on it ends with whatever piPid holds instead of hanging.
+      if (this._piPidDone) { const done = this._piPidDone; this._piPidDone = null; done(); }
       // Fail any pending waiters NOW with the real cause instead of leaving
       // them to time out cryptically (a fresh install resolving to a model
       // no provider serves makes pi print "Unknown provider" and exit — the
