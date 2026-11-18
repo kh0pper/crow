@@ -482,7 +482,7 @@ def blender_pose(stacks, bones, matrices):
         evaluated = obj.evaluated_get(depsgraph)
         mesh = evaluated.to_mesh()
         coords = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
-        mesh.foreach_get("co", coords)
+        mesh.vertices.foreach_get("co", coords)
         posed[mesh_id] = coords.reshape(-1, 3).astype(np.float64)
         evaluated.to_mesh_clear()
     return posed
