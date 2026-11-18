@@ -64,6 +64,7 @@ from .gateway import (
     PORTFOLIO_OWNER,
     RATE_CAP,
     STALE_MARKET,
+    UNALLOCATED_NEGATIVE,
     _bot_drawdown_pct,
 )
 from .limits import Limits
@@ -112,15 +113,32 @@ UNALLOCATED_PREFIX = "unallocated negative: "
 RECENTER_SETTLE_TRIES = 10
 RECENTER_SETTLE_WAIT_S = 1.0
 RECENTER_NOTE = "recentered"
-# The kv key holding the epoch (epoch seconds) a bot's current grid started at,
+# The kv key holding the epoch (epoch seconds on the wall clock, `time.time()`,
+# which is what `created_at` is stamped with) a bot's current grid started at,
 # written by a recenter so the replaced grid's rows stop counting as today's.
 INIT_SINCE_PREFIX = "runner:init_since:"
 
 # Refusals that clear by themselves: the level they held back is placed again on
-# a later cycle, so the first book is not settled by them.
+# a later cycle, so the first book is not settled by them.  A currency short on
+# the exchange is one of these: it clears once its owner's funds move.
 TRANSIENT_REFUSALS = frozenset(
-    {HALTED, CLOCK_SKEW, STALE_MARKET, DRAWDOWN_STOP, DAILY_CAP, RATE_CAP}
+    {
+        HALTED,
+        CLOCK_SKEW,
+        STALE_MARKET,
+        DRAWDOWN_STOP,
+        DAILY_CAP,
+        RATE_CAP,
+        UNALLOCATED_NEGATIVE,
+    }
 )
+
+# A fill whose follow-ups the exchange keeps refusing is given up on instead of
+# being offered for ever: at this many settled refusals its mark becomes
+# `OPP_SKIPPED` and one alert says why.  A post-only bounce is the exchange's own
+# reprice attempt rather than a settled answer, so it does not count.
+MAX_FOLLOW_UP_REJECTIONS = 3
+FOLLOW_UP_REJECTED_NOTE = "follow-up rejected x3"
 
 # Failures in a row after which the loop raises instead of retrying for ever.
 MAX_CONSECUTIVE_FAILURES = 5
@@ -229,8 +247,11 @@ class Runner:
     Every collaborator is injected — the store, the gateway, the exchange, the
     snapshot cache, the strategies and the clocks — so a cycle can be driven
     against a scripted book with nothing mocked inside the engine.  `now` is an
-    epoch-seconds clock (the one `created_at` is stamped with), `market_for` gives
-    a product's book and poll range, and `spec_for` its `ProductSpec`.
+    epoch-seconds clock (the wall clock by default, the one `created_at` is
+    stamped with), `market_for` gives a product's book and poll range, and
+    `spec_for` its `ProductSpec`.  The one stamp not taken from `now` is the init
+    epoch a recenter writes: it is compared with `created_at` directly, so it is
+    always the wall clock even when a caller moves `now`.
     """
 
     def __init__(
@@ -611,7 +632,9 @@ class Runner:
 
         Read back from the kv table, so a value that is absent, or not a number
         (a hand-edited file, an older key), means "no epoch": every row counts as
-        today's and the filter behaves as it did before recentering existed.
+        today's and the filter behaves as it did before recentering existed.  The
+        stamp is the wall clock, the same one that stamped the `created_at`
+        values it is compared with.
         """
         value = self.store.get(f"{INIT_SINCE_PREFIX}{bot_id}")
         if value is None:
@@ -644,13 +667,20 @@ class Runner:
         Second, a fill marked answered whose every follow-up is REJECTED or FAILED
         was not answered at all (the exchange refused it, or it never landed), so
         its mark goes back to `OPP_TODO` and the next decision offers it again.
-        A fill with no follow-up row yet, or with any follow-up in another status,
-        is left alone.
+        That retry is bounded: at `MAX_FOLLOW_UP_REJECTIONS` or more settled
+        refusals — a FAILED child, or a REJECTED one whose note is not a post-only
+        bounce, which is no answer at all — the fill is retired as `OPP_SKIPPED`
+        with `FOLLOW_UP_REJECTED_NOTE` and one alert naming the reason instead, so
+        a level the exchange will never take is not offered for ever.  A skipped
+        row is no longer `OPP_PLACED`, so later cycles neither retry it nor alert
+        again.  A fill with no follow-up row yet, or with any follow-up in another
+        status, is left alone.
 
         Both passes run before the view is built, so the next decision cannot
         place the same follow-up a second time.  The first pass already refuses to
         retire a fill whose only follow-up failed; the second is what un-marks
-        such a fill so it is offered again.
+        such a fill so it is offered again, or retires it once the refusals have
+        added up.
         """
         for row in self.store.orders(owner=bot_id):
             fill_cid = row["consumes_fill"]
@@ -704,6 +734,29 @@ class Runner:
             if not all(
                 child["status"] in (REJECTED, FAILED) for child in follow_ups
             ):
+                continue
+            counted = [
+                child
+                for child in follow_ups
+                if child["status"] == FAILED
+                or "POST_ONLY" not in str(child["note"] or "")
+            ]
+            if len(counted) >= MAX_FOLLOW_UP_REJECTIONS:
+                last = counted[-1]
+                reason = str(last["note"] or "no reason recorded")
+                self.store.update_order(
+                    cid,
+                    opposite=OPP_SKIPPED,
+                    note=FOLLOW_UP_REJECTED_NOTE,
+                )
+                message = (
+                    f"bot {bot_id}: fill {cid} was marked answered, but "
+                    f"{len(counted)} follow-ups to it were rejected "
+                    f"({', '.join(child['client_order_id'] for child in counted)}); "
+                    f"last refusal: {reason}; not offered again"
+                )
+                log.error(message)
+                self.store.event("ALERT", message)
                 continue
             self.store.update_order(cid, opposite=OPP_TODO)
             message = (
@@ -762,12 +815,14 @@ class Runner:
 
         Returns True when a place in the FIRST book's decision was refused with a
         transient code — halted, a stale, unusable or crossed snapshot, an
-        unknown clock skew, a drawdown stop, a spent cap — so the caller leaves
-        `init_done` at 0 and the next cycle offers the refused levels again.  Any
-        other refusal (an order too large, a product not allowed, a level the
-        sizing cannot fund) is settled: it would be refused just the same next
-        cycle, so it must not hold the first book open for ever.  A decision that
-        is not the first book always answers False.
+        unknown clock skew, a drawdown stop, a spent cap, or a currency the
+        exchange is short of (UNALLOCATED_NEGATIVE, which clears once its owner's
+        funds move) — so the caller leaves `init_done` at 0 and the next cycle
+        offers the refused levels again.  Any other refusal (an order too large, a
+        product not allowed, a level the sizing cannot fund) is settled: it would
+        be refused just the same next cycle, so it must not hold the first book
+        open for ever.  A decision that is not the first book always answers
+        False.
         """
         bot_id = bot["id"]
         cancels = [i for i in decision.intents if i.action == "cancel"]
@@ -1089,8 +1144,11 @@ class Runner:
         epoch (or the other way round) could count the replaced grid's rows as
         today's and hold a level of the new one back.  The epoch is stored as
         `runner:init_since:<id>` with the same JSON encoding `store.put` uses, so
-        `store.get` hands `_init_epoch` the float back; it is on the same clock
-        that stamps a row's `created_at`, which is what the level filter compares.
+        `store.get` hands `_init_epoch` the float back.  It is stamped with the
+        wall clock (`time.time()`), not with the injected `now`: the level filter
+        compares it with a row's `created_at`, which the store stamps with the
+        wall clock, so the two have to share a clock even when a caller moves
+        `now`.
         """
         with self.store.tx() as db:
             db.execute(
@@ -1101,7 +1159,7 @@ class Runner:
                 "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)",
                 (
                     f"{INIT_SINCE_PREFIX}{bot_id}",
-                    json.dumps(self.now()),
+                    json.dumps(time.time()),
                 ),
             )
         message = f"bot {bot_id}: recentered on {new_center}; the book re-inits"

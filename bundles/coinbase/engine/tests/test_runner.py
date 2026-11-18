@@ -118,6 +118,7 @@ TRANSIENT_REFUSALS = (
     DRAWDOWN_STOP,
     DAILY_CAP,
     RATE_CAP,
+    UNALLOCATED_NEGATIVE,
 )
 
 # The levels a recentered grid (center 1.1) puts down.
@@ -594,6 +595,29 @@ def children_of(env, parent_cid, *, live_only=False):
     return rows
 
 
+def rejected_follow_up(
+    env, parent_cid, note, *, level=0, price=D("1.0"), size=D("10")
+):
+    """A follow-up row the exchange refused, answering the fill *parent_cid*.
+
+    `note` is what the refusal left behind: a post-only reprice rejection is
+    normal and its note says so, while any other refusal is one the runner counts
+    against the fill.
+    """
+    cid = insert_order_row(
+        env.store,
+        side="SELL",
+        level=level,
+        price=D(price),
+        size=D(size),
+        status=REJECTED,
+    )
+    env.store.update_order(
+        cid, consumes_fill=parent_cid, parent_cid=parent_cid, note=note
+    )
+    return cid
+
+
 # ---------------------------------------------------------------- start-up
 
 
@@ -877,6 +901,38 @@ def test_init_done_only_after_every_intent_resolved(envs):
     assert bot_row(mixed)["init_done"] is True
 
 
+def test_init_retries_after_unallocated_negative_clears(envs):
+    env = envs()
+    real_submit = env.gateway.submit
+    short = {"on": True}
+
+    def refusing_while_short(source, owner, intent, product=None):
+        if short["on"]:
+            return GatewayResult(False, None, UNALLOCATED_NEGATIVE)
+        return real_submit(source, owner, intent, product)
+
+    env.gateway.submit = refusing_while_short
+    env.runner.cycle()
+
+    # The exchange is short of what its owners hold, so the first book is not
+    # settled: every level is left open for a later cycle rather than recorded as
+    # answered-and-done.
+    assert bot_row(env)["init_done"] is False
+    assert orders(env.store, BOT) == []
+    assert any(
+        UNALLOCATED_NEGATIVE in message for message in messages(env.store, "warn")
+    )
+
+    short["on"] = False
+    env.runner.cycle()
+
+    rows = orders(env.store, BOT)
+    assert len(rows) == 6
+    # Each level once: the retry lays the whole book and nothing twice.
+    assert len({(row["side"], row["level"]) for row in rows}) == 6
+    assert bot_row(env)["init_done"] is True
+
+
 def test_kill_during_first_cycle_then_clear_halt_gives_full_init(envs):
     env = envs()
     real_submit = env.gateway.submit
@@ -1052,6 +1108,87 @@ def test_heal_unmarks_parent_whose_follow_up_failed(envs):
     assert children_of(env, parent, live_only=True) == live
     assert env.store.order(parent)["opposite"] == OPP_PLACED
     assert len(orders(env.store, BOT)) == rows_after
+
+
+def test_three_rejected_follow_ups_skip_the_fill_with_one_alert(envs):
+    env = envs()
+    parent = answered_buy(env)
+    # Three attempts to answer the fill, three refusals.  They all carry the same
+    # reason, so "the last rejection reason" in the alert is that text whichever
+    # of the three the runner counts last.
+    reason = "EXCHANGE_REJECTED: insufficient funds"
+    refused = [rejected_follow_up(env, parent, reason) for _ in range(3)]
+    assert len(children_of(env, parent)) == 3
+    assert children_of(env, parent, live_only=True) == []
+
+    env.runner.cycle()
+
+    # A fourth attempt would be refused the same way, so the fill is given up on
+    # instead of offered again, and it says so once.
+    after = env.store.order(parent)
+    assert after["opposite"] == OPP_SKIPPED
+    assert after["note"] == "follow-up rejected x3"
+    alerts = messages(env.store, "ALERT")
+    assert len(alerts) == 1
+    assert parent in alerts[0]
+    assert reason in alerts[0]
+
+    # No new follow-up was offered: the three refused rows are the whole story.
+    assert len(children_of(env, parent)) == 3
+    assert children_of(env, parent, live_only=True) == []
+    assert {row["client_order_id"] for row in children_of(env, parent)} == set(
+        refused
+    )
+
+    # The skip is final: the next cycle neither alerts again nor offers the fill.
+    rows_after = len(orders(env.store, BOT))
+    env.runner.cycle()
+
+    assert len(messages(env.store, "ALERT")) == 1
+    assert len(orders(env.store, BOT)) == rows_after
+    assert env.store.order(parent)["opposite"] == OPP_SKIPPED
+    assert len(children_of(env, parent)) == 3
+
+
+def test_post_only_rejections_do_not_count_toward_the_limit(envs):
+    env = envs()
+    parent = answered_buy(env)
+    # A post-only order the exchange refused only needs a reprice: three of those
+    # are normal traffic, not three answers that failed.
+    for _ in range(3):
+        rejected_follow_up(env, parent, "POST_ONLY_EXHAUSTED")
+
+    env.runner.cycle()
+
+    # The fill was offered again and answered this time.
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    assert env.store.order(parent)["note"] != "follow-up rejected x3"
+    live = children_of(env, parent, live_only=True)
+    assert len(live) == 1
+    assert live[0]["consumes_fill"] == parent
+    assert live[0]["side"] == "SELL"
+    assert live[0]["status"] == OPEN
+    assert len(children_of(env, parent)) == 4
+    assert messages(env.store, "ALERT") == []
+
+
+def test_two_rejected_follow_ups_still_retried(envs):
+    env = envs()
+    parent = answered_buy(env)
+    for _ in range(2):
+        rejected_follow_up(env, parent, "EXCHANGE_REJECTED: insufficient funds")
+
+    env.runner.cycle()
+
+    # Two refusals are under the limit: the fill is un-marked and offered again.
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    assert env.store.order(parent)["note"] != "follow-up rejected x3"
+    live = children_of(env, parent, live_only=True)
+    assert len(live) == 1
+    assert live[0]["consumes_fill"] == parent
+    assert live[0]["status"] == OPEN
+    assert len(children_of(env, parent)) == 3
+    assert messages(env.store, "ALERT") == []
 
 
 def test_follow_up_stuck_pending_submit_expired_then_placed_again_once(envs):
@@ -2176,6 +2313,25 @@ def test_recenter_never_wraps_reconcile_in_tx(envs, monkeypatch):
 
     assert calls
     assert D(bot_row(env)["params"]["center"]) == D("1.1")
+
+
+def test_recenter_epoch_uses_wall_clock_not_injected_now(envs):
+    env = envs()
+    env.runner.cycle()
+    assert len(orders(env.store, BOT, OPEN)) == 6
+
+    # The epoch is compared with a row's `created_at`, which the store stamps
+    # with the wall clock, so it has to be written on that same clock.  This
+    # runner's injected clock says 5000.0 (its settle reconcile is handed that
+    # value too), and the epoch must still be the real time.
+    on_another_clock = env.new_runner(now=lambda: 5000.0)
+    on_another_clock.recenter(BOT, "1.1")
+
+    assert D(bot_row(env)["params"]["center"]) == D("1.1")
+    epoch = env.store.get("runner:init_since:b1")
+    assert isinstance(epoch, (int, float))
+    assert float(epoch) != 5000.0
+    assert abs(float(epoch) - time.time()) < 5
 
 
 # ---------------------------------------------------------------- the loop
