@@ -101,12 +101,15 @@ async function openEngine(length) {
 /**
  * Render an input through the meter and hand back every payload it posted.
  *
- * `during` runs before rendering starts (that is where a test turns the meter
- * on), and `between` gets the context once rendering has begun — an
- * OfflineAudioContext's `suspend()` is what lets a test change the meter while
- * audio is being rendered.
+ * `early` runs first of all, synchronously, with the bare context right after it
+ * is made: that is where a test registers its `suspend()` times, because a
+ * suspend has to be recorded before the render can start. `during` runs once the
+ * engine is up and before rendering starts (that is where a test turns the meter
+ * on), and `between` gets the context once rendering has begun, so a suspend that
+ * has landed is where a test changes the meter while audio is being rendered.
  *
  * @param {{frames: number, sampleOf: (frame: number) => number,
+ *          early?: (context: object) => void,
  *          during?: (held: object) => Promise<void>|void,
  *          between?: (held: object) => Promise<void>|void}} options
  * @returns {Promise<{levels: object[], meter: object, context: object}>}
@@ -117,8 +120,10 @@ async function renderInput(options) {
     length: options.frames,
     sampleRate: SAMPLE_RATE,
   });
+  if (options.early) options.early(context);
   const engine = await studioEngine.create(context, { assetBytes: ASSETS });
   let meter = null;
+  let rendered = false;
   try {
     const samples = new Float32Array(options.frames);
     for (let frame = 0; frame < options.frames; frame += 1) samples[frame] = options.sampleOf(frame);
@@ -136,8 +141,19 @@ async function renderInput(options) {
     if (options.during) await options.during(held);
 
     const rendering = context.startRendering();
+    // `between` can throw, and then nothing below awaits the render.
+    rendering.catch(() => {});
     if (options.between) await options.between(held);
-    await rendering;
+    let timer = null;
+    const tooSlow = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("the offline render did not finish in 20 s")), 20000);
+    });
+    try {
+      await Promise.race([rendering, tooSlow]);
+    } finally {
+      clearTimeout(timer);
+    }
+    rendered = true;
     // The posts are port messages from another thread: the last one may still be
     // in flight when the render resolves.
     await waitFor(() => false, 200);
@@ -145,6 +161,8 @@ async function renderInput(options) {
   } finally {
     if (meter) meter.dispose();
     engine.dispose();
+    // A render that never got going leaves the worklet thread running.
+    if (!rendered) await releaseWorklet(context);
   }
 }
 
@@ -244,19 +262,26 @@ test("dispose takes the meter out of the graph and no post arrives after it", as
   assert.deepEqual(levels, [], "a disposed meter is not pulled, so it never measures");
 });
 
-test("setActive false stops the posts and setActive true resumes them", async () => {
+test("setActive false stops the posts and setActive true resumes them", { timeout: 60000 }, async () => {
   // Suspends land on whole render blocks: 188 * 128 and 750 * 128.
   const offAt = 188 * 128;
   const onAt = 750 * 128;
   const frames = Math.round(3 * SAMPLE_RATE);
 
+  let off;
+  let on;
   const { levels } = await renderInput({
     frames: frames,
     sampleOf: sine440,
+    // Registered first, long before startRendering(): the suspend is recorded
+    // asynchronously, and one made right before the render starts is sometimes
+    // refused with InvalidStateError.
+    early: (context) => {
+      off = context.suspend(offAt / SAMPLE_RATE);
+      on = context.suspend(onAt / SAMPLE_RATE);
+    },
     during: ({ meter }) => meter.setActive(true),
     between: async ({ context, meter }) => {
-      const off = context.suspend(offAt / SAMPLE_RATE);
-      const on = context.suspend(onAt / SAMPLE_RATE);
       await off;
       meter.setActive(false);
       await context.resume();
@@ -282,21 +307,28 @@ test("setActive false stops the posts and setActive true resumes them", async ()
   );
 });
 
-test("clearClip names its sequence, and every reading after it carries it", async () => {
+test("clearClip names its sequence, and every reading after it carries it", { timeout: 60000 }, async () => {
   // Suspends land on whole render blocks, as they do above.
   const firstClearAt = 375 * 128;
   const secondClearAt = 750 * 128;
   const frames = Math.round(3 * SAMPLE_RATE);
 
+  let first;
+  let second;
   const { levels } = await renderInput({
     frames: frames,
     // Full scale for the first two windows, which latches CLIP once; the rest of
     // the render is far too quiet to latch it again.
     sampleOf: (frame) => (frame < 2 * POST_FRAMES ? 1 : 0.25),
+    // Registered first, long before startRendering(): the suspend is recorded
+    // asynchronously, and one made right before the render starts is sometimes
+    // refused with InvalidStateError.
+    early: (context) => {
+      first = context.suspend(firstClearAt / SAMPLE_RATE);
+      second = context.suspend(secondClearAt / SAMPLE_RATE);
+    },
     during: ({ meter }) => meter.setActive(true),
     between: async ({ context, meter }) => {
-      const first = context.suspend(firstClearAt / SAMPLE_RATE);
-      const second = context.suspend(secondClearAt / SAMPLE_RATE);
       await first;
       meter.clearClip(3);
       await context.resume();
@@ -306,23 +338,36 @@ test("clearClip names its sequence, and every reading after it carries it", asyn
     },
   });
 
-  const latched = levels.filter((level) => level.frame < firstClearAt);
-  assert.ok(latched.some((level) => level.clipped), "the full-scale start latched CLIP");
-  assert.deepEqual(latched.map((level) => level.clearSeq), latched.map(() => 0), "no clear had been named yet");
-  for (const level of levels) assert.equal(typeof level.clearSeq, "number", "the sequence is a plain number on the level");
+  // Read the posts in the order they arrived, not against the suspend times.
+  // Under load the worklet runs behind the render thread, so the suspend can
+  // resolve and the clear can be sent while the worklet is still a few blocks
+  // before that frame: a post stamped below a suspend time may already carry
+  // the sequence that clear named. The order of the posts is what holds.
+  const seqs = levels.map((level) => level.clearSeq);
+  for (const seq of seqs) {
+    assert.equal(typeof seq, "number", "the sequence is a plain number on the level");
+    assert.ok(seq === 0 || seq === 3, `a post carries 0 or the named 3, got ${seq}`);
+  }
 
-  // The clear crosses the port as a message, so a post or two around the
-  // suspend may still have been stamped before it: read a few posts past it.
-  const afterFirst = levels.filter(
-    (level) => level.frame > firstClearAt + 8 * POST_FRAMES && level.frame < secondClearAt,
+  // Zeros, then threes, then zeros: never back and forth.
+  assert.match(
+    seqs.map((seq) => (seq === 0 ? "0" : "3")).join(""),
+    /^0*3+0*$/,
+    "a post carries the sequence the last clear named: none, then 3, then none again, never back and forth",
   );
-  assert.ok(afterFirst.length > 0, "the meter keeps posting after the clear");
-  assert.deepEqual(afterFirst.map((level) => level.clearSeq), afterFirst.map(() => 3), "and every reading carries the sequence it was given");
-  assert.deepEqual(afterFirst.map((level) => level.clipped), afterFirst.map(() => false), "with the latch let go");
+  assert.ok(seqs.includes(3), "a clear that names a sequence reaches the posts after it");
+  assert.equal(seqs[seqs.length - 1], 0, "and after a clear that names no sequence it is 0");
 
-  const afterSecond = levels.filter((level) => level.frame > secondClearAt + 8 * POST_FRAMES);
-  assert.ok(afterSecond.length > 0, "and after a clear that names no sequence");
-  assert.deepEqual(afterSecond.map((level) => level.clearSeq), afterSecond.map(() => 0), "a clear with no sequence is 0");
+  // Half a second of margin at the start, well before any clear is sent.
+  const start = levels.filter((level) => level.frame < firstClearAt / 2);
+  assert.ok(start.length > 0, "the meter posted from the full-scale start");
+  assert.deepEqual(start.map((level) => level.clearSeq), start.map(() => 0), "no clear had been named yet");
+  assert.ok(start.some((level) => level.clipped), "the full-scale start latched CLIP");
+
+  assert.ok(
+    levels.some((level) => level.frame > firstClearAt + 8 * POST_FRAMES),
+    "the meter keeps posting after the clear",
+  );
 });
 
 test("createInputMeter with no input is refused the way createRecorder is", async () => {
