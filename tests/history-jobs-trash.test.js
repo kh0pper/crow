@@ -1378,7 +1378,17 @@ test("a failed history erase is partial and the finish path re-runs it", async (
     const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
     const L = await import("../servers/shared/project-lifecycle.js");
 
-    const project = await createProjectSpace(db, { name: "Erase later" });
+    // Creation makes the workspace folder now, and it resolves the data dir from CROW_DATA_DIR: the
+    // project's workspace must sit under the SAME data dir this delete is given, or the delete would
+    // find it outside its own projects folder.
+    const prevDataDir = process.env.CROW_DATA_DIR;
+    process.env.CROW_DATA_DIR = dataDir;
+    let project;
+    try {
+      project = await createProjectSpace(db, { name: "Erase later" });
+    } finally {
+      process.env.CROW_DATA_DIR = prevDataDir;
+    }
     const id = Number(project.id);
     const section = Number((await withWriteContext(OWNER, () => db.execute({
       sql: "INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES ('erase-later', 'Note', 'scoped', ?)",

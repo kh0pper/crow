@@ -310,8 +310,11 @@ test("workspace rename never follows links", async () => {
   assert.equal(readFileSync(join(world, "sessions", "s1.jsonl"), "utf8"), "history", "the bot's history is untouched");
   assert.equal(realpathSync(world), worldReal);
 
-  // No workspace: skipped, still ok.
+  // No workspace: skipped, still ok. Creation makes the workspace folder now, so the folder is
+  // removed first: a project whose workspace is not on disk (an older row, or one removed by hand)
+  // is the case this asserts.
   const bare = await mk("Bare");
+  rmSync((await proj(bare)).workspace_dir, { recursive: true, force: true });
   const r2 = await del(bare, "Bare");
   assert.equal(r2.ok, true);
   assert.equal(r2.counts.workspace, false);

@@ -2166,8 +2166,9 @@ export function createProjectServer(dbPath, options = {}) {
   //
   // Two more rules the core applies: a bot may not write or delete a dot-entry anywhere, or an agent
   // instruction or config file at any depth (CLAUDE.md, AGENTS.md, GEMINI.md, opencode.json and the
-  // rest of BOT_REFUSED_NAMES — the names the operator's own runner reads as configuration, so a bot
-  // may not plant them in a workspace the operator opens), and a peer instance is refused
+  // rest of BOT_REFUSED_NAMES, plus any name whose stem is a runner's own — BOT_REFUSED_STEMS — the
+  // names the operator's own runner reads as configuration, so a bot may not plant them in a
+  // workspace the operator opens), and a peer instance is refused
   // outright in v1: workspace files are for this instance's owner and its bots, and they are not
   // part of the project-share vocabulary.
   //
@@ -2178,7 +2179,10 @@ export function createProjectServer(dbPath, options = {}) {
   // an unidentified local caller — which keeps full access.
   //
   // The project must exist and not be archived, and its workspace folder must sit inside this
-  // instance's `<data>/projects` folder.
+  // instance's `<data>/projects` folder. A project created over MCP has its workspace folder made
+  // at creation; when it is missing anyway, a WRITE makes it (0700, one component at a time, no
+  // symlink — ensureWorkspaceDir), while a listing answers an empty workspace and a read or a
+  // delete answers not found, so no read path creates a folder.
   //
   // Version history (servers/shared/history/workspace-history.js) records the workspace on its next
   // snapshot, so every write and delete becomes a version the owner can restore.

@@ -7,12 +7,14 @@
  * project_spaces row.
  *
  * Exported functions:
- *   createProjectSpace(db, opts)      — insert ps row + owner member row, one batch
+ *   createProjectSpace(db, opts)      — insert ps row + owner member row, one batch; then
+ *                                       make the project's workspace folder (best effort)
  *   updateProjectSpaceMeta(db, id, patch) — update meta columns, no re-slug
  */
 
 import { slugify, workspacePathFor, storagePrefixFor } from "./slugify.js";
 import { resolveDataDir } from "../db.js";
+import { ensureWorkspaceDir } from "./project-files.js";
 import { resolve } from "node:path";
 import { lstatSync } from "node:fs";
 
@@ -117,6 +119,7 @@ export async function createProjectSpace(db, opts = {}) {
       });
     }
 
+    await ensureWorkspace(workspaceDir, dataDir, type);
     await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
     return { id, slug: explicitSlug, workspaceDir, storagePrefix };
@@ -163,9 +166,32 @@ export async function createProjectSpace(db, opts = {}) {
   const workspaceDir = workspacePathFor(dataDir, slug);
   const storagePrefix = storagePrefixFor(slug);
 
+  await ensureWorkspace(workspaceDir, dataDir, type);
   await ensureHistory(db, { id, workspace_dir: workspaceDir, type }, dataDir);
 
   return { id, slug, workspaceDir, storagePrefix };
+}
+
+/**
+ * Give a freshly created project its workspace folder on disk (best effort).
+ *
+ * `crow_create_project` used to record `workspace_dir` and never make the folder, so every file
+ * write then failed with "This instance's projects folder is not available" until someone created
+ * it by hand. The folder is made here now, through project-files.js's ensureWorkspaceDir (0700 per
+ * component, no symlink, below `<data>/projects` only). This can NEVER fail the creation: the
+ * write path makes the folder on demand anyway, so a refusal here is only logged.
+ *
+ * @param {string} workspaceDir — the exact folder this project's row names
+ * @param {string} dataDir      — the data dir this creation already resolved
+ * @param {string} [type]       — a learner profile has no files of its own (like its history)
+ */
+function ensureWorkspace(workspaceDir, dataDir, type) {
+  if (type === "learner_profile") return;
+  try {
+    ensureWorkspaceDir(workspaceDir, dataDir);
+  } catch (err) {
+    console.warn("[project-spaces] the project's workspace folder was not created:", err?.message || err);
+  }
 }
 
 /**
