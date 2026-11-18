@@ -1,7 +1,7 @@
 {
   "id": "artifacts",
   "name": "Artifacts",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
   "type": "bundle",
   "author": "Crow",
@@ -26,12 +26,12 @@
   "env_vars": [
     {
       "name": "CROW_ARTIFACT_ORIGIN_PORT",
-      "description": "Loopback port of this instance's artifact origin (see docs/developers/port-allocation.md). Empty: artifact viewing is off.",
+      "description": "Port of this instance's artifact origin listener (see docs/developers/port-allocation.md); CROW_ARTIFACT_ORIGIN_BIND decides where it listens. Empty: artifact viewing is off.",
       "required": false
     },
     {
       "name": "CROW_ARTIFACT_ORIGIN_URL",
-      "description": "The origin browsers use for artifact content, on its OWN hostname (e.g. https://<artifacts-host>). Empty: the local-only fallback on this machine's loopback port, with weaker isolation.",
+      "description": "The origin browsers use for artifact content, on its OWN hostname (e.g. https://<artifacts-host>). Empty: the local-only fallback (this machine's loopback, or the bind address when that is not loopback), with weaker isolation.",
       "required": false
     }
   ],

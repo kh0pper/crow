@@ -18,6 +18,7 @@ import {
   _setFirewallReader,
   _setTailscaleReader,
   _setContainerReader,
+  _setArtifactNodeReader,
   isRunningInContainer,
   CONTAINER_MARKER_PATHS,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
@@ -310,6 +311,42 @@ test("cache: injectable now can bypass TTL", async () => {
   fakeNow += 60_000;
   await collectHealthSignals(countingDb, { now: clock });
   assert.ok(calls > after1, "after TTL expired, re-hits DB");
+});
+
+// ── artifact-node: the sidecar's problem codes map to their own issue ids ────
+
+// The sidecar audit (artifact-sidecar-health.test.js) produces codes this panel
+// turns into one warn issue each, with a translated sentence. `host-loopback` is
+// the code the isolation review cares most about: a sidecar on the HOST's network
+// answers every loopback port of this machine to the tailnet.
+test("artifact-node: host-loopback surfaces as artifact-node:host-loopback, warn, with a human label", async () => {
+  try {
+    _setArtifactNodeReader(async () => ({ ok: false, problems: ["host-loopback"], keyExpiry: null }));
+    invalidateHealthCache();
+    const result = await collectHealthSignals(makeDb(), { now: () => NOW, lang: "en" });
+
+    const card = result.details.find((d) => d.id === "artifact-node");
+    assert.ok(card, "the card carries the problem");
+    assert.equal(card.state, "warn");
+
+    const issues = result.issues.filter((i) => i.id.startsWith("artifact-node:"));
+    assert.deepEqual(issues.map((i) => i.id), ["artifact-node:host-loopback"], "one issue, under its own code");
+    assert.equal(issues[0].severity, "warn", "warn is what the health monitor pushes");
+    assert.match(issues[0].label, /private services/, "the label is a sentence, not the raw code");
+    assert.doesNotMatch(issues[0].label, /host-loopback|signals\.artifactNode/);
+
+    // Every other known code maps the same way (no code is silently dropped).
+    _setArtifactNodeReader(async () => ({ ok: false, problems: ["logged-out", "key-expiring", "funnel-on", "unexpected-mapping", "unreachable"], keyExpiry: null }));
+    invalidateHealthCache();
+    const mapped = (await collectHealthSignals(makeDb(), { now: () => NOW })).issues.filter((i) => i.id.startsWith("artifact-node:")).map((i) => i.id).sort();
+    assert.deepEqual(mapped, [
+      "artifact-node:funnel-on", "artifact-node:key-expiring", "artifact-node:logged-out",
+      "artifact-node:unexpected-mapping", "artifact-node:unreachable",
+    ]);
+  } finally {
+    _setArtifactNodeReader(async () => null);
+    invalidateHealthCache();
+  }
 });
 
 // ─── syncOutbox signal (stdio-sync-outbox Task 7 Step 1) ──────────────────────

@@ -197,7 +197,15 @@ export async function startArtifactOrigin({ port, host = "127.0.0.1", ...opts })
   server.headersTimeout = 10000;
   server.requestTimeout = 30000;
   server.on("clientError", clientErrorResponse);
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, host, resolve); });
+  await new Promise((resolve, reject) => {
+    server.once("error", (err) => {
+      // Release the object on a failed bind: the gateway retries the origin's
+      // listen (runtime.js), and each attempt makes a new server.
+      try { server.close(); } catch { /* not listening anyway */ }
+      reject(err);
+    });
+    server.listen(port, host, resolve);
+  });
   // The fallback CSP base is the origin browsers actually use in fallback
   // mode — http://localhost:<actual port> — never the request's Host header.
   const fallbackBase = opts.fallbackBase || (opts.publicBase ? null : `http://localhost:${server.address().port}`);

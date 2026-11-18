@@ -6,16 +6,24 @@
  * is a 404 (with the full sandbox headers).
  *
  * Configuration (per instance; nothing starts without a port):
- *   CROW_ARTIFACT_ORIGIN_PORT  loopback port (registered in port-allocation.md)
- *   CROW_ARTIFACT_ORIGIN_BIND  default 127.0.0.1 (a container instance binds
- *                              0.0.0.0 inside its namespace and publishes on
- *                              host loopback, behind its DOCKER-USER fence)
+ *   CROW_ARTIFACT_ORIGIN_PORT  port of this instance's origin listener
+ *                              (registered in port-allocation.md). It is not
+ *                              necessarily a loopback port: the BIND decides
+ *                              where it listens.
+ *   CROW_ARTIFACT_ORIGIN_BIND  default 127.0.0.1. A host-run gateway with a
+ *                              sidecar binds its bridge's gateway IP (e.g.
+ *                              172.30.0.1); a container instance binds 0.0.0.0
+ *                              INSIDE its own namespace and publishes on host
+ *                              loopback, behind its DOCKER-USER fence.
  *   CROW_ARTIFACT_ORIGIN_URL   the origin browsers use, e.g.
  *                              https://crow-artifacts.example.ts.net — its OWN
- *                              hostname (D13). Unset → the loopback fallback
- *                              http://localhost:<port>, local-only, weaker.
+ *                              hostname (D13). Unset → the fallback below:
+ *                              http://<bind or loopback>:<port>, local-only,
+ *                              weaker.
  */
 import { createViewTokenStore } from "./view-tokens.js";
+// F1: one helper decides "this machine", shared with the sidecar audit.
+import { isLoopbackOrWildcardHost } from "./sidecar-health.js";
 // D24: the bundle's panel routes reach the decision through the runtime (the
 // one process-wide surface they import), never their own copy of the table.
 export { loadDecision } from "./view-tokens.js";
@@ -63,6 +71,21 @@ function loopbackFor(bind) {
   return h;
 }
 
+/**
+ * The fallback origin browsers use when CROW_ARTIFACT_ORIGIN_URL is unset.
+ *
+ * A loopback bind (in any spelling) or a wildcard gives the documented
+ * `http://localhost:<port>` — that is the hostname a dashboard tab on this
+ * machine uses, so `isolationFor` still reports `shared-host` there. A bind that
+ * is NOT this machine (a docker bridge's gateway IP) gives that address, because
+ * `localhost` does not answer on it; the isolation is then `own-host` anyway.
+ */
+export function fallbackOriginUrl(host, port) {
+  const bind = loopbackFor(host);
+  const base = isLoopbackOrWildcardHost(host) ? "localhost" : bind;
+  return `http://${base.includes(":") ? `[${base}]` : base}:${port}`;
+}
+
 export async function startArtifactOriginFromEnv(env = process.env) {
   // Idempotent (PR A review L6): a second call returns the running server
   // instead of orphaning its reference. Restart = _resetForTest (tests) or a
@@ -83,8 +106,52 @@ export async function startArtifactOriginFromEnv(env = process.env) {
     port, host, tokens, publicBase: configured,
     resolveContent: async (q) => (resolver ? resolver(q) : null),
   });
-  info = { baseUrl: configured || `http://localhost:${port}`, port, configured: !!configured, bindHost: loopbackFor(host) };
+  // The fallback base is the address the browser really reaches: loopback and
+  // wildcard binds keep the documented `http://localhost:<port>`, anything else
+  // is named (see fallbackOriginUrl).
+  info = { baseUrl: configured || fallbackOriginUrl(host, port), port, configured: !!configured, bindHost: loopbackFor(host) };
   return server;
+}
+
+/** Boot ordering (review F8): the origin's bind may be a docker bridge's
+ *  gateway IP. When the gateway starts before `docker.service` has created that
+ *  bridge, `listen()` fails with EADDRNOTAVAIL and the origin stays off until
+ *  the next restart — so the caller retries, bounded, and warns at the end. */
+export const ORIGIN_BIND_RETRY_EVERY_MS = 5000;
+export const ORIGIN_BIND_RETRY_WINDOW_MS = 2 * 60 * 1000;
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A missing bind address (a race with dockerd), not a typo in the env. */
+export function isAddressNotAvailable(err) {
+  return err != null && (err.code === "EADDRNOTAVAIL" || err.cause?.code === "EADDRNOTAVAIL");
+}
+
+/**
+ * `startArtifactOriginFromEnv`, retried while the bind address does not exist
+ * yet. Returns the server, or null once the window is spent (the caller has
+ * already warned; the origin is simply off). Any other error — a bad port, an
+ * unparseable URL — is rethrown unchanged on the first attempt.
+ *
+ * `sleep` and `everyMs`/`windowMs` are injectable so the tests do not sleep.
+ */
+export async function startArtifactOriginWithBindRetry({
+  start = startArtifactOriginFromEnv, env = process.env, log = (m) => console.warn(m),
+  sleep = defaultSleep, everyMs = ORIGIN_BIND_RETRY_EVERY_MS, windowMs = ORIGIN_BIND_RETRY_WINDOW_MS,
+} = {}) {
+  for (let waited = 0; ; waited += everyMs) {
+    try {
+      return await start(env);
+    } catch (err) {
+      if (!isAddressNotAvailable(err)) throw err;
+      if (waited + everyMs > windowMs) {
+        log(`[gateway] artifact origin NOT started: ${err.message} (its bind address was still missing after ${Math.round(windowMs / 1000)}s; start the gateway After=docker.service)`);
+        return null;
+      }
+      log(`[gateway] artifact origin waiting for its bind address (${err.code}); retrying in ${Math.round(everyMs / 1000)}s`);
+      await sleep(everyMs);
+    }
+  }
 }
 
 /** Test seam. */

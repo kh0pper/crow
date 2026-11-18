@@ -11,9 +11,12 @@
 # the sidecar runs in. Under `network_mode: host` that 127.0.0.1 is THIS
 # COMPUTER's loopback, so every loopback port here — the dashboard, an admin
 # API, a database — would answer the tailnet. So: never add
-# `network_mode: host`, and never publish a port (this file has neither, and
-# the sidecar needs neither). The bridge below gives it a namespace of its own,
-# and its only way to the origin is the bridge gateway IP.
+# `network_mode: host`, never `network_mode: service:<x>` or
+# `network_mode: container:<x>` (those join another container's namespace, and
+# a namespace shared with the app container is the same flaw under a different
+# name), and never publish a port (this file has none, and the sidecar needs
+# none). The bridge below gives it a namespace of its own, and its only way to
+# the origin is the bridge gateway IP.
 #
 # Before the first start:
 #   1. Create the EXTERNAL bridge once (compose only attaches to it):
@@ -26,16 +29,36 @@
 #      CROW_ARTIFACT_ORIGIN_BIND=172.30.0.1 — and render
 #      bundles/artifacts/sidecar/serve.json.tmpl into ./serve.json beside this
 #      file with renderServeConfig(tmpl, { target: "http://172.30.0.1:3090" })
-#      (3090 is CROW_ARTIFACT_ORIGIN_PORT here). Host firewall: ONE rule,
-#      scoped to the bridge's own interface (`docker network inspect
-#      crow-artifacts-sidecar` names it, br-…), the sidecar IP and that port:
+#      (3090 is CROW_ARTIFACT_ORIGIN_PORT here).
+#      Host firewall: ONE door, and it only exists because ufw is enabled with
+#      default-deny incoming (check `ufw status verbose`) — that is what the
+#      design relies on. The rule, scoped to the bridge's own interface
+#      (`docker network inspect crow-artifacts-sidecar` names it, br-…), the
+#      sidecar IP and that port:
 #        ufw allow in on <bridge interface> from 172.30.0.2 to 172.30.0.1 \
 #          port 3090 proto tcp
-#      Optionally add a DOCKER-USER rule dropping the private ranges from
-#      172.30.0.0/24. See docs/architecture/artifacts.md.
+#      Then FENCE the bridge subnet from this machine's private networks
+#      (DOCKER-USER; the documented default). ESTABLISHED,RELATED is accepted
+#      first, and the origin's own subnet is excluded from the 172.16/12 drop
+#      because the origin lives on it:
+#        iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 10.0.0.0/8 -j DROP
+#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 172.16.0.0/12 ! -d 172.30.0.0/24 -j DROP
+#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 192.168.0.0/16 -j DROP
+#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 100.64.0.0/10 -j DROP
+#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 169.254.0.0/16 -j DROP
+#      Persist them with a small oneshot unit that re-applies them on every
+#      boot (crow-artifacts-fence.service; docs/architecture/artifacts.md has the
+#      unit, and the caveat: a fenced sidecar reaches LAN and tailnet peers over
+#      DERP instead of a direct path).
 #   3. Replace the <pin> below with the real digest
 #      (`docker buildx imagetools inspect tailscale/tailscale:<version>`).
 #   4. Put TS_AUTHKEY (a SINGLE-USE auth key) in a .env file beside this one.
+#
+# The gateway must start AFTER docker (After=docker.service): it binds the bridge
+# gateway IP above, which does not exist until dockerd creates the bridge. It
+# also retries that bind every 5 s for 2 minutes, so a boot that won the race
+# recovers on its own.
 #
 # A household CONTAINER instance needs none of steps 1-2: its sidecar joins that
 # instance's compose network and proxies to the origin by container name.
@@ -65,9 +88,10 @@ services:
       - ./state:/var/lib/tailscale
       - ./serve.json:/config/serve.json:ro
     # Userspace networking needs nothing beyond this: drop every capability,
-    # then give back only DAC_OVERRIDE, which containerboot needs to create and
-    # chown its state and socket directories inside a bind mount owned by the
-    # host user (the container runs as root there).
+    # then give back only DAC_OVERRIDE. `DAC_OVERRIDE` is what lets root in the
+    # container traverse and write the state and socket directories below: they
+    # are a bind mount the HOST user owns with mode 0700, and a container user
+    # it does not own cannot even traverse them otherwise. Nothing is chowned.
     cap_drop: [ALL]
     cap_add: [DAC_OVERRIDE]
     security_opt:
