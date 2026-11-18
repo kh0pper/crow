@@ -29,6 +29,7 @@ import csv
 import hmac
 import json
 import logging
+import math
 import re
 import tempfile
 import time
@@ -39,7 +40,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from . import records
 from .benchmark import KEY_PREFIX, Benchmark
@@ -57,6 +58,19 @@ log = logging.getLogger("crow_coinbase.api")
 # The one environment variable this module names: its absence refuses a start.
 ENV_TOKEN = "CROW_COINBASE_ENGINE_TOKEN"
 MISSING_TOKEN = "CROW_COINBASE_ENGINE_TOKEN is missing or blank"
+WHITESPACE_TOKEN = "CROW_COINBASE_ENGINE_TOKEN must not contain whitespace"
+SHORT_TOKEN = "CROW_COINBASE_ENGINE_TOKEN is shorter than 32 characters"
+# The shortest token this engine serves with.  A token is compared byte for
+# byte, so it is never trimmed: whitespace in the configured value is a mistake
+# to refuse, not one to repair into a different secret.
+MIN_TOKEN_CHARS = 32
+
+# The largest exponent an amount may carry: 1e16 and up is a typo or an attack,
+# and it is refused before it reaches any arithmetic.
+MAX_AMOUNT_EXPONENT = 15
+
+# What a failed POST /bots says: the exception text goes to the log, not out.
+CREATE_FAILED = "bot creation failed"
 
 AUTH_SCHEME = "Bearer"
 BEARER_PREFIX = f"{AUTH_SCHEME} "
@@ -84,15 +98,21 @@ ALL_YEARS = "all"
 
 
 def token_or_refuse(token: Optional[str]) -> str:
-    """The configured API token, or `StartupRefused` when it is blank.
+    """The configured API token, or `StartupRefused` when it may not be served.
 
     Shared by `create_app` and the process wrapper: a blank token is not a
     running engine with unauthenticated routes, it is an engine that refuses to
-    start.  Called before anything is opened or written.
+    start.  Called before anything is opened or written.  The value is taken as
+    it was configured — whitespace anywhere in it, or a token short enough to
+    guess, is refused rather than trimmed into a different secret.
     """
-    text = "" if token is None else str(token).strip()
+    text = "" if token is None else str(token)
     if not text:
         raise StartupRefused(MISSING_TOKEN)
+    if any(character.isspace() for character in text):
+        raise StartupRefused(WHITESPACE_TOKEN)
+    if len(text) < MIN_TOKEN_CHARS:
+        raise StartupRefused(SHORT_TOKEN)
     return text
 
 
@@ -141,6 +161,18 @@ def _bad_gateway(detail: str) -> HTTPException:
 # ---------------------------------------------------------------- request bodies
 
 
+def _no_boolean(value: Any, where: str) -> Any:
+    """A JSON number as it arrived, or a refusal when it is `true`/`false`.
+
+    Pydantic would read a boolean as a number for a union field that admits
+    `int`, turning `true` into a capital of 1; the check is on the raw body
+    value, before that happens.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{where} must be a number, not a boolean")
+    return value
+
+
 class BotCreate(BaseModel):
     """The whole POST /bots body.
 
@@ -158,6 +190,11 @@ class BotCreate(BaseModel):
     capital_quote: str | int | float
     capital_base: str | int | float
 
+    @field_validator("capital_quote", "capital_base", mode="before")
+    @classmethod
+    def _not_a_boolean(cls, value: Any, info: ValidationInfo) -> Any:
+        return _no_boolean(value, str(info.field_name))
+
 
 class Recenter(BaseModel):
     """The whole POST /bots/{id}/recenter body: one new center, nothing else."""
@@ -165,6 +202,11 @@ class Recenter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     center: str | int | float
+
+    @field_validator("center", mode="before")
+    @classmethod
+    def _not_a_boolean(cls, value: Any, info: ValidationInfo) -> Any:
+        return _no_boolean(value, str(info.field_name))
 
 
 # ---------------------------------------------------------------- money parsing
@@ -174,9 +216,14 @@ def _amount(value: Any, field: str) -> D:
     """A non-negative finite `Decimal` from a JSON string or number.
 
     A number goes through `Decimal(str(value))`, never `Decimal(float)`, so no
-    binary rounding is introduced on the way in.  NaN and infinity are refused
-    here because every later comparison would answer false for them.
+    binary rounding is introduced on the way in.  A boolean is refused instead
+    of being read as 1/0, NaN and infinity are refused here because every later
+    comparison would answer false for them, and an amount whose leading digit
+    sits past `MAX_AMOUNT_EXPONENT` is refused rather than carried into the cap
+    and the ledger.
     """
+    if isinstance(value, bool):
+        raise _invalid(f"{field} must be a number, not a boolean")
     try:
         amount = D(str(value))
     except (ArithmeticError, ValueError, TypeError):
@@ -185,6 +232,8 @@ def _amount(value: Any, field: str) -> D:
         raise _invalid(f"{field} must be a finite number")
     if amount < 0:
         raise _invalid(f"{field} must be >= 0")
+    if amount.adjusted() > MAX_AMOUNT_EXPONENT:
+        raise _invalid(f"{field} is out of range")
     return amount
 
 
@@ -381,7 +430,9 @@ def _heartbeat_age(path: Path | str, at: float) -> Optional[float]:
 
     No file, an unreadable one, one that is not JSON, and one whose `ts` is not
     a number are all "no stamp": the caller decides what a missing heartbeat
-    means, and a garbled file must never read as a fresh one.
+    means, and a garbled file must never read as a fresh one.  A `ts` that is a
+    number but not finite comes back as a non-finite age — a stamp this clock
+    cannot date, which is not the same thing as an absent one.
     """
     payload = _read_json_file(path)
     if not isinstance(payload, dict):
@@ -389,7 +440,13 @@ def _heartbeat_age(path: Path | str, at: float) -> Optional[float]:
     stamp = payload.get("ts")
     if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
         return None
-    return float(at) - float(stamp)
+    try:
+        stamp_at = float(stamp)
+    except (OverflowError, ValueError):
+        return float("nan")
+    if not math.isfinite(stamp_at):
+        return float("nan")
+    return float(at) - stamp_at
 
 
 def _health_body(ok: bool, age: Optional[float]) -> dict:
@@ -522,7 +579,15 @@ def create_app(
             return JSONResponse(
                 status_code=200 if ok else 503, content=_health_body(ok, None)
             )
-        ok = age <= window
+        if not math.isfinite(age):
+            # A stamp that cannot be dated is stale, and the grace does not
+            # cover it: only an absent stamp is what the grace is for.
+            return JSONResponse(
+                status_code=503, content=_health_body(False, None)
+            )
+        # A stamp too far ahead of this clock refutes it in the same way an old
+        # one does, so both ends are a whole poll window.
+        ok = -limits.poll_seconds <= age <= window
         return JSONResponse(
             status_code=200 if ok else 503, content=_health_body(ok, age)
         )
@@ -594,8 +659,8 @@ def create_app(
             except HTTPException:
                 raise
             except Exception as error:  # noqa: BLE001 - reported, never swallowed
-                log.exception("bot %s: creation failed", body.id)
-                raise HTTPException(status_code=500, detail=str(error)) from None
+                log.exception("bot %s: creation failed: %s", body.id, error)
+                raise HTTPException(status_code=500, detail=CREATE_FAILED) from None
         return _bot_json(row)
 
     @app.post("/bots/{bot_id}/pause", dependencies=guard)
@@ -621,24 +686,34 @@ def create_app(
             return _bot_json(bot)
 
     @app.post("/bots/{bot_id}/stop", dependencies=guard)
-    def stop_bot(bot_id: str) -> dict:
+    def stop_bot(bot_id: str) -> Response:
         """Sweep this bot's book off the exchange, then mark it STOPPED.
 
-        The status is written only after the sweep went through: a failing
-        sweep answers 502 and leaves the bot exactly as it was, so the stop can
-        simply be retried.  A bot that is already stopped is answered, not swept.
+        The status is written whether or not the sweep went through: reconcile
+        sweeps a STOPPED owner's book again, so a bot left stopped is exactly a
+        bot whose leftover orders get retried, while a bot left ACTIVE would go
+        on placing.  A failing sweep answers 502, with the status already
+        written.  A bot that is already stopped is answered, not swept.
         """
         with gateway.lock:
             bot = _require_bot(store, bot_id)
             if bot["status"] == STOPPED:
                 return _bot_json(bot)
+            failure: Optional[BaseException] = None
             try:
                 gateway.cancel_all(scope="owner", owner=bot_id)
-            except Exception as error:  # noqa: BLE001 - the status stays as it was
-                log.warning("bot %s: stop could not sweep the book: %s", bot_id, error)
-                raise _bad_gateway(f"could not cancel {bot_id}'s orders: {error}") from None
+            except Exception as error:  # noqa: BLE001 - the bot stops regardless
+                failure = error
+                log.error("bot %s: stop could not sweep the book: %s", bot_id, error)
             store.set_bot_status(bot_id, STOPPED)
             bot["status"] = STOPPED
+            if failure is not None:
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "detail": f"could not cancel {bot_id}'s orders: {failure}"
+                    },
+                )
             return _bot_json(bot)
 
     @app.post("/bots/{bot_id}/recenter", dependencies=guard)
@@ -650,6 +725,8 @@ def create_app(
         """
         with gateway.lock:
             bot = _require_bot(store, bot_id)
+            if bot["status"] == STOPPED:
+                raise _conflict(f"bot {bot_id} is {STOPPED}; it cannot be recentered")
             strategy = strategies.get(bot["strategy"])
             if strategy is None or not hasattr(strategy, "recenter"):
                 raise _invalid(
@@ -673,24 +750,31 @@ def create_app(
         """Halt first and without the lock, then sweep the book and stop every bot.
 
         The halt takes no lock by design, so a kill never queues behind a cycle
-        that is holding it.  A sweep that fails still stops the bots and still
-        answers that the engine is halted: the flag is what refuses every later
-        order, and it is already set.
+        that is holding it.  No step of it may stop the ones after it: a halt
+        that cannot be persisted, a sweep that fails and a bot whose status
+        cannot be written are each remembered and logged, and the sweep and the
+        stops happen anyway.  Any remembered failure answers 502 with the
+        reasons and `halted` still true: the flag is what refuses every later
+        order, and what could be done was done.
         """
-        gateway.halt("kill switch")
+        failures: list[str] = []
+        try:
+            gateway.halt("kill switch")
+        except Exception as error:  # noqa: BLE001 - the sweep runs whatever happened
+            failures.append(f"the halt flag could not be persisted: {error}")
+            log.exception("kill: the halt failed")
         with gateway.lock:
-            failure: Optional[BaseException] = None
             cancelled = 0
             try:
                 cancelled = gateway.cancel_all(scope="all")
             except Exception as error:  # noqa: BLE001 - the bots stop regardless
-                failure = error
+                failures.append(f"the sweep failed: {error}")
                 log.error("kill: the sweep failed: %s", error)
-            stopped = _stop_every_bot(store)
-        if failure is not None:
+            stopped = _stop_every_bot(store, failures)
+        if failures:
             return JSONResponse(
                 status_code=502,
-                content={"detail": str(failure), "halted": True},
+                content={"detail": "; ".join(failures), "halted": True},
             )
         return JSONResponse(
             status_code=200,
@@ -772,10 +856,20 @@ def create_app(
     return app
 
 
-def _stop_every_bot(store: Store) -> list[str]:
-    """Mark every bot STOPPED and answer their ids in the order they are stored."""
+def _stop_every_bot(store: Store, failures: list[str]) -> list[str]:
+    """Mark every bot STOPPED and answer their ids in the order they are stored.
+
+    One bot whose status cannot be written is logged into *failures* and the
+    rest are still stopped: a kill that left half the bots able to place would
+    be worse than one that reports the write it could not make.
+    """
     stopped: list[str] = []
     for bot in store.list_bots():
-        store.set_bot_status(bot["id"], STOPPED)
+        try:
+            store.set_bot_status(bot["id"], STOPPED)
+        except Exception as error:  # noqa: BLE001 - the next bot is still stopped
+            failures.append(f"bot {bot['id']} could not be stopped: {error}")
+            log.error("kill: could not stop bot %s: %s", bot["id"], error)
+            continue
         stopped.append(bot["id"])
     return stopped

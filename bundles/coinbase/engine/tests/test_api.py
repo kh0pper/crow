@@ -24,6 +24,8 @@ import contextlib
 import csv
 import io
 import json
+import logging
+import math
 import os
 import threading
 import time
@@ -44,7 +46,8 @@ from crow_coinbase.runner import StartupRefused
 from crow_coinbase.store import ACTIVE, BOT_ID_RE, OPEN, PAUSED, STOPPED
 from crow_coinbase.strategies.base import OrderIntent
 
-TOKEN = "test-token-123"
+# 32+ characters, the shortest token the engine starts with.  Test data only.
+TOKEN = "test-token-" + "x" * 32
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
 ENV = {
@@ -346,6 +349,49 @@ def test_compare_digest_used(engine, monkeypatch):
     assert offenders == [], f"the token is compared with ==/!=: {offenders}"
 
 
+def dependency_names(dependant):
+    """Every dependency callable's `__name__` in *dependant*, however deep."""
+    names = set()
+    for sub in getattr(dependant, "dependencies", ()) or ():
+        call = getattr(sub, "call", None)
+        if call is not None:
+            names.add(getattr(call, "__name__", ""))
+        names |= dependency_names(sub)
+    return names
+
+
+def route_dependency_names(route):
+    """The names of the callables a route depends on, both spellings FastAPI uses."""
+    names = dependency_names(getattr(route, "dependant", None))
+    for dep in getattr(route, "dependencies", ()) or ():
+        target = getattr(dep, "dependency", dep)
+        names.add(getattr(target, "__name__", ""))
+    return names
+
+
+def test_every_route_except_health_is_guarded_and_docs_404(engine):
+    guarded = []
+    for route in engine.app.routes:
+        path = getattr(route, "path", "")
+        if path == "/health":
+            continue
+        names = route_dependency_names(route)
+        assert "_check_token" in names, (
+            f"{path} carries no auth dependency: {sorted(names)}"
+        )
+        guarded.append(path)
+
+    # The walk is not vacuous: the surface really is that wide.
+    assert len(guarded) >= 13, guarded
+    for path in ("/status", "/bots", "/bots/{bot_id}/stop", "/kill", "/pnl"):
+        assert path in guarded, f"{path} is not one of the guarded routes"
+
+    with raw_api(engine) as anonymous:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert anonymous.get(path).status_code == 404, path
+            assert anonymous.get(path, headers=HEADERS).status_code == 404, path
+
+
 # ---------------------------------------------------------------- startup
 
 
@@ -384,6 +430,41 @@ def test_refuses_start_without_token(tmp_path):
         )
         == 3
     )
+
+
+BAD_TOKENS = [
+    ("too-short", "short"),
+    ("one-char-short", "x" * 31),
+    ("space-inside", "a" * 16 + " " + "b" * 20),
+    ("trailing-newline", "x" * 39 + "\n"),
+    ("tab-inside", "x" * 20 + "\t" + "y" * 20),
+]
+
+
+@pytest.mark.parametrize("case,token", BAD_TOKENS, ids=[c for c, _ in BAD_TOKENS])
+def test_token_rejects_whitespace_and_short(tmp_path, case, token):
+    data_dir = tmp_path / case
+    with pytest.raises(StartupRefused):
+        build_app(dict(ENV, CROW_COINBASE_ENGINE_TOKEN=token), data_dir=data_dir)
+    assert not (data_dir / "engine.sqlite").exists()
+
+    # Exactly 32 characters is the shortest token this engine starts with, and
+    # it still has to be presented byte for byte.
+    accepted = "x" * 32
+    engine = build_app(
+        dict(ENV, CROW_COINBASE_ENGINE_TOKEN=accepted),
+        data_dir=tmp_path / "exact",
+    )
+    with raw_api(engine) as anonymous:
+        good = anonymous.get(
+            "/status", headers={"Authorization": f"Bearer {accepted}"}
+        )
+        assert good.status_code == 200, good.text
+        wrong = anonymous.get(
+            "/status", headers={"Authorization": f"Bearer {'y' * 32}"}
+        )
+        assert wrong.status_code == 401
+        assert wrong.json() == {"detail": "unauthorized"}
 
 
 # ---------------------------------------------------------------- POST /bots
@@ -522,6 +603,88 @@ def test_seed_dry_called_once_in_creation_tx(tmp_path):
         assert again.status_code == 201
         assert [row["id"] for row in other.store.list_bots()] == [BOT]
         assert count_rows(other, "sim_deposits") == 2
+
+
+def test_create_bot_500_detail_is_generic(engine, client):
+    def exploding_seed(owner, quote, base):
+        raise RuntimeError("secret-internal-detail /tmp/x.sqlite")
+
+    engine.gateway.seed_dry = exploding_seed
+    failed = client.post("/bots", json=CREATE_BODY)
+    assert failed.status_code == 500
+    assert failed.json()["detail"] == "bot creation failed"
+    assert "secret-internal-detail" not in failed.text
+    assert "/tmp/x.sqlite" not in failed.text
+    assert engine.store.list_bots() == []
+    assert count_rows(engine, "sim_deposits") == 0
+
+
+BAD_BOOKS = [
+    ("zero-bid-ask", D("0"), D("0")),
+    ("crossed", D("1.10"), D("1.00")),
+    ("nan-bid", D("NaN"), D("1.00")),
+    ("infinite-ask", D("0.99"), D("Infinity")),
+]
+
+
+@pytest.mark.parametrize("case,bid,ask", BAD_BOOKS, ids=[c for c, _, _ in BAD_BOOKS])
+def test_price_for_rejects_bad_book(tmp_path, case, bid, ask):
+    books = Books()
+    books.markets[PRODUCT] = FakeMarket(bid=bid, ask=ask)
+    data_dir = tmp_path / case
+    data_dir.mkdir(parents=True, exist_ok=True)
+    engine = build_app(
+        dict(ENV),
+        data_dir=data_dir,
+        market_for=books.market_for,
+        spec_for=lambda product: SPEC,
+    )
+    # No poll has happened, so the fallback to the book is the one in play.
+    assert engine.gateway.snapshots.get(PRODUCT) is None
+
+    with api(engine) as client:
+        response = client.post("/bots", json=CREATE_BODY)
+        assert response.status_code == 503, response.text
+        assert engine.store.list_bots() == []
+        assert count_rows(engine, "sim_deposits") == 0
+
+
+OVER_BOUND_CASES = [
+    ("capital_quote", "-1"),
+    ("capital_quote", "NaN"),
+    ("capital_quote", "Infinity"),
+    ("capital_quote", "1e999999999"),
+    ("capital_quote", True),
+    ("center", "1e999999999"),
+    ("center", "NaN"),
+    ("center", "Infinity"),
+    ("center", "-1"),
+    ("center", "0"),
+    ("center", True),
+]
+
+
+@pytest.mark.parametrize(
+    "where,value", OVER_BOUND_CASES, ids=[f"{w}={v!r}" for w, v in OVER_BOUND_CASES]
+)
+def test_amounts_over_bounds_rejected(engine, client, where, value):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.store.set_init_done(BOT)
+    params_before = bot_row(engine)["params"]
+
+    if where == "capital_quote":
+        body = dict(CREATE_BODY, id="b2", capital_quote=value)
+        response = client.post("/bots", json=body)
+        assert response.status_code == 422, response.text
+        assert [row["id"] for row in engine.store.list_bots()] == [BOT]
+        assert count_rows(engine, "sim_deposits") == 2
+        assert bot_row(engine)["params"] == params_before
+    else:
+        response = client.post("/bots/b1/recenter", json={"center": value})
+        assert response.status_code == 422, response.text
+        assert bot_row(engine)["params"] == params_before
+        assert bot_row(engine)["params"]["center"] == "1.0"
+        assert bot_row(engine)["init_done"] is True
 
 
 # ---------------------------------------------------------------- the cycle lock
@@ -699,6 +862,108 @@ def test_kill_then_submit_refused(engine, client):
     assert bot_row(engine)["status"] == STOPPED
 
 
+def swept_cb_orders(engine):
+    return [
+        str(order["client_order_id"])
+        for order in engine.exchange.list_open_orders()
+        if str(order["client_order_id"]).startswith("cb-")
+    ]
+
+
+def test_kill_never_aborts_on_store_failure(engine, client):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    other = dict(CREATE_BODY, id="b2", capital_quote="40", capital_base="10")
+    assert client.post("/bots", json=other).status_code == 201
+    engine.runner.cycle()
+    book = swept_cb_orders(engine)
+    assert any(cid.startswith("cb-b1-") for cid in book)
+    assert any(cid.startswith("cb-b2-") for cid in book)
+
+    real_status = engine.store.set_bot_status
+    attempts = []
+
+    def store_fails_for_one_bot(bot_id, status):
+        attempts.append((bot_id, status))
+        if bot_id == BOT:
+            raise RuntimeError("the bots table is not writable for b1")
+        return real_status(bot_id, status)
+
+    engine.store.set_bot_status = store_fails_for_one_bot
+    try:
+        killed = client.post("/kill")
+    finally:
+        engine.store.set_bot_status = real_status
+
+    assert killed.status_code == 502, killed.text
+    body = killed.json()
+    assert body["halted"] is True
+    assert isinstance(body["detail"], str) and body["detail"]
+
+    # One failing write did not end the sweep: every bot was still attempted,
+    # and the one whose write went through really is STOPPED.
+    assert {bot_id for bot_id, _ in attempts} == {BOT, "b2"}
+    assert {status for _, status in attempts} == {STOPPED}
+    assert bot_row(engine, "b2")["status"] == STOPPED
+
+    assert engine.gateway.is_halted() is True
+    assert swept_cb_orders(engine) == []
+
+
+def test_kill_halt_failure_still_sweeps_and_stops(engine, client):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    assert [cid for cid in swept_cb_orders(engine) if cid.startswith("cb-b1-")]
+
+    real_halt = engine.gateway.halt
+
+    def failing_halt(reason):
+        raise RuntimeError("the halt flag could not be persisted")
+
+    engine.gateway.halt = failing_halt
+    try:
+        killed = client.post("/kill")
+    finally:
+        engine.gateway.halt = real_halt
+
+    assert killed.status_code == 502, killed.text
+    body = killed.json()
+    assert body["halted"] is True
+    assert isinstance(body["detail"], str) and body["detail"]
+
+    # The halt failed, so the sweep and the stops have to happen anyway.
+    assert bot_row(engine)["status"] == STOPPED
+    assert swept_cb_orders(engine) == []
+
+
+def test_stop_marks_stopped_even_when_cancel_fails(engine, client):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    assert engine.store.orders(owner=BOT, statuses=(OPEN,))
+
+    real_cancel_all = engine.gateway.cancel_all
+
+    def failing_sweep(scope, owner=None):
+        raise RuntimeError("the sweep died")
+
+    engine.gateway.cancel_all = failing_sweep
+    try:
+        stopped = client.post("/bots/b1/stop")
+    finally:
+        engine.gateway.cancel_all = real_cancel_all
+
+    assert stopped.status_code == 502, stopped.text
+    detail = stopped.json().get("detail")
+    assert isinstance(detail, str) and detail
+
+    # A stop whose sweep failed still leaves the bot stopped: the reconcile loop
+    # sweeps a STOPPED owner's book, so a retry is not needed to get out of it.
+    assert bot_row(engine)["status"] == STOPPED
+
+    again = client.post("/bots/b1/stop")
+    assert again.status_code == 200
+    assert bot_row(engine)["status"] == STOPPED
+
+
 # ---------------------------------------------------------------- health
 
 
@@ -767,6 +1032,65 @@ def test_health_no_balances_and_503_when_stale(tmp_path):
         anonymous_health = anonymous.get("/health")
         assert anonymous_health.status_code == 503  # still past the grace
         assert set(anonymous_health.json()) == HEALTH_KEYS
+
+
+FAR_FUTURE_S = 10**9
+
+
+def test_health_rejects_non_finite_and_future_heartbeat(tmp_path):
+    clock = [1000.0]
+    engine = make_engine(tmp_path / "health-stamps", now=lambda: clock[0]).engine
+    heartbeat = Path(engine.runner.heartbeat_path)
+
+    def stamp(ts):
+        heartbeat.write_text(
+            json.dumps({"ts": ts, "cycle": 1, "bots_active": 0, "errors": []}),
+            encoding="utf-8",
+        )
+
+    with api(engine) as client:
+
+        def stale(label):
+            response = client.get("/health")
+            assert response.status_code == 503, label
+            body = response.json()
+            assert set(body) == HEALTH_KEYS, label
+            assert body["ok"] is False, label
+            assert body["live_enabled"] is False, label
+            return body
+
+        undatable = [("infinite", float("inf")), ("nan", float("nan"))]
+
+        # Inside the startup grace: a stamp that cannot be dated is not the same
+        # thing as no stamp at all, so the grace does not cover it.
+        for label, ts in undatable:
+            stamp(ts)
+            body = stale(f"inside grace: {label}")
+            assert body["heartbeat_age_s"] is None, label
+        stamp(clock[0] + FAR_FUTURE_S)
+        body = stale("inside grace: far-future")
+        assert body["heartbeat_age_s"] is None or body["heartbeat_age_s"] < 0
+
+        # Past the grace, the same stamps are stale for the same reasons.
+        clock[0] = 1000.0 + 130.0
+        for label, ts in undatable:
+            stamp(ts)
+            body = stale(f"past grace: {label}")
+            assert body["heartbeat_age_s"] is None, label
+        stamp(clock[0] + FAR_FUTURE_S)
+        body = stale("past grace: far-future")
+        assert body["heartbeat_age_s"] is None or body["heartbeat_age_s"] < 0
+
+        # A stamp a few seconds ahead of the clock is still a live engine: the
+        # skew only refutes the stamp once it passes a whole poll window.
+        stamp(clock[0] + 5)
+        skewed = client.get("/health")
+        assert skewed.status_code == 200, skewed.text
+        assert skewed.json()["ok"] is True
+        age = skewed.json()["heartbeat_age_s"]
+        assert isinstance(age, (int, float)) and not isinstance(age, bool)
+        assert math.isfinite(age)
+        assert -6 < age <= 0
 
 
 # ---------------------------------------------------------------- fills
@@ -921,6 +1245,36 @@ def test_startup_checks_failure_exits_3(tmp_path):
     assert live_served == []
 
 
+def test_main_configures_logging(monkeypatch, tmp_path):
+    order = []
+
+    def recorder(**kwargs):
+        order.append(("basicConfig", kwargs))
+
+    monkeypatch.setattr(logging, "basicConfig", recorder)
+
+    def refusing_build(env):
+        order.append(("build", {}))
+        raise StartupRefused("no token")
+
+    assert main({}, build=refusing_build) == 3
+    assert [step for step, _ in order] == ["basicConfig", "build"]
+    assert order[0][1].get("level") == logging.INFO
+
+    order.clear()
+    missing = {k: v for k, v in ENV.items() if k != "CROW_COINBASE_ENGINE_TOKEN"}
+    assert (
+        main(
+            dict(missing, CROW_COINBASE_DATA_DIR=str(tmp_path / "logged")),
+            build=build_app,
+        )
+        == 3
+    )
+    assert len(order) == 1, order
+    assert order[0][0] == "basicConfig"
+    assert order[0][1].get("level") == logging.INFO
+
+
 # ---------------------------------------------------------------- smaller surfaces
 
 
@@ -969,6 +1323,33 @@ def test_recenter_grid_only(engine, client):
     assert client.post("/bots/b1/recenter", json={"center": "-1"}).status_code == 422
     assert bot_row(engine)["params"]["center"] == "1.1"
     assert bot_row(engine)["init_done"] is False
+
+
+def test_recenter_stopped_bot_409(engine, client):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.store.set_init_done(BOT)
+    assert client.post("/bots/b1/stop").status_code == 200
+    assert bot_row(engine)["status"] == STOPPED
+    params_before = bot_row(engine)["params"]
+
+    calls = []
+    real_recenter = engine.runner.recenter
+
+    def watching_recenter(bot_id, center):
+        calls.append((bot_id, center))
+        return real_recenter(bot_id, center)
+
+    engine.runner.recenter = watching_recenter
+    try:
+        response = client.post("/bots/b1/recenter", json={"center": "1.1"})
+    finally:
+        engine.runner.recenter = real_recenter
+
+    assert response.status_code == 409, response.text
+    assert calls == [], "a stopped bot was handed to the runner"
+    assert bot_row(engine)["params"] == params_before
+    assert bot_row(engine)["params"]["center"] == "1.0"
+    assert bot_row(engine)["status"] == STOPPED
 
 
 def test_pnl_shape(engine, client):

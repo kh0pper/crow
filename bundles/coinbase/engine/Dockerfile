@@ -28,4 +28,4 @@ USER 1000:1000
 EXPOSE 3062
 # Every interface INSIDE the container, so the published port reaches the app.
 # The host side of the mapping is 127.0.0.1 only (docker-compose.yml).
-CMD ["uvicorn", "--factory", "crow_coinbase.api:make_app", "--host", "0.0.0.0", "--port", "3062"]
+CMD ["python", "-m", "crow_coinbase"]

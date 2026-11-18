@@ -113,6 +113,27 @@ def _cached_spec_for(
     return spec_for
 
 
+def _book_mid(bid: Any, ask: Any) -> D:
+    """The mid of the top of book, or a `ValueError` when it is not a price.
+
+    A bid at or below zero, an ask that does not sit above the bid (a crossed
+    book), and a mid that is not a finite positive number are all a book this
+    engine cannot value anything with: raising here is what lets the surface
+    answer 503 rather than counting a bot's base capital as nothing.
+    """
+    top_bid, top_ask = D(bid), D(ask)
+    if not top_bid.is_finite() or not top_ask.is_finite():
+        raise ValueError(f"the book is not finite: bid {bid}, ask {ask}")
+    if top_bid <= 0:
+        raise ValueError(f"the book has no bid: bid {bid}, ask {ask}")
+    if top_ask <= top_bid:
+        raise ValueError(f"the book is crossed: bid {bid}, ask {ask}")
+    mid = (top_bid + top_ask) / 2
+    if not mid.is_finite() or mid <= 0:
+        raise ValueError(f"the book's mid is not a positive number: {mid}")
+    return mid
+
+
 def _price_for(
     snapshots: Any, market_for: Callable[[str], MarketData]
 ) -> Callable[[str], D]:
@@ -120,16 +141,16 @@ def _price_for(
 
     A usable snapshot is the price the engine's own orders are checked against,
     so it is preferred; with none (a bot created before the first poll) the
-    public top of book answers instead, and a book that cannot be read raises to
-    the caller.
+    public top of book answers instead, and a book that cannot be read — no
+    bid, a crossed one, a price that is not finite — raises to the caller.
     """
 
     def price_for(product: str) -> D:
         snap = snapshots.get(product)
         if snap is not None and snap.bid > 0 and snap.ask > snap.bid:
-            return (snap.bid + snap.ask) / 2
+            return _book_mid(snap.bid, snap.ask)
         bid, ask = market_for(product).best_bid_ask()
-        return (D(bid) + D(ask)) / 2
+        return _book_mid(bid, ask)
 
     return price_for
 
@@ -257,8 +278,10 @@ def main(
 
     A `StartupRefused` (or any `ValueError` out of the configuration), and any
     problem the runner's own startup checks report, answer `EXIT_REFUSED` with
-    nothing started: no thread, no socket.
+    nothing started: no thread, no socket.  Logging is configured first, so a
+    refusal and the reasons for it reach the container's log.
     """
+    logging.basicConfig(level=logging.INFO)
     source = os.environ if env is None else env
     run = uvicorn.run if serve is None else serve
 
