@@ -239,6 +239,27 @@ function processAlive(pid) {
   } catch { return true; } // no /proc: trust the signal check
 }
 
+/**
+ * Wait for the KERNEL to finish exiting a process the product already SIGKILLed.
+ *
+ * The import check resolves when the child's stdout pipe closes, and that happens
+ * as the SIGKILLed grandchild's fds are closed — `exit_files` runs BEFORE the
+ * process becomes a zombie. A /proc/<pid>/stat sample taken right after the
+ * resolve can therefore still read `R` (or `X`) for a process that is already
+ * killed, and processAlive() would report it as running. This polls until the
+ * table entry reads gone; it does NOT give the product more time. A grandchild
+ * that survived the group kill keeps running (it sleeps 60 s), so the deadline
+ * here is reached and this returns false — the assertion still fails.
+ */
+async function waitForExit(pid, deadlineMs = 5000) {
+  const deadline = performance.now() + deadlineMs;
+  while (performance.now() < deadline) {
+    if (!processAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return !processAlive(pid);
+}
+
 test("a grandchild holding stdout is a clean timeout, and nothing survives it", async () => {
   // The child loads, prints the token and exits 0, but leaves a grandchild that
   // inherited stdout. The parent's pipe only closes with the last holder, so a
@@ -262,7 +283,8 @@ if (process.env.${IMPORT_CHECK_ENV} === "1") { process.stdout.write("${IMPORT_CH
     assert.equal(r.timedOut, true, "the pipe stayed open past the deadline — that is a timeout, not a pass");
     const pid = Number(readFileSync(pidFile, "utf8"));
     assert.ok(Number.isInteger(pid) && pid > 0, "the fixture recorded its grandchild's pid");
-    assert.equal(processAlive(pid), false, "the whole process group was killed, not just the direct child");
+    assert.equal(await waitForExit(pid, 5000), true,
+      "the whole process group was killed, not just the direct child");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
