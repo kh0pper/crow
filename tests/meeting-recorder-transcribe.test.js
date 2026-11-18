@@ -806,14 +806,33 @@ test("config validates the chunk window and keeps today's defaults", () => {
 // Last: these leave sessions that look busy, which would make other retranscribes refuse.
 /** A live process whose command line names transcribe.js, the way a real worker's does. */
 function standInWorker() {
-  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", "transcribe.js"], { stdio: "ignore" });
+  const child = spawn(process.execPath,
+    ["-e", 'process.stdout.write("ready"); setTimeout(() => {}, 60000)', "transcribe.js"],
+    { stdio: ["ignore", "pipe", "ignore"] });
   child.unref(); // never holds the test runner open, even if an assertion fails before kill()
-  return child;
+  // Readiness comes from the child, because a pid's command line is only the new one after exec.
+  return new Promise((ready, fail) => {
+    const onError = (err) => { cleanup(); fail(err); };
+    const onExit = (code, signal) => {
+      cleanup();
+      fail(new Error(`stand-in worker exited (${code ?? signal}) before it was ready`));
+    };
+    const cleanup = () => {
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.stdout.once("data", () => {
+      cleanup();
+      child.stdout.destroy(); // the pipe is done its job and must not hold the runner open
+      ready(child);
+    });
+  });
 }
 
 test("--retranscribe refuses while anything could be writing the session", async () => {
-  const child = standInWorker();
-  await new Promise((ok) => child.once("spawn", ok));
+  const child = await standInWorker();
   assert.equal(worker.pidAlive(child.pid), true);
   assert.equal(worker.pidAlive(process.pid), false, "a live pid that is not a worker does not count");
   const env = envFor("http://127.0.0.1:9/v1/audio/transcriptions");
