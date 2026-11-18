@@ -18,12 +18,13 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
 import { ContainRefused, neverBound } from "../scripts/pi-bots/pi_contain.mjs";
 import { buildAddonPlan } from "../scripts/addon-sandbox/plan.mjs";
+import { deriveProfile } from "../scripts/addon-sandbox/profile.mjs";
 import { ADDON_TOKEN_DIRS } from "../servers/shared/addon-doors.js";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-plan-")));
@@ -1085,6 +1086,64 @@ test("the grant is that one folder, not .config: a sibling dot-config folder sta
     closePlan(plan);
     rmSync(other, { recursive: true, force: true });
   }
+});
+
+// ---- GWS_FILES_DIR: the one folder the local-path tools may use ---------
+
+// The bundle's local-path tools (upload, download, export, a local image insert)
+// are confined to one owner-chosen folder, GWS_FILES_DIR (see the bundle's
+// local_paths.py). The Wall side of that: the manifest declares it as a WRITE
+// grant, so an owner-set folder is bound read-write (upload reads from it,
+// downloads land in it) and an unset one binds nothing at all.
+
+test("the google-workspace files folder is bound read-write only when the owner set GWS_FILES_DIR", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../bundles/google-workspace/manifest.json", import.meta.url), "utf8"));
+
+  // The declaration itself: optional, owner-chosen, no default, handed to the
+  // child and declared to the wall.
+  const spec = (manifest.env_vars || []).find((v) => v && v.name === "GWS_FILES_DIR");
+  assert.ok(spec, "the manifest declares GWS_FILES_DIR");
+  assert.equal(spec.path, true, "a folder path field");
+  assert.notEqual(spec.required, true, "optional: an install without it keeps its old behaviour");
+  assert.equal(spec.default, undefined, "no default — a default is not the owner's choice");
+  assert.ok((manifest.server?.envKeys || []).includes("GWS_FILES_DIR"), "handed to the child as an env key");
+  assert.deepEqual(manifest.sandbox?.files?.write, ["env:GWS_FILES_DIR"], "declared to the wall as a write grant");
+
+  // Unset (what the generated registry profile records): nothing is bound.
+  const unset = deriveProfile(manifest, {}, { source: "repo" });
+  assert.deepEqual(unset.files.write, [], "no files folder set: nothing bound");
+  assert.ok(unset.refused.some((r) => r?.what === "file:GWS_FILES_DIR"),
+    "and the report names the unset field: " + JSON.stringify(unset.refused));
+
+  // Owner-set: one read-write bind of exactly that folder.
+  const filesDir = mk(HOME, "files", "google-workspace");
+  writeFileSync(join(filesDir, "report.pdf"), "");
+  const filesReal = realpathSync(filesDir);
+  const owned = deriveProfile(manifest, { env: { GWS_FILES_DIR: filesDir }, ownerSet: ["GWS_FILES_DIR"] }, { source: "repo" });
+  assert.deepEqual(owned.files.write, [{ from: "GWS_FILES_DIR", path: filesDir, source: "owner" }],
+    "the owner's value, marked owner-set");
+
+  const plan = googleWorkspacePlan("repo", {
+    profile: profileOf({
+      id: GW_ID,
+      source: "repo",
+      files: {
+        read: [],
+        write: owned.files.write,
+        oauthDir: { from: "GOOGLE_TOKEN_FILE", path: GW_TOKEN, source: "owner" },
+        state: [],
+      },
+    }),
+  });
+  try {
+    assert.deepEqual(plan.refused, [], "nothing is refused: " + JSON.stringify(plan.refused));
+    const op = pairs(plan.args).find((q) => (q[0] === "--bind-fd" || q[0] === "--ro-bind-fd") && q[2] === filesReal);
+    assert.ok(op, "the files folder is bound by fd: " + JSON.stringify(fdOps(plan.args)));
+    assert.equal(op[0], "--bind-fd", "read-write: uploads are read from it and downloads land in it");
+    const bind = plan.fds.find((f) => String(f.childFd) === op[1]);
+    assert.equal(bind?.role, "dir-write", "a folder grant, not a single file");
+    assert.equal(readlinkSync("/proc/self/fd/" + bind.fd), filesReal, "the fd really is that folder");
+  } finally { closePlan(plan); }
 });
 
 // ---- nothing under the data dir except the add-on's own folder -----------

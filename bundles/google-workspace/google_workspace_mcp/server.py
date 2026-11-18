@@ -101,7 +101,8 @@ async def gdocs_insert_image(
     public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA). A revoke that
     fails is reported as a failure (the file is still public). With GWS_OUTBOUND_GUARD on a LOCAL image is refused
     outright, and a Drive-hosted image must ALREADY be shared anyone-with-the-link: the guard never adds an
-    anyone/domain permission, so an unshared file is refused with nothing changed."""
+    anyone/domain permission, so an unshared file is refused with nothing changed. A LOCAL image must be inside
+    the files folder (GWS_FILES_DIR) and really be a PNG/JPEG/GIF/WebP file (its first bytes are checked)."""
     return await docs.gdocs_insert_image(
         doc_id, image, anchor_text=anchor_text, index=index,
         max_width_pt=max_width_pt, keep_drive_copy=keep_drive_copy,
@@ -272,7 +273,9 @@ async def gdrive_trash_file(file_id: str) -> dict:
 @mcp.tool()
 async def gdrive_download_file(file_id: str, local_path: str) -> dict:
     """Download a Drive file's bytes to a local path (binary-safe, no size cap). Uploaded files only
-    (PDF, images, docx, zip, ...); Google-native files have no raw bytes — use gdrive_export."""
+    (PDF, images, docx, zip, ...); Google-native files have no raw bytes — use gdrive_export.
+    local_path must be inside the files folder (GWS_FILES_DIR) this server may use, and the file is
+    created, never overwritten: pass a name that is not taken yet."""
     return await drive.gdrive_download_file(file_id, local_path)
 
 
@@ -280,7 +283,8 @@ async def gdrive_download_file(file_id: str, local_path: str) -> dict:
 async def gdrive_export(file_id: str, local_path: str, mime_type: Optional[str] = None) -> dict:
     """Export a Google-native file (Doc/Sheet/Slides/Drawing) to a local path. mime_type defaults to
     application/pdf; pass docx/xlsx/csv MIME types for those formats. Export API caps output at 10 MB.
-    Non-native files: use gdrive_download_file."""
+    Non-native files: use gdrive_download_file. local_path must be inside the files folder
+    (GWS_FILES_DIR) and is created, never overwritten."""
     return await drive.gdrive_export(file_id, local_path, mime_type=mime_type)
 
 
@@ -298,7 +302,8 @@ async def gdrive_upload_file(
     Drive convert a pptx/docx/xlsx upload into a native Slides/Doc/Sheet; any other convert_to
     value is refused before the upload starts.
     To replace an existing file's content keeping its id and links, use gdrive_upload_new_version.
-    With GWS_OUTBOUND_GUARD on, the destination folder's owners and sharing are checked first."""
+    With GWS_OUTBOUND_GUARD on, the destination folder's owners and sharing are checked first.
+    local_path must be inside the files folder (GWS_FILES_DIR) this server may use."""
     return await drive.gdrive_upload_file(
         local_path, folder_id, name=name, mime_type=mime_type, convert_to=convert_to
     )
@@ -309,7 +314,8 @@ async def gdrive_upload_new_version(
     file_id: str, local_path: str, mime_type: Optional[str] = None
 ) -> dict:
     """Replace an existing Drive file's content with a new version. The id, name, sharing, and links
-    stay stable (the ledgered-id workflow); prior content stays in Drive version history."""
+    stay stable (the ledgered-id workflow); prior content stays in Drive version history.
+    local_path must be inside the files folder (GWS_FILES_DIR) this server may use."""
     return await drive.gdrive_upload_new_version(file_id, local_path, mime_type=mime_type)
 
 
@@ -1026,7 +1032,9 @@ async def gslides_batch_update(presentation_id: str, requests: list) -> dict:
 
 @mcp.tool()
 async def gslides_export(presentation_id: str, fmt: str = "pdf", out_path: Optional[str] = None) -> dict:
-    """Export the deck to a local file via Drive. fmt: 'pdf' or 'pptx'. Returns the path."""
+    """Export the deck to a local file via Drive. fmt: 'pdf' or 'pptx'. Returns the path. With out_path
+    omitted it lands in the files folder (GWS_FILES_DIR) under a unique timestamped name, so repeated
+    exports create new files; it is created, never overwritten."""
     return await slides.gslides_export(presentation_id, fmt=fmt, out_path=out_path)
 
 

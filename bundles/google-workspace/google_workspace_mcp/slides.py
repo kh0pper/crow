@@ -24,7 +24,7 @@ from typing import Optional
 
 from .auth import get_slides_service, get_drive_service
 from .guardrails import handle_google_errors
-from . import folder_guard
+from . import folder_guard, local_paths
 
 logger = logging.getLogger(__name__)
 
@@ -585,22 +585,56 @@ async def gslides_edit_notes(
 async def gslides_export(
     presentation_id: str, fmt: str = "pdf", out_path: Optional[str] = None
 ) -> dict:
-    """Export the deck via Drive to a local file. fmt: 'pdf' or 'pptx'. Returns the path."""
+    """Export the deck via Drive to a local file. fmt: 'pdf' or 'pptx'. Returns the path.
+
+    With `out_path` omitted the file lands in the files folder (GWS_FILES_DIR), named
+    after the presentation id (every character outside [A-Za-z0-9._-] replaced, so an
+    id cannot name a path) plus a UTC timestamp, so repeated exports create new files
+    instead of being refused. An install with neither a folder nor the outbound guard
+    keeps the old default location of /tmp; a path outside the files folder, or over
+    an existing file, is refused — see local_paths.
+    """
     mimes = {
         "pdf": "application/pdf",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     }
     if fmt not in mimes:
         return {"success": False, "error": "fmt must be 'pdf' or 'pptx'."}
-    path = out_path or f"/tmp/{presentation_id}.{fmt}"
+    requested = out_path if out_path is not None and str(out_path).strip() else None
+    path = requested or local_paths.default_path(presentation_id, fmt)
+    # Decided before the export runs, so a refused path makes no Google call.
+    try:
+        path = local_paths.resolve(path, local_paths.WRITE, "exporting a presentation")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
 
-    def _export():
-        data = get_drive_service().files().export(
-            fileId=presentation_id, mimeType=mimes[fmt]
-        ).execute()
-        with open(path, "wb") as fh:
-            fh.write(data)
-        return len(data)
-
-    size = await asyncio.to_thread(_export)
-    return {"success": True, "data": {"presentation_id": presentation_id, "path": path, "bytes": size, "format": fmt}}
+    data = await asyncio.to_thread(
+        lambda: get_drive_service()
+        .files()
+        .export(fileId=presentation_id, mimeType=mimes[fmt])
+        .execute()
+    )
+    try:
+        if requested is None:
+            written, handle = local_paths.open_write_default(
+                presentation_id, fmt, "exporting a presentation"
+            )
+        else:
+            written, handle = local_paths.open_write(
+                path, "exporting a presentation"
+            )
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
+    try:
+        handle.write(data)
+    finally:
+        handle.close()
+    return {
+        "success": True,
+        "data": {
+            "presentation_id": presentation_id,
+            "path": written,
+            "bytes": len(data),
+            "format": fmt,
+        },
+    }

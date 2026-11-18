@@ -1044,6 +1044,10 @@
       "ownEnvFile": false,
       "refused": [
         {
+          "what": "file:GWS_FILES_DIR",
+          "reason": "the field GWS_FILES_DIR is not set"
+        },
+        {
           "what": "file:GOOGLE_TOKEN_FILE",
           "reason": "the field GOOGLE_TOKEN_FILE is not set"
         }
