@@ -30,8 +30,14 @@ gateway, and one called `exchange.py` is not the adapter.
   argument of `getattr`, `setattr`, `hasattr`, `delattr`, `methodcaller` or
   `__getattribute__`, the ways of reaching a method by name.  A comparison, a
   keyword value, a tuple member, a `Literal[...]` element or a dict value is
-  not a finding.  `watchdog.py` may cancel, so even the lookup spelling is
-  allowed there.
+  not a finding.  `watchdog.py` may cancel, but only spelled out: the next rule
+  refuses the lookup spelling outright there.
+* In `watchdog.py` alone, any call whose callee ends in `getattr` or
+  `methodcaller` is a finding (`WATCHDOG_LOOKUP`), whatever its arguments: a
+  name built somewhere else and resolved at runtime is exactly how the one
+  method this file may call would be reached without ever spelling `cancel`.
+  The same lookup in another file, with an argument that is neither `self` nor a
+  write name, stays quiet.
 * The gateway's own send/adopt/reprice steps — `_send`, `_submit_place`,
   `_adopt`, `_evaluate_place` — write an order row and call the exchange by
   design, so as an attribute (`gw._send(...)`) or as a bare name (`_send(...)`)
@@ -117,6 +123,9 @@ SDK_ALLOWED_ORDER_NAME = "limit_order_gtc"
 SELF_INSPECTION_BUILTINS = frozenset({"getattr", "setattr", "delattr", "vars"})
 # Builtins that build code or imports at runtime.
 CODE_EXECUTION_BUILTINS = frozenset({"eval", "exec", "__import__"})
+# In the watchdog a method reached by a name built elsewhere is refused whatever
+# that name turns out to be: the file has one method to call, spelled out.
+WATCHDOG_LOOKUP_CALLEES = frozenset({"getattr", "methodcaller"})
 # The write names whose string spelling is a finding on its own; `cancel` is
 # vocabulary as well, so its string only counts at a by-name lookup.
 WRITE_NAME_LITERALS = WRITE_NAMES - {"cancel"}
@@ -265,6 +274,12 @@ def scan_source(filename: str, source: str) -> list[str]:
 
         elif isinstance(node, ast.Call):
             callee = _last_part(_dotted(node.func))
+            if relative == WATCHDOG_FILE and callee in WATCHDOG_LOOKUP_CALLEES:
+                add(
+                    node,
+                    "WATCHDOG_LOOKUP",
+                    f"{callee}(...) by name in {relative}",
+                )
             if callee in SELF_INSPECTION_BUILTINS and node.args:
                 first = node.args[0]
                 if isinstance(first, ast.Name) and first.id == "self":
@@ -518,6 +533,30 @@ NEGATIVE_CASES = [
             """
         ),
         id="setattr-self-in-worker",
+    ),
+    # ---- the watchdog may not reach a method by a name built elsewhere
+    pytest.param(
+        "watchdog.py",
+        _module(
+            """
+            def sweep(ex, name, ids):
+                return getattr(ex, name)(ids)
+            """
+        ),
+        id="watchdog-getattr-by-name",
+    ),
+    pytest.param(
+        "watchdog.py",
+        _module(
+            """
+            import operator
+
+
+            def sweep(ex, name, ids):
+                return operator.methodcaller(name, ids)(ex)
+            """
+        ),
+        id="watchdog-methodcaller-by-name",
     ),
     # ---- the allow rules are keyed on the whole relative path, not the basename
     pytest.param(
@@ -823,6 +862,16 @@ ALLOWED_CASES = [
             """
         ),
         id="runner-intent-action-annotation",
+    ),
+    pytest.param(
+        "api.py",
+        _module(
+            """
+            def fetch(ex, name):
+                return getattr(ex, name)()
+            """
+        ),
+        id="getattr-by-variable-outside-watchdog",
     ),
     pytest.param(
         "api.py",

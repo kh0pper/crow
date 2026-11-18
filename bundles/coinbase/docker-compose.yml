@@ -6,12 +6,35 @@
 ##
 ## The engine's API is published on 127.0.0.1 only: Crow's MCP server and panel run on
 ## the host and reach it there. Keep this ports entry loopback.
+##
+## Each service gets its own environment anchor. The engine needs the account credentials;
+## the watchdog needs none of them, so it carries the configuration values it reads and
+## nothing else, and it runs with no network at all: switching the network namespace off
+## leaves it with the shared data volume, which is the only thing its cancel path touches.
 
 x-coinbase-env: &env
   COINBASE_API_KEY: ${COINBASE_API_KEY:-}
   COINBASE_API_SECRET: ${COINBASE_API_SECRET:-}
   CROW_COINBASE_PORTFOLIO_ID: ${CROW_COINBASE_PORTFOLIO_ID:-}
   CROW_COINBASE_ENGINE_TOKEN: ${CROW_COINBASE_ENGINE_TOKEN:?CROW_COINBASE_ENGINE_TOKEN is required}
+  CROW_COINBASE_LIVE: ${CROW_COINBASE_LIVE:-false}
+  CROW_COINBASE_POLL_SECONDS: ${CROW_COINBASE_POLL_SECONDS:-60}
+  CROW_COINBASE_MAKER_FEE_PCT: ${CROW_COINBASE_MAKER_FEE_PCT:-0.5}
+  CROW_COINBASE_PRODUCTS: ${CROW_COINBASE_PRODUCTS:-BTC-USDC,ETH-USDC,XRP-USDC}
+  CROW_COINBASE_DAILY_NOTIONAL_USD: ${CROW_COINBASE_DAILY_NOTIONAL_USD:-200}
+  CROW_COINBASE_ORDERS_PER_HOUR: ${CROW_COINBASE_ORDERS_PER_HOUR:-30}
+  CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT: ${CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT:-20}
+  CROW_COINBASE_BOT_MAX_ORDER_USD: ${CROW_COINBASE_BOT_MAX_ORDER_USD:-50}
+  CROW_COINBASE_MAX_BOT_CAPITAL_USD: ${CROW_COINBASE_MAX_BOT_CAPITAL_USD:-100}
+  CROW_COINBASE_AI_MAX_ORDER_USD: ${CROW_COINBASE_AI_MAX_ORDER_USD:-25}
+  CROW_COINBASE_AI_DAILY_NOTIONAL_USD: ${CROW_COINBASE_AI_DAILY_NOTIONAL_USD:-50}
+  CROW_COINBASE_AI_ORDERS_PER_HOUR: ${CROW_COINBASE_AI_ORDERS_PER_HOUR:-10}
+  CROW_COINBASE_WATCHDOG_POLICY: ${CROW_COINBASE_WATCHDOG_POLICY:-leave}
+  CROW_COINBASE_DATA_DIR: /data
+
+# The watchdog reads the heartbeat file and the database under /data, so it takes the
+# configuration values and none of the credentials above.
+x-coinbase-watchdog-env: &watchdog_env
   CROW_COINBASE_LIVE: ${CROW_COINBASE_LIVE:-false}
   CROW_COINBASE_POLL_SECONDS: ${CROW_COINBASE_POLL_SECONDS:-60}
   CROW_COINBASE_MAKER_FEE_PCT: ${CROW_COINBASE_MAKER_FEE_PCT:-0.5}
@@ -55,9 +78,13 @@ services:
       target: runtime
     container_name: crow-coinbase-watchdog
     command: ["python", "-m", "crow_coinbase.watchdog"]
-    environment: *env
+    environment: *watchdog_env
     volumes:
       - coinbase-data:/data
+    # No network: the watchdog reads the heartbeat and the database file, and its
+    # cancel writes only to that database - it has no API to call and no client to
+    # build. Leave this off the engine service, which serves its API.
+    network_mode: "none"
     init: true
     mem_limit: 512m
     depends_on:
