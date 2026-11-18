@@ -3868,6 +3868,64 @@ test("O2/S5: a range set before the take began covers pass 0 and replaces the pl
   ), "over the range the plan gave");
 });
 
+test("F1: a range that can only reach the pass after next drops the skipped pass's plan entry", async () => {
+  // Two range changes inside pass 0. The first books pass 1. The second arrives
+  // inside the lead the engine needs to arm a recorder, so it can only reach pass
+  // 2 — and the gate it arms for pass 2 overwrites the one waiting for pass 1. The
+  // recorder judges pass 1 by the range it still holds ([0,1)), so pass 1's own
+  // [2,3) entry goes: it is booked with the range its audio was recorded by, never
+  // with beats it never played.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED, clock: PASS0_CLOCK });
+  const recorder = await recordWithPunch(ui, 0, 1);
+  await reportLaunch(ui);
+  assert.equal(ui.page.__studioTest.setPunch(2, 3), true, "a second range, set while pass 0 runs");
+  await ui.settle();
+  assert.deepEqual(viewOf(ui).rec.punch_plan, [
+    { from_pass: 0, from: 0, to: 1 },
+    { from_pass: 1, from: 2, to: 3 },
+  ], "which books pass 1");
+
+  // The third range arrives with less than the arming lead to pass 1: it books
+  // pass 2, and pass 1 falls back to the range the recorder's own slot holds.
+  clockAtFrame(ui, passFrame(1) - 4000);
+  assert.equal(ui.page.__studioTest.setPunch(3, 4), true, "a third, inside the lead to pass 1");
+  await ui.settle();
+
+  const plan = viewOf(ui).rec.punch_plan;
+  assert.deepEqual(plan, [
+    { from_pass: 0, from: 0, to: 1 },
+    { from_pass: 2, from: 3, to: 4 },
+  ], "pass 1's entry goes with the gate that was overwritten");
+  assert.equal(plan.some((entry) => Number(entry.from_pass) === 1), false,
+    "no plan entry books pass 1 a range of its own");
+  assert.equal(recorder.gates.length, 3, "the recorder is handed the third range");
+  assert.equal(recorder.gates[2].activeFrom, passFrame(2), "from pass 2's own first frame");
+
+  await chunkPass(ui, recorder, 0);
+  const run = onlyRun(ui);
+  const first = bookedAt(run, 0);
+  assert.deepEqual({ from: first.from, to: first.to }, { from: 0, to: 1 },
+    "pass 0 keeps the range it began with");
+  await chunkPass(ui, recorder, 1);
+  const second = bookedAt(run, 1);
+  assert.ok(second, "pass 1 is booked");
+  assert.deepEqual({ from: second.from, to: second.to }, { from: 0, to: 1 },
+    "with the range the recorder judged it by, never the one it could not hear");
+  await chunkPass(ui, recorder, 2);
+  const third = bookedAt(run, 2);
+  assert.ok(third, "pass 2 is booked");
+  assert.deepEqual({ from: third.from, to: third.to }, { from: 3, to: 4 }, "with the third range");
+
+  await endTake(ui, recorder, 3);
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, `the recording writes one comp (got ${sent.length})`);
+  assert.deepEqual(sent[0].args.segments, [
+    { take_id: second.take_id, from_beat: 0, to_beat: 1 },
+    { take_id: T_OLD, from_beat: 1, to_beat: 3 },
+    { take_id: third.take_id, from_beat: 3, to_beat: 4 },
+  ], "each pass over the beats its own take holds audio for");
+});
+
 test("R12: a punch on a clip with no comp records the take whole, sends no gate and no set_comp, and shows the no-take-to-punch-into notice", async () => {
   // Nothing to punch into: a clip whose comp is empty. Its first take becomes the
   // whole-clip comp when it lands, and that comp is left alone.
@@ -4114,6 +4172,48 @@ test("O5: a comp drag's write waits for a punch write on the wire, and the punch
     "computed from the snapshot that holds the drag's write");
 });
 
+test("F3: an error frame for a comp write lets go of the clip's queue", async () => {
+  // A command the hub answers with an error frame instead of a result: the write
+  // will never be answered otherwise, and every later write for the clip is
+  // chained behind it — the operator's own comp drag included.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }, { id: T_OTHER }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, "the recording's comp write is on the wire");
+  assert.ok(viewOf(ui).awaiting[sent[0].cmd_id], "and the page is waiting for its answer");
+
+  ui.frame({ type: "error", cmd_id: sent[0].cmd_id, error: "storage refused" });
+  await ui.settle();
+
+  assert.deepEqual(viewOf(ui).awaiting, {}, "the wait is let go by the error frame");
+  assert.ok(toastText(ui).includes("storage refused"), `the page says what went wrong (got: ${toastText(ui)})`);
+
+  await dragComp(ui, T_OTHER, 0, 2);
+  assert.equal(setCompCommands(ui).length, 2, "and the operator's own comp drag reaches the wire");
+});
+
+test("F3: a comp write the hub never answers is let go at its own timeout, so the clip is not wedged", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }, { id: T_OTHER }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 1, "the recording's comp write is on the wire");
+  assert.equal(Object.keys(viewOf(ui).awaiting).length, 1, "with no answer for it");
+
+  // The page's own timers run: the wait's own timeout is one of them.
+  for (const fn of ui.timers.splice(0)) fn();
+  await ui.settle();
+
+  assert.deepEqual(viewOf(ui).awaiting, {}, "the wait is let go at its timeout");
+
+  await dragComp(ui, T_OTHER, 0, 2);
+  assert.equal(setCompCommands(ui).length, 2, "so the next comp drag goes out");
+});
+
 test("O6: a pass that lands while the socket is down is written once the page is back on it", async () => {
   const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
   const recorder = await recordWithPunch(ui, 1, 3);
@@ -4240,6 +4340,66 @@ test("O11b: a punched pass that finishes uploading after a reload leaves the com
     `the page says the comp was left alone (got: ${noticeText(ui)})`);
   assert.equal(setCompCommands(ui).length, 0, "and no comp is written for it");
   assert.deepEqual(await docComp(ui), [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }], "the comp is untouched");
+});
+
+test("F2: a punch comp write dropped with the closed page leaves a marker, and the next load says the comp was left as it was", async () => {
+  // The upload finishes after the page is closed: the pass lands, and its comp
+  // write is dropped because there is no page to make it from. The device keeps
+  // a marker for the song, so the next load says the comp was left as it was —
+  // once (O11b).
+  const storage = countInStorage(0);
+  const ui = await bootPanel({
+    clip: true,
+    lengthBars: 1,
+    takes: [{ id: T_OLD }],
+    latency: CALIBRATED,
+    gateFinish: true,
+    storage,
+  });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "the pass is still uploading");
+
+  viewOf(ui).closed = true;
+  ui.releaseFinish();
+  await ui.settle(40);
+
+  assert.equal(setCompCommands(ui).length, 0, "no comp write is made from a closed page");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and its run is let go");
+  assert.equal(ui.store.pendings.size, 0, "with the pending row");
+  assert.equal(
+    storage.getItem("crow.studio.punchdropped.v1.song-1"),
+    "true",
+    "the device keeps a marker for the song whose comp was left alone",
+  );
+
+  // The next load of that song says so.
+  const again = await bootPanel({
+    clip: true,
+    lengthBars: 1,
+    takes: [{ id: T_OLD }],
+    latency: CALIBRATED,
+    storage,
+  });
+  await again.settle(24);
+  assert.ok(
+    noticeText(again).includes("Punched passes were added as takes after a reload; the comp was left as it was."),
+    `the next load says the comp was left as it was (got: ${noticeText(again)})`,
+  );
+  assert.equal(storage.getItem("crow.studio.punchdropped.v1.song-1"), null, "and the marker is gone");
+
+  const later = await bootPanel({
+    clip: true,
+    lengthBars: 1,
+    takes: [{ id: T_OLD }],
+    latency: CALIBRATED,
+    storage,
+  });
+  await later.settle(24);
+  assert.equal(noticeText(later).includes("the comp was left as it was"), false,
+    "a load after that says nothing: it was said once");
 });
 
 test("O11c: a flush for a clip that is gone from the song writes nothing and says so on the console", async () => {
