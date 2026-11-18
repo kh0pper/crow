@@ -1221,6 +1221,44 @@ test("frames before anchor + offset pass through, and a gate sent before arm doe
   assertGated(samples, off - start, "the frame after the range");
 });
 
+test("an initial gate whose first frame is not on a block gates that block from that frame on", () => {
+  // anchor 512 with a 100-frame offset: the gate's own first frame is 612, a
+  // hundred frames into the block that starts on 512. Blocks are 128 frames.
+  const gate = gateMessage({
+    anchorFrame: 512,
+    loopFrames: 1024,
+    fromFrames: 100,
+    toFrames: 300,
+    offsetFrames: 100,
+  });
+  const [on, off] = passGate(gate, 0);
+  assert.equal(on, 712, "the range opens after the delay");
+  assert.equal(off, 912, "and closes 200 frames later");
+
+  const rec = bareRecorder(1);
+  // The page sends the gate once it knows the anchor, before the take is armed.
+  rec.send(gate);
+  rec.send({ type: "arm", frame: gate.anchorFrame });
+  rec.send({ type: "stop", frame: 1152 });
+  rec.run(0, 1280, () => 0.5);
+
+  const samples = segmentSamples(rec.scope.posted, 0);
+  const start = gate.anchorFrame;
+  // Before anchor + offset the take is open, gate or no gate.
+  for (let frame = start; frame < start + gate.offsetFrames; frame += 1) {
+    assertOpen(samples, frame - start, `frame ${frame} before the gate is defined`);
+  }
+  // From anchor + offset on the gate is in force — inside the very block that
+  // started on the arm frame, not from the block after it. That block runs
+  // 512..639, so its last frame is sample 127.
+  assertGated(samples, gate.offsetFrames, "the gate's own first frame");
+  assertGated(samples, 127, "the last frame of the block the gate opened in");
+  assertGated(samples, on - 1 - start, "the frame before the range opens");
+  assertOpen(samples, on - start, "the range's first frame");
+  assertOpen(samples, off - 1 - start, "the range's last frame");
+  assertGated(samples, off - start, "the frame after the range");
+});
+
 test("a replacement sent mid-pass leaves the running pass on the old range and the next on the new one", () => {
   const first = gateMessage({ anchorFrame: 0, loopFrames: 1024, fromFrames: 128, toFrames: 384 });
   const second = gateMessage({
@@ -1252,6 +1290,50 @@ test("a replacement sent mid-pass leaves the running pass on the old range and t
     assertOpen(samples, off - start - 1, `pass ${pass} at its range's last frame`);
     assertGated(samples, off - start, `pass ${pass} after its range closes`);
   }
+});
+
+test("a replacement's first frame is its activeFrom, not the start of the block holding it", () => {
+  // A 1000-frame pass from frame 512: pass 1 begins on 1512, 104 frames into
+  // the block that starts on 1408, so the replacement's activeFrom is not
+  // block-aligned.
+  const first = gateMessage({ anchorFrame: 512, loopFrames: 1000, fromFrames: 100, toFrames: 900 });
+  const second = gateMessage({
+    anchorFrame: 512,
+    loopFrames: 1000,
+    fromFrames: 0,
+    toFrames: 500,
+    activeFrom: 1512,
+  });
+  const rec = bareRecorder(1);
+  rec.send({ type: "arm", frame: 512 });
+  rec.send({ type: "stop", frame: 2112 });
+  rec.send(first);
+  // Five blocks: the first gate's own first frame is 512, so it is in force
+  // from the block that starts on 512.
+  rec.run(0, 640, () => 0.5);
+  // The range changes while pass 0 is still being recorded, with the next
+  // pass's own first frame as its activeFrom.
+  rec.send(second);
+  rec.run(640, 1664, () => 0.5);
+
+  const samples = segmentSamples(rec.scope.posted, 0);
+  const at = (frame) => frame - 512;
+  // The old range opens on 612 and closes on 1412; the new one opens and
+  // closes on 1512 and 2012.
+  assertGated(samples, at(611), "the frame before the old range opens");
+  assertOpen(samples, at(612), "the old range's first frame");
+  assertOpen(samples, at(1411), "the old range's last frame, and a frame the new range would silence");
+  assertGated(samples, at(1412), "the frame after the old range closes");
+  // Up to the frame before activeFrom the running pass keeps the old slot.
+  assertGated(samples, at(1511), "the frame before the new gate's activeFrom");
+  // From activeFrom on the frame is judged by the new range — on that exact
+  // frame, inside the block that started on 1408, where the new range is open.
+  assertOpen(samples, at(1512), "the frame of the new gate's activeFrom");
+  assertOpen(samples, at(1535), "the last frame of the block the new gate took over in");
+  assertOpen(samples, at(1611), "a frame of the next block that the old range would silence");
+  assertOpen(samples, at(2011), "the new range's last frame");
+  assertGated(samples, at(2012), "the frame after the new range closes");
+  assertGated(samples, at(2111), "the take's last frame");
 });
 
 test("gateOff restores ungated recording", () => {

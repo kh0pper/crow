@@ -43,12 +43,14 @@
  * clip: the range applies to EVERY pass, so the gate is periodic rather than a
  * list — nothing to top up, nothing to allocate, no cap on the number of
  * ranges. The worklet keeps two preallocated slots (`gateCurrent` in force,
- * `gateNext` waiting) and a message fills `next` in place; `next` becomes
- * `current` on the first block whose start is at or after its `activeFrom`, so
- * a slot is only ever swapped between blocks. A gate is defined only for
- * frames at or after `anchor + offsetFrames` (before that the take is open), so
- * a gate that arrives before the arm frame — or a replacement mid-pass, sent
- * with the next pass's own start — never gates a pass that is already running.
+ * `gateNext` waiting) and a message fills `next` in place. The slot that judges
+ * a frame is chosen per frame — `next` once `frame >= next.activeFrom`, the
+ * running slot before that — and the two objects are also traded at a block
+ * start that has reached that frame, which makes the change permanent. A gate
+ * is defined only for frames at or after `anchor + offsetFrames` (before that
+ * the take is open), so a gate that arrives before the arm frame — or a
+ * replacement mid-pass, sent with the next pass's own start — never gates a
+ * pass that is already running.
  *
  * Inside a gate a frame is recorded as digital silence when it lies outside
  * `[on, off)` of its pass. It is still counted and chunked, so a gated pass
@@ -258,8 +260,9 @@
     }
 
     /**
-     * A punch range: fill the waiting slot with it. The slot becomes the gate
-     * from the first block that starts at or after `activeFrom`.
+     * A punch range: fill the waiting slot with it. The slot judges every frame
+     * from `activeFrom` on, and is traded into place at the first block that
+     * reaches that frame.
      * @param {object} message
      * @returns {void}
      */
@@ -300,9 +303,12 @@
     }
 
     /**
-     * Make the waiting slot the gate when this block is old enough for it. A slot
-     * changes between blocks only, so a replacement sent mid-pass leaves the pass
-     * that is running on the range it started with.
+     * Trade the two slots once this block has reached the waiting one's
+     * `activeFrom`, so the change is permanent. Which slot judges a frame is
+     * decided per frame in `gateSilentAt`, so this only trades the objects: a
+     * frame of this block at or after `activeFrom` reads the same slot before
+     * and after the trade, and every frame before it stays on the slot that was
+     * already running.
      * @param {number} base this block's first context frame
      * @returns {void}
      */
@@ -318,14 +324,20 @@
 
     /**
      * Whether this frame is outside the open range of its pass, and so recorded
-     * as silence. Nothing is gated before the gate's own first frame, and a
+     * as silence. The slot is chosen per frame: the waiting one judges a frame
+     * that has reached its `activeFrom`, the running one judges the frames
+     * before it — so a gate takes effect on its exact first frame, even in the
+     * middle of a block, and a pass that is already running keeps the range it
+     * started with. Nothing is gated before the gate's own first frame, and a
      * recorder with no gate passes every frame.
      * @param {number} frame the absolute frame
      * @returns {boolean}
      */
     gateSilentAt(frame) {
-      if (!this.gateCurrentOn) return false;
-      const gate = this.gateCurrent;
+      let gate = null;
+      if (this.gateNextOn && frame >= this.gateNext.activeFrom) gate = this.gateNext;
+      else if (this.gateCurrentOn) gate = this.gateCurrent;
+      if (gate === null) return false;
       const anchor = gate.anchorFrame;
       const offset = gate.offsetFrames;
       const loop = gate.loopFrames;
