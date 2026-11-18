@@ -76,7 +76,7 @@ const fresh = async (n = 3) => {
   return ps;
 };
 async function auditRows(pid, botId) {
-  return (await db.execute({ sql: "SELECT * FROM project_audit_log WHERE project_id=? AND action='bot.move' AND target=?", args: [pid, `bot:${botId}`] })).rows;
+  return (await db.execute({ sql: "SELECT * FROM project_audit_log WHERE project_id=? AND action='bot.move' AND target=? ORDER BY id", args: [pid, `bot:${botId}`] })).rows;
 }
 
 test("move: null → project carries the legacy world as one root link", async () => {

@@ -69,7 +69,7 @@
   var stage = el("div", { class: "cv-stage" }, [frameBox, pinLayer, region]);
   var commentBtn = el("button", { type: "button", class: "cv-comment", "aria-pressed": "false", text: T.comment });
   var handle = el("button", { type: "button", class: "cv-handle", "aria-expanded": "false" });
-  var sendBtn = el("button", { type: "button", class: "cv-send" });
+  var sendBtn = el("button", { type: "button", class: "cv-send", disabled: "" });
   var composeSlot = el("div", { class: "cv-compose-slot" });
   var sectionList = el("ol", { class: "cv-sections", hidden: "", "aria-label": T.pick_section });
   // D28 (review H1): a selection in the frame is only a PROPOSAL; this
