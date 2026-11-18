@@ -55,14 +55,7 @@
         "CANVAS_BASE_URL": "${CANVAS_BASE_URL}"
       }
     },
-    "google-workspace": {
-      "command": "uvx",
-      "args": ["workspace-mcp"],
-      "env": {
-        "GOOGLE_CLIENT_ID": "${GOOGLE_CLIENT_ID}",
-        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}"
-      }
-    },
+    "_comment_google-workspace": "Google Workspace is the first-party bundle, installed and configured on Crow's Extensions page (or `crow bundle install google-workspace`), not a core .mcp.json server — see docs/integrations/google-workspace.md.",
     "arxiv": {
       "command": "uvx",
       "args": ["arxiv-mcp-server"],
