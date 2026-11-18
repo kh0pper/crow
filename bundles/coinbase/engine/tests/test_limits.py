@@ -1,6 +1,7 @@
 """limits.py: env-configured limits and the rolling/daily cap windows."""
 
 import dataclasses
+import time
 from datetime import datetime, timezone
 from decimal import Decimal as D
 
@@ -55,6 +56,16 @@ def store(tmp_path):
     s.create_bot("b1", PRODUCT, "grid", {}, D("100"), D("50"))
     yield s
     s.close()
+
+
+@pytest.fixture
+def chicago_tz(monkeypatch):
+    """Run the test under TZ America/Chicago, then restore the process timezone."""
+    monkeypatch.setenv("TZ", "America/Chicago")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 def utc(y, mo, d, h=0, mi=0, s=0, us=0):
@@ -250,6 +261,8 @@ BAD_VALUES = (
     (PRODUCTS, "xrp-usdc"),
     (PRODUCTS, "XRPUSDC"),
     (PRODUCTS, "BTC-USDC,BTC-USDC"),
+    (PRODUCTS, "ETH-BTC"),
+    (PRODUCTS, "BTC-EUR"),
     (DAILY, "0"),
     (DAILY, "-1"),
     (DAILY, "Infinity"),
@@ -279,12 +292,20 @@ def test_invalid_env_values_name_the_variable(name, bad):
     assert Limits.from_env({FEE: "0"}).maker_fee_pct == D("0")
 
 
-def test_daily_resets_at_utc_midnight(store):
+def test_usd_quoted_products_are_valid():
+    limits = Limits.from_env({PRODUCTS: "BTC-USD,ETH-USDC"})
+
+    assert limits.products == ("BTC-USD", "ETH-USDC")
+
+
+def test_daily_resets_at_utc_midnight(store, chicago_tz):
     add(store, 1, utc(2026, 3, 10, 23, 59, 59), price=D("2"), size=D("10"))  # 20
     add(store, 2, utc(2026, 3, 11, 0, 0, 1), price=D("3"), size=D("10"))  # 30
 
     late, _ = window_at(store, utc(2026, 3, 10, 23, 59, 59, us=500000))
-    assert late.daily_notional(None) == D("20")
+    # A row dated after the clock counts: the window has no upper bound, so a
+    # future-dated row can never buy budget (fail closed).
+    assert late.daily_notional(None) == D("50")
 
     new_day, _ = window_at(store, utc(2026, 3, 11, 0, 0, 2))
     assert new_day.daily_notional(None) == D("30")
@@ -295,6 +316,27 @@ def test_daily_resets_at_utc_midnight(store):
     same_window, _ = window_at(store, utc(2026, 3, 11, 0, 0, 2))
     assert same_window.daily_notional(None) == D("35")
     assert same_window.orders_last_hour(None) == 3
+
+
+def test_daily_window_is_utc_not_local_day(store, chicago_tz):
+    # America/Chicago is UTC-5 here, so 03:00 UTC on 03-10 is 22:00 on 03-09
+    # local: the row and the clock below sit on different local days but the
+    # same UTC day.
+    add(store, 1, utc(2026, 3, 10, 3, 0, 0), price=D("2"), size=D("7"))  # 14
+
+    midday, _ = window_at(store, utc(2026, 3, 10, 12, 0, 0))  # 07:00 local, 03-10
+    assert midday.daily_notional(None) == D("14")
+
+    # 23:00 UTC on 03-10 is 18:00 local on the 10th — the same local day as the
+    # clock below, which has already rolled over to the UTC day of the 11th.
+    add(store, 2, utc(2026, 3, 10, 23, 0, 0), price=D("3"), size=D("5"))  # 15
+
+    next_utc_day, _ = window_at(store, utc(2026, 3, 11, 2, 0, 0))  # 21:00 local 03-10
+    assert next_utc_day.daily_notional(None) == D("0")
+
+    # A row inside the new UTC day is what counts, whatever the local day says.
+    add(store, 3, utc(2026, 3, 11, 1, 0, 0), price=D("11"), size=D("2"))  # 22
+    assert next_utc_day.daily_notional(None) == D("22")
 
 
 def test_rolling_hour_crosses_clock_hour(store, tmp_path):
@@ -346,6 +388,25 @@ def test_post_only_rejections_not_counted(store):
     add(store, 6, t, price=D("100"), size=D("1"), status=REJECTED)
     assert window.daily_notional(None) == D("15")
     assert window.orders_last_hour(None) == 3
+
+
+def test_null_status_row_counts(store):
+    t = utc(2026, 3, 10, 12, 0, 0)
+    cid = add(store, 1, t, price=D("2"), size=D("9"))  # 18
+
+    store.conn().execute(
+        "UPDATE orders SET status=NULL WHERE client_order_id=?", (cid,)
+    )
+
+    window, _ = window_at(store, t)
+    assert window.daily_notional(None) == D("18")
+    assert window.orders_last_hour(None) == 1
+
+
+def test_orders_created_at_index_exists(store):
+    names = {row[1] for row in store.conn().execute("PRAGMA index_list(orders)")}
+
+    assert "orders_created_at" in names
 
 
 def test_pending_submit_counted(store):

@@ -11,8 +11,13 @@ values are parsed with `Decimal(str(...))` and a non-finite number is refused.
 already placed today (UTC day) and how many orders were placed in the last
 rolling hour — by reading the `orders` table.  It counts the orders the engine
 actually placed: a row the exchange rejected, or one that never reached it, does
-not spend the budget.  The state lives in the table rather than in a counter
-here, so the caps survive a restart.
+not spend the budget, while a cancelled one does (it rested on the book).  The
+state lives in the table rather than in a counter here, so the caps survive a
+restart.
+
+A product is an upper-case BASE-QUOTE pair, each side 2-15 characters of A-Z0-9,
+and the quote must be USDC or USD: the caps are denominated in USD, so any other
+quote would route notional past them.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -63,6 +68,11 @@ DEFAULT_WATCHDOG_POLICY = "leave"
 WATCHDOG_POLICIES = ("leave", "cancel")
 
 PRODUCT_SPLIT_RE = re.compile(r"^([A-Z0-9]{2,15})-([A-Z0-9]{2,15})$")
+
+# The quote half of a product must be USD-denominated: the daily cap is a USD
+# amount, so a pair quoted in anything else would spend budget it is not
+# measured against.
+ALLOWED_QUOTES = ("USDC", "USD")
 
 
 # ---------------------------------------------------------------- value parsing
@@ -141,17 +151,25 @@ def _positive_int(name: str, text: str) -> int:
 
 
 def _products(name: str, text: str) -> tuple[str, ...]:
-    """A comma-separated product list, order kept, padding stripped."""
+    """A comma-separated product list, order kept, padding stripped.
+
+    Each entry is an upper-case BASE-QUOTE pair — each side 2-15 characters of
+    A-Z0-9 — whose quote is USDC or USD, because the caps are USD amounts and a
+    pair quoted in another currency would slip past them.
+    """
     parts = [part.strip() for part in text.split(",")]
     if any(not part for part in parts):
         raise ValueError(
             f"{name} must be a comma-separated list of products, got {text!r}"
         )
+    quotes = " or ".join(ALLOWED_QUOTES)
     for part in parts:
-        if not PRODUCT_SPLIT_RE.match(part):
+        match = PRODUCT_SPLIT_RE.match(part)
+        if match is None or match.group(2) not in ALLOWED_QUOTES:
             raise ValueError(
-                f"{name} has an invalid product {part!r}; "
-                f"expected an upper-case base-quote pair such as BTC-USDC"
+                f"{name} has an invalid product {part!r}; expected an upper-case "
+                f"BASE-QUOTE pair quoted in {quotes} such as BTC-USDC, with each "
+                f"side 2-15 characters of A-Z0-9"
             )
     if len(set(parts)) != len(parts):
         raise ValueError(f"{name} lists the same product more than once: {text!r}")
@@ -245,6 +263,13 @@ class CapWindow:
     It holds no counters: the rows are the state, so a restart (or a second
     process) sees exactly the same budget.  `now` is injected so a caller can
     move the clock.
+
+    What a row spends: a CANCELLED order counts.  It was accepted and rested on
+    the book, and counting it blocks cap-gaming by placing then cancelling.  An
+    order that partially filled and was then cancelled counts its FULL submitted
+    size (`price * size`), not just the filled part.  Only REJECTED (a post-only
+    refusal) and FAILED (never reached the exchange) are excluded.  A row whose
+    status is NULL counts too.
     """
 
     def __init__(self, store: Store, now: Callable[[], float]):
@@ -253,16 +278,18 @@ class CapWindow:
 
     # ------------------------------------------------ public API
     def daily_notional(self, source: Optional[str] = None) -> Decimal:
-        """Notional placed since the UTC midnight before `now()`.
+        """Notional placed since this UTC day's midnight.
 
-        `price` and `size` are TEXT, so the sum is taken in Decimal, never in
-        float.  A source of None counts every row.
+        Only the lower bound is applied, so a row dated after the clock counts
+        too: a future-dated row can never buy budget (fail closed).  `price` and
+        `size` are TEXT, so the sum is taken in Decimal, never in float.  A
+        source of None counts every row.
         """
-        start, end = self._utc_day_bounds()
+        start = self._utc_day_start()
         rows = self._fetch(
             "price, size",
-            "created_at >= ? AND created_at < ?",
-            (start, end),
+            "created_at >= ?",
+            (start,),
             source,
         )
         priced = (D(row["price"] or "0") * D(row["size"] or "0") for row in rows)
@@ -285,12 +312,12 @@ class CapWindow:
         return int(row["placed"]) if row is not None else 0
 
     # ------------------------------------------------ internals
-    def _utc_day_bounds(self) -> tuple[float, float]:
-        """The epoch seconds of this UTC day's midnight and of the next one."""
+    def _utc_day_start(self) -> float:
+        """The epoch seconds of this UTC day's midnight, and nothing beyond it."""
         day = datetime.fromtimestamp(self.now(), timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        return day.timestamp(), (day + timedelta(days=1)).timestamp()
+        return day.timestamp()
 
     def _fetch(
         self,
@@ -299,11 +326,15 @@ class CapWindow:
         args: tuple,
         source: Optional[str],
     ) -> sqlite3.Cursor:
-        """Run one read over the counted rows; every value is a bound parameter."""
+        """Run one read over the counted rows; every value is a bound parameter.
+
+        `COALESCE(status, '')` makes a row with a NULL status count: an unknown
+        status must never look like an excluded one (fail closed).
+        """
         marks = ",".join("?" * len(EXCLUDED_STATUSES))
         sql = (
             f"SELECT {columns} FROM orders "
-            f"WHERE {where} AND status NOT IN ({marks})"
+            f"WHERE {where} AND COALESCE(status, '') NOT IN ({marks})"
         )
         params: list[Any] = list(args) + list(EXCLUDED_STATUSES)
         if source is not None:

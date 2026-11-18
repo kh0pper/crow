@@ -74,6 +74,7 @@ SCHEMA = (
          filled_size TEXT DEFAULT '0', filled_value TEXT DEFAULT '0',
          fees TEXT DEFAULT '0', basis_per_base TEXT, consumes_fill TEXT,
          opposite INTEGER DEFAULT 0, fills_ok INTEGER DEFAULT 0, note TEXT)""",
+    """CREATE INDEX IF NOT EXISTS orders_created_at ON orders(created_at)""",
     """CREATE TABLE IF NOT EXISTS fills (
          trade_id TEXT PRIMARY KEY, order_id TEXT, client_order_id TEXT, owner TEXT,
          side TEXT, size TEXT, price TEXT, commission TEXT, trade_time TEXT,
