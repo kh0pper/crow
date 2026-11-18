@@ -247,6 +247,11 @@ class GridStrategy:
         p = _parse(view.params)
         lv = _levels(p, view.spec)
 
+        # No top of book means no mid to place the grid's band against, so the
+        # first book waits for a snapshot that carries one.
+        if snap.bid is None or snap.ask is None:
+            return Decision([], pause_reason=NO_RANGE_DATA)
+
         # The first book is laid down around the top of book, so it only makes
         # sense while that mid sits inside the grid's own band.
         mid = (D(snap.bid) + D(snap.ask)) / 2
@@ -288,8 +293,8 @@ class GridStrategy:
         if snap.low is None or snap.high is None:
             return Decision([], pause_reason=NO_RANGE_DATA)
 
-        #    A poll window outside the band pauses the whole bot: nothing is
-        #    placed for any fill, so the book is left exactly as it is.
+        # A poll window outside the band pauses the whole bot: nothing is placed
+        # for any fill, so the book is left exactly as it is.
         why = money.out_of_range(
             snap.low, snap.high, money.range_bounds(lv, p["step_pct"])
         )

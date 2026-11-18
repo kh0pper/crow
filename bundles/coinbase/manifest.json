@@ -1,7 +1,7 @@
 {
   "id": "coinbase",
   "name": "Coinbase",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Dry-run Coinbase trading engine for Crow: simulated rebalance and grid bots behind one order gateway with hard caps. Live trading is not enabled in this release.",
   "type": "bundle",
   "author": "Crow",
@@ -27,7 +27,10 @@
     { "name": "CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT", "description": "Portfolio drawdown percent from its high-water mark at which the engine halts all new orders until the halt is cleared.", "default": "20", "required": false },
     { "name": "CROW_COINBASE_BOT_MAX_ORDER_USD", "description": "Largest single order, in USD, a bot may place.", "default": "50", "required": false },
     { "name": "CROW_COINBASE_MAX_BOT_CAPITAL_USD", "description": "Largest starting capital, in USD, a new bot may be created with.", "default": "100", "required": false },
+    { "name": "CROW_COINBASE_AI_MAX_ORDER_USD", "description": "Hard cap, in USD, on the value of a single order the AI may place.", "default": "25", "required": false },
+    { "name": "CROW_COINBASE_AI_DAILY_NOTIONAL_USD", "description": "Hard cap on the total USD value of orders the AI may place per UTC day.", "default": "50", "required": false },
+    { "name": "CROW_COINBASE_AI_ORDERS_PER_HOUR", "description": "Hard cap on orders the AI may place in any rolling hour.", "default": "10", "required": false },
     { "name": "CROW_COINBASE_WATCHDOG_POLICY", "description": "What the watchdog does when the engine's heartbeat goes stale: `leave` raises an alert only; `cancel` also cancels the engine's own open orders (those whose client order id starts with cb-).", "default": "leave", "required": false }
   ],
-  "notes": "This release runs simulated trading only: orders are limit and post-only, and fills are simulated against public market data. Live trading is not enabled in this release."
+  "notes": "This release runs simulated trading only: orders are limit and post-only, and fills are simulated against public market data. Live trading is not enabled in this release. The engine refuses live mode in this release: a config that asks for it is refused at startup and the engine exits with code 3, which Docker's restart policy retries until the environment is fixed."
 }

@@ -3,8 +3,9 @@
 #   base    - the package and its runtime dependencies, from the locked requirements
 #   test    - base + the dev extra + tests/ (CI runs pytest through uv; this stage is
 #             what a container-based test run uses)
-#   runtime - base as the unprivileged service: the LAST stage, so a plain
-#             `docker build` yields it and docker-compose's `target: runtime` matches it
+#   runtime - base as the unprivileged service, with uv removed: the LAST stage, so a
+#             plain `docker build` yields it and docker-compose's `target: runtime`
+#             matches it
 
 FROM python:3.12-slim AS base
 WORKDIR /app
@@ -22,6 +23,9 @@ COPY tests/ ./tests/
 CMD ["pytest", "-q", "-p", "no:cacheprovider"]
 
 FROM base AS runtime
+# uv is a build and test tool: the runtime image serves the installed package and
+# carries no uv at all.
+RUN pip uninstall -y uv
 RUN mkdir -p /data && chown -R 1000:1000 /data /app
 ENV PYTHONUNBUFFERED=1
 USER 1000:1000

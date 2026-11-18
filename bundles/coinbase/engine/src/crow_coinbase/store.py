@@ -260,14 +260,24 @@ class Store:
     def set_bot_status(self, bot_id: str, status: str) -> None:
         self.conn().execute("UPDATE bots SET status=? WHERE id=?", (status, bot_id))
 
+    def set_bot_params(self, bot_id: str, params: dict) -> None:
+        """Replace a bot's params, encoded the way `create_bot` encodes them."""
+        self.conn().execute(
+            "UPDATE bots SET params_json=? WHERE id=?",
+            (json.dumps(params or {}), bot_id),
+        )
+
     def set_bot_state(self, bot_id: str, state: dict) -> None:
         self.conn().execute(
             "UPDATE bots SET state_json=? WHERE id=?",
             (json.dumps(state or {}), bot_id),
         )
 
-    def set_init_done(self, bot_id: str) -> None:
-        self.conn().execute("UPDATE bots SET init_done=1 WHERE id=?", (bot_id,))
+    def set_init_done(self, bot_id: str, flag: bool = True) -> None:
+        """Mark the first book done (the default), or unmark it with `flag=False`."""
+        self.conn().execute(
+            "UPDATE bots SET init_done=? WHERE id=?", (1 if flag else 0, bot_id)
+        )
 
     # ------------------------------------------------ orders
     def insert_order(

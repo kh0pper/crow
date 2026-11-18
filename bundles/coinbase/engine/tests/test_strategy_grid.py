@@ -235,6 +235,22 @@ def test_init_pauses_when_mid_is_out_of_range():
     ]
 
 
+def test_init_pauses_without_a_top_of_book():
+    for bid, ask in ((None, D("0.9650")), (D("0.9640"), None), (None, None)):
+        s = MarketSnapshot(
+            product=PRODUCT,
+            bid=bid,
+            ask=ask,
+            low=D("0.9400"),
+            high=D("0.9900"),
+            ts=TS,
+        )
+        d = GridStrategy().init_intents(s, view(hold=holding("45", "60")))
+        assert d.intents == []
+        assert d.pause_reason == "no range data"
+        assert d.skipped_fills == []
+
+
 # ---------------------------------------------------------------- buy fills
 
 

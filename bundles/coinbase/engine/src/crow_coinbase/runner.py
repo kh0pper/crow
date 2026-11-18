@@ -65,7 +65,7 @@ from .gateway import (
     RATE_CAP,
     STALE_MARKET,
     UNALLOCATED_NEGATIVE,
-    _bot_drawdown_pct,
+    bot_drawdown_pct,
 )
 from .limits import Limits
 from .money import ProductSpec
@@ -455,7 +455,7 @@ class Runner:
                 continue
             product = bot["product"]
             equity = self.ledger.equity(bot["id"], {product: mid}, product)
-            pct = _bot_drawdown_pct(bot)
+            pct = bot_drawdown_pct(bot)
             floor = hwm * (1 - pct / 100)
             if equity >= floor:
                 continue
@@ -1142,26 +1142,20 @@ class Runner:
 
         One transaction on purpose: a reader that saw the new center without the
         epoch (or the other way round) could count the replaced grid's rows as
-        today's and hold a level of the new one back.  The epoch is stored as
-        `runner:init_since:<id>` with the same JSON encoding `store.put` uses, so
-        `store.get` hands `_init_epoch` the float back.  It is stamped with the
-        wall clock (`time.time()`), not with the injected `now`: the level filter
-        compares it with a row's `created_at`, which the store stamps with the
-        wall clock, so the two have to share a clock even when a caller moves
-        `now`.
+        today's and hold a level of the new one back.  Every write inside it goes
+        through a store setter, which joins the caller's open transaction rather
+        than opening one of its own.  The epoch is stored as
+        `runner:init_since:<id>` with `store.put`, so `store.get` hands
+        `_init_epoch` the float back.  It is stamped with the wall clock
+        (`time.time()`), not with the injected `now`: the level filter compares it
+        with a row's `created_at`, which the store stamps with the wall clock, so
+        the two have to share a clock even when a caller moves `now`.
         """
-        with self.store.tx() as db:
-            db.execute(
-                "UPDATE bots SET params_json=?, init_done=0, status=? WHERE id=?",
-                (json.dumps(new_params), status, bot_id),
-            )
-            db.execute(
-                "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)",
-                (
-                    f"{INIT_SINCE_PREFIX}{bot_id}",
-                    json.dumps(time.time()),
-                ),
-            )
+        with self.store.tx():
+            self.store.set_bot_params(bot_id, new_params)
+            self.store.set_init_done(bot_id, False)
+            self.store.set_bot_status(bot_id, status)
+            self.store.put(f"{INIT_SINCE_PREFIX}{bot_id}", time.time())
         message = f"bot {bot_id}: recentered on {new_center}; the book re-inits"
         log.info(message)
         self.store.event("info", message)

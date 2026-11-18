@@ -847,6 +847,56 @@ def test_cancel_intent_via_submit(store):
     assert "cancel" in (store.order(resting)["note"] or "")
 
 
+def test_cancel_all_appends_its_note_instead_of_overwriting(store):
+    adopted_cid = "cb-b1-S-1-000000000001"
+    bare_cid = "cb-b1-B-1-000000000002"
+    exchange = ScriptedExchange(
+        open_orders=[
+            exchange_order(adopted_cid, "ex-adopted", side="SELL"),
+            exchange_order(bare_cid, "ex-bare"),
+        ]
+    )
+    gw = make_gateway(store, exchange=exchange)
+
+    seed_order(store, cid=adopted_cid, side="SELL", level=1, status=OPEN)
+    seed_order(store, cid=bare_cid, status=OPEN)
+    store.update_order(adopted_cid, note="adopted orphan")
+
+    assert gw.cancel_all("owner", "b1") == 2
+
+    adopted = store.order(adopted_cid)["note"]
+    assert "adopted orphan" in adopted
+    assert "cancel requested" in adopted
+    assert adopted == "adopted orphan; cancel requested"
+
+    # A row with no note of its own gets exactly the cancel note.
+    assert store.order(bare_cid)["note"] == "cancel requested"
+
+    # Cancelling the same rows again does not repeat the note.
+    assert gw.cancel_all("owner", "b1") == 2
+    assert store.order(adopted_cid)["note"] == "adopted orphan; cancel requested"
+    assert store.order(bare_cid)["note"] == "cancel requested"
+
+
+def test_cancel_intent_appends_its_note_instead_of_overwriting(store):
+    exchange = ScriptedExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    cid = seed_order(store, status=OPEN, order_id="ex-9")
+    store.update_order(cid, note="post-only bounce")
+
+    first = gw.submit("bot", "b1", cancel(cid))
+    assert first.ok is True
+    assert store.order(cid)["note"] == "post-only bounce; cancel requested"
+
+    # The row is still OPEN until reconcile settles it, so the same cancel can be
+    # sent again: the note is not repeated.
+    second = gw.submit("bot", "b1", cancel(cid))
+    assert second.ok is True
+    assert exchange.cancel_calls == [["ex-9"], ["ex-9"]]
+    assert store.order(cid)["note"] == "post-only bounce; cancel requested"
+
+
 def test_cancel_all_owner_scope_leaves_other_bot_and_non_cb(store):
     store.create_bot("b2", PRODUCT, "grid", {}, D("100"), D("50"))
     store.create_bot("b10", PRODUCT, "grid", {}, D("100"), D("50"))

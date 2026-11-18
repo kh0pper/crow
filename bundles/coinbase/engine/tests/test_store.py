@@ -674,6 +674,60 @@ def test_hwm_only_ratchets_up(store):
     assert store.hwm("nobody") is None
 
 
+def test_set_bot_params_round_trips(store):
+    store.create_bot("b1", XRP, "grid", {"step_pct": "1"}, D("100"), D("50"))
+
+    store.set_bot_params("b1", {"center": "1.1", "levels_below": 2})
+
+    bot = store.get_bot("b1")
+    assert bot["params"] == {"center": "1.1", "levels_below": 2}
+    # The rest of the row is left alone, and an empty mapping is stored as one.
+    assert bot["product"] == XRP
+    assert bot["status"] == "ACTIVE"
+    assert bot["init_done"] is False
+
+    store.set_bot_params("b1", {})
+    assert store.get_bot("b1")["params"] == {}
+
+
+def test_set_init_done_defaults_to_one_and_can_be_reset(store):
+    store.create_bot("b1", XRP, "grid", {}, D("100"), D("50"))
+    assert store.get_bot("b1")["init_done"] is False
+
+    # The one-argument call still means "done".
+    store.set_init_done("b1")
+    assert store.get_bot("b1")["init_done"] is True
+    row = store.conn().execute(
+        "SELECT init_done FROM bots WHERE id=?", ("b1",)
+    ).fetchone()
+    assert row[0] == 1
+
+    store.set_init_done("b1", False)
+    assert store.get_bot("b1")["init_done"] is False
+    row = store.conn().execute(
+        "SELECT init_done FROM bots WHERE id=?", ("b1",)
+    ).fetchone()
+    assert row[0] == 0
+
+    store.set_init_done("b1", True)
+    assert store.get_bot("b1")["init_done"] is True
+
+
+def test_bot_setters_roll_back_with_the_callers_transaction(store):
+    store.create_bot("b1", XRP, "grid", {"step_pct": "1"}, D("100"), D("50"))
+
+    with pytest.raises(RuntimeError):
+        with store.tx():
+            store.set_bot_params("b1", {"step_pct": "2"})
+            store.set_init_done("b1")
+            raise RuntimeError("boom")
+
+    bot = store.get_bot("b1")
+    assert bot["params"] == {"step_pct": "1"}
+    assert bot["init_done"] is False
+    assert store.conn().in_transaction is False
+
+
 def test_kv_json_and_events(store):
     store.put("halted", True)
     assert store.get("halted") is True

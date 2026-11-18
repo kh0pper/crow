@@ -114,6 +114,9 @@ DEFAULT_DRAWDOWN_PCT = 20
 # finds it and applies the fills; a terminal status written here would skip that.
 ADOPTED_STATUSES = frozenset({OPEN})
 
+# The note a cancellation leaves on the row, appended to whatever is there.
+CANCEL_REQUESTED_NOTE = "cancel requested"
+
 
 @dataclass(frozen=True)
 class GatewayResult:
@@ -431,7 +434,7 @@ class OrderGateway:
         if source == "bot":
             hwm = self.store.hwm(owner)
             if hwm is not None and hwm > 0:
-                pct = _bot_drawdown_pct(bot)
+                pct = bot_drawdown_pct(bot)
                 equity = self.ledger.equity(owner, {product: mid}, product)
                 if equity < hwm * (1 - pct / 100):
                     return DRAWDOWN_STOP
@@ -573,8 +576,28 @@ class OrderGateway:
             return GatewayResult(False, cid, CANCEL_FAILED)
         if not (res or {}).get(order_id):
             return GatewayResult(False, cid, CANCEL_FAILED)
-        self.store.update_order(cid, note="cancel requested")
+        self._note_cancel_requested(cid)
         return GatewayResult(True, cid, None)
+
+    def _note_cancel_requested(self, cid: str) -> None:
+        """Append the cancel note to a row, keeping whatever note it already has.
+
+        A row note carries the history of the order (a post-only bounce, an
+        adopted orphan), so the cancellation is added to it rather than written
+        over it.  A row already marked as cancelled is left alone, so cancelling
+        twice does not repeat the note.
+        """
+        row = self.store.order(cid)
+        if row is None:
+            return
+        old = str(row["note"] or "")
+        if old.endswith(CANCEL_REQUESTED_NOTE):
+            return
+        if not old:
+            note = CANCEL_REQUESTED_NOTE
+        else:
+            note = f"{old}; {CANCEL_REQUESTED_NOTE}"
+        self.store.update_order(cid, note=note)
 
     def _send(
         self,
@@ -676,8 +699,8 @@ class OrderGateway:
             res = self.exchange.cancel(order_ids) or {}
             for order in selected:
                 cid = order.get("client_order_id")
-                if cid and self.store.order(cid) is not None:
-                    self.store.update_order(cid, note="cancel requested")
+                if cid:
+                    self._note_cancel_requested(cid)
             return sum(1 for order_id in order_ids if res.get(order_id))
 
     # ------------------------------------------------ dry seeding
@@ -758,7 +781,7 @@ def _is_positive_decimal(value) -> bool:
     return value > 0
 
 
-def _bot_drawdown_pct(bot: Optional[dict]) -> Decimal:
+def bot_drawdown_pct(bot: Optional[dict]) -> Decimal:
     """A bot's own drawdown stop, or the default when its params are unusable.
 
     The stored value has to be a finite `Decimal` strictly between 0 and 100: a

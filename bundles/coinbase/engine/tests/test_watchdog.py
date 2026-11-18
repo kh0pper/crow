@@ -933,7 +933,7 @@ def test_main_cancel_sweep_with_real_dry_exchange_and_reconcile(tmp_path, monkey
     )
     engine_exchange.deposit("USDC", D("100"), "watchdog sweep")
 
-    cids = ("cb-b1-B+1-000000000001", "cb-b1-B+2-000000000002")
+    cids = ("cb-b1-B+1-a00000000001", "cb-b1-B+2-b00000000002")
     for cid, level in zip(cids, (1, 2)):
         placed = engine_exchange.place_limit(
             cid, PRODUCT, "BUY", D("10"), D("0.98")
