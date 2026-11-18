@@ -15,8 +15,9 @@ available figures would jump the moment our own rebalance order rested and the
 strategy would chase itself.  Sizing is the other way round: what an order may
 commit is capped by the AVAILABLE funds — `available_quote` for a buy
 (inclusive of the maker fee), `available_base` for a sell — because that is what
-the exchange lets it hold.  A stale order cancelled in the same decision frees
-its reservation first, so its replacement may size against the sum.
+the exchange lets it hold.  A stale resting order is cancelled on its own: a
+decision that cancels never places, and the replacement is a later tick's
+answer, once the cancellation has freed what the order held.
 
 Params arrive from JSON, so any number may be a str, an int, a float or a
 Decimal; each is read through `_dec` (`Decimal(str(x))`), a value that will not
@@ -41,7 +42,7 @@ ZERO = D(0)
 # An order in one of these statuses still holds funds (it may yet land).
 LIVE_STATUSES = ("PENDING_SUBMIT", "OPEN")
 
-# Only an order that is on the book can be re-priced; one that may still land
+# Only an order that is on the book can be taken off it; one that may still land
 # cannot.
 OPEN_STATUS = "OPEN"
 
@@ -176,33 +177,19 @@ def _live_rows(open_orders) -> list[dict]:
 def _is_stale(row: dict, now: D, after: D) -> bool:
     """True for a resting order older than the reprice age.
 
-    A row that may still land is never re-priced, and a row without a created_at
-    cannot be shown to be old, so both are treated as fresh.
+    The age is read from `created_at`, falling back to `updated_at` when that
+    column is missing, None or unparseable.  A row with no usable age at all
+    cannot be shown to be young, so a resting one counts as stale.  A row that
+    may still land (`PENDING_SUBMIT`) is never re-priced, whatever its age.
     """
     if _row_status(row) != OPEN_STATUS:
         return False
-    created = _dec_or_none(row.get("created_at"))
-    if created is None:
-        return False
-    return now - created > after
-
-
-def _reservation(row: dict, fee_rate: D) -> tuple[D, D]:
-    """`(quote, base)` a live order holds, in that order.
-
-    A buy holds the unfilled remainder at its limit price plus the fee, a sell
-    holds the unfilled remainder in base.  A missing `filled_size` means nothing
-    has filled yet, so the whole size is held.
-    """
-    size = _dec_or_none(row.get("size")) or ZERO
-    filled = _dec_or_none(row.get("filled_size")) or ZERO
-    remaining = size - filled
-    if remaining <= 0:
-        return ZERO, ZERO
-    if _row_side(row) == BUY:
-        price = _dec_or_none(row.get("price")) or ZERO
-        return remaining * price * (ONE + fee_rate), ZERO
-    return ZERO, remaining
+    age_from = _dec_or_none(row.get("created_at"))
+    if age_from is None:
+        age_from = _dec_or_none(row.get("updated_at"))
+    if age_from is None:
+        return True
+    return now - age_from > after
 
 
 def _skipped_fills(pending_fills) -> list[str]:
@@ -382,9 +369,11 @@ class RebalanceStrategy:
     """Hold a target base/quote weight, trading only when it drifts out of band.
 
     One order at a time: while any order is live the weight is that order's
-    business, and only a resting order that has gone stale is taken off the book
-    and replaced.  Sizing is capped by the available funds, the weight is read
-    from the totals.
+    business, and only resting orders that have all gone stale are taken off the
+    book — alone, with no replacement in the same decision.  The weight is read
+    from the totals; sizing is capped by the available funds, so the replacement
+    lands on a later tick, once the cancellations have freed what those orders
+    held.
     """
 
     name = "rebalance"
@@ -409,7 +398,7 @@ class RebalanceStrategy:
 
     # ------------------------------------------------ one tick
     def decide(self, snap: MarketSnapshot, view: BotView) -> Decision:
-        """One tick: pause without a book, else reprice stale orders or trade once."""
+        """One tick: pause without a book, else cancel stale orders or trade once."""
         p = _parse(view.params)
 
         book, why = _read_book(snap)
@@ -424,10 +413,6 @@ class RebalanceStrategy:
         base, quote = D(held.base), D(held.quote)
         fee_rate = D(view.fee_rate)
         skipped = _skipped_fills(view.pending_fills)
-
-        intents: list[OrderIntent] = []
-        available_quote = D(held.available_quote)
-        available_base = D(held.available_base)
 
         live = _live_rows(view.open_orders)
         if live:
@@ -445,13 +430,16 @@ class RebalanceStrategy:
                 # left to settle rather than replaced blindly.
                 return Decision([], skipped_fills=skipped)
 
-            for cid, row in zip(cids, live):
-                intents.append(_cancel_intent(cid, row, p["reprice_after_s"]))
-                # The cancellation frees what the order held, so its
-                # replacement may size against the sum.
-                freed_quote, freed_base = _reservation(row, fee_rate)
-                available_quote += freed_quote
-                available_base += freed_base
+            # Stale orders are cancelled alone.  The replacement is a later
+            # tick's answer, after reconcile has freed what they held, so the
+            # free funds it sizes against are real rather than assumed.
+            return Decision(
+                [
+                    _cancel_intent(cid, row, p["reprice_after_s"])
+                    for cid, row in zip(cids, live)
+                ],
+                skipped_fills=skipped,
+            )
 
         place = _place_intent(
             base,
@@ -460,12 +448,12 @@ class RebalanceStrategy:
             bid,
             ask,
             p,
-            available_quote,
-            available_base,
+            D(held.available_quote),
+            D(held.available_base),
             fee_rate,
             view.spec,
         )
-        if place is not None:
-            intents.append(place)
+        if place is None:
+            return Decision([], skipped_fills=skipped)
 
-        return Decision(intents, skipped_fills=skipped)
+        return Decision([place], skipped_fills=skipped)

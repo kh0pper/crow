@@ -9,9 +9,9 @@ it does not depend on how the strategy's algebra was written; prices come from
 plain dataclasses.
 
 Every decision in this file goes through `decide()`, which checks the shape
-rules the contract puts on every tick: at most one place intent, no
-`consumes_fill` on a rebalance's orders, no `level`, and a cancel intent that
-names the row it cancels.
+rules the contract puts on every tick: at most one place intent, never a place
+in the same decision as a cancel, no `consumes_fill` on a rebalance's orders, no
+`level`, and a cancel intent that names the row it cancels.
 """
 
 from __future__ import annotations
@@ -204,6 +204,9 @@ def decide(strat, s, v):
     """One tick, with the contract's shape rules checked in every test."""
     d = strat.decide(s, v)
     assert len(places(d)) <= 1, d.intents  # never more than one order
+    if cancels(d):
+        # Taking a row off the book and placing its replacement are two ticks.
+        assert places(d) == [], d.intents
     for i in d.intents:
         if i.action == "place":
             assert i.side in (money.BUY, money.SELL)
@@ -297,6 +300,42 @@ def test_below_band_buys():
     assert_weight_at_target(h, money.BUY, i.size, i.limit_price)
 
 
+def test_zero_holdings():
+    strat = RebalanceStrategy()
+
+    # Nothing in base, all in quote: the weight is 0, so it is a buy, and it may
+    # not spend more quote than the account holds.
+    only_quote = holding(quote="100")
+    assert only_quote.base == 0
+    d = decide(strat, snap(), view(hold=only_quote))
+    assert d.pause_reason is None
+    assert [i.action for i in d.intents] == ["place"]
+    buy = d.intents[0]
+    assert buy.side == money.BUY
+    assert buy.limit_price == BID
+    assert buy.size == solve_size(only_quote, "50", money.BUY, BID)
+    assert money.buy_cost(buy.size, buy.limit_price, FEE) <= D("100")
+
+    # Nothing in quote, all in base: the weight is 100%, so it is a sell, and it
+    # may not sell more base than the account holds.
+    only_base = holding(base="100")
+    assert only_base.quote == 0
+    d2 = decide(strat, snap(), view(hold=only_base))
+    assert d2.pause_reason is None
+    assert [i.action for i in d2.intents] == ["place"]
+    sell = d2.intents[0]
+    assert sell.side == money.SELL
+    assert sell.limit_price == ASK
+    assert sell.size == solve_size(only_base, "50", money.SELL, ASK)
+    assert sell.size <= D("100")
+
+    # Nothing at all: there is no weight to bring back, and nothing to pause on.
+    d3 = decide(strat, snap(), view(hold=holding()))
+    assert d3.intents == []
+    assert d3.pause_reason is None
+    assert d3.skipped_fills == []
+
+
 def test_small_trade_skipped():
     strat = RebalanceStrategy()
 
@@ -364,6 +403,14 @@ def test_one_open_order_at_most():
     assert [i.side for i in places(d5)] == [money.SELL]
     assert cancels(d5) == []
 
+    # A live row with no created_at and no updated_at cannot be shown to be
+    # young, so it is stale: the cancel is free and nothing is placed yet.
+    undated = order("cb-r-6", money.SELL, ASK, "150")
+    d6 = decide(strat, snap(), view(hold=h, open_orders=[undated]))
+    assert [i.action for i in d6.intents] == ["cancel"]
+    assert d6.intents[0].cancel_cid == "cb-r-6"
+    assert d6.pause_reason is None
+
 
 def test_stale_order_by_age_cancel_and_repropose():
     strat = RebalanceStrategy()
@@ -373,13 +420,11 @@ def test_stale_order_by_age_cancel_and_repropose():
 
     d = decide(strat, snap(), view(hold=h, open_orders=[stale]))
     assert d.pause_reason is None
-    assert [i.action for i in d.intents] == ["cancel", "place"]
+    # A stale row is taken off the book and nothing else: the replacement is a
+    # later tick's answer, once the cancellation has freed what the row held.
+    assert [i.action for i in d.intents] == ["cancel"]
     assert d.intents[0].cancel_cid == "cb-r-sell-1"
-    place = d.intents[1]
-    assert place.side == money.SELL
-    assert place.limit_price == ASK
-    # The cancelled row's reservation is free again: 400 available + 300 back.
-    assert place.size == solve_size(h, "50", money.SELL, ASK)
+    assert places(d) == []
 
     # Exactly reprice_after_s old is not stale: 600 > 600 is false.
     for age in (600, 599, 1, 0):
@@ -388,6 +433,12 @@ def test_stale_order_by_age_cancel_and_repropose():
         assert d2.intents == [], age
         assert d2.pause_reason is None
 
+    # One second past reprice_after_s is stale.
+    just_stale = order("cb-r-sell-2", money.SELL, ASK, "300", created_at=TS - 601)
+    d_edge = decide(strat, snap(), view(hold=h, open_orders=[just_stale]))
+    assert [i.action for i in d_edge.intents] == ["cancel"]
+    assert d_edge.intents[0].cancel_cid == "cb-r-sell-2"
+
     # A stale row whose weight has since come back into the band: cancel only.
     inside = holding_at("55", reserved_base="300")
     d3 = decide(strat, snap(), view(hold=inside, open_orders=[stale]))
@@ -395,20 +446,85 @@ def test_stale_order_by_age_cancel_and_repropose():
     assert d3.intents[0].cancel_cid == "cb-r-sell-1"
     assert d3.pause_reason is None
 
-    # Two stale rows: a cancel each, and still at most one fresh order.
+    # Two stale rows: a cancel for each, in the order they came in, and no
+    # replacement on this tick.
     second = order("cb-r-sell-3", money.SELL, ASK, "100", created_at=TS - 900)
     first = order("cb-r-sell-4", money.SELL, ASK, "100", created_at=TS - 700)
     two = holding_at("70", reserved_base="200")
     d4 = decide(strat, snap(), view(hold=two, open_orders=[first, second]))
-    assert [i.action for i in d4.intents] == ["cancel", "cancel", "place"]
+    assert [i.action for i in d4.intents] == ["cancel", "cancel"]
     assert [i.cancel_cid for i in cancels(d4)] == ["cb-r-sell-4", "cb-r-sell-3"]
-    assert len(places(d4)) == 1
+    assert places(d4) == []
 
-    # A row with no created_at is never stale, and neither is a null one.
+    # A row with no created_at and no updated_at cannot be shown to be young, so
+    # it counts as stale, and a cancel costs nothing.
     undated = order("cb-r-sell-5", money.SELL, ASK, "300")
     for row in (undated, dict(undated, created_at=None)):
         d5 = decide(strat, snap(), view(hold=h, open_orders=[row]))
-        assert d5.intents == []
+        assert [i.action for i in d5.intents] == ["cancel"]
+        assert d5.intents[0].cancel_cid == "cb-r-sell-5"
+        assert d5.pause_reason is None
+
+
+def test_stale_age_falls_back_to_updated_at():
+    strat = RebalanceStrategy()
+    h = holding_at("70", reserved_base="300")
+
+    # Only updated_at: that column is the row's age.
+    old = order("cb-r-u-1", money.SELL, ASK, "300", updated_at=TS - 601)
+    assert "created_at" not in old
+    d = decide(strat, snap(), view(hold=h, open_orders=[old]))
+    assert [i.action for i in d.intents] == ["cancel"]
+    assert d.intents[0].cancel_cid == "cb-r-u-1"
+
+    # A null created_at is a missing one, so the updated_at age is used.
+    nulled = dict(
+        order("cb-r-u-2", money.SELL, ASK, "300", created_at=None),
+        updated_at=TS - 601,
+    )
+    d_nulled = decide(strat, snap(), view(hold=h, open_orders=[nulled]))
+    assert [i.action for i in d_nulled.intents] == ["cancel"]
+    assert d_nulled.intents[0].cancel_cid == "cb-r-u-2"
+
+    young = order("cb-r-u-3", money.SELL, ASK, "300", updated_at=TS - 60)
+    d2 = decide(strat, snap(), view(hold=h, open_orders=[young]))
+    assert d2.intents == []
+    assert d2.pause_reason is None
+
+    # created_at wins when both are present: a young created_at is not stale,
+    # however old the last update is.
+    mixed = order(
+        "cb-r-u-4",
+        money.SELL,
+        ASK,
+        "300",
+        created_at=TS - 60,
+        updated_at=TS - 900,
+    )
+    d3 = decide(strat, snap(), view(hold=h, open_orders=[mixed]))
+    assert d3.intents == []
+    assert d3.pause_reason is None
+
+    # Neither column present: stale, and the cancel is free.
+    bare = order("cb-r-u-5", money.SELL, ASK, "300")
+    assert "created_at" not in bare and "updated_at" not in bare
+    d4 = decide(strat, snap(), view(hold=h, open_orders=[bare]))
+    assert [i.action for i in d4.intents] == ["cancel"]
+    assert d4.intents[0].cancel_cid == "cb-r-u-5"
+
+    # A row that may still land is never re-priced, whatever its age columns
+    # say.
+    for extra in (
+        {},
+        {"created_at": TS - 900},
+        {"updated_at": TS - 900},
+        {"created_at": TS - 900, "updated_at": TS - 900},
+    ):
+        pending = order(
+            "cb-r-u-6", money.SELL, ASK, "300", status="PENDING_SUBMIT", **extra
+        )
+        d5 = decide(strat, snap(), view(hold=h, open_orders=[pending]))
+        assert d5.intents == [], extra
         assert d5.pause_reason is None
 
 
@@ -557,7 +673,7 @@ def test_buy_affordable_including_fee():
     assert_weight_at_target(free, money.BUY, places(d2)[0].size, BID)
 
 
-def test_stale_cancel_adds_back_reservation():
+def test_stale_cancel_then_place_next_tick():
     strat = RebalanceStrategy()
 
     # A stale buy for 500 XRP holds 484.41 USDC of the 675.15: on the free
@@ -567,25 +683,33 @@ def test_stale_cancel_adds_back_reservation():
 
     stale = order("cb-r-buy-1", money.BUY, BID, "500", created_at=TS - 700)
     assert "filled_size" not in stale  # a row without it reserves the whole size
-    reservation = D("500") * BID * (D(1) + FEE)
-    assert reservation == D("484.4100")
 
     uncapped = solve_size(h, "50", money.BUY, BID)
     capped_size = money.buy_size_for_quote(h.available_quote, BID, FEE, SPEC)
     assert capped_size < uncapped  # the free funds alone would give a smaller buy
 
+    # Tick 1: the stale row comes off the book, and nothing is placed with it.
     d = decide(strat, snap(), view(hold=h, open_orders=[stale]))
-    assert [i.action for i in d.intents] == ["cancel", "place"]
+    assert [i.action for i in d.intents] == ["cancel"]
     assert d.intents[0].cancel_cid == "cb-r-buy-1"
-    place = d.intents[1]
+    assert places(d) == []
+    assert d.pause_reason is None
+
+    # Tick 2: the row is cancelled and its funds are free, so the full size goes.
+    freed = holding_at("30")
+    assert freed.quote == h.quote
+    assert freed.available_quote == h.quote
+    gone = dict(stale, status="CANCELLED")
+    d2 = decide(strat, snap(), view(hold=freed, open_orders=[gone]))
+    assert cancels(d2) == []
+    assert [i.action for i in d2.intents] == ["place"]
+    place = d2.intents[0]
     assert place.side == money.BUY
     assert place.limit_price == BID
-    # Sized from what the cancellation frees, and affordable against that sum.
     assert place.size == uncapped
-    assert money.buy_cost(place.size, place.limit_price, FEE) <= (
-        h.available_quote + reservation
-    )
-    assert_weight_at_target(h, money.BUY, place.size, place.limit_price)
+    assert place.size == solve_size(freed, "50", money.BUY, BID)
+    assert money.buy_cost(place.size, place.limit_price, FEE) <= freed.available_quote
+    assert_weight_at_target(freed, money.BUY, place.size, place.limit_price)
 
 
 # ---------------------------------------------------------------- pending fills
