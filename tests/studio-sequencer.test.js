@@ -811,6 +811,224 @@ test("nextBarFrame matches the frame of the following bar while playing", () => 
   assert.deepEqual(odd.nextBarFrame(), { bar: 1, beat: 4, frame: oddBoundary }, "the frame must be the rounded boundary");
 });
 
+// --- nextLoopFrame: the frame a take's next pass starts on -------------------
+
+test("today: a launch while PAUSED reports a beat-0 launch at the resume block", () => {
+  // Characterisation, and the reason no recording path anchors on a launch
+  // report: `launchBeat()` answers 0 whenever the transport is not playing, so
+  // a launch made while paused is reported as a bar-0 launch in the block that
+  // resumes — a bar the playhead is not on.
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1"), scene("s2")],
+      clips: [
+        clip("c1", "t1", "s1", 2, [note(0, 1, 60)]),
+        clip("c2", "t1", "s2", 2, [note(0, 1, 67)]),
+      ],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+  collect(seq, FRAMES_PER_BAR + FRAMES_PER_BEAT, 4096); // into bar 1, beat 2
+  seq.pause();
+  seq.launchScene("s2");
+  seq.play();
+
+  const resumed = seq.block(FRAMES_PER_BAR + FRAMES_PER_BEAT, 128);
+  assert.deepEqual(launchesOf(resumed), [
+    { track_id: "t1", clip_id: "c2", scene_id: "s2", bar: 0, frame: 0 },
+  ]);
+  // The playhead is in bar 1 (0-based) at that very block: the report's bar 0
+  // is the resumed run's origin, not the bar the take stands in.
+  assert.equal(seq.nextBarFrame().bar, 2, "the playhead is a bar past the bar the launch names");
+});
+
+test("a playing 4-bar clip answers the next loop boundary at least minLead ahead", () => {
+  const LOOP = FRAMES_PER_BAR * 4;
+  const MIN_ARM_LEAD = 8192;
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 4, [note(0, 1, 60)])],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+  seq.block(0, 128);
+
+  // 128 frames in: the boundary at 0 is behind the playhead, so the next pass
+  // is one whole four-bar loop later.
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", MIN_ARM_LEAD), { frame: LOOP, bar: 4, looping: true });
+
+  // Exactly the lead before the boundary: that boundary is still far enough
+  // ahead to arm on.
+  seq.block(LOOP - MIN_ARM_LEAD - 128, 128);
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", MIN_ARM_LEAD), { frame: LOOP, bar: 4, looping: true });
+
+  // Any closer than the lead and the following pass is the answer.
+  seq.block(LOOP - MIN_ARM_LEAD, 4096);
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", MIN_ARM_LEAD), { frame: LOOP * 2, bar: 8, looping: true });
+});
+
+test("nextLoopFrame rounds each loop boundary once at a fractional tempo", () => {
+  const seq = StudioSequencer.create({ sampleRate: 44100 });
+  seq.setSong(
+    song({
+      bpm: 97,
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 2, [note(0, 1, 60)])],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+  seq.block(0, 12345);
+  const framesPerBeat = (44100 * 60) / 97;
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", 8192), {
+    frame: Math.round(framesPerBeat * 8),
+    bar: 2,
+    looping: true,
+  });
+});
+
+test("Stop then Play: the answer is on the rebuilt segment's loop grid", () => {
+  const LOOP = FRAMES_PER_BAR * 2;
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 2, [note(0, 1, 60)])],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+  collect(seq, FRAMES_PER_BAR * 6 + 1000, 4096);
+  seq.stop();
+
+  // Stopped there is no loop of the clip to follow: the bar line is the answer.
+  const stopped = seq.nextLoopFrame("t1", "c1", 8192);
+  assert.deepEqual(stopped, { frame: stopped.frame, bar: 0, looping: false });
+
+  seq.play();
+  const start = 65536;
+  seq.block(start, 128);
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", 8192), { frame: start + LOOP, bar: 2, looping: true });
+});
+
+test("Pause then resume: the answer is on the loop grid of the re-anchored origin", () => {
+  const LOOP = FRAMES_PER_BAR * 2;
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 2, [note(0, 1, 60)])],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+  seq.block(0, LOOP / 2);
+  seq.pause();
+  assert.equal(seq.nextLoopFrame("t1", "c1", 8192).looping, false, "a paused transport has no loop grid");
+
+  // The resumed run is anchored on the paused beat, so the next boundary is the
+  // paused position again one pass on — not the loop grid the first run had.
+  const at = LOOP / 2 + 1024;
+  seq.play();
+  seq.block(at, 128);
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", 8192), { frame: at + LOOP / 2, bar: 2, looping: true });
+});
+
+test("a tempo change mid-run: the answer follows the re-anchored origin and fpb", () => {
+  const make = (bpm) =>
+    song({
+      bpm,
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 2, [note(0, 1, 60)])],
+    });
+  const seq = sequencer(make(120));
+  seq.launchScene("s1");
+  seq.play();
+  seq.block(0, FRAMES_PER_BAR); // one bar in: the playhead stands on beat 4
+  seq.setSong(make(240));
+
+  // At 240 bpm a beat is 12,000 frames, and the origin has moved so the
+  // playhead keeps beat 4: the clip's two bars run from 48,000 to 144,000.
+  const framesPerBeat = FRAMES_PER_BEAT / 2;
+  const origin = FRAMES_PER_BAR - 4 * framesPerBeat;
+  assert.deepEqual(seq.nextLoopFrame("t1", "c1", 8192), {
+    frame: origin + 8 * framesPerBeat,
+    bar: 2,
+    looping: true,
+  });
+});
+
+test("an empty armed slot, a stopped transport and another clip all answer the bar frame", () => {
+  const snapshot = () =>
+    song({
+      tracks: [track("t1"), track("t2")],
+      scenes: [scene("s1"), scene("s2")],
+      clips: [
+        clip("c1", "t1", "s1", 2, [note(0, 1, 60)]),
+        clip("c2", "t1", "s2", 1, [note(0, 1, 62)]),
+      ],
+    });
+
+  // Nothing has ever played: bar 0 starts at the next block's first frame.
+  const idle = sequencer(snapshot());
+  idle.launchScene("s1");
+  idle.block(0, 128);
+  assert.deepEqual(idle.nextLoopFrame("t1", "c1", 8192), { frame: 128, bar: 0, looping: false });
+
+  // Playing, but the track plays another clip than the one the take names: the
+  // take has no grid of its own, so the bar line answers instead.
+  const other = sequencer(snapshot());
+  other.launchScene("s2");
+  other.play();
+  other.block(0, 128);
+  const bar = other.nextBarFrame();
+  assert.deepEqual(other.nextLoopFrame("t1", "c1", 8192), { frame: bar.frame, bar: bar.bar, looping: false });
+  // The clip it does play answers its own grid, so this is about the clip and
+  // not about the track being unplayable.
+  assert.equal(other.nextLoopFrame("t1", "c2", 8192).looping, true);
+
+  // An empty slot: the track has no clip of its own in the launched scene.
+  const empty = sequencer(snapshot());
+  empty.launchScene("s1");
+  empty.play();
+  empty.block(0, 128);
+  const emptyBar = empty.nextBarFrame();
+  assert.deepEqual(empty.nextLoopFrame("t2", "c9", 8192), { frame: emptyBar.frame, bar: emptyBar.bar, looping: false });
+});
+
+test("a clip launched mid-bar answers from its own startBeat, not from bar 0", () => {
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1"), scene("s2")],
+      clips: [
+        clip("c1", "t1", "s1", 2, [note(0, 1, 60)]),
+        clip("c2", "t1", "s2", 2, [note(0, 1, 62)]),
+      ],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+  collect(seq, FRAMES_PER_BAR / 2, 4096);
+  seq.launchScene("s2"); // takes effect on the next bar line, beat 4
+  collectFrom(seq, FRAMES_PER_BAR / 2, FRAMES_PER_BAR, 4096);
+
+  // The clip is two bars long and starts on beat 4, so its passes start at beats
+  // 4, 12 and 20: a bar-0 grid would have answered 192,000 instead.
+  assert.deepEqual(seq.nextLoopFrame("t1", "c2", 8192), {
+    frame: FRAMES_PER_BAR * 3,
+    bar: 3,
+    looping: true,
+  });
+});
+
 test("stopTrack is reported with clip_id null", () => {
   const seq = sequencer(
     song({

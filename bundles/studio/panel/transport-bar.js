@@ -26,8 +26,10 @@
  * page renders nothing.
  *
  * `hooks` is the page's own reading of the transport:
- * `{snapshot(), isPlaying(), isPaused(), isRecording(), position(),
- * queuedSceneId(), currentSceneId()}`. The returned controller is
+ * `{snapshot(), isPlaying(), isPaused(), isRecording(), isCounting(), position(),
+ * queuedSceneId(), currentSceneId()}`. `isRecording` says a take is running and
+ * `isCounting` says a count-in is (a count-in is not a take: it leaves Pause
+ * alone and shows Record pressed). The returned controller is
  * `{refresh(), destroy()}`: `refresh` repaints the readout and the pressed
  * states (the client calls it after a render), and `destroy` puts every moved
  * node back where it was and removes `--st-transport-h` again.
@@ -240,6 +242,10 @@ export const TRANSPORT_SCRIPT = [
   "      next.textContent = sceneLabel(snap, hook('queuedSceneId'), 'next');",
   "      var paused = hook('isPaused') === true;",
   "      var recording = hook('isRecording') === true;",
+  "      // A count-in is not a take, so it never disables Pause, but the Record",
+  "      // button reads pressed during it: the take it counts for is about to",
+  "      // start (R7, R19).",
+  "      var counting = hook('isCounting') === true;",
   "      if (play) play.setAttribute('aria-pressed', hook('isPlaying') === true ? 'true' : 'false');",
   "      if (pause) {",
   "        pause.setAttribute('aria-pressed', paused ? 'true' : 'false');",
@@ -251,7 +257,7 @@ export const TRANSPORT_SCRIPT = [
   "          pauseDisabled = false;",
   "        }",
   "      }",
-  "      if (record) record.setAttribute('aria-pressed', recording ? 'true' : 'false');",
+  "      if (record) record.setAttribute('aria-pressed', recording || counting ? 'true' : 'false');",
   "      measure();",
   "    }",
   "",

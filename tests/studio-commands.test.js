@@ -16,6 +16,7 @@ import {
   readField,
   snapshot,
 } from "../bundles/studio/server/doc.js";
+import { spliceComp } from "../bundles/studio/panel/punch.js";
 import {
   StudioError,
   applyCommand,
@@ -1591,5 +1592,40 @@ test("a full song with proposals pending says declining one frees a slot", (t) =
   const added = addAmp(doc, `track:${third}`, "amp-16", "cap-a", HUMAN);
   assert.equal(added.summary, "Added an amp to Guitar 3");
   assert.equal(Object.keys(snapshot(doc).inserts).length, LIMITS.ampInsertsPerSong);
+});
+
+test("a punch's comp write is one clip.set_comp step carrying both whole comps", (t) => {
+  const doc = newSongDoc({ title: "Punch song" });
+  t.after(() => doc.destroy());
+  const track = addTrack(doc, "Guitar", { kind: "audio" });
+  const scene = addScene(doc, "Verse");
+  const clip = runCommand(doc, "clip.add_audio", {
+    track_id: track,
+    scene_id: scene,
+    length_bars: 2,
+    name: "Guitar take",
+  }).args.clip_id;
+  runCommand(doc, "take.add", { clip_id: clip, take: { id: TAKE_ID, ...TAKE_ARGS } });
+  runCommand(doc, "take.add", { clip_id: clip, take: { id: OTHER_TAKE_ID, ...TAKE_ARGS } });
+
+  // The comp the clip already holds: its first take, the whole clip.
+  const before = snapshot(doc).clips[clip].comp;
+  assert.deepEqual(before, [{ take_id: TAKE_ID, from_beat: 0, to_beat: 8 }]);
+
+  // A punched pass replaces the comp over the range it recorded, and that whole
+  // new comp is what the one command carries.
+  const segments = spliceComp(before, OTHER_TAKE_ID, 2, 6, 8);
+  const result = doc.transact(() => runCommand(doc, "clip.set_comp", { clip_id: clip, segments }));
+  assert.equal(result.id, "clip.set_comp");
+  assert.deepEqual(result.before[`clip:${clip}|comp`], before, "the old comp is in before, whole");
+  assert.deepEqual(result.after[`clip:${clip}|comp`], segments, "and the new one in after, whole");
+  assert.deepEqual(result.after[`clip:${clip}|comp`], [
+    { take_id: TAKE_ID, from_beat: 0, to_beat: 2 },
+    { take_id: OTHER_TAKE_ID, from_beat: 2, to_beat: 6 },
+    { take_id: TAKE_ID, from_beat: 6, to_beat: 8 },
+  ]);
+  assert.deepEqual(snapshot(doc).clips[clip].comp, segments);
+  assert.ok(result.touched.includes(`clip:${clip}`), "it touches the clip");
+  assert.ok(result.touched.includes(`take:${OTHER_TAKE_ID}`), "and the take it puts over the range");
 });
 

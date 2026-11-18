@@ -38,6 +38,7 @@ import {
   planUndo,
   REDO_COMMAND,
 } from "../bundles/studio/server/history.js";
+import { spliceComp } from "../bundles/studio/panel/punch.js";
 
 /** The song every entry in a test belongs to. */
 const SONG_ID = "song-1";
@@ -616,4 +617,89 @@ test("an old song with no takes container reads empty", (t) => {
   assert.deepEqual(Object.keys(snapshot(doc).takes), [fresh.id]);
   assert.deepEqual(snapshot(doc).clips[clip].comp, [{ take_id: fresh.id, from_beat: 0, to_beat: 4 }]);
   assert.deepEqual(checkInvariants(doc), []);
+});
+
+// ---- a punch landing in the comp (R13) -------------------------------------
+//
+// A gated take replaces the comp over the range it recorded, with the one
+// splice `panel/punch.js` gives the comp drag. Those two cases are the song's
+// side of it: a take that was discarded cannot come back through a punch, and
+// the comp write is one step the shared history can take back.
+
+test("R13: a discarded take under the range is not named in the comp", (t) => {
+  const s = studio(t);
+  const track = addAudioTrack(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addAudioClip(s.doc, track, scene, 2);
+  const first = take();
+  const second = take();
+  const punched = take();
+  s.run("take.add", { clip_id: clip, take: first });
+  s.run("take.add", { clip_id: clip, take: second });
+  s.run("take.add", { clip_id: clip, take: punched });
+  s.run("clip.set_comp", {
+    clip_id: clip,
+    segments: [
+      { take_id: first.id, from_beat: 0, to_beat: 2 },
+      { take_id: second.id, from_beat: 2, to_beat: 6 },
+    ],
+  });
+
+  // The take under the range is discarded while the punch is still being
+  // recorded: its segments go with it.
+  s.run("take.discard", { clip_id: clip, take_id: second.id });
+  const before = clipOf(s.doc, clip).comp;
+  assert.deepEqual(before, [{ take_id: first.id, from_beat: 0, to_beat: 2 }]);
+
+  const after = spliceComp(before, punched.id, 2, 6, 8);
+  assert.equal(
+    after.some((segment) => segment.take_id === second.id),
+    false,
+    "the splice names no discarded take",
+  );
+  const written = s.run("clip.set_comp", { clip_id: clip, segments: after });
+  assert.deepEqual(clipOf(s.doc, clip).comp, [
+    { take_id: first.id, from_beat: 0, to_beat: 2 },
+    { take_id: punched.id, from_beat: 2, to_beat: 6 },
+  ], "the punched take covers the range and nothing else moves");
+  assert.deepEqual(written.result.after[`clip:${clip}|comp`], clipOf(s.doc, clip).comp);
+  assert.equal(takeOf(s.doc, second.id).discarded, true, "the discarded take keeps its row");
+  assert.deepEqual(takeOf(s.doc, punched.id), { ...punched, clip_id: clip, discarded: false });
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("R13: undoing the set_comp restores the old comp exactly and leaves the takes listed", (t) => {
+  const s = studio(t);
+  const track = addAudioTrack(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addAudioClip(s.doc, track, scene, 2);
+  const first = take();
+  const punched = take();
+  s.run("take.add", { clip_id: clip, take: first });
+  s.run("take.add", { clip_id: clip, take: punched });
+  const before = clipOf(s.doc, clip).comp;
+  assert.deepEqual(before, [{ take_id: first.id, from_beat: 0, to_beat: 8 }],
+    "the first take is the whole-clip comp");
+
+  const segments = spliceComp(before, punched.id, 2, 6, 8);
+  const step = s.run("clip.set_comp", { clip_id: clip, segments });
+  assert.deepEqual(step.result.before[`clip:${clip}|comp`], before, "the step carries the old comp");
+  assert.deepEqual(step.result.after[`clip:${clip}|comp`], segments, "and the new one");
+  assert.deepEqual(clipOf(s.doc, clip).comp, [
+    { take_id: first.id, from_beat: 0, to_beat: 2 },
+    { take_id: punched.id, from_beat: 2, to_beat: 6 },
+    { take_id: first.id, from_beat: 6, to_beat: 8 },
+  ]);
+
+  const undone = s.undo(step.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.deepEqual(clipOf(s.doc, clip).comp, before, "one undo gives the comp back exactly");
+  assert.deepEqual(
+    Object.keys(snapshot(s.doc).takes).sort(),
+    [first.id, punched.id].sort(),
+    "and both takes stay listed",
+  );
+  assert.equal(takeOf(s.doc, punched.id).discarded, false);
+  assert.deepEqual(checkInvariants(s.doc), []);
 });

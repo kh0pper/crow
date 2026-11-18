@@ -383,6 +383,8 @@
    *            seek: function(number): void,
    *            block: function(number, number): Array<object>,
    *            nextBarFrame: function(): {bar: number, beat: number, frame: number},
+   *            nextLoopFrame: function(string, string, number): {frame: number,
+   *              bar: number, looping: boolean},
    *            barLines: function(object): {barFrame: number|null,
    *              nextBarFrame: number|null, bar: number|null},
    *            clickBeats: function(number, number, object): {count: number,
@@ -1939,6 +1941,70 @@
     }
 
     /**
+     * The next loop boundary of one track's playing clip, in this sequencer's own
+     * frames — the answer to a host's `nextLoopFrame` request, which is where a
+     * recorder arms a take.
+     *
+     * A take is one whole loop pass of its clip, so every pass starts on a loop
+     * boundary of THAT clip: one of `seg.startBeat + k * clip.lengthBeats`, each
+     * boundary rounded once (never `round(origin + a) + round(b)`, which is a
+     * frame away from `round(origin + a + b)` at a fractional frames-per-beat).
+     * The first boundary whose rounded frame is at or after
+     * `frameNow() + minLeadFrames` is the answer, so a caller that arms there
+     * still has the whole lead to get the recorder armed: an arm has to be in
+     * the future, and the audio thread never catches a plan up.
+     *
+     * `looping` says whether that answer really is the armed clip's own grid. It
+     * is true only while the transport runs AND the clip the track plays right
+     * now is the armed clip. A track playing another clip, an empty slot and a
+     * stopped or paused transport all have no loop of the armed clip to follow:
+     * the answer is then `nextBarFrame()` with `looping: false`, which is the
+     * bar a take armed on before takes had a grid.
+     * @param {string} trackId
+     * @param {string|null} armedClipId the clip the take belongs to
+     * @param {number} minLeadFrames how far ahead of the next block the frame has
+     *   to be
+     * @returns {{frame: number, bar: number, looping: boolean}} `bar` is the
+     *   0-based transport bar the loop start sits on, by the same rounding a
+     *   launch report uses
+     */
+    function nextLoopFrame(trackId, armedClipId, minLeadFrames) {
+      const armed = armedClipId === null || armedClipId === undefined ? null : String(armedClipId);
+      const segs = segments.get(trackId);
+      const seg =
+        armed === null || !playing || originFrame === null || segs === undefined
+          ? null
+          : audibleSegment(segs, currentBeat());
+      const clip = seg !== null && seg.clipId === armed ? clips.get(armed) : undefined;
+
+      // No loop of the armed clip plays right now: the bar line is the answer,
+      // said so that a caller knows the take has no loop grid of its own.
+      if (!clip || !(clip.lengthBeats > 0)) {
+        const bar = nextBarFrame();
+        return { frame: bar.frame, bar: bar.bar, looping: false };
+      }
+
+      const lead = Number(minLeadFrames);
+      const target = frameNow() + (Number.isFinite(lead) && lead > 0 ? Math.round(lead) : 0);
+      // The first boundary whose ROUNDED frame is at or after the target: the
+      // same "x >= frame - 0.5" rule `nextBarFrom` uses for a bar line, so a
+      // boundary one frame past its rounded position is not skipped.
+      const from = (target - 0.5 - originFrame) / framesPerBeat;
+      let index = Math.ceil((from - seg.startBeat) / clip.lengthBeats - EPSILON_BEATS);
+      if (!(index > 0)) index = 0;
+      let atBeat = seg.startBeat + index * clip.lengthBeats;
+      let frame = Math.round(originFrame + atBeat * framesPerBeat);
+      // A boundary the target already stands past (the rounding above can put
+      // it a frame short) is no boundary at all: the following one is.
+      while (frame < target) {
+        index += 1;
+        atBeat = seg.startBeat + index * clip.lengthBeats;
+        frame = Math.round(originFrame + atBeat * framesPerBeat);
+      }
+      return { frame: frame, bar: Math.round(atBeat / BEATS_PER_BAR), looping: true };
+    }
+
+    /**
      * Fill a caller's own object with the bar lines around the playhead, in this
      * sequencer's own frames, WITHOUT allocating one: a host that reads them on
      * every block (the performance bus's looper quantizes to them) must not make
@@ -2846,6 +2912,7 @@
       seek: seek,
       block: block,
       nextBarFrame: nextBarFrame,
+      nextLoopFrame: nextLoopFrame,
       barLines: barLines,
       clickBeats: clickBeats,
       position: position,

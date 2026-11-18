@@ -1360,7 +1360,12 @@ export function createStudioWeb({
       }
       send(record.ws, { type: "error", error: "bad message" });
     } catch (err) {
-      send(record.ws, { type: "error", error: errorText(err) });
+      // The frame names the command it answers when the message carried an id:
+      // the page that sent it can let go of its wait instead of holding every
+      // later write for the same clip behind an answer that will never come.
+      const frame = { type: "error", error: errorText(err) };
+      if (cmd_id !== null) frame.cmd_id = cmd_id;
+      send(record.ws, frame);
     }
   }
 

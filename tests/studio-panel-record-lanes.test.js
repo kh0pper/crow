@@ -20,12 +20,17 @@
  *
  * The widget is view state from end to end: no case sends a command except the
  * mute, solo and arm buttons, which are the existing ones.
+ *
+ * The punch range (B7) is view state too: a drag across the armed lane sets it
+ * in clip beats, the lane draws it over the clip's placed beats, the options row
+ * says what it is and lets it go, and the device keeps it per song and per clip.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SHELL_SCRIPT } from "../bundles/studio/panel/shell.js";
 import { SHELL_LAYOUT_SCRIPT } from "../bundles/studio/panel/shell-layout.js";
+import { PUNCH_SCRIPT } from "../bundles/studio/panel/punch.js";
 
 /** The note track, whose lane shows a placement and cannot be armed. */
 const NOTE_TRACK = "bass";
@@ -46,6 +51,18 @@ const AUDIO_CLIP = "c-gtr";
 /** The placements, and the sections the ruler draws. */
 const NOTE_PLACEMENT = "p-notes";
 const AUDIO_PLACEMENT = "p-audio";
+
+/** The bar the audio placement puts its clip on, and the one a second clip takes. */
+const AUDIO_PLACEMENT_BAR = 4;
+const SECOND_PLACEMENT_BAR = 8;
+
+/** A second scene, its audio clip on the same track, and that clip's placement. */
+const SECOND_SCENE = "chorus";
+const SECOND_AUDIO_CLIP = "c-gtr2";
+const SECOND_PLACEMENT = "p-audio2";
+
+/** The sentence the options row wears while no punch range is set. */
+const PUNCH_NONE_TEXT = "Off. Drag across the armed lane to set a range.";
 
 /** The project the page's own song list names (nothing here lists a project). */
 const PROJECT = 61;
@@ -127,8 +144,34 @@ async function lanesDoc(options = {}) {
   return doc;
 }
 
-// ---- the fake browser ------------------------------------------------------
+/**
+ * The same song with a second audio clip on the recording track, in a scene of
+ * its own and placed further along the timeline: two clips, so a punch range
+ * can be shown to belong to one of them.
+ * @returns {Promise<object>}
+ */
+async function twoClipDoc() {
+  const doc = await lanesDoc();
+  const runCommand = await commands();
+  runCommand(doc, "scene.add", { id: SECOND_SCENE, name: "Chorus" });
+  runCommand(doc, "clip.add_audio", {
+    clip_id: SECOND_AUDIO_CLIP,
+    track_id: AUDIO_TRACK,
+    scene_id: SECOND_SCENE,
+    length_bars: 2,
+    name: "Guitar double",
+  });
+  runCommand(doc, "arrangement.place", {
+    id: SECOND_PLACEMENT,
+    track_id: AUDIO_TRACK,
+    clip_id: SECOND_AUDIO_CLIP,
+    start_bar: SECOND_PLACEMENT_BAR,
+    bars: 2,
+  });
+  return doc;
+}
 
+// ---- the fake browser ------------------------------------------------------
 /** An in-memory localStorage, so the shell's own layout store has somewhere to read. */
 function memoryStorage() {
   const values = new Map();
@@ -393,6 +436,16 @@ function fakeEngine() {
         splitAt(list) {
           recorder.splits = list;
         },
+        // The punch: the range the recorder keeps open on every pass, and the
+        // frame a range set mid-take takes over from (see engine-client.js).
+        gates: [],
+        gatePeriodic(spec) {
+          recorder.gates.push(spec);
+        },
+        gatedOff: 0,
+        gateOff() {
+          recorder.gatedOff += 1;
+        },
         dispose() {},
       };
       engine.recorders.push(recorder);
@@ -422,8 +475,11 @@ function fakeNavigator() {
 /**
  * Boot the emitted client script against the page the handler renders, with a
  * fake browser around it, and hand back what it drew and what it sent.
- * @param {{doc?: object, page?: string}} [options] `page` is left for a
- *   library-page case; the lanes cases all use the song page
+ * @param {{doc?: object, page?: string, song?: string, storage?: object,
+ *   latency?: object, clock?: number, outputLatency?: number}} [options] `page`
+ *   is left for a library-page case; the lanes cases all use the song page;
+ *   `song` opens another song of the same library; `storage` is this device's
+ *   own store, shared between two boots when a case opens a second song
  * @returns {Promise<object>}
  */
 async function bootLanes(options = {}) {
@@ -434,6 +490,7 @@ async function bootLanes(options = {}) {
   const { RECORD_VIEW_SCRIPT } = await import("../bundles/studio/panel/record-view.js");
   const { TAKE_STORE_SCRIPT } = await import("../bundles/studio/panel/take-store.js");
 
+  const songId = String(options.song || "song-1");
   const doc = options.doc || (await lanesDoc());
   const res = {
     html: "",
@@ -442,15 +499,19 @@ async function bootLanes(options = {}) {
     },
   };
   await (await import("../bundles/studio/panel/studio.js")).default.handler(
-    { query: { song: "song-1" }, headers: {} },
+    { query: { song: songId }, headers: {} },
     res,
     { db: panelDb(), layout: minimalLayout },
   );
-  assert.ok(res.html.includes('data-studio-song="song-1"'), "the handler rendered the song page");
+  assert.ok(
+    res.html.includes(`data-studio-song="${songId}"`),
+    "the handler rendered the song page",
+  );
   assert.ok(
     res.html.includes("StudioRecordView"),
     "the page carries the record view's rules before the client",
   );
+  assert.ok(res.html.includes("StudioPunch"), "and the punch rules");
   const { document, window: domWindow } = parseHTML(res.html);
 
   // A phone's page reports its visibility, and a case drives it: a hidden page
@@ -464,7 +525,10 @@ async function bootLanes(options = {}) {
   }
 
   const store = fakeTakeStore({ latency: options.latency });
-  const storage = memoryStorage();
+  const storage = options.storage || memoryStorage();
+  // This device's count-in: the rig records with it Off, which is the path a take
+  // has always taken (R4), so a launch report is what arms the recorder here.
+  storage.setItem("crow.studio.countin.v1", "0");
   const sessionValues = new Map();
   const engine = fakeEngine();
   const sent = [];
@@ -491,7 +555,7 @@ async function bootLanes(options = {}) {
     }
     if (target.includes("/project-bot")) return response(404, { error: "not_found" });
     if (target.includes("/api/studio/songs")) {
-      return response(200, [{ id: "song-1", project_id: PROJECT, title: "Record lanes song" }]);
+      return response(200, [{ id: songId, project_id: PROJECT, title: "Record lanes song" }]);
     }
     if (target.includes("/api/studio/takes")) {
       return response(503, { error: "Studio cannot take recordings on this instance." });
@@ -541,6 +605,8 @@ async function bootLanes(options = {}) {
       return frames.length;
     },
     cancelAnimationFrame() {},
+    // The page listens on the window for a drag's moves and release (and for its
+    // own beforeunload and online), so the rig keeps them and a case fires them.
     addEventListener(name, handler) {
       (windowListeners[name] ||= []).push(handler);
     },
@@ -563,8 +629,11 @@ async function bootLanes(options = {}) {
   assert.ok(windowStub.StudioShellLayout, "the layout model script is evaluated");
 
   // The record view's rules are emitted before the client in the page, and they
-  // are run in that order here: the lanes ask them for the two labels.
+  // are run in that order here: the lanes ask them for the two labels. The punch
+  // rules come beside them, and the client asks them whether a range fits.
   new Function("window", RECORD_VIEW_SCRIPT)(windowStub);
+  new Function("window", PUNCH_SCRIPT)(windowStub);
+  assert.ok(windowStub.StudioPunch, "the punch rules are evaluated");
   new Function("window", "navigator", TAKE_STORE_SCRIPT)(windowStub, fakeNavigator());
   windowStub.StudioTakeStore = store;
 
@@ -664,6 +733,16 @@ async function bootLanes(options = {}) {
     click(`[data-role=rec-lane][data-track-id=${trackId}] [data-act=arm-audio]`);
     await settle(24);
   };
+  /** One DOM event the way a browser sends it: bubbling, cancelable, with props. */
+  const event = (type, props) => {
+    const made = new domWindow.Event(type, { bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(props || {})) made[key] = value;
+    return made;
+  };
+  /** Send one event to the window, as a pointer on the page would. */
+  const fireWindow = (type, made) => {
+    for (const handler of [...(windowListeners[type] || [])]) handler(made);
+  };
   /** The one meter node the page built, or undefined. */
   const meterNode = () => document.querySelector("[data-role=rec-meter]");
 
@@ -687,6 +766,8 @@ async function bootLanes(options = {}) {
     mode,
     arm,
     meterNode,
+    event,
+    fireWindow,
     setVisibility(next) {
       visibility = String(next);
     },
@@ -1508,4 +1589,280 @@ test("on a phone the ruler drops its side column so the bars line up with the la
     "the ruler is one column, like the stacked lane body it sits over",
   );
   assert.doesNotMatch(phone, /116px/, "the 116 px side column is gone");
+});
+
+/** The studio sheet's whole text. */
+function studioRules(html) {
+  const style = /<style>([\s\S]*?)<\/style>/.exec(String(html));
+  assert.ok(style, "the page carries the studio sheet");
+  return style[1];
+}
+
+test("the lane's punch surface lets a vertical swipe scroll the page", async () => {
+  const res = {
+    html: "",
+    send(body) {
+      this.html = String(body);
+    },
+  };
+  await (await import("../bundles/studio/panel/studio.js")).default.handler(
+    { query: { song: "song-1" }, headers: {} },
+    res,
+    { db: panelDb(), layout: minimalLayout },
+  );
+  const found = /\.studio \.st-rec-lane-punch \{[^}]*\}/.exec(studioRules(res.html));
+  assert.ok(found, "the record target's punch surface has a rule of its own");
+  assert.match(
+    found[0],
+    /touch-action: pan-y;/,
+    "a swipe up or down the lane scrolls the page instead of being swallowed",
+  );
+  assert.doesNotMatch(found[0], /touch-action: none;/, "and nothing turns the whole gesture off");
+});
+
+// ---- the punch range (B7) -------------------------------------------------
+//
+// A punch is a stretch of the clip a take lands in, counted in CLIP beats:
+// dragging across the armed lane sets it, the lane draws it over the clip's
+// placed beats, and the options row says what it is and lets it go. It is this
+// device's own view state, kept per song and per clip, and none of it is a
+// command.
+
+/** 32 bars across a 320 px lane: 10 px a bar, 2.5 px a beat. */
+const BAR_PX = 10;
+const BEAT_PX = 2.5;
+
+/** The x a clip beat stands at, for a clip placed on `startBar`. */
+function punchX(beat, startBar) {
+  return startBar * BAR_PX + beat * BEAT_PX;
+}
+
+/** The punch range's key on this device, for one song and one clip. */
+function punchKey(songId, clipId) {
+  return "crow.studio.punch.v1." + songId + "." + clipId;
+}
+
+/** The audio lane's body, which is the surface a punch drag is measured on. */
+function laneBody(ui, trackId = AUDIO_TRACK) {
+  const body = ui.lane(trackId).querySelector("[data-role=rec-lane-body]");
+  assert.ok(body, "the lane carries a body");
+  return body;
+}
+
+/** Give a lane body a laid-out box: 32 bars of 10 px. */
+function stubLaneBox(body) {
+  body.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 128, right: 320, bottom: 128, x: 0, y: 0,
+  });
+  return body;
+}
+
+/** Drag across the armed lane, from one clip beat to another. */
+async function dragPunch(ui, fromBeat, toBeat, startBar = AUDIO_PLACEMENT_BAR) {
+  const body = stubLaneBox(laneBody(ui));
+  body.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: punchX(fromBeat, startBar) }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: punchX(toBeat, startBar) }));
+  ui.fireWindow("pointerup", ui.event("pointerup", { clientX: punchX(toBeat, startBar) }));
+  await ui.settle();
+}
+
+/** The options row's reading of the punch range. */
+function punchText(ui) {
+  const node = ui.document.querySelector("[data-role=punch-text]");
+  assert.ok(node, "the options row carries the punch reading");
+  return String(node.textContent);
+}
+
+/** The notice above the transport, as one string. */
+function noticeText(ui) {
+  return String(ui.document.querySelector("[data-role=rec-notice]").textContent);
+}
+
+test("a drag on the armed lane sets view.punch in clip beats and storage", async () => {
+  const ui = await bootLanes();
+  await ui.arm(AUDIO_TRACK);
+
+  assert.equal(ui.view().punch, null, "nothing is punched before a range is set");
+  assert.equal(punchText(ui), PUNCH_NONE_TEXT, "and the row says how a range is set");
+
+  await dragPunch(ui, 1, 5);
+
+  assert.deepEqual(ui.view().punch, { from: 1, to: 5 }, "the range is in clip beats");
+  assert.equal(ui.view().punchClip, AUDIO_CLIP, "on the clip a take lands in");
+  assert.equal(ui.storage.getItem(punchKey("song-1", AUDIO_CLIP)), "1:5", "and this device keeps it");
+
+  const band = ui.document.querySelector("[data-role=rec-punch]");
+  assert.ok(band, "the armed lane draws the range");
+  assert.equal(band.getAttribute("data-clip-id"), AUDIO_CLIP);
+  assert.equal(band.getAttribute("data-from"), "1");
+  assert.equal(band.getAttribute("data-to"), "5");
+  // The clip is placed on bar 5 and is two bars long, so its beat 1 is a quarter
+  // of a bar in, and a four-beat range is one of the ruler's thirty-two bars.
+  assert.equal(band.style.left, "13.281%", "the band starts on the clip's own first bar and beat");
+  assert.equal(band.style.width, "3.125%", "and spans the range over the clip's placed bars");
+  assert.match(String(band.textContent), /applies on every pass/);
+  assert.match(punchText(ui), /beats 1 to 5/, "the row names the range in clip beats");
+  assert.equal(commandsSent(ui, "clip.set_comp").length, 0, "a range is view state and sends no command");
+  assert.equal(commandsSent(ui, "arrangement.place").length, 0, "and places nothing");
+});
+
+test("a reversed or empty range is refused with a notice and nothing is stored", async () => {
+  const ui = await bootLanes();
+  await ui.arm(AUDIO_TRACK);
+  const set = (from, to) => ui.page.__studioTest.setPunch(from, to);
+
+  assert.equal(set(5, 2), false, "a reversed pair is refused");
+  assert.equal(ui.view().punch, null, "and nothing becomes the range");
+  assert.match(noticeText(ui), /end after it starts/, "the notice says what a range has to be");
+
+  assert.equal(set(3, 3), false, "an empty pair is refused too");
+  assert.match(noticeText(ui), /end after it starts/);
+
+  // The clip is two bars long, so a range that runs past its end is outside it.
+  assert.equal(set(2, 20), false, "a range past the clip's end is refused");
+  assert.match(noticeText(ui), /outside this clip/);
+
+  assert.equal(ui.storage.getItem(punchKey("song-1", AUDIO_CLIP)), null, "nothing was stored");
+  assert.equal(ui.document.querySelector("[data-role=rec-punch]"), null, "and the lane draws no band");
+});
+
+test("Clear removes the range and the storage key", async () => {
+  const ui = await bootLanes();
+  await ui.arm(AUDIO_TRACK);
+  await dragPunch(ui, 2, 6);
+  assert.equal(ui.storage.getItem(punchKey("song-1", AUDIO_CLIP)), "2:6", "the range is kept");
+
+  ui.click("[data-act=punch-clear]");
+  await ui.settle();
+
+  assert.equal(ui.view().punch, null, "the range is gone from the page");
+  assert.equal(ui.storage.getItem(punchKey("song-1", AUDIO_CLIP)), null, "and from this device");
+  assert.equal(ui.document.querySelector("[data-role=rec-punch]"), null, "the lane draws no band");
+  assert.equal(punchText(ui), PUNCH_NONE_TEXT, "the row says no range is set");
+});
+
+test("the key is per song and per clip: a second clip keeps its own range", async () => {
+  const ui = await bootLanes({ doc: await twoClipDoc() });
+  await ui.arm(AUDIO_TRACK);
+  ui.view().lastScene = SCENE;
+  await ui.pushState();
+  assert.equal(ui.view().punchClip, AUDIO_CLIP, "the record target's clip in the launched scene");
+
+  await dragPunch(ui, 1, 5);
+  const firstKey = punchKey("song-1", AUDIO_CLIP);
+  const secondKey = punchKey("song-1", SECOND_AUDIO_CLIP);
+  assert.equal(ui.storage.getItem(firstKey), "1:5");
+
+  // The other scene's clip is another clip, so it has a range of its own (none
+  // yet), and the first clip's range is left exactly where it is.
+  ui.view().lastScene = SECOND_SCENE;
+  await ui.pushState();
+  assert.equal(ui.view().punchClip, SECOND_AUDIO_CLIP);
+  assert.equal(ui.view().punch, null, "a clip with no stored range starts with none");
+  assert.equal(ui.document.querySelector("[data-role=rec-punch]"), null, "and draws no band");
+  assert.equal(ui.storage.getItem(firstKey), "1:5", "the first clip's range is untouched");
+
+  await dragPunch(ui, 1, 3, SECOND_PLACEMENT_BAR);
+  assert.deepEqual(ui.view().punch, { from: 1, to: 3 }, "the second clip's range is its own");
+  assert.equal(ui.storage.getItem(secondKey), "1:3", "kept under its own key");
+  assert.equal(ui.storage.getItem(firstKey), "1:5", "and the first clip's is still there");
+
+  // Back to the first clip: the page reads that clip's own range again.
+  ui.view().lastScene = SCENE;
+  await ui.pushState();
+  assert.deepEqual(ui.view().punch, { from: 1, to: 5 }, "the first clip's range is what the page holds");
+  const band = ui.document.querySelector("[data-role=rec-punch]");
+  assert.equal(band.getAttribute("data-clip-id"), AUDIO_CLIP, "and the band is over the first clip again");
+});
+
+test("a range set while a take runs is stored and applies from the next pass", async () => {
+  // The clip already holds a take, so its comp is something a punch can replace.
+  const doc = await lanesDoc();
+  const runCommand = await commands();
+  runCommand(doc, "take.add", {
+    clip_id: AUDIO_CLIP,
+    take: {
+      id: "6f1c1f7a-0000-4000-8000-00000000000a",
+      storage_key: "projects/61/studio/song-1/takes/6f1c1f7a-0000-4000-8000-00000000000a.wav",
+      rate: 48000,
+      channels: 2,
+      frames: 96000,
+      offset_frames: 0,
+      compensated: false,
+      bpm: 120,
+      recorded_at: "2026-01-01T10:00:00.000Z",
+      author_label: "You",
+      discarded: false,
+    },
+  });
+  // The page's clock stands well inside pass 0 (192,000 frames is four seconds),
+  // so the next pass's boundary is further off than the lead the engine needs to
+  // arm a recorder: the new range takes over on that next pass.
+  const ui = await bootLanes({ doc, latency: TAP_LATENCY, clock: 4, outputLatency: OUTPUT_LATENCY });
+  await ui.arm(AUDIO_TRACK);
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  for (const listener of ui.engine.launches) {
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: ARM_FRAME });
+  }
+  await ui.settle();
+  assert.equal(ui.view().rec.active, true, "the take is running");
+  assert.equal(ui.view().punchNext, false, "nothing is waiting for a later pass yet");
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.deepEqual(recorder.gates, [], "a take with no range has no gate");
+
+  await dragPunch(ui, 1, 5);
+
+  assert.deepEqual(ui.view().punch, { from: 1, to: 5 }, "the range is set");
+  assert.equal(ui.view().punchNext, true, "and marked to apply from the next pass");
+  assert.equal(ui.storage.getItem(punchKey("song-1", AUDIO_CLIP)), "1:5", "and kept on this device");
+  const next = ui.document.querySelector("[data-role=punch-next]");
+  assert.ok(next, "the row says this pass is not the one it applies to");
+  assert.match(String(next.textContent), /next pass/);
+  assert.match(noticeText(ui), /next pass/);
+  const band = ui.document.querySelector("[data-role=rec-punch]");
+  assert.equal(band.getAttribute("data-to"), "5", "the lane draws it where it will be recorded");
+
+  // The recorder is handed the new range for the pass after this one: the pass
+  // already armed keeps the gate it started with.
+  const rec = ui.view().rec;
+  assert.equal(recorder.gates.length, 1, "the new range reaches the recorder once");
+  assert.deepEqual(rec.punch_plan, [{ from_pass: 1, from: 1, to: 5 }],
+    "the take's plan records the new range from the next pass on");
+  const gate = recorder.gates[0];
+  assert.equal(gate.anchorFrame, rec.anchor, "on the take's own anchor");
+  assert.equal(gate.loopFrames, rec.loop_frames, "and its own pass length");
+  assert.equal(gate.fromFrames, 1 * rec.fpb, "opening on the range's first beat");
+  assert.equal(gate.toFrames, 5 * rec.fpb, "and closing on its end");
+  assert.equal(gate.offsetFrames, rec.offset_frames, "moved by the input delay the take is cut by");
+  assert.equal(
+    gate.activeFrom,
+    rec.anchor + Math.round(rec.loop_frames) + rec.offset_frames,
+    "it takes over at the first frame of the next pass",
+  );
+});
+
+test("view.punch survives a render, and another song starts with none of it", async () => {
+  const storage = memoryStorage();
+  const ui = await bootLanes({ storage });
+  await ui.arm(AUDIO_TRACK);
+  await dragPunch(ui, 2, 6);
+  assert.equal(ui.storage.getItem(punchKey("song-1", AUDIO_CLIP)), "2:6");
+
+  await ui.pushState();
+  assert.deepEqual(ui.view().punch, { from: 2, to: 6 }, "a render keeps the page's own range");
+  assert.equal(
+    ui.document.querySelector("[data-role=rec-punch]").getAttribute("data-from"),
+    "2",
+    "and the band with it",
+  );
+
+  // Another song on the same device has a key of its own: the range above
+  // belongs to the first song, and none of it is drawn in the second.
+  const other = await bootLanes({ song: "song-2", storage });
+  await other.arm(AUDIO_TRACK);
+  assert.equal(other.view().punch, null, "another song starts with no punched range");
+  assert.equal(other.document.querySelector("[data-role=rec-punch]"), null, "and its lane draws no band");
+  assert.equal(other.storage.getItem(punchKey("song-2", AUDIO_CLIP)), null);
+  assert.equal(other.storage.getItem(punchKey("song-1", AUDIO_CLIP)), "2:6", "the first song keeps its own");
 });

@@ -800,6 +800,31 @@ test("two hellos back to back join only the first song", async (t) => {
   assert.equal(update.entry.args.id, "first-scene");
 });
 
+test("a command that throws answers an error frame carrying its cmd_id", async (t) => {
+  const { port, hub } = await boot(t);
+  const songId = await seedSong(hub);
+
+  const ws = connect(t, port);
+  const next = collector(ws);
+  await opened(ws);
+  ws.send(JSON.stringify({ type: "hello", csrf: "csrf-ok", song_id: songId, client_id: "client-a" }));
+  await next((msg) => msg.type === "state");
+
+  // A command that throws on the server's side. The frame that answers it has to
+  // name the command it answers: a page that only heard a sentence would wait for
+  // ever, and every later write for the same clip is chained behind that wait.
+  const runCommand = hub.runCommand.bind(hub);
+  hub.runCommand = (request) => {
+    if (request.command === "clip.set_comp") throw new Error("storage refused");
+    return runCommand(request);
+  };
+
+  ws.send(JSON.stringify({ type: "command", cmd_id: "comp-1", command: "clip.set_comp", args: {} }));
+  const error = await next((msg) => msg.type === "error");
+  assert.equal(error.cmd_id, "comp-1", "the error frame names the command it answers");
+  assert.equal(error.error, INTERNAL_TEXT, "with the fixed sentence a fault is reported with");
+});
+
 test("a superseded socket's close leaves the live client's presence alone", async (t) => {
   const { port, hub } = await boot(t);
   const songId = await seedSong(hub);

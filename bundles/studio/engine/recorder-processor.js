@@ -22,6 +22,10 @@
  * - `{type:"split", frames:[…]}` — absolute frames at which a new take segment
  *   begins (loop recording: one pass, one take). Segments are numbered from 0
  *   and `segment` in every chunk names the one it belongs to.
+ * - `{type:"gate", anchorFrame, loopFrames, fromFrames, toFrames,
+ *   offsetFrames, activeFrom}` — a punch: the same stretch of every loop pass
+ *   is the only part of the take that holds the input (see "The gate" below).
+ * - `{type:"gate_off"}` — no gate: every captured frame is the input again.
  *
  * recorder → client:
  *
@@ -32,6 +36,32 @@
  * - `{type:"done", segments:[{segment, start_frame, frames}]}` — posted once,
  *   as soon as the stop frame is reached.
  * - `{type:"error", error}` — a fault, reported once.
+ *
+ * ## The gate
+ *
+ * A punch range is one stretch of a clip, and a loop-recorded pass is that
+ * clip: the range applies to EVERY pass, so the gate is periodic rather than a
+ * list — nothing to top up, nothing to allocate, no cap on the number of
+ * ranges. The worklet keeps two preallocated slots (`gateCurrent` in force,
+ * `gateNext` waiting) and a message fills `next` in place. The slot that judges
+ * a frame is chosen per frame — `next` once `frame >= next.activeFrom`, the
+ * running slot before that — and the two objects are also traded at a block
+ * start that has reached that frame, which makes the change permanent. A gate
+ * is defined only for frames at or after `anchor + offsetFrames` (before that
+ * the take is open), so a gate that arrives before the arm frame — or a
+ * replacement mid-pass, sent with the next pass's own start — never gates a
+ * pass that is already running.
+ *
+ * Inside a gate a frame is recorded as digital silence when it lies outside
+ * `[on, off)` of its pass. It is still counted and chunked, so a gated pass
+ * keeps its full length, its chunk numbering and its `segment` entry: a take's
+ * beat 0 stays the clip's beat 0. Pass membership uses the same rounded
+ * boundaries the page's splits do (`anchor + round(k * loopFrames) +
+ * offsetFrames`), and `on`/`off` are the expression `panel/punch.js`
+ * `passGateRanges` uses — `round(anchor + k * loopFrames + offsetFrames +
+ * fromFrames)` and the same with `toFrames` — so the gate and the page agree on
+ * a frame, including at a seam where the loop length is not a whole number of
+ * frames.
  *
  * ## Encoding
  *
@@ -89,6 +119,25 @@
   function wholeFrame(value) {
     const number = Number(value);
     return Number.isFinite(number) ? Math.trunc(number) : null;
+  }
+
+  /**
+   * @param {unknown} value a number a client sent
+   * @returns {number|null} the number, or null when it is not a finite one
+   */
+  function reading(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  /**
+   * A gate slot with nothing in it. Two of these live for the whole processor;
+   * a message fills one in place and `swapGate()` trades the two.
+   * @returns {{anchorFrame: number, loopFrames: number, fromFrames: number,
+   *            toFrames: number, offsetFrames: number, activeFrom: number}}
+   */
+  function emptyGate() {
+    return { anchorFrame: 0, loopFrames: 0, fromFrames: 0, toFrames: 0, offsetFrames: 0, activeFrom: 0 };
   }
 
   /** One AudioWorkletProcessor that records an input as 24-bit PCM chunks. */
@@ -150,6 +199,18 @@
       /** Whether a fault has been reported already. */
       this.failureReported = false;
 
+      /**
+       * The punch gate: two preallocated slots, `current` (in force) and `next`
+       * (waiting for its `activeFrom`). A message fills `next`; the block loop
+       * swaps the two objects, never their fields, so nothing is allocated on
+       * the audio thread. With both slots off the recorder is exactly the
+       * recorder it was before the gate existed.
+       */
+      this.gateCurrent = emptyGate();
+      this.gateNext = emptyGate();
+      this.gateCurrentOn = false;
+      this.gateNextOn = false;
+
       this.port.onmessage = (event) => {
         try {
           this.receive(event && event.data);
@@ -160,7 +221,7 @@
     }
 
     /**
-     * One message from the client: arm, stop or split.
+     * One message from the client: arm, stop, split or gate.
      * @param {object} message
      * @returns {void}
      */
@@ -185,7 +246,114 @@
         frames.sort((left, right) => left - right);
         this.splits = frames;
         this.nextSplit = 0;
+        return;
       }
+      if (message.type === "gate") {
+        this.receiveGate(message);
+        return;
+      }
+      if (message.type === "gate_off") {
+        this.gateCurrentOn = false;
+        this.gateNextOn = false;
+        return;
+      }
+    }
+
+    /**
+     * A punch range: fill the waiting slot with it. The slot judges every frame
+     * from `activeFrom` on, and is traded into place at the first block that
+     * reaches that frame.
+     * @param {object} message
+     * @returns {void}
+     */
+    receiveGate(message) {
+      const anchorFrame = reading(message.anchorFrame);
+      const loopFrames = reading(message.loopFrames);
+      const fromFrames = reading(message.fromFrames);
+      const toFrames = reading(message.toFrames);
+      const offsetFrames = message.offsetFrames === undefined ? 0 : reading(message.offsetFrames);
+      const activeFrom = message.activeFrom === undefined ? null : reading(message.activeFrom);
+      if (
+        anchorFrame === null ||
+        loopFrames === null ||
+        fromFrames === null ||
+        toFrames === null ||
+        offsetFrames === null ||
+        (message.activeFrom !== undefined && activeFrom === null)
+      ) {
+        this.complain("a gate needs a frame for every one of its numbers");
+        return;
+      }
+      if (!(loopFrames > 0)) {
+        this.complain("a gate needs a pass longer than no frames");
+        return;
+      }
+      if (!(toFrames > fromFrames)) {
+        this.complain("a gate has to end after it begins");
+        return;
+      }
+      const slot = this.gateNext;
+      slot.anchorFrame = anchorFrame;
+      slot.loopFrames = loopFrames;
+      slot.fromFrames = fromFrames;
+      slot.toFrames = toFrames;
+      slot.offsetFrames = offsetFrames;
+      slot.activeFrom = activeFrom === null ? anchorFrame + offsetFrames : activeFrom;
+      this.gateNextOn = true;
+    }
+
+    /**
+     * Trade the two slots once this block has reached the waiting one's
+     * `activeFrom`, so the change is permanent. Which slot judges a frame is
+     * decided per frame in `gateSilentAt`, so this only trades the objects: a
+     * frame of this block at or after `activeFrom` reads the same slot before
+     * and after the trade, and every frame before it stays on the slot that was
+     * already running.
+     * @param {number} base this block's first context frame
+     * @returns {void}
+     */
+    swapGate(base) {
+      if (!this.gateNextOn) return;
+      if (base < this.gateNext.activeFrom) return;
+      const incoming = this.gateNext;
+      this.gateNext = this.gateCurrent;
+      this.gateCurrent = incoming;
+      this.gateCurrentOn = true;
+      this.gateNextOn = false;
+    }
+
+    /**
+     * Whether this frame is outside the open range of its pass, and so recorded
+     * as silence. The slot is chosen per frame: the waiting one judges a frame
+     * that has reached its `activeFrom`, the running one judges the frames
+     * before it — so a gate takes effect on its exact first frame, even in the
+     * middle of a block, and a pass that is already running keeps the range it
+     * started with. Nothing is gated before the gate's own first frame, and a
+     * recorder with no gate passes every frame.
+     * @param {number} frame the absolute frame
+     * @returns {boolean}
+     */
+    gateSilentAt(frame) {
+      let gate = null;
+      if (this.gateNextOn && frame >= this.gateNext.activeFrom) gate = this.gateNext;
+      else if (this.gateCurrentOn) gate = this.gateCurrent;
+      if (gate === null) return false;
+      const anchor = gate.anchorFrame;
+      const offset = gate.offsetFrames;
+      const loop = gate.loopFrames;
+      // The gate is defined only from the take's first frame: before it every
+      // frame is the input, so a gate can never bite into a pass already running.
+      if (frame < anchor + offset) return false;
+      // Which pass, then corrected by one against the same rounded boundaries
+      // the page's splits use — so a fractional pass length can never put the
+      // first frame of a pass inside the previous pass's range, or the last frame
+      // of a pass outside its own.
+      let pass = Math.floor((frame - anchor - offset) / loop);
+      if (frame < anchor + Math.round(pass * loop) + offset) pass -= 1;
+      else if (frame >= anchor + Math.round((pass + 1) * loop) + offset) pass += 1;
+      const on = Math.round(anchor + pass * loop + offset + gate.fromFrames);
+      const off = Math.round(anchor + pass * loop + offset + gate.toFrames);
+      return frame < on || frame >= off;
     }
 
     /**
@@ -219,6 +387,7 @@
     block(input, count) {
       if (this.stopped) return;
       const base = this.contextOffset() + this.frame;
+      this.swapGate(base);
       const first = input && input[0] ? input[0] : null;
 
       // Armed on a frame that has already gone by: start there from the
@@ -314,8 +483,11 @@
         return true;
       }
 
+      // A frame outside the punch range is recorded as digital silence; it is
+      // still counted, so the pass keeps its full length and chunk numbering.
+      const silent = this.gateSilentAt(frame);
       for (let channel = 0; channel < this.channels; channel += 1) {
-        this.pending[this.pendingFrames * this.channels + channel] = sampleAt(channel);
+        this.pending[this.pendingFrames * this.channels + channel] = silent ? 0 : sampleAt(channel);
       }
       this.pendingFrames += 1;
       this.segmentFrames += 1;
@@ -413,6 +585,16 @@
         this.frameOffset = now === null ? 0 : now - this.frame;
       }
       return this.frameOffset;
+    }
+
+    /**
+     * Report a message the recorder could not use, without stopping: a gate
+     * with a bad number is ignored and the take carries on ungated by it.
+     * @param {string} text
+     * @returns {void}
+     */
+    complain(text) {
+      this.port.postMessage({ type: "error", error: text });
     }
 
     /**

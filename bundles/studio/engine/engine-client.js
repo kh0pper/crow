@@ -120,6 +120,13 @@
  * - `nextBarFrame()` asks for the next bar boundary on the same clock and
  *   resolves `{frame, bar}` (0-based bar; while the transport is stopped, the
  *   frame bar 0 would start at).
+ * - `nextLoopFrame(track_id, clip_id)` asks for the next LOOP boundary of that
+ *   track's playing clip — the frame the next pass of a take starts on — and
+ *   resolves `{frame, bar, looping}`. `looping` is false when the track is not
+ *   playing that clip (an empty slot, another clip, a stopped transport), and
+ *   the answer is then the next bar line. It is at least `MIN_ARM_LEAD` frames
+ *   ahead whenever `looping` is true, so a recorder armed there arms on a frame
+ *   the engine has not rendered yet.
  * - `setMode("session" | "arrangement")` and `seek(bar)` choose what the
  *   transport plays: the session grid, where launches arm clips, or the song's
  *   arrangement, where its placements sound on their bars. Switching mode
@@ -135,6 +142,19 @@
  *   running (or is already paused) does nothing. `stop()` puts the transport
  *   back to the start — bar 1 in the session, the seek bar on the timeline — and
  *   is what a load that waits for Stop lands on.
+ * - `play({countInBars})` with 1, 2 or 4 bars counts the song in instead of
+ *   starting it at once. The engine picks the frame the song starts on (the
+ *   first block start at least that many beats ahead), rings one click per beat
+ *   with the first beat of every count-in bar accented, and starts the song —
+ *   or, after a pause, resumes it at the paused position — on that frame. The
+ *   count-in is a monitor signal: it is never in a take, a tap, a meter reading
+ *   or a render, and it clicks with the metronome switched off. `onCountIn()`
+ *   follows `{type:"count_in_start", play_frame}` (at once, before the first
+ *   click), `{type:"count_in", beat, beats, frame, play_frame}` (one per click)
+ *   and `{type:"count_in_done", frame}`; every frame is in AudioContext frames.
+ *   `cancelCountIn()` stops the clicks and leaves the transport exactly as it
+ *   was. Stop and Pause cancel a count-in too, and a `play()` during one is
+ *   ignored.
  * - `setMetronome(on)` turns the engine's metronome click on or off: while the
  *   transport plays, one short click (~25 ms of a sine with a fast decay) on
  *   every quarter-note beat, 1500 Hz and louder on the first beat of an engine
@@ -461,6 +481,16 @@
 
   /** How many bars the looper's buffers hold: the longest take it records. */
   const LOOPER_BARS = 8;
+
+  /**
+   * How far ahead of the engine's next block a take's arm frame has to be, in
+   * frames: about 170 ms at 48 kHz. A take is armed for the next loop boundary
+   * of its clip, and the page has to get the recorder armed before that frame is
+   * rendered: the audio thread never replays a late plan, so the boundary asked
+   * for is always at least this far ahead. The recorder's own replay of a late
+   * arm is only the safety net for a stalled page.
+   */
+  const MIN_ARM_LEAD = 8192;
 
   /**
    * How many pads may ROLL at once: the engine's own limit, worked out here too so
@@ -1105,7 +1135,8 @@
    *                    launchClip: function(string): void,
    *                    stopTrack: function(string): void,
    *                    stopAll: function(): void,
-   *                    play: function(): void,
+   *                    play: function(object): void,
+   *                    cancelCountIn: function(): void,
    *                    stop: function(): void,
    *                    resetLive: function(): void,
    *                    pauseVoices: function(boolean): void,
@@ -1118,7 +1149,10 @@
    *                    flush: function(): Promise<void>,
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
+   *                    onCountIn: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
+   *                    nextLoopFrame: function(string, string): Promise<{frame: number,
+   *                      bar: number, looping: boolean}>,
    *                    onTap: function(function): function,
    *                    onPadEvent: function(function): function,
  *                    onMeter: function(function): function,
@@ -1373,7 +1407,8 @@
    * The caller arms it on a frame the engine reported (`onLaunch`, Task 2) and
    * stops it on a frame it computes itself (a take's `offset_frames` included,
    * so the compensated take keeps its tail). `splitAt` cuts one recording into
-   * one take segment per loop pass.
+   * one take segment per loop pass. `gatePeriodic` is the punch: the same
+   * stretch of every pass is the only part of a take that holds the input.
    *
    * @param {BaseAudioContext} context
    * @param {{assetBase?: string, assetBytes?: object}} engineOptions
@@ -1383,6 +1418,8 @@
    *                    armAt: function(number): void,
    *                    stopAt: function(number): void,
    *                    splitAt: function(number[]): void,
+   *                    gatePeriodic: function(object): void,
+   *                    gateOff: function(): void,
    *                    onChunk: function(function): function,
    *                    onDone: function(function): function,
    *                    dispose: function(): void}>}
@@ -1486,6 +1523,67 @@
         const list = [];
         for (const value of Array.isArray(frames) ? frames : []) list.push(frameNumber(value, "splitAt"));
         post({ type: "split", frames: list });
+      },
+
+      /**
+       * Punch: from here on, a frame of a take holds the input only inside a
+       * stretch of its pass, and is digital silence outside it. The stretch is
+       * the same on every pass, so the gate is periodic — one range, no cap and
+       * nothing to top up. A gated frame is still counted, so every pass keeps
+       * its full length and its own segment.
+       *
+       * `fromFrames` and `toFrames` are frames into the pass (`beat * fpb`), and
+       * `offsetFrames` is the input delay the take's own offset carries, so the
+       * range is moved onto the frames the input arrives on. A pass is
+       * `loopFrames` long from `anchorFrame`, the take's first context frame.
+       *
+       * `activeFrom` is the first frame the new range may gate (default: the
+       * take's first frame). A page that replaces the range while a take runs
+       * sends the next pass's start, so the pass already running keeps the range
+       * it started with. Values that are not finite, a pass of no frames, or a
+       * range that ends before it begins are refused: that is a caller's bug, not
+       * something to hand the audio thread.
+       *
+       * @param {{anchorFrame: number, loopFrames: number, fromFrames: number,
+       *          toFrames: number, offsetFrames?: number, activeFrom?: number}} spec
+       * @returns {void}
+       */
+      gatePeriodic(spec) {
+        const source = spec && typeof spec === "object" ? spec : {};
+        const anchorFrame = frameNumber(source.anchorFrame, "gatePeriodic");
+        const offsetFrames =
+          source.offsetFrames === undefined ? 0 : frameNumber(source.offsetFrames, "gatePeriodic");
+        const loopFrames = Number(source.loopFrames);
+        const fromFrames = Number(source.fromFrames);
+        const toFrames = Number(source.toFrames);
+        if (!Number.isFinite(loopFrames) || loopFrames <= 0) {
+          throw new Error("StudioEngine: gatePeriodic needs a pass of more than no frames");
+        }
+        if (!Number.isFinite(fromFrames) || !Number.isFinite(toFrames) || !(toFrames > fromFrames)) {
+          throw new Error("StudioEngine: gatePeriodic needs fromFrames before toFrames");
+        }
+        const activeFrom =
+          source.activeFrom === undefined
+            ? anchorFrame + offsetFrames
+            : frameNumber(source.activeFrom, "gatePeriodic");
+        post({
+          type: "gate",
+          anchorFrame: anchorFrame,
+          loopFrames: loopFrames,
+          fromFrames: fromFrames,
+          toFrames: toFrames,
+          offsetFrames: offsetFrames,
+          activeFrom: activeFrom,
+        });
+      },
+
+      /**
+       * Take the gate off again (the next block on): every captured frame is the
+       * input, exactly as a recorder without a gate.
+       * @returns {void}
+       */
+      gateOff() {
+        post({ type: "gate_off" });
       },
 
       /**
@@ -1786,6 +1884,8 @@
     /** Whether the engine was already asked to record pad events. */
     let padEventsAsked = false;
     const meterListeners = new Set();
+    /** Followers of the count-in's own messages (see `onCountIn`). */
+    const countInListeners = new Set();
     const masterLatencyListeners = new Set();
     const insertFaultListeners = new Set();
     const insertLoadingListeners = new Set();
@@ -1819,6 +1919,9 @@
     let flushSeq = 0;
     const barRequests = new Map();
     let barSeq = 0;
+    /** request id → the resolver waiting for the processor's `nextLoopFrame`. */
+    const loopRequests = new Map();
+    let loopSeq = 0;
     /** take id → resolvers waiting for the processor's `audio_loaded`. */
     const pendingAudio = new Map();
     /** sample id → resolvers waiting for the processor's `sample_loaded`. */
@@ -2003,11 +2106,46 @@
         }
         return;
       }
+      if (message.type === "count_in_start" || message.type === "count_in" || message.type === "count_in_done") {
+        // The count-in's own three messages, passed on as the processor spelled
+        // them: `play_frame` is the frame the song starts on (and the one a take
+        // arms on), `frame` a click's frame or the frame the song did start on.
+        // A page that follows no count-in costs nothing here.
+        if (countInListeners.size === 0) return;
+        const countIn =
+          message.type === "count_in"
+            ? {
+                type: "count_in",
+                beat: Number(message.beat),
+                beats: Number(message.beats),
+                frame: Number(message.frame),
+                play_frame: Number(message.play_frame),
+              }
+            : message.type === "count_in_start"
+              ? { type: "count_in_start", play_frame: Number(message.play_frame) }
+              : { type: "count_in_done", frame: Number(message.frame) };
+        for (const listener of countInListeners) {
+          try {
+            listener(countIn);
+          } catch {
+            /* one bad listener must not stop the count-in for the others */
+          }
+        }
+        return;
+      }
       if (message.type === "nextBarFrame") {
         const resolveFrame = barRequests.get(message.id);
         if (resolveFrame) {
           barRequests.delete(message.id);
           resolveFrame({ frame: message.frame, bar: message.bar });
+        }
+        return;
+      }
+      if (message.type === "nextLoopFrame") {
+        const resolveLoop = loopRequests.get(message.id);
+        if (resolveLoop) {
+          loopRequests.delete(message.id);
+          resolveLoop({ frame: message.frame, bar: message.bar, looping: message.looping === true });
         }
         return;
       }
@@ -2427,9 +2565,37 @@
         post({ type: "stopAll" });
       },
 
-      /** @returns {void} */
-      play() {
-        post({ type: "play" });
+      /**
+       * Start the transport, or carry on from a pause — with a count-in when one
+       * is asked for.
+       *
+       * `countInBars` of 1, 2 or 4 makes the ENGINE count that many bars of
+       * clicks and pick the frame the song starts on (the first block start at
+       * least that many beats ahead), announced to `onCountIn()` before the first
+       * click. The page never counts itself, so a timer cannot drift the start. A
+       * count-in on a paused transport resumes it at the paused position instead
+       * of restarting it. With no option, with 0, or with any other number this
+       * is the plain Play it always was.
+       * @param {{countInBars?: number}} [options]
+       * @returns {void}
+       */
+      play(options) {
+        const countInBars = options && typeof options === "object" ? Math.trunc(Number(options.countInBars)) : 0;
+        post({
+          type: "play",
+          count_in_bars: countInBars === 1 || countInBars === 2 || countInBars === 4 ? countInBars : 0,
+        });
+      },
+
+      /**
+       * Stop a count-in and change nothing else: no further click starts (one
+       * already ringing finishes) and the transport is left exactly as it was —
+       * stopped, or paused at the position it was paused on. Stop and Pause
+       * cancel a count-in as well, so this is the page's own "cancel" only.
+       * @returns {void}
+       */
+      cancelCountIn() {
+        post({ type: "count_in_cancel" });
       },
 
       /**
@@ -2567,6 +2733,33 @@
       },
 
       /**
+       * Follow a count-in (`play({countInBars})`). The listener is handed the
+       * engine's own messages as it posts them:
+       *
+       *     {type: "count_in_start", play_frame}
+       *     {type: "count_in", beat, beats, frame, play_frame}
+       *     {type: "count_in_done", frame}
+       *
+       * `play_frame` is the AudioContext frame the song will start on (or the
+       * one it did start on), posted the moment the count-in is accepted and
+       * hundreds of ms before the first click, so a recorder can arm a take on a
+       * frame the engine has not rendered yet. `beat` is 1-based, so the
+       * accented clicks are beats 1, 5, 9 … and `frame` is a click's own frame in
+       * the same clock. `count_in_done` is posted by the block that started the
+       * song — a cancelled count-in posts none.
+       * @param {(event: {type: string, play_frame?: number, beat?: number,
+       *                 beats?: number, frame?: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onCountIn(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        countInListeners.add(listener);
+        return function unsubscribe() {
+          countInListeners.delete(listener);
+        };
+      },
+
+      /**
        * The next bar boundary, on the engine's clock: `frame` is an
        * AudioContext frame and `bar` is the 0-based bar it belongs to. While
        * the transport is stopped this is the frame bar 0 would start at. It is
@@ -2582,6 +2775,44 @@
         return new Promise((resolve) => {
           barRequests.set(id, resolve);
           post({ type: "nextBarFrame", id: id });
+        });
+      },
+
+      /**
+       * The next LOOP boundary of a track's playing clip, on the engine's clock:
+       * `frame` is an AudioContext frame, `bar` the 0-based transport bar that
+       * loop start sits on, and `looping` whether the answer really is the armed
+       * clip's own grid.
+       *
+       * A take is one whole loop pass of its clip, so every pass of it starts on
+       * a loop boundary of that clip: this is where a recorder arms a take it
+       * starts while the transport already runs, so a Record pressed mid-loop
+       * gives a whole take at the next loop start instead of a partial one. The
+       * answer is at least MIN_ARM_LEAD frames ahead whenever `looping` is true,
+       * so the recorder is always armed on a frame the engine has not rendered.
+       *
+       * `looping: false` means the track has no loop of that clip to follow: an
+       * empty slot, a different clip playing on it, or a stopped or paused
+       * transport. The answer is then the next bar line, which is the frame a
+       * take armed on before takes had a grid of their own.
+       *
+       * Resolves when the processor answers; a processor that has failed never
+       * does, exactly like `nextBarFrame()`.
+       * @param {string} trackId
+       * @param {string|null} armedClipId the clip the take belongs to
+       * @returns {Promise<{frame: number, bar: number, looping: boolean}>}
+       */
+      nextLoopFrame(trackId, armedClipId) {
+        const id = ++loopSeq;
+        return new Promise((resolve) => {
+          loopRequests.set(id, resolve);
+          post({
+            type: "nextLoopFrame",
+            id: id,
+            track_id: trackId,
+            clip_id: armedClipId === null || armedClipId === undefined ? null : String(armedClipId),
+            min_lead: MIN_ARM_LEAD,
+          });
         });
       },
 
@@ -3335,8 +3566,9 @@
       },
 
       /**
-       * Build a recorder on this context: `{armAt, stopAt, splitAt, onChunk,
-       * onDone, dispose}` (see `runRecorder` above for the whole contract).
+       * Build a recorder on this context: `{armAt, stopAt, splitAt, gatePeriodic,
+       * gateOff, onChunk, onDone, dispose}` (see `runRecorder` above for the whole
+       * contract).
        * @param {{input: MediaStream|AudioNode, channels?: number}} options
        * @returns {Promise<object>}
        */
@@ -3369,6 +3601,7 @@
         tapListeners.clear();
         padEventListeners.clear();
         meterListeners.clear();
+        countInListeners.clear();
         masterLatencyListeners.clear();
         insertFaultListeners.clear();
         insertLoadingListeners.clear();
