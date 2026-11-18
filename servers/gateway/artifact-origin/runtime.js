@@ -120,7 +120,15 @@ export async function startArtifactOriginFromEnv(env = process.env) {
 export const ORIGIN_BIND_RETRY_EVERY_MS = 5000;
 export const ORIGIN_BIND_RETRY_WINDOW_MS = 2 * 60 * 1000;
 
-const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** The retry's sleep. `unref()`d (review N6): a boot's bind retry must never
+ *  hold the process open — a shutdown, or a `node -e` that imports this module,
+ *  would otherwise wait out the last 5 s tick (and the tests would hang).
+ *  Exported as the injection default.
+ */
+export const defaultSleep = (ms) => new Promise((resolve) => {
+  const timer = setTimeout(resolve, ms);
+  timer.unref?.();
+});
 
 /** A missing bind address (a race with dockerd), not a typo in the env. */
 export function isAddressNotAvailable(err) {

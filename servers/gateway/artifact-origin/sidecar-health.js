@@ -27,7 +27,12 @@
  *     on this gateway's HTTP port: netstack completes that connect only after
  *     its backend dial to 127.0.0.1:<port> succeeded, so a completed connect
  *     IS a shared namespace (`sidecarSharesHostLoopback`). A refused connect
- *     or a timeout is the sidecar's own namespace.
+ *     or a timeout is the sidecar's own namespace. Only an address inside
+ *     Tailscale's `100.64.0.0/10` is ever dialled (anything else in
+ *     `Self.TailscaleIPs` is not the node's tailnet address), and when
+ *     `CROW_GATEWAY_BIND` names a specific non-loopback address the gateway
+ *     answers no loopback port at all, so the probe is skipped as
+ *     inconclusive and the result says so (`probe: "skipped-gateway-bind"`).
  *
  * `sidecarHealth()` is pure (fixture JSON in, problems out). The reader runs
  * the tailscale CLI against the sidecar's LocalAPI socket (no sudo) plus the
@@ -40,6 +45,7 @@
 import { execFile } from "node:child_process";
 import net from "node:net";
 import { gatewayListenPort } from "../listen-port.js";
+import { gatewayListenHost } from "../listen-host.js";
 
 export const KEY_EXPIRY_WARN_MS = 14 * 24 * 60 * 60 * 1000;
 export const SIDECAR_READ_EVERY_MS = 5 * 60 * 1000;
@@ -56,20 +62,62 @@ function validPort(p) {
 const HOST_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const IPV6_CHARS_RE = /^[0-9A-Fa-f:.]+$/;
 
+/** The names that mean "this machine" on their own: `localhost` plus the
+ *  `/etc/hosts` aliases glibc/Debian ship for `::1` (`ip6-localhost`,
+ *  `ip6-loopback`). Any `*.localhost` counts too (RFC 6761). */
+const LOOPBACK_NAMES = new Set(["localhost", "ip6-localhost", "ip6-loopback"]);
+
+/** Percent-escapes decoded, so `[::1%25lo]` (the form a URL serialises) reads as
+ *  `[::1%lo]`. A `%` that is not an escape is left as written — nothing is
+ *  invented, and the shape check below then rejects it as unreadable. */
+function decodeHostString(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s.includes("%")) return s;
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
+/** An IPv6 zone id (`::1%lo`, `fe80::1%eth0`) names an interface, not an address:
+ *  `::1%lo` is still this machine's loopback. Dropped before the shape check,
+ *  which would otherwise reject the `%` and read the whole host as unreadable. */
+function stripZone(s) {
+  const i = s.indexOf("%");
+  return i < 0 ? s : s.slice(0, i);
+}
+
 /** A bare (lowercased) name, IPv4 or IPv6 literal — brackets stripped, never a port.
- *  A single trailing dot (the rooted spelling, `localhost.`) is dropped. */
+ *  A single trailing dot (the rooted spelling, `localhost.`) is dropped, and an
+ *  IPv6 literal keeps its meaning when it carries a zone id (`%lo`). */
 function cleanHost(raw) {
-  const h = String(raw ?? "").trim();
+  const h = decodeHostString(raw);
   if (!h) return null;
   if (h.startsWith("[") || h.endsWith("]")) {
     if (!(h.startsWith("[") && h.endsWith("]")) || h.length < 3) return null;
-    const inner = h.slice(1, -1);
+    const inner = stripZone(h.slice(1, -1));
     return IPV6_CHARS_RE.test(inner) && inner.includes(":") ? inner.toLowerCase() : null;
   }
   // An IPv6 literal always has at least two colons; one colon is `host:port`.
-  if ((h.match(/:/g) || []).length >= 2) return IPV6_CHARS_RE.test(h) ? h.toLowerCase() : null;
+  if ((h.match(/:/g) || []).length >= 2) {
+    const bare = stripZone(h);
+    return IPV6_CHARS_RE.test(bare) ? bare.toLowerCase() : null;
+  }
   const rooted = h.endsWith(".") ? h.slice(0, -1) : h;
   return HOST_LABEL_RE.test(rooted) ? rooted.toLowerCase() : null;
+}
+
+/**
+ * Is this IPv4 inside Tailscale's CGNAT range, `100.64.0.0/10`?
+ *
+ * A node's own tailnet address is always there (its IPv6 is `fd7a:115c:a1e0::/48`).
+ * `Self.TailscaleIPs` can also carry an address from another interface on some
+ * hosts, and dialling that would measure something that is not the sidecar at
+ * all — so the probe takes only a CGNAT address and skips otherwise.
+ */
+export function isCgnatIpv4(ip) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip ?? "").trim());
+  if (!m) return false;
+  const o = m.slice(1).map(Number);
+  if (o.some((n) => n > 255)) return false;
+  return o[0] === 100 && o[1] >= 64 && o[1] <= 127;
 }
 
 /** `127.0.0.0/8` (all of it: a dialer routes every 127.x to loopback) or `0.0.0.0`. */
@@ -108,14 +156,17 @@ function isLoopbackOrWildcardV6(normalised) {
  *     reaching the host's own stack);
  *   - `::1` in any expansion, and the IPv4-mapped `::ffff:127.*` /
  *     `::ffff:0.0.0.0` forms;
- *   - the names `localhost`, `localhost.` and anything `*.localhost`.
- * Brackets, case and a trailing root dot are ignored; anything unreadable is
+ *   - the names `localhost`, `localhost.`, anything `*.localhost`, and the
+ *     `/etc/hosts` aliases `ip6-localhost` / `ip6-loopback`.
+ * Brackets, case, percent-escapes and a trailing root dot are ignored, and an
+ * IPv6 zone id (`::1%lo`) is dropped before the check — it names an interface,
+ * not a different address. Anything unreadable is
  * not loopback (callers treat an unreadable shape the way their contract says).
  */
 export function isLoopbackOrWildcardHost(host) {
   const h = cleanHost(host);
   if (h == null) return false;
-  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (LOOPBACK_NAMES.has(h) || h.endsWith(".localhost")) return true;
   let norm;
   try { norm = new URL(`http://${h.includes(":") ? `[${h}]` : h}/`).hostname.replace(/^\[|\]$/g, ""); }
   catch { return false; }                                            // not a host literal at all
@@ -255,9 +306,12 @@ function mappingIsExpected(cfg, target) {
  *   `serve status -json` (the TS_SERVE_CONFIG shape: TCP / Web / AllowFunnel);
  *   target/bind/originPort are the instance's settings (expectedSidecarTarget);
  *   sharedLoopback is the active probe's verdict (sidecarSharesHostLoopback).
- * @returns {{ ok: boolean, problems: string[], keyExpiry: string|null }}
+ * @returns {{ ok: boolean, problems: string[], keyExpiry: string|null, probe?: string }}
+ *   `probe` is present only when the active probe could not decide anything
+ *   (`"skipped-gateway-bind"`), so an inconclusive audit is never read as
+ *   "the sidecar has a namespace of its own".
  */
-export function sidecarHealth({ statusJson, serveConfig, target = null, bind = null, originPort = null, sharedLoopback = false, now = Date.now() }) {
+export function sidecarHealth({ statusJson, serveConfig, target = null, bind = null, originPort = null, sharedLoopback = false, probe = null, now = Date.now() }) {
   if (!isObj(statusJson) || serveConfig == null) return { ok: false, problems: ["unreachable"], keyExpiry: null };
   const problems = [];
   if (statusJson.BackendState !== "Running") problems.push("logged-out");
@@ -285,7 +339,9 @@ export function sidecarHealth({ statusJson, serveConfig, target = null, bind = n
   else if (expected.problem) problems.push(expected.problem);
   else if (!mappingIsExpected(serveConfig, expected.target)) problems.push("unexpected-mapping");
 
-  return { ok: problems.length === 0, problems, keyExpiry };
+  const result = { ok: problems.length === 0, problems, keyExpiry };
+  if (probe) result.probe = probe;
+  return result;
 }
 
 /**
@@ -342,6 +398,9 @@ const defaultConnect = (host, port, timeoutMs = NETNS_PROBE_TIMEOUT_MS) => new P
  *
  * Only ever called for a Running sidecar, and it never throws.
  *
+ * Only an address in `100.64.0.0/10` is dialled (see `isCgnatIpv4`); a sidecar
+ * whose `TailscaleIPs` holds no such IPv4 has nothing to probe.
+ *
  * @param {{ statusJson: any, port?: number|string|null, connect?: Function,
  *           timeoutMs?: number }} o
  * @returns {Promise<boolean>} true = shared (the netstack answered this machine's loopback)
@@ -352,7 +411,10 @@ export async function sidecarSharesHostLoopback({ statusJson, port = null, conne
     const p = validPort(port);
     if (!p) return false;
     const ips = isObj(statusJson.Self) && Array.isArray(statusJson.Self.TailscaleIPs) ? statusJson.Self.TailscaleIPs : [];
-    const v4 = ips.map((ip) => String(ip ?? "").trim()).find((ip) => net.isIPv4(ip));
+    // Review N2: only the node's OWN tailnet address is probed. A non-CGNAT
+    // entry (another interface, a provider address) is not the sidecar, so
+    // dialling it could prove nothing and is skipped.
+    const v4 = ips.map((ip) => String(ip ?? "").trim()).find((ip) => net.isIPv4(ip) && isCgnatIpv4(ip));
     if (!v4) return false;
     await connect(v4, p, timeoutMs);
     return true;
@@ -368,38 +430,59 @@ export async function sidecarSharesHostLoopback({ statusJson, port = null, conne
  * 5 minutes. The expected target comes from CROW_ARTIFACT_SIDECAR_TARGET, else
  * from CROW_ARTIFACT_ORIGIN_BIND (see expectedSidecarTarget); the netns probe
  * connects to the gateway's own port (`PORT` / `CROW_GATEWAY_PORT`, the same
- * expression the listener uses).
+ * expression the listener uses) — but only when the gateway answers this
+ * machine's loopback. `CROW_GATEWAY_BIND` names something that is neither
+ * loopback nor a wildcard (a bridge gateway IP, a LAN address), so that port is
+ * not on loopback and the probe is inconclusive: it is skipped and the result
+ * carries `probe: "skipped-gateway-bind"`.
+ *
+ * Concurrent callers share ONE read: the Nest asks from more than one place, and
+ * two audits would double the sidecar's CLI runs and its probe.
  */
 export function createSidecarHealthReader({ env = process.env, exec = defaultExec, connect = defaultConnect, now = () => Date.now() } = {}) {
-  let cache = null, cacheAt = 0;
-  return async function readSidecarHealth() {
-    const socket = env.CROW_ARTIFACT_SIDECAR_SOCKET;
-    const originPort = validPort(env.CROW_ARTIFACT_ORIGIN_PORT);
-    if (!socket || !originPort) return null;
-    const t = now();
-    if (cache && t - cacheAt < SIDECAR_READ_EVERY_MS) return cache;
-    let result;
+  let cache = null, cacheAt = 0, inflight = null;
+
+  async function read(socket, originPort, t) {
     try {
       const [st, sv] = await Promise.all([
         exec("tailscale", ["--socket", socket, "status", "--json"]),
         exec("tailscale", ["--socket", socket, "serve", "status", "-json"]),
       ]);
       const statusJson = JSON.parse(st);
+      // Review N5: the probe measures "does this gateway's LOOPBACK port answer
+      // the sidecar's tailnet address". A bind that is neither loopback nor a
+      // wildcard answers no loopback port, so the probe would fail for a reason
+      // that has nothing to do with the sidecar's namespace — skipped, and said
+      // so, instead of read as "its own namespace".
+      const probe = isLoopbackOrWildcardHost(gatewayListenHost(env)) ? null : "skipped-gateway-bind";
       // Bounded (2 s) and never throwing; cached with the result it belongs to.
-      const sharedLoopback = await sidecarSharesHostLoopback({ statusJson, port: gatewayListenPort(env), connect });
-      result = sidecarHealth({
+      const sharedLoopback = probe ? false : await sidecarSharesHostLoopback({ statusJson, port: gatewayListenPort(env), connect });
+      return sidecarHealth({
         statusJson,
         serveConfig: JSON.parse(sv),
         target: env.CROW_ARTIFACT_SIDECAR_TARGET || null,
         bind: env.CROW_ARTIFACT_ORIGIN_BIND || null,
         originPort,
         sharedLoopback,
+        probe,
         now: t,
       });
     } catch {
-      result = { ok: false, problems: ["unreachable"], keyExpiry: null };
+      return { ok: false, problems: ["unreachable"], keyExpiry: null };
     }
-    cache = result; cacheAt = t;
-    return result;
+  }
+
+  return async function readSidecarHealth() {
+    const socket = env.CROW_ARTIFACT_SIDECAR_SOCKET;
+    const originPort = validPort(env.CROW_ARTIFACT_ORIGIN_PORT);
+    if (!socket || !originPort) return null;
+    const t = now();
+    if (cache && t - cacheAt < SIDECAR_READ_EVERY_MS) return cache;
+    if (!inflight) {
+      inflight = read(socket, originPort, t)
+        .then((result) => { cache = result; cacheAt = t; return result; })
+        .finally(() => { inflight = null; });
+    }
+    return inflight;
   };
 }

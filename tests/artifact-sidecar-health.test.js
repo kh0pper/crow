@@ -20,6 +20,7 @@ import {
   expectedSidecarTarget,
   parseOriginTarget,
   isLoopbackOrWildcardHost,
+  isCgnatIpv4,
   sidecarSharesHostLoopback,
 } from "../servers/gateway/artifact-origin/sidecar-health.js";
 
@@ -499,4 +500,152 @@ test("Nest health signal: no card when not configured; ok card when healthy; one
     hs._setDiskReader(null);
     hs.invalidateHealthCache();
   }
+});
+
+// Review N4: the name set and the IPv6 spellings. `ip6-localhost` and
+// `ip6-loopback` are the /etc/hosts aliases glibc ships for `::1`, and a zone id
+// (`::1%lo`) or a percent-escape (`[::1%25lo]`) does not move the address.
+test("ip6-localhost/ip6-loopback, an IPv6 zone id and percent-escapes are this machine's loopback", () => {
+  // 1. The two /etc/hosts aliases, in any case.
+  for (const host of ["ip6-localhost", "IP6-LOCALHOST", "ip6-localhost.", "ip6-loopback", "IP6-Loopback"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+    assert.deepEqual(expectedSidecarTarget({ bind: host, originPort: PORT }), { target: null, problem: "host-loopback" }, host);
+  }
+  // 2. A zone id on the IPv6 literal: bare, bracketed, URL-escaped (`%25`).
+  for (const host of ["::1%lo", "[::1%lo]", "::1%25lo", "[::1%25lo]", "0:0:0:0:0:0:0:1%lo", "[0:0:0:0:0:0:0:1%25lo]"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+    assert.deepEqual(expectedSidecarTarget({ bind: host, originPort: PORT }), { target: null, problem: "host-loopback" }, `bind ${host}`);
+    const hostPart = host.startsWith("[") ? host : `[${host}]`;
+    assert.deepEqual(expectedSidecarTarget({ target: `http://${hostPart}:${PORT}` }), { target: null, problem: "host-loopback" }, `target ${host}`);
+  }
+  // 3. Through a live Serve Proxy target: the same finding, never unexpected-mapping.
+  for (const proxy of [`http://[::1%lo]:${PORT}`, `http://[::1%25lo]:${PORT}`, `http://[0:0:0:0:0:0:0:1%lo]:${PORT}`]) {
+    assert.deepEqual(sidecarHealth({ statusJson: status(), serveConfig: serve(proxy), target: TARGET, now: NOW }).problems, ["host-loopback"], proxy);
+  }
+  // 4. A percent-encode cannot smuggle a loopback spelling past the check…
+  for (const host of ["local%68ost", "127%2e0%2e0%2e1", "[::%31]", "0%2e0%2e0%2e0"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+  }
+  // …and a host that is not loopback stays not loopback.
+  for (const host of ["[fe80::1%25eth0]", "fd00::1%25eth0", "172%2e30%2e0%2e1", "crow%2dartifacts"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), false, host);
+  }
+});
+
+// Review N2: the probe dials the node's OWN tailnet address, which Tailscale
+// hands out of 100.64.0.0/10. `Self.TailscaleIPs` can carry something else on
+// some hosts, and dialling that would measure a different machine.
+test("the probe dials only a CGNAT (100.64.0.0/10) tailnet address", async () => {
+  for (const [ip, want] of [
+    ["100.64.0.0", true], ["100.64.20.7", true], ["100.100.1.2", true], ["100.127.255.255", true],
+    ["100.63.255.255", false], ["100.128.0.0", false], ["99.64.0.1", false], ["192.0.2.5", false],
+    ["10.0.0.5", false], ["172.30.0.9", false], ["fd7a:115c:a1e0::7", false], ["100.64.0.256", false],
+    ["", false], [null, false], [undefined, false],
+  ]) assert.equal(isCgnatIpv4(ip), want, String(ip));
+
+  const env = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  const readerFor = (ips, dials) => createSidecarHealthReader({
+    env, now: () => NOW, connect: async (host, port) => { dials.push([host, port]); },
+    exec: async (file, args) => (args.includes("serve") ? JSON.stringify(serve()) : JSON.stringify(status({ Self: { TailscaleIPs: ips } }))),
+  });
+
+  // Nothing in range → no probe at all, and the mapping is judged on its own.
+  for (const ips of [["192.0.2.5"], ["10.0.0.5", "fd7a:115c:a1e0::7"], [], ["100.128.0.1"], ["100.63.0.9"]]) {
+    const dials = [];
+    const r = await readerFor(ips, dials)();
+    assert.deepEqual(dials, [], `no dial for ${JSON.stringify(ips)}`);
+    assert.deepEqual(r.problems, [], `not host-loopback for ${JSON.stringify(ips)}`);
+  }
+  // An in-range address next to an out-of-range one is still the node's own.
+  const dials = [];
+  assert.deepEqual((await readerFor(["192.0.2.5", "100.100.1.2"], dials)()).problems, ["host-loopback"]);
+  assert.deepEqual(dials, [["100.100.1.2", 3001]], "the CGNAT address, not the first IPv4 in the list");
+});
+
+// Review N5: the probe asks "does this gateway's LOOPBACK port answer the
+// sidecar's tailnet address". With CROW_GATEWAY_BIND on a specific non-loopback
+// address the gateway answers no loopback port, so the probe proves nothing:
+// it is skipped, and the audit says it was inconclusive rather than healthy.
+test("CROW_GATEWAY_BIND beyond loopback: the probe is skipped and reported as inconclusive", async () => {
+  const baseEnv = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  const dials = [];
+  const readerFor = (bind) => createSidecarHealthReader({
+    env: { ...baseEnv, CROW_GATEWAY_BIND: bind },
+    now: () => NOW,
+    connect: async (host, port) => { dials.push([host, port]); },
+    exec: async (file, args) => (args.includes("serve") ? JSON.stringify(serve()) : JSON.stringify(status({ Self: { TailscaleIPs: ["100.64.20.7"] } }))),
+  });
+
+  // Neither loopback nor a wildcard: no dial, no host-loopback on the probe's
+  // account, and the detail field says why the audit is inconclusive.
+  for (const bind of ["172.30.0.1", "192.168.1.10", "100.64.20.7", "fd00::1"]) {
+    assert.deepEqual(await readerFor(bind)(), { ok: true, problems: [], keyExpiry: null, probe: "skipped-gateway-bind" }, bind);
+  }
+  assert.deepEqual(dials, [], "nothing was dialled");
+
+  // A loopback or wildcard bind still answers loopback, so the probe is valid
+  // there (here it completes, which is the finding).
+  for (const bind of ["127.0.0.1", "0.0.0.0", "::", "localhost", "ip6-localhost"]) {
+    const r = await readerFor(bind)();
+    assert.deepEqual(r.problems, ["host-loopback"], bind);
+    assert.equal(r.probe, undefined, `${bind}: no skip detail when the probe ran`);
+  }
+  assert.ok(dials.length > 0, "the in-loopback binds were probed");
+
+  // The pure audit carries the detail only when it is given one, so every other
+  // result keeps its three documented fields.
+  assert.deepEqual(
+    sidecarHealth({ statusJson: status(), serveConfig: serve(), target: TARGET, probe: "skipped-gateway-bind", now: NOW }),
+    { ok: true, problems: [], keyExpiry: null, probe: "skipped-gateway-bind" },
+  );
+  assert.deepEqual(sidecarHealth({ statusJson: status(), serveConfig: serve(), target: TARGET, now: NOW }), { ok: true, problems: [], keyExpiry: null });
+});
+
+// Review N6: the Nest asks for the audit from more than one place, so two
+// concurrent first reads must share ONE run of the sidecar's CLI and one probe.
+test("reader: concurrent reads share one CLI run and one probe (in-flight dedupe)", async () => {
+  const env = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  let statusCalls = 0, serveCalls = 0, probes = 0;
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const exec = async (file, args) => {
+    if (args.includes("serve")) { serveCalls++; await tick(); return JSON.stringify(serve()); }
+    statusCalls++; await tick();
+    return JSON.stringify(status({ Self: { TailscaleIPs: ["100.64.20.7"] } }));
+  };
+  let t = NOW;
+  const read = createSidecarHealthReader({
+    env, exec, now: () => t,
+    connect: async () => { probes++; throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); },
+  });
+
+  const [a, b, c] = await Promise.all([read(), read(), read()]);
+  assert.equal(statusCalls, 1, "one status run for three concurrent readers");
+  assert.equal(serveCalls, 1, "one serve run for three concurrent readers");
+  assert.equal(probes, 1, "one probe for three concurrent readers");
+  assert.deepEqual(a, b);
+  assert.deepEqual(b, c);
+
+  // The shared result is the cached one: a later read inside the window is free.
+  await read();
+  assert.equal(statusCalls, 1);
+  // …and a read after the window starts a NEW run (the dedupe did not wedge it).
+  t += 6 * 60 * 1000;
+  await read();
+  assert.equal(statusCalls, 2);
+  assert.equal(serveCalls, 2);
 });

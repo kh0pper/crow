@@ -72,19 +72,29 @@ tailscaled's userspace netstack forwards an inbound TCP connection on **any** po
 
 - **Host-run gateway.** Give the sidecar a dedicated docker bridge — an EXTERNAL network created once, so its subnet and gateway survive `compose down`/`up` — and bind the origin to that bridge's **gateway IP** (`CROW_ARTIFACT_ORIGIN_BIND=172.30.0.1`; a bridge IP is normal here, not a mistake). The sidecar then reaches `http://172.30.0.1:<origin port>` from its own namespace. Allow it in exactly one place: a `ufw` rule scoped to that bridge, that sidecar IP and that port (`ufw allow in on <bridge> from <sidecar IP> to <bridge gateway> port <origin port> proto tcp`), so nothing else on the host's networks reaches the origin.
   - **`ufw` has to be doing something.** This rule is a hole in a default-deny wall; ufw's rules are only consulted when the firewall is enabled with a default-deny incoming policy. The whole design relies on that (`ufw status verbose` → `Status: active`, `Default: deny (incoming)`), which is how the dashboard host is set up. On a host whose firewall is off, that one allow rule is decoration and the origin is exposed to every network the host is on — the Nest's Privacy card warns about exactly this when the gateway is bound beyond loopback.
-  - **Fence the sidecar subnet by default** (DOCKER-USER, iptables; `nft` hosts use the same chain through the `iptables` shim). The sidecar needs the origin and the tailnet — nothing else on this machine. `ESTABLISHED,RELATED` is accepted FIRST (a drop rule's own return traffic, and Docker's published-port flows, must not be cut mid-stream), and the origin's own bridge subnet is excluded from the `172.16/12` drop because the origin lives on it (`172.30.0.0/24` is inside `172.16.0.0/12`):
+  - **Fence the sidecar subnet by default** (DOCKER-USER, iptables; `nft` hosts use the same chain through the `iptables` shim). Mind which chain this is. DOCKER-USER is consulted from **FORWARD**, so it fences what the sidecar can reach *through* this machine — another container, a LAN host, a tailnet peer, the internet. Traffic from the sidecar to one of this computer's **own** addresses never enters FORWARD at all: it is INPUT, which no DOCKER-USER rule can see. That door is the single `ufw` rule above, and it is shut only because ufw is enabled with default-deny incoming — with the host firewall off, this fence does not close it either. The sidecar needs the origin and the tailnet — nothing else. Two rules of construction:
+    - Every rule goes in with `-I` at an explicit position, never `-A`. Docker older than 28 ends DOCKER-USER with a `-j RETURN`, so a rule appended after it is never reached; Docker 28 dropped that trailing RETURN, which is exactly why `-A` looks fine on one host and silently does nothing on another.
+    - The order below is the rule: `ESTABLISHED,RELATED` **from the sidecar subnet** RETURNs first — scoped to that subnet and placed ahead of the drops, it does not short-circuit another fence's rules, while it keeps reply traffic for the sidecar's own connections (and Docker's published-port flows) from being cut mid-stream. Then the drops block the private ranges, with the origin's own bridge subnet excluded from the `172.16/12` drop because the origin lives on it (`172.30.0.0/24` is inside `172.16.0.0/12`):
 
     ```bash
-    DOCKER_USER_RULES=$(cat <<'EOF'
-    -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    -A DOCKER-USER -s 172.30.0.0/24 -d 10.0.0.0/8 -j DROP
-    -A DOCKER-USER -s 172.30.0.0/24 -d 172.16.0.0/12 ! -d 172.30.0.0/24 -j DROP
-    -A DOCKER-USER -s 172.30.0.0/24 -d 192.168.0.0/16 -j DROP
-    -A DOCKER-USER -s 172.30.0.0/24 -d 100.64.0.0/10 -j DROP
-    -A DOCKER-USER -s 172.30.0.0/24 -d 169.254.0.0/16 -j DROP
+    # Positions 1…6, in this order, as root. -I, never -A (see above).
+    while IFS= read -r rule; do
+      iptables -w $rule
+    done <<'EOF'
+    -I DOCKER-USER 1 -s 172.30.0.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    -I DOCKER-USER 2 -s 172.30.0.0/24 -d 10.0.0.0/8 -j DROP
+    -I DOCKER-USER 3 -s 172.30.0.0/24 -d 172.16.0.0/12 ! -d 172.30.0.0/24 -j DROP
+    -I DOCKER-USER 4 -s 172.30.0.0/24 -d 192.168.0.0/16 -j DROP
+    -I DOCKER-USER 5 -s 172.30.0.0/24 -d 100.64.0.0/10 -j DROP
+    -I DOCKER-USER 6 -s 172.30.0.0/24 -d 169.254.0.0/16 -j DROP
     EOF
-    )
-    printf '%s\n' "$DOCKER_USER_RULES" | iptables-restore --noflush
+    ```
+
+    **Docker's embedded DNS.** A container's resolver (`127.0.0.11` in its own namespace) forwards to the host's upstream resolvers, and on a host whose `/etc/resolv.conf` (or `resolvectl status`) names a LAN or tailnet address, that forward is a packet from the sidecar subnet to a private range — cut by the drops above, so every lookup inside the sidecar times out and the node looks broken rather than fenced. If this machine's upstream resolver is on a private address, allow that one resolver *ahead of the drops* (positions 2 and 3, shifting the rest down):
+
+    ```bash
+    iptables -I DOCKER-USER 2 -s 172.30.0.0/24 -d <resolver IPv4> -p udp --dport 53 -j ACCEPT
+    iptables -I DOCKER-USER 3 -s 172.30.0.0/24 -d <resolver IPv4> -p tcp --dport 53 -j ACCEPT
     ```
 
     Persist them with a small oneshot unit that re-applies the same rules on every boot, like the engine fence's re-apply service (`docs/guide/engine-fence.md` is the pattern: a script in `/usr/local/sbin`, a `.service`, `After=docker.service`, `WantedBy=multi-user.target`):
@@ -106,7 +116,7 @@ tailscaled's userspace netstack forwards an inbound TCP connection on **any** po
     WantedBy=multi-user.target
     ```
 
-    The script is the rule text above with `-C` before each `-A` (apply once, never stack duplicates) and a `remove` that deletes by the same spec. Note the cost, because it is the point: a fenced sidecar can no longer reach this machine's LAN addresses (or any private range) directly, so Tailscale relays those peers over **DERP** instead of a direct path — slower, still end-to-end encrypted, and the reason a direct LAN path never has to be trusted. A deployment that needs direct paths has to narrow the fence to the ranges it really means to forbid, and say so here.
+    The script is the rule text above. `apply` deletes any copy of each spec (`iptables -D DOCKER-USER <spec>`, ignoring "no such rule"), then inserts them at positions 1…6 in that order — so a re-run repairs a half-applied fence instead of stacking duplicates, and the `RETURN` cannot end up after a `DROP`; `remove` deletes the same specs and nothing else. Note the cost, because it is the point: a fenced sidecar can no longer reach this machine's LAN addresses (or any private range) directly, so Tailscale relays those peers over **DERP** instead of a direct path — slower, still end-to-end encrypted, and the reason a direct LAN path never has to be trusted. A deployment that needs direct paths has to narrow the fence to the ranges it really means to forbid, and say so here.
 - **Household container instance.** The sidecar joins the instance's own compose network and proxies by container name (`http://<container-name>:3092`). The sidecar can be part of that compose file, and no host publish is needed. `network_mode: service:<x>` or `container:<x>` is **not** an alternative on any host: those join another container's namespace, so "its own namespace" is gone and a loopback target is reachable again — the same flaw as `network_mode: host`, wearing a different name.
 
 Tailscale Services were not chosen: they require the host to be a tagged node, need admin approval, and cannot carry Funnel.
@@ -136,11 +146,11 @@ The origin binds a docker bridge's gateway address, and that address does not ex
 | `logged-out` | `BackendState` is not `Running`. |
 | `key-expiring` | The node key expires within 14 days (or already has). |
 | `funnel-on` | Any `AllowFunnel` entry is true. |
-| `host-loopback` | The sidecar is on the host's network (or another container's), so userspace netstack answers **every** port of its tailnet address on this computer's loopback. Three ways in, one finding: a live Serve Proxy target that names this machine in any spelling a dialer accepts (`127.0.0.1`, `127.0.0.2`, `127.1`, `2130706433`, `::1` in any expansion, `::ffff:127.0.0.1`, `localhost`, `localhost.`, `*.localhost`, a wildcard `0.0.0.0` / `::`, or tailscaled's scheme-less `3090` / `localhost:3090`); a `CROW_ARTIFACT_SIDECAR_TARGET` or `CROW_ARTIFACT_ORIGIN_BIND` of that shape, where no non-loopback target exists at all; or the active probe below. Reported instead of `unexpected-mapping`. Move the sidecar to its own network. |
+| `host-loopback` | The sidecar is on the host's network (or another container's), so userspace netstack answers **every** port of its tailnet address on this computer's loopback. Three ways in, one finding: a live Serve Proxy target that names this machine in any spelling a dialer accepts (`127.0.0.1`, `127.0.0.2`, `127.1`, `2130706433`, `::1` in any expansion, `::ffff:127.0.0.1`, `localhost`, `localhost.`, `*.localhost`, the `/etc/hosts` aliases `ip6-localhost` / `ip6-loopback`, `::1%lo` / `[::1%25lo]` (a zone id or a percent-escape changes nothing), a wildcard `0.0.0.0` / `::`, or tailscaled's scheme-less `3090` / `localhost:3090`); a `CROW_ARTIFACT_SIDECAR_TARGET` or `CROW_ARTIFACT_ORIGIN_BIND` of that shape, where no non-loopback target exists at all; or the active probe below. Reported instead of `unexpected-mapping`. Move the sidecar to its own network. |
 | `unexpected-mapping` | Anything other than the one 443 → `<CROW_ARTIFACT_SIDECAR_TARGET>` (or the `<bind>:<port>` derived from the environment) proxy. |
 | `unreachable` | The CLI failed or returned something unreadable. This is never treated as healthy. |
 
-**The active probe.** A non-loopback target does not prove anything by itself — a sidecar with host networking answers a bridge-IP Proxy happily. So each audit also takes the sidecar's own tailnet IPv4 (`status --json` → `Self.TailscaleIPs`) and connects to it on **this gateway's HTTP port** (`PORT` / `CROW_GATEWAY_PORT`, the same expression the listener uses), 2 seconds at most. Netstack completes that connect only after its backend dial to `127.0.0.1:<port>` succeeded, so a completed connect **is** a shared namespace (`host-loopback`); a refusal or a timeout is a namespace of its own. It runs only while the sidecar is `Running`, never throws, and is cached with the rest of the result (one probe per 5-minute read). Its false-negative is a host whose gateway answers on no loopback address; its false-positive would need something else listening on the sidecar's tailnet address at the gateway's port.
+**The active probe.** A non-loopback target does not prove anything by itself — a sidecar with host networking answers a bridge-IP Proxy happily. So each audit also takes the sidecar's own tailnet IPv4 (`status --json` → `Self.TailscaleIPs`) and connects to it on **this gateway's HTTP port** (`PORT` / `CROW_GATEWAY_PORT`, the same expression the listener uses), 2 seconds at most. Netstack completes that connect only after its backend dial to `127.0.0.1:<port>` succeeded, so a completed connect **is** a shared namespace (`host-loopback`); a refusal or a timeout is a namespace of its own. Only an address inside Tailscale's own range `100.64.0.0/10` is dialled — anything else in `Self.TailscaleIPs` is not that node's tailnet address, so the probe is skipped rather than pointed somewhere that is not the sidecar. It runs only while the sidecar is `Running`, never throws, and is cached with the rest of the result (one probe per 5-minute read). When `CROW_GATEWAY_BIND` is set to something that is neither loopback nor a wildcard, this gateway answers no loopback port at that port number at all, so the probe could not prove anything either way: it is skipped, the result carries `probe: "skipped-gateway-bind"`, and the audit is inconclusive — never `host-loopback` on the probe's account. Its remaining false-negative is a host whose gateway answers loopback only on some other address; its false-positive would need something else listening on the sidecar's tailnet address at the gateway's port.
 
 **A container instance must name its target.** Inside a container the origin binds `0.0.0.0` (the instance's own namespace, published on host loopback) — but from inside that namespace a wildcard bind says nothing about what the sidecar can reach, so the audit reports `host-loopback`. Set `CROW_ARTIFACT_SIDECAR_TARGET=http://<container-name>:<port>` on a container instance; that is the documented default for the household layout.
 
@@ -154,7 +164,7 @@ Without `CROW_ARTIFACT_ORIGIN_URL`, the origin is `http://localhost:<port>`, and
 - The sandbox still holds: top-level loads run opaque, and `document.cookie` throws.
 - The CSP source base is pinned to `http://localhost:<port>` — it is **never** derived from the request's `Host` header, so a forged or rebinding `Host` cannot widen `script-src`.
 - `http://localhost:<port>` is reachable only from the machine Crow runs on, so a dashboard opened from another device cannot show artifacts on a fallback install.
-- A bind that is **not** loopback or a wildcard (a sidecar bridge gateway IP, say) makes the fallback that address instead — `http://172.30.0.1:<port>` — because `localhost` does not answer there. `isolationFor()` then reports `own-host`, and the fallback is reachable from the bridge only.
+- A bind that is **not** loopback or a wildcard (a sidecar bridge gateway IP, say) makes the fallback that address instead — `http://172.30.0.1:<port>` — because `localhost` does not answer there. `isolationFor()` then reports `own-host`, and the fallback is reachable from the bridge only — in the sense that only the bridge can reach it at that address, and only because ufw's default-deny incoming refuses everything else. The bind address itself refuses nothing, and DOCKER-USER cannot help: traffic to a host address is INPUT, not FORWARD.
 
 ## The trusted viewer
 

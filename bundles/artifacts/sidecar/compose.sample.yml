@@ -38,15 +38,28 @@
 #        ufw allow in on <bridge interface> from 172.30.0.2 to 172.30.0.1 \
 #          port 3090 proto tcp
 #      Then FENCE the bridge subnet from this machine's private networks
-#      (DOCKER-USER; the documented default). ESTABLISHED,RELATED is accepted
-#      first, and the origin's own subnet is excluded from the 172.16/12 drop
-#      because the origin lives on it:
-#        iptables -I DOCKER-USER 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 10.0.0.0/8 -j DROP
-#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 172.16.0.0/12 ! -d 172.30.0.0/24 -j DROP
-#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 192.168.0.0/16 -j DROP
-#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 100.64.0.0/10 -j DROP
-#        iptables -A DOCKER-USER -s 172.30.0.0/24 -d 169.254.0.0/16 -j DROP
+#      (DOCKER-USER; the documented default). DOCKER-USER is FORWARD: it stops
+#      what the sidecar reaches THROUGH this machine. Traffic to this machine's
+#      OWN addresses is INPUT, which no DOCKER-USER rule sees — only the ufw
+#      rule above holds that back, and only under default-deny incoming.
+#      Insert every rule with -I at an explicit position, never -A: Docker
+#      older than 28 ends DOCKER-USER with a -j RETURN, so an appended rule is
+#      never reached (Docker 28 dropped that RETURN, so -A works on one host
+#      and silently does nothing on another). The ESTABLISHED,RELATED RETURN
+#      is scoped to the sidecar subnet and goes FIRST, so it cannot
+#      short-circuit another fence's rules, and the origin's own subnet is
+#      excluded from the 172.16/12 drop because the origin lives on it:
+#        iptables -I DOCKER-USER 1 -s 172.30.0.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+#        iptables -I DOCKER-USER 2 -s 172.30.0.0/24 -d 10.0.0.0/8 -j DROP
+#        iptables -I DOCKER-USER 3 -s 172.30.0.0/24 -d 172.16.0.0/12 ! -d 172.30.0.0/24 -j DROP
+#        iptables -I DOCKER-USER 4 -s 172.30.0.0/24 -d 192.168.0.0/16 -j DROP
+#        iptables -I DOCKER-USER 5 -s 172.30.0.0/24 -d 100.64.0.0/10 -j DROP
+#        iptables -I DOCKER-USER 6 -s 172.30.0.0/24 -d 169.254.0.0/16 -j DROP
+#      If this machine's upstream DNS resolver is on a LAN or tailnet address,
+#      Docker's embedded DNS in the sidecar forwards there and those drops cut
+#      it (every lookup times out); allow that one resolver ahead of the drops
+#      (-I DOCKER-USER 2/3 -d <resolver> -p udp|tcp --dport 53 -j ACCEPT).
+#      docs/architecture/artifacts.md has the full note.
 #      Persist them with a small oneshot unit that re-applies them on every
 #      boot (crow-artifacts-fence.service; docs/architecture/artifacts.md has the
 #      unit, and the caveat: a fenced sidecar reaches LAN and tailnet peers over

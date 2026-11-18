@@ -7,12 +7,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import {
   startArtifactOriginWithBindRetry,
   startArtifactOriginFromEnv,
   isAddressNotAvailable,
   fallbackOriginUrl,
   artifactOriginInfo,
+  defaultSleep,
   _resetForTest,
   ORIGIN_BIND_RETRY_EVERY_MS,
   ORIGIN_BIND_RETRY_WINDOW_MS,
@@ -114,6 +116,22 @@ test("the fallback origin URL follows the bind: localhost for loopback/wildcards
   assert.equal(fallbackOriginUrl("fd00::1", 3090), "http://[fd00::1]:3090", "IPv6 brackets are kept");
   assert.equal(fallbackOriginUrl("crow-artifacts", 3092), "http://crow-artifacts:3092");
   assert.equal(new URL(fallbackOriginUrl("172.30.0.1", 3090)).port, "3090");
+});
+
+test("the retry sleep is unref'd: a pending sleep never holds the process open (review N6)", async () => {
+  // A CHILD process is the only honest check: with a ref'd timer it lives out the
+  // full 60 s and the 10 s timeout kills it, which is the failure this pins.
+  const mod = new URL("../servers/gateway/artifact-origin/runtime.js", import.meta.url).href;
+  const code = `import(${JSON.stringify(mod)}).then(({ defaultSleep }) => { defaultSleep(60000); });`;
+  const started = Date.now();
+  const run = await new Promise((resolve) => {
+    execFile(process.execPath, ["-e", code], { timeout: 10000, encoding: "utf8" }, (err, stdout, stderr) => resolve({ err, stdout, stderr }));
+  });
+  assert.equal(run.err, null, `a pending unref'd sleep must not keep node alive: ${run.err?.message ?? ""} ${run.stderr ?? ""}`);
+  assert.ok(Date.now() - started < 10000, "the child exited on its own, well before the sleep ran out");
+  assert.equal(run.stdout.trim(), "", "the sleep resolves nothing by itself");
+  // The seam is the exported default, and it still resolves.
+  await defaultSleep(1);
 });
 
 test("the gateway's mount retries in the BACKGROUND, so a missing bridge never holds the dashboard's listen", () => {
