@@ -193,6 +193,25 @@ Generate a formatted APA bibliography for a project or filtered set of sources.
 
 Get statistics about projects and the research pipeline. No parameters.
 
+## Workspace file tools
+
+A project's workspace folder (`project_spaces.workspace_dir`, i.e. `<data dir>/projects/<slug>-<id>/workspace`) is reachable over MCP itself, so a client that holds this instance's token — the owner's own Claude Code session, a bot, the dashboard — can work on a project's files without a host path.
+
+| Tool | Parameters | Notes |
+|---|---|---|
+| `crow_project_file_list` | `project_id, path?, recursive?, limit?` | Entries `{path, type, size, mtime}`; `type` is `file`, `dir`, `link` or `other`. A link is reported and never followed; `.git*` folders and a top-level `bots/` (bot worlds) are omitted. |
+| `crow_project_file_read` | `project_id, path, offset?, max_bytes?, encoding?` | UTF-8 text; a binary file is refused unless `encoding: "base64"`. At most 1 MiB per call. |
+| `crow_project_file_write` | `project_id, path, content, encoding?, create_dirs?, if_match_sha256?` | Atomic: temp file in the same folder, fsync, `rename`; 5 MiB per call. `if_match_sha256` refuses the write when the file changed since it was read. |
+| `crow_project_file_delete` | `project_id, path, if_match_sha256?` | One file, or one EMPTY folder. Recursive delete is not available. |
+
+Who may call them: the owner and an unidentified local caller have full access. A bot needs a share of the project — `read` to list and read, `read_write` to write or delete — and a write or delete also needs the project's `write_files` member capability, the same check `crow_upload_file` makes for a project upload. A peer instance is refused: workspace files are not part of the project-share vocabulary.
+
+Path safety and I/O live in `servers/shared/project-files.js`, with no MCP coupling. A `path` is relative: absolute paths, NUL, backslashes, empty components, `.`/`..`, control characters, any `.git*` component and a top-level `bots/` are refused. The workspace root is realpath'd and must sit inside this instance's data dir; it is opened once with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` and every component below it is opened from its parent's fd with `O_NOFOLLOW`, so a symlink is refused rather than followed and a folder swapped for one after it was resolved is caught (each opened fd's kernel path — `/proc/self/fd/<fd>` — must still be under the root). Only regular files are read, written or deleted; a hard-linked file (`nlink > 1`) is never overwritten.
+
+Limits: 1 MiB per read, 5 MiB per write, 2000 entries per listing (depth 8 when `recursive`), and a per-project quota of `CROW_PROJECT_FILE_QUOTA_MB` (default 500 MiB) measured with a bounded walk of the workspace. A write that cannot be measured is refused.
+
+Every write and delete appends `file.write` / `file.delete` to `project_audit_log` with the path, size and sha256 (never the content). The workspace's version history records the change on its next snapshot, so a bad write can be restored like any other file change.
+
 ## Data Backend Tools
 
 These tools manage external data connections for `data_connector` type projects.

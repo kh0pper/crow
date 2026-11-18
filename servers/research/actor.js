@@ -19,6 +19,16 @@ function isPeer(extra) {
   return !!(extra && extra.authInfo && extra.authInfo.token === PEER_TOKEN);
 }
 
+/**
+ * Did this call arrive from a peer instance (`authInfo.token === "peer-instance"`)? The same test
+ * `resolveCallActor` makes before it narrows such a call to UNKNOWN. A tool that must refuse a
+ * peer outright (rather than treat it as an unidentified local caller) asks here: it answers true
+ * for exactly the calls the gateway's peer mounts make.
+ */
+export function isPeerCall(extra) {
+  return isPeer(extra);
+}
+
 function metaActor(extra) {
   const meta = extra && extra._meta;
   return meta && typeof meta === "object" ? meta["crow/actor"] : undefined;
