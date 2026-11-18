@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { buildContainPlan, containSelected, ContainRefused } from "../scripts/pi-bots/pi_contain.mjs";
+import { buildContainPlan, containSelected, ContainRefused, neverBound } from "../scripts/pi-bots/pi_contain.mjs";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "crow-contain-plan-")));
 after(() => rmSync(T, { recursive: true, force: true }));
@@ -30,6 +30,10 @@ writeFileSync(join(data, "identity.json"), "{}");
 mk(crowHome, "secrets");
 const otherInst = mk(H, ".crow-other", "data");
 mk(H, ".ssh"); mk(H, ".claude"); mk(H, ".gnupg");
+// The Google Cloud CLI's credential folder: operator secrets, never bound.
+const gcloud = mk(H, ".config", "gcloud");
+writeFileSync(join(gcloud, "application_default_credentials.json"), "{}");
+mk(gcloud, "legacy_credentials");
 const session = mk(T, "sess", "bot-a");
 const work = mk(crowHome, "data", "projects", "p1", "workspace");
 const notes = mk(H, "notes");
@@ -126,14 +130,24 @@ test("bot paths: session and cwd rw, workspace rw, write_paths rw, read_paths ro
 });
 
 test("never bound, whatever the policy says: key dirs, assistant config, other instances, the whole home", () => {
+  const ADCFILE = join(gcloud, "application_default_credentials.json");
   const { args, refused } = buildContainPlan(base({
-    writePaths: [join(H, ".ssh"), otherInst], readPaths: [join(H, ".claude"), join(H, ".gnupg", "x")],
+    writePaths: [join(H, ".ssh"), otherInst, gcloud], readPaths: [join(H, ".claude"), join(H, ".gnupg", "x"), ADCFILE],
   }));
-  for (const p of [join(H, ".ssh"), otherInst, join(H, ".claude")]) {
+  for (const p of [join(H, ".ssh"), otherInst, join(H, ".claude"), gcloud, ADCFILE]) {
     assert.ok(!pairs(args).some((q) => (q[0] === "--bind" || q[0] === "--ro-bind") && q[1] === p), p + " not bound");
   }
   const reasons = refused.map((r) => r.path);
   for (const p of [join(H, ".ssh"), otherInst, join(H, ".claude")]) assert.ok(reasons.includes(p), p + " refused");
+  // The gcloud folder EXISTS here, so this is the protected-path rule and not
+  // the "does not exist" refusal.
+  for (const p of [gcloud, ADCFILE]) {
+    assert.ok(!pairs(args).some((q) => (q[0] === "--bind" || q[0] === "--ro-bind") && (q[1] === p || String(q[1]).startsWith(gcloud + "/"))), p + " not bound");
+    const hit = refused.find((r) => r.path === p);
+    assert.ok(hit, p + " refused");
+    assert.match(hit.reason, /a protected path \(.*\.config\/gcloud\)$/, p + " is refused as a protected path");
+  }
+  assert.ok(neverBound(H).includes(gcloud), "~/.config/gcloud is in the never-bound list");
   // The whole home is an ancestor of <CROW_HOME>: a write path on it now
   // refuses the spawn (the Crow-home ruling), not just the bind.
   assert.throws(() => buildContainPlan(base({ writePaths: [H] })), ContainRefused);

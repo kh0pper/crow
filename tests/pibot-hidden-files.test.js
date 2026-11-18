@@ -10,6 +10,7 @@ import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
+  GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL,
   BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName } from "../scripts/pi-bots/hidden_files.mjs";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
@@ -471,6 +472,18 @@ test("unmaskableRefusal: one plain sentence per cause (hard link, outside, hidde
   assert.ok(!bridge.includes("Crow could not hide ~/.ssh."), "and holds no copy of it");
 });
 
+test("GCLOUD_NOT_HIDDEN_REFUSAL: one sentence, thrown by the bridge, hidden-or-refuse only for a folder that exists", () => {
+  assert.equal(GCLOUD_DIR_REL, ".config/gcloud", "the Google Cloud CLI's credential folder, below the home");
+  assert.equal(GCLOUD_NOT_HIDDEN_REFUSAL, "A bot could not start: Crow could not hide ~/.config/gcloud.");
+  const bridge = readFileSync(join(import.meta.dirname, "..", "scripts", "pi-bots", "bridge.mjs"), "utf8");
+  assert.ok(bridge.includes("new Error(GCLOUD_NOT_HIDDEN_REFUSAL)"), "the bridge throws the shared sentence");
+  assert.ok(!bridge.includes("Crow could not hide ~/.config/gcloud."), "and holds no copy of it");
+  // The refusal is gated on a folder that really exists (a host with no gcloud
+  // CLI must start bots exactly as before) and is never created by Crow.
+  assert.match(bridge, /if \(hiddenCandidates\.gcloudDir && !launch\.masked\.includes\(hiddenCandidates\.gcloudDir\)\)/, "hidden-or-refuse only when the folder was found");
+  assert.ok(!/mkdirSync\([^)]*gcloud/.test(bridge), "Crow never creates ~/.config/gcloud");
+});
+
 test("secretFilesFor: a CO-HOSTED home's bundle link into appRoot/bundles lists the resolved .env under appRoot when appRoot is passed", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-cohost-"));
   const appRoot = join(root, "app");
@@ -621,6 +634,29 @@ test("~/.ssh is created 0700 when it is missing and lists empty inside", { skip:
   assert.ok(existsSync(sshDir), "the bridge created the folder before the spawn");
   assert.equal(statSync(sshDir).mode & 0o777, 0o700, "0700");
   assert.deepEqual(report.list.ssh, [], "empty inside");
+});
+
+test("~/.config/gcloud is hidden whole when it exists: the gcloud credentials are unreadable inside", { skip: noSandbox }, async () => {
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  mkdirSync(join(gcloudDir, "legacy_credentials"), { recursive: true });
+  const adc = join(gcloudDir, "application_default_credentials.json");
+  writeFileSync(adc, '{"fake":"application-default-credentials"}\n', { mode: 0o600 });
+  try {
+    const { report } = await spawnReport({ dirs: { gcloud: gcloudDir }, files: { adc } });
+    assert.deepEqual(report.list.gcloud, [], "~/.config/gcloud is an empty tmpfs inside");
+    assert.equal(report.len.adc, "ENOENT", "a bot cannot read application_default_credentials.json inside");
+    assert.equal(readFileSync(adc, "utf8").includes("application-default-credentials"), true, "the file on disk keeps its content");
+  } finally { rmSync(gcloudDir, { recursive: true, force: true }); }
+});
+
+test("~/.config/gcloud is never created when it is missing, and the spawn still starts", { skip: noSandbox }, async () => {
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  rmSync(gcloudDir, { recursive: true, force: true });
+  try {
+    const { report } = await spawnReport({ dirs: { gcloud: gcloudDir } });
+    assert.equal(report.list.gcloud, "ENOENT", "nothing is there inside either");
+    assert.equal(existsSync(gcloudDir), false, "Crow did not create it (no gcloud CLI on this host)");
+  } finally { rmSync(gcloudDir, { recursive: true, force: true }); }
 });
 
 test("the instance env/ and android-keystore/ folders list empty inside", { skip: noSandbox }, async () => {

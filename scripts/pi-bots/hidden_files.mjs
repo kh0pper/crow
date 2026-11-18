@@ -229,6 +229,21 @@ export function unmaskableRefusal(rel, cause, extra = {}) {
  *  every default-tier spawn). */
 export const SSH_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hide ~/.ssh.";
 
+/**
+ * The Google Cloud CLI's credential folder, relative to the operator's home:
+ * application_default_credentials.json, credentials.db, access_tokens.db and
+ * legacy_credentials/ all live inside it. No Crow code reads it, so a bot
+ * sandbox hides it WHOLE, like ~/.ssh — except that it is never created: a
+ * host without the gcloud CLI is left exactly as it is, and the folder is
+ * hidden (or the spawn refused) only when it really exists.
+ */
+export const GCLOUD_DIR_REL = ".config/gcloud";
+
+/** The refusal when an existing ~/.config/gcloud could not be masked at all.
+ *  Hidden-or-refuse: a bot never runs with the operator's gcloud credentials
+ *  reachable. Never used for a folder that does not exist. */
+export const GCLOUD_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hide ~/.config/gcloud.";
+
 function bundleIds(root, readdir) {
   try { return readdir(join(root, "bundles")); } catch { return []; }
 }

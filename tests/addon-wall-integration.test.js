@@ -121,6 +121,9 @@ async function buildRig() {
   writeFileSync(join(home, "crow", ".env"), "FIXTURE_VALUE=1\n");
   mkdirSync(join(home, ".ssh"), { recursive: true });
   writeFileSync(join(home, ".ssh", "id_ed25519"), "fixture key\n");
+  // The Google Cloud CLI's credentials folder: operator secrets, like ~/.ssh.
+  mkdirSync(join(home, ".config", "gcloud"), { recursive: true });
+  writeFileSync(join(home, ".config", "gcloud", "application_default_credentials.json"), "fixture adc\n");
   mkdirSync(join(crowHome, "secrets"), { recursive: true });
   writeFileSync(join(crowHome, "secrets", "keychain.key"), "fixture key material\n");
   writeFileSync(join(crowHome, "mcp-addons.json"), JSON.stringify({}), { mode: 0o600 });
@@ -274,6 +277,7 @@ test("a walled hostile add-on reaches nothing it was not given", { skip, timeout
         join(rig.home, "crow", ".env"),
         join(rig.crowHome, "secrets", "keychain.key"),
         join(rig.home, ".ssh", "id_ed25519"),
+        join(rig.home, ".config", "gcloud", "application_default_credentials.json"),
         "/var/run/docker.sock",
       ]) {
         const result = await rig.call("probe_read", { path });

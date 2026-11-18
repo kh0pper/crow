@@ -78,6 +78,10 @@ writeFileSync(join(CROW, "addon-walls.json"), "{}");
 const SSH_DIR = mk(HOME, ".ssh");
 const SSH_KEY = join(SSH_DIR, "id_ed25519");
 writeFileSync(SSH_KEY, "k");
+// The Google Cloud CLI's credential folder: operator secrets, like ~/.ssh.
+const GCLOUD_DIR = mk(HOME, ".config", "gcloud");
+const GCLOUD_ADC = join(GCLOUD_DIR, "application_default_credentials.json");
+writeFileSync(GCLOUD_ADC, "{}");
 // A folder the owner chose for a sign-in file: visible (and below a visible
 // folder, not a direct child of the home), so it is writable.
 const SIGNIN = mk(HOME, "signin", "acme");
@@ -380,8 +384,9 @@ test("neverBound(home) never appears as a bind source, including through a symli
           { from: "ACME_KEY_FILE", path: SSH_KEY, source: "owner" },
           { from: "ACME_LINK_FILE", path: link, source: "owner" },
           { from: "ACME_SECRETS", path: join(CROW, "secrets"), source: "owner" },
+          { from: "ACME_GCLOUD", path: GCLOUD_ADC, source: "owner" },
         ],
-        write: [],
+        write: [{ from: "ACME_GCLOUD_DIR", path: GCLOUD_DIR, source: "owner" }],
         oauthDir: null,
         state: [],
       },
@@ -401,6 +406,9 @@ test("neverBound(home) never appears as a bind source, including through a symli
     const refusedPaths = plan.refused.map((r) => r.path);
     assert.ok(refusedPaths.includes(SSH_KEY), "a key file is refused");
     assert.ok(refusedPaths.includes(link), "a symlinked value is refused");
+    assert.ok(never.includes(GCLOUD_DIR), "~/.config/gcloud is in the never-bound list");
+    assert.ok(refusedPaths.includes(GCLOUD_ADC), "a gcloud credential file is refused");
+    assert.ok(refusedPaths.includes(GCLOUD_DIR), "the gcloud folder is refused");
   } finally { closePlan(plan); }
 });
 
