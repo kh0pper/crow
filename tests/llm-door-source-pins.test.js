@@ -376,7 +376,7 @@ test("census: a loopback socket relaying a LAN client logs exactly ONE line, nam
   });
   const lines = censusLines();
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /: lan 192\.0\.2\.7 route=POST \/llm\/v1\/chat\/completions client=pin-test$/);
+  assert.match(lines[0], /: lan 192\.0\.2\.7 route=v1 client=pin-test$/);
   assert.equal(lines[0].includes("127.0.0.1"), false, "the loopback socket is not the source the line names");
 });
 

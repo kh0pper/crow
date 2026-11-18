@@ -174,15 +174,15 @@ test("CROW_LLM_DOOR_ENFORCE is off unless it is exactly \"1\"; the owner login i
 // Part 2 — the shadow census (module level: bounds, dedupe, summary)
 // ---------------------------------------------------------------------------
 
-test("census: one event per (class, source, route) per window, and the summary counts it", () => {
+test("census: one event per (class, source, route label) per window, and the summary counts it", () => {
   resetDoorShadow();
   const t0 = 1_800_000_000_000;
   const lines = [];
   const log = (l) => lines.push(l);
-  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "POST /llm/v1/chat/completions", model: "m" }, t0, log), true);
-  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "POST /llm/v1/chat/completions", model: "m" }, t0 + 1000, log), false, "inside the window");
-  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "POST /llm/p/p/v1/chat/completions" }, t0 + 1000, log), true, "a different route is its own key");
-  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "POST /llm/v1/chat/completions" }, t0 + DOOR_SHADOW_WINDOW_MS, log), true, "the window has passed");
+  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "v1", model: "m" }, t0, log), true);
+  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "v1", model: "m" }, t0 + 1000, log), false, "inside the window");
+  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "p" }, t0 + 1000, log), true, "a different door is its own key");
+  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "v1" }, t0 + DOOR_SHADOW_WINDOW_MS, log), true, "the window has passed");
   assert.equal(lines.length, 3);
   const s = doorShadowSummary(t0 + DOOR_SHADOW_WINDOW_MS);
   assert.equal(s.total, 3);
@@ -200,7 +200,7 @@ test("census: the dedupe map and the ring are capped, so a spray of sources cann
   const n = DOOR_SHADOW_MAX_KEYS + 60;
   for (let i = 0; i < n; i++) {
     // A distinct address per event, all at the same instant.
-    recordDoorShadow({ cls: "unidentified", source: `198.51.${Math.floor(i / 254)}.${(i % 254) + 1}`, route: "POST /llm/v1/chat/completions" }, t0, (l) => lines.push(l));
+    recordDoorShadow({ cls: "unidentified", source: `198.51.${Math.floor(i / 254)}.${(i % 254) + 1}`, route: "v1" }, t0, (l) => lines.push(l));
   }
   assert.equal(lines.length, n, "every distinct source got its one line");
   assert.equal(doorShadowKeyCount(), DOOR_SHADOW_MAX_KEYS);
@@ -214,26 +214,44 @@ test("census: a source that is not a plain address is logged as unknown, never e
   for (const source of ["obfuscated-9f3a7c1d", "", null]) {
     resetDoorShadow();
     lines.length = 0;
-    assert.equal(recordDoorShadow({ cls: "unidentified", source, route: "POST /llm/v1/chat/completions" }, 1_800_000_000_000, (l) => lines.push(l)), true);
+    assert.equal(recordDoorShadow({ cls: "unidentified", source, route: "v1" }, 1_800_000_000_000, (l) => lines.push(l)), true);
     assert.match(lines[0], /source=unknown /);
     assert.equal(lines[0].includes("9f3a7c1d"), false);
   }
   // An IPv6 zone id is caller-chosen text: the address is kept, the zone never.
   resetDoorShadow();
   lines.length = 0;
-  recordDoorShadow({ cls: "unidentified", source: "fe80::1%caller-chosen-text", route: "POST /llm/v1/chat/completions" }, 1_800_000_000_000, (l) => lines.push(l));
+  recordDoorShadow({ cls: "unidentified", source: "fe80::1%caller-chosen-text", route: "v1" }, 1_800_000_000_000, (l) => lines.push(l));
   assert.match(lines[0], /source=fe80::1 /);
   assert.equal(lines[0].includes("caller-chosen-text"), false);
   assert.equal(lines[0].includes("%"), false);
   resetDoorShadow();
 });
 
+test("census: the route is a FIXED label set, so a caller-chosen path cannot mint a key or an entry", () => {
+  resetDoorShadow();
+  const t0 = 1_800_000_000_000;
+  const lines = [];
+  const log = (l) => lines.push(l);
+  // Whatever a caller writes in the path (a random subpath, a whole request
+  // line), the event lands under "other": one key, one ring entry, one line.
+  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "POST /llm/v1/chat/completions" }, t0, log), true, "the first unknown path is the one line");
+  for (const route of [`/llm/v1/${"a".repeat(60)}`, `/llm/p/${"b".repeat(60)}/v1/chat/completions`, "/llm/v1/another"]) {
+    assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route }, t0 + 1, log), false, route);
+  }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], / route=other model=-$/);
+  assert.equal(doorShadowRingSize(), 1);
+  assert.deepEqual(doorShadowSummary(t0 + 2).sources[0].routes, ["other"]);
+  resetDoorShadow();
+});
+
 test("census: an enforced refusal says so, and a throwing logger never throws", () => {
   resetDoorShadow();
   const lines = [];
-  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.9", route: "POST /llm/acquire", enforced: true }, 1_800_000_000_000, (l) => lines.push(l)), true);
+  assert.equal(recordDoorShadow({ cls: "unidentified", source: "100.64.20.9", route: "acquire", enforced: true }, 1_800_000_000_000, (l) => lines.push(l)), true);
   assert.match(lines[0], /^\[llm-door\] refused an unidentified caller \(CROW_LLM_DOOR_ENFORCE=1\)/);
-  assert.doesNotThrow(() => recordDoorShadow({ cls: "unidentified", source: "100.64.20.8", route: "POST /llm/acquire" }, 1_800_000_000_000, () => { throw new Error("boom"); }));
+  assert.doesNotThrow(() => recordDoorShadow({ cls: "unidentified", source: "100.64.20.8", route: "acquire" }, 1_800_000_000_000, () => { throw new Error("boom"); }));
   resetDoorShadow();
 });
 
@@ -241,7 +259,7 @@ test("census: an enforced refusal says so, and a throwing logger never throws", 
 // Part 3 — the real router: shadow mode changes no outcome, enforcement refuses
 // ---------------------------------------------------------------------------
 
-let up, srv, appUrl, upUrl;
+let up, srv, appUrl, realSrv, realUrl, throwSrv, throwUrl, upUrl;
 let providers;
 let remote = "127.0.0.1";
 let peer = null;                 // classifyPeerFn override for the Serve cases
@@ -249,11 +267,42 @@ let now = 1_800_000_000_000;
 let acquired = [];
 let forwarded = 0;
 let logs = [];
+/** Every line any app in this file logged, never reset (the classifier-failure
+ *  WARN is once per process, so it survives resetState). */
+const allLogs = [];
 
 const asRemote = (req, _res, next) => {
   Object.defineProperty(req.socket, "remoteAddress", { value: remote, configurable: true });
   next();
 };
+
+/** One gateway-shaped app over the router. `opts` adds to the seams below — and
+ *  leaving classifyPeerFn/classifyDoorCallerFn out runs the REAL ones. */
+function makeApp(opts) {
+  const app = express();
+  app.use(asRemote);
+  app.use(llmRouterRouter({
+    acquireFn: async (pid) => { acquired.push(pid); return true; },
+    resolveKeyFn: async (key) => ({ baseUrl: upUrl, model: key.split("/")[1], apiKey: null }),
+    probeReadyFn: async () => true,
+    warmFn: async (pid) => { acquired.push(pid); return true; },
+    loadProvidersFn: () => ({ providers }),
+    remoteAddressFn: () => remote,
+    // Today's bearer rule: the local/models token.
+    doorAuthFn: async (token) => token === LOCAL || token === MODELS,
+    localTokenFn: async (token) => token === LOCAL || token === MODELS,
+    peerTokenFn: async (token) => (token === PEER ? { id: "peer-1" } : null),
+    // ownerLoginFn and enforceFn stay REAL: they read CROW_OWNER_TAILNET_LOGIN
+    // and CROW_LLM_DOOR_ENFORCE, which every test sets explicitly.
+    nowFn: () => now,
+    logFn: (line) => { allLogs.push(line); logs.push(line); },
+    recordUsageFn: async () => {},
+    resolveVoiceKeysFn: async () => ({ fast: "crow-voice/qwen3.5-4b", escalate: "crow-voice/qwen3.5-4b" }),
+    ...opts,
+  }));
+  const server = http.createServer(app);
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, url: `http://127.0.0.1:${server.address().port}` })));
+}
 
 before(async () => {
   up = http.createServer((rq, res) => {
@@ -269,34 +318,15 @@ before(async () => {
   providers = {
     "crow-voice": { baseUrl: upUrl, apiKey: "none", bundleId: "vllm-rocm-qwen35-4b", models: [{ id: "qwen3.5-4b" }] },
   };
-  const app = express();
-  app.use(asRemote);
-  app.use(llmRouterRouter({
-    acquireFn: async (pid) => { acquired.push(pid); return true; },
-    resolveKeyFn: async (key) => ({ baseUrl: upUrl, model: key.split("/")[1], apiKey: null }),
-    probeReadyFn: async () => true,
-    warmFn: async (pid) => { acquired.push(pid); return true; },
-    loadProvidersFn: () => ({ providers }),
-    remoteAddressFn: () => remote,
-    // Today's bearer rule: the local/models token.
-    doorAuthFn: async (token) => token === LOCAL || token === MODELS,
-    localTokenFn: async (token) => token === LOCAL || token === MODELS,
-    peerTokenFn: async (token) => (token === PEER ? { id: "peer-1" } : null),
-    // The Serve path in production is decided by peer-class.js (socket uid +
-    // headers); here the peer is injected, exactly as req.crowPeer would be.
-    classifyPeerFn: () => peer || { via: "direct", client: remote },
-    // ownerLoginFn and enforceFn stay REAL: they read CROW_OWNER_TAILNET_LOGIN
-    // and CROW_LLM_DOOR_ENFORCE, which every test sets explicitly.
-    nowFn: () => now,
-    logFn: (line) => logs.push(line),
-    recordUsageFn: async () => {},
-    resolveVoiceKeysFn: async () => ({ fast: "crow-voice/qwen3.5-4b", escalate: "crow-voice/qwen3.5-4b" }),
-  }));
-  srv = http.createServer(app);
-  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
-  appUrl = `http://127.0.0.1:${srv.address().port}`;
+  // The Serve path in production is decided by peer-class.js (socket uid +
+  // headers); here the peer is injected, exactly as req.crowPeer would be.
+  ({ server: srv, url: appUrl } = await makeApp({ classifyPeerFn: () => peer || { via: "direct", client: remote } }));
+  // The same door with the REAL peer classifier, for the forged-login case.
+  ({ server: realSrv, url: realUrl } = await makeApp({}));
+  // A classifier that throws (the census' own failure mode).
+  ({ server: throwSrv, url: throwUrl } = await makeApp({ classifyDoorCallerFn: async () => { throw new Error("classifier down"); } }));
 });
-after(() => { srv?.close(); up?.close(); });
+after(() => { srv?.close(); realSrv?.close(); throwSrv?.close(); up?.close(); });
 
 function resetState() {
   resetDoorShadow();
@@ -318,13 +348,14 @@ function withEnv(name, value, fn) {
   });
 }
 
-async function call(path, { headers = {}, body, method = "POST" } = {}) {
+async function call(path, { headers = {}, body, raw, method = "POST", base = appUrl } = {}) {
   acquired = [];
   forwarded = 0;
   const h = { ...headers };
   let payload;
-  if (body !== undefined) { h["content-type"] = "application/json"; payload = JSON.stringify(body); }
-  return fetch(`${appUrl}${path}`, { method, headers: h, body: payload });
+  if (raw !== undefined) { h["content-type"] = "application/json"; payload = raw; }
+  else if (body !== undefined) { h["content-type"] = "application/json"; payload = JSON.stringify(body); }
+  return fetch(`${base}${path}`, { method, headers: h, body: payload });
 }
 
 const CHAT = { model: "crow-voice/qwen3.5-4b", messages: [{ role: "user", content: "hi" }] };
@@ -402,7 +433,7 @@ test("shadow: the would-refuse event is recorded only for an unidentified caller
   const lines = shadowLines();
   assert.equal(lines.length, 1);
   assert.match(lines[0], /would refuse an unidentified caller/);
-  assert.match(lines[0], /unidentified source=100\.64\.20\.5 login=- route=POST \/llm\/v1\/chat\/completions model=crow-voice\/qwen3\.5-4b$/);
+  assert.match(lines[0], /unidentified source=100\.64\.20\.5 login=- route=v1 model=crow-voice\/qwen3\.5-4b$/);
   assert.equal(summary().total, 1);
   assert.equal(summary().sources[0].source, "100.64.20.5");
 
@@ -410,13 +441,13 @@ test("shadow: the would-refuse event is recorded only for an unidentified caller
   resetState();
   remote = "100.64.20.6";
   assert.equal((await call(DOOR_PATHS.provider.path, { body: P_CHAT })).status, 200);
-  assert.match(shadowLines()[0], /route=POST \/llm\/p\/crow-voice\/v1\/chat\/completions model=qwen3\.5-4b$/);
+  assert.match(shadowLines()[0], /route=p model=qwen3\.5-4b$/);
 
   // /llm/acquire, whose body is parsed before its gate.
   resetState();
   remote = "100.64.20.7";
   assert.equal((await call("/llm/acquire", { body: { provider: "crow-voice" } })).status, 200);
-  assert.match(shadowLines()[0], /route=POST \/llm\/acquire model=-$/);
+  assert.match(shadowLines()[0], /route=acquire model=-$/);
 
   // Nothing for a caller that holds a credential the door will keep accepting.
   for (const token of [LOCAL, MODELS, PEER]) {
@@ -477,6 +508,63 @@ test("shadow: dedupe — one line per source+route per 10 min, and no token ever
   assert.equal(all.includes("hi"), false, "no request body in the logs");
 });
 
+test("shadow: a spray of caller-chosen subpaths is ONE line per door, and never evicts another source", async () => {
+  resetState();
+  // A real source first: the entry the spray must not push out of the ring.
+  remote = "100.64.20.6";
+  assert.equal((await call(DOOR_PATHS.v1.path, { body: CHAT })).status, 200);
+  assert.equal(shadowLines().length, 1);
+
+  // One source, 1000 requests, every one naming its own path and provider
+  // segment: the census keys on the door, not on the caller's path.
+  remote = "100.64.20.5";
+  for (let i = 0; i < 1000; i++) {
+    const rnd = `r${i}x${(i * 7919) % 1000}`;
+    const path = i % 2 ? `/llm/v1/${rnd}` : `/llm/p/${rnd}/v1/chat/completions`;
+    await call(path, { body: CHAT });
+  }
+
+  assert.equal(shadowLines().length, 3, "one line per (source, door): the real source, then v1 and p");
+  assert.equal(doorShadowRingSize(), 3, "and one ring entry per (source, door)");
+  const s = summary();
+  assert.equal(s.total, 3);
+  const real = s.sources.find((x) => x.source === "100.64.20.6");
+  assert.ok(real, "the other source's entry survived the spray");
+  const spam = s.sources.find((x) => x.source === "100.64.20.5");
+  assert.equal(spam.count, 2);
+  assert.deepEqual([...spam.routes].sort(), ["p", "v1"]);
+  for (const l of shadowLines()) assert.match(l, / route=(v1|p|acquire|other) model=/);
+});
+
+test("shadow: a malformed body from an unidentified caller is still recorded (the parser is not a hole)", async () => {
+  resetState();
+  remote = "100.64.20.5";
+  const r = await call(DOOR_PATHS.v1.path, { raw: '{"model": "crow-voice/qwen3.5-4b", "messages": [' });
+  assert.equal(r.status, 400, "express' own parser error, unchanged");
+  assert.equal(forwarded, 0, "nothing was forwarded");
+  const lines = shadowLines();
+  assert.equal(lines.length, 1, "the would-refuse event is recorded even though the body never parsed");
+  assert.match(lines[0], /route=v1 model=-$/, "no body, no model id");
+  assert.equal(summary().total, 1);
+  assert.equal(summary().sources[0].source, "100.64.20.5");
+});
+
+test("shadow: a direct tailnet socket with a forged Tailscale-User-Login is unidentified (the REAL peer classifier)", async () => {
+  // No classifyPeerFn and no classifyDoorCallerFn here: peer-class.js itself
+  // decides, and only a Serve socket it verified can assert a login.
+  await withEnv("CROW_OWNER_TAILNET_LOGIN", OWNER, async () => {
+    resetState();
+    remote = "100.64.20.5";
+    const r = await call(DOOR_PATHS.v1.path, { headers: { "tailscale-user-login": OWNER }, body: CHAT, base: realUrl });
+    assert.equal(r.status, 200, "the tailnet address is still admitted in shadow mode");
+    const lines = shadowLines();
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /would refuse an unidentified caller/);
+    assert.match(lines[0], /source=100\.64\.20\.5/, "named by the socket the classifier vouched for");
+    assert.match(lines[0], /login=- /, "a bare header buys no login");
+  });
+});
+
 test("enforce=1: unidentified callers get 401 on all three doors; every other class is admitted", async () => {
   await withEnv("CROW_OWNER_TAILNET_LOGIN", OWNER, () => withEnv("CROW_LLM_DOOR_ENFORCE", "1", async () => {
     resetState();
@@ -530,6 +618,42 @@ test("enforce=1 leaves today's 403 alone: a caller the source rule refuses is no
   });
 });
 
+test("a classifier that throws is admitted in shadow mode, and refused (503 DOOR_IDENTITY_UNAVAILABLE) under enforce=1", async () => {
+  // Shadow: the census failing changes nothing about the answer.
+  resetState();
+  remote = "100.64.20.5";
+  for (const [name, d] of Object.entries(DOOR_PATHS)) {
+    assert.equal((await call(d.path, { body: d.body, base: throwUrl })).status, 200, `${name}: still admitted`);
+  }
+  assert.equal((await call("/llm/acquire", { body: { provider: "crow-voice" }, base: throwUrl })).status, 200);
+  assert.deepEqual(shadowLines(), [], "a classifier failure is not a would-refuse");
+
+  // Enforce: identity IS the rule, so an undetermined caller is refused — with
+  // its own code, because no credential would change the answer.
+  await withEnv("CROW_LLM_DOOR_ENFORCE", "1", async () => {
+    for (const addr of ["100.64.20.5", "127.0.0.1"]) {
+      resetState();
+      remote = addr;
+      for (const [name, d] of Object.entries(DOOR_PATHS)) {
+        const r = await call(d.path, { body: d.body, base: throwUrl });
+        assert.equal(r.status, 503, `${name} from ${addr}: refused`);
+        assert.equal((await r.json()).error.code, "DOOR_IDENTITY_UNAVAILABLE", name);
+        assert.equal(forwarded, 0, `${name}: nothing forwarded`);
+        assert.deepEqual(acquired, [], `${name}: nothing acquired`);
+      }
+      const acq = await call("/llm/acquire", { body: { provider: "crow-voice" }, base: throwUrl });
+      assert.equal(acq.status, 503);
+      const body = await acq.json();
+      assert.equal(body.ok, false);
+      assert.equal(body.error, "DOOR_IDENTITY_UNAVAILABLE");
+      assert.deepEqual(acquired, [], "no model was started");
+    }
+    // The operator is told once, and not as a census event.
+    assert.equal(logs.filter((l) => l.startsWith("[llm-door]")).length, 0, "nothing was counted as a would-refuse");
+    assert.equal(allLogs.filter((l) => l.includes("classifier threw")).length, 1, "one WARN, not one per request");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Part 4 — the Nest item
 // ---------------------------------------------------------------------------
@@ -562,8 +686,8 @@ test("Nest: the shadow summary lands as one info item, in en and es, and only wh
   resetDoorShadow();
   assert.equal(find(await collect("en")), undefined, "no card when nobody has been seen");
 
-  recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "POST /llm/v1/chat/completions", model: "m" }, fixed);
-  recordDoorShadow({ cls: "unidentified", source: "192.0.2.7", route: "POST /llm/acquire" }, fixed);
+  recordDoorShadow({ cls: "unidentified", source: "100.64.20.5", route: "v1", model: "m" }, fixed);
+  recordDoorShadow({ cls: "unidentified", source: "192.0.2.7", route: "acquire" }, fixed);
 
   const en = await collect("en");
   const item = find(en);

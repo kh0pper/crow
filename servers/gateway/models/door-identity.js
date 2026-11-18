@@ -46,10 +46,13 @@
  *    peer token stops working on the next request;
  *  - the census/ring logs never carry a token, a body, `req.ip` or a raw header
  *    value: only an address that parses (64 chars max), the tailnet login
- *    tailscaled asserted, a bounded route and a bounded model id;
+ *    tailscaled asserted, one of the fixed route labels (DOOR_ROUTES) and a
+ *    model id this instance's providers know (else "other");
  *  - the ring and the per-key dedupe map are bounded, so a spray of spoofed
  *    sources cannot grow memory. At most one event per (class, source, route)
- *    per DOOR_SHADOW_WINDOW_MS;
+ *    per DOOR_SHADOW_WINDOW_MS, where `route` is one of the FIXED labels in
+ *    DOOR_ROUTES (never the caller's path: /llm/v1/<random> must not mint a
+ *    key or push a real entry out of the ring);
  *  - no DB write, no setting, no counter file.
  *
  * Pure Node + servers/shared/peer-class.js: importable from the health signals
@@ -90,8 +93,22 @@ export function doorEnforceOn(env = process.env) {
 
 const LOGIN_MAX = 200;
 const ADDR_MAX = 64;
-const ROUTE_MAX = 120;
+const ROUTE_MAX = 24;
 const MODEL_MAX = 80;
+
+/** The ONLY route labels the census keeps — one per door (v1, p, acquire). Any
+ *  other value collapses to "other" in the dedupe key, the ring and the line:
+ *  the path is caller-chosen, so left as-is a request to /llm/v1/<random> or
+ *  /llm/p/<random>/… would mint a fresh key + log line per request and push a
+ *  real source out of the ring. */
+export const DOOR_ROUTES = Object.freeze(["v1", "p", "acquire"]);
+export const DOOR_ROUTE_OTHER = "other";
+
+/** One route label, from the fixed set (anything else is "other"). */
+export function doorRouteLabel(route) {
+  const v = String(route ?? "").trim();
+  return DOOR_ROUTES.includes(v) ? v : DOOR_ROUTE_OTHER;
+}
 
 /** The bearer token on a request, or null. Never logged, never returned to a
  *  caller outside this module's own verdict. */
@@ -261,7 +278,7 @@ export const DOOR_SHADOW_RING = 512;
 /** The summary's window (the health strip says "in the last 24 h"). */
 export const DOOR_SHADOW_SUMMARY_MS = 24 * 60 * 60 * 1000;
 
-const shadowSeen = new Map(); // "<cls> <source> <route>" -> last recorded at, ms
+const shadowSeen = new Map(); // "<cls> <source> <route label>" -> last recorded at, ms
 const shadowRing = [];        // { at, cls, source, login, route, model, enforced }
 
 /** Test seams. */
@@ -289,7 +306,9 @@ function printable(s, max) {
  * deduped; never throws (a logger that throws must not change the door's
  * answer). Returns true when it recorded and logged.
  *
- * @param {{cls?: string, source?: string, login?: string|null, route?: string, model?: string|null, enforced?: boolean}} event
+ * @param {{cls?: string, source?: string, login?: string|null, route?: string,
+ *          model?: string|null, enforced?: boolean}} event  `route` must be one of
+ *          DOOR_ROUTES; anything else is recorded as "other".
  * @param {number} [nowMs]
  * @param {(line: string) => void} [logFn]
  */
@@ -297,7 +316,7 @@ export function recordDoorShadow(event, nowMs = Date.now(), logFn = console.log)
   try {
     const cls = event && typeof event.cls === "string" && event.cls ? event.cls : DOOR_CLASS.UNIDENTIFIED;
     const source = printableSource(event && event.source);
-    const route = printable(event && event.route, ROUTE_MAX).trim() || "-";
+    const route = doorRouteLabel(printable(event && event.route, ROUTE_MAX));
     const key = `${cls} ${source} ${route}`;
     const now = Number.isFinite(nowMs) ? nowMs : Date.now();
     const last = shadowSeen.get(key);

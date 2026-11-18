@@ -43,7 +43,8 @@
  * one bounded, deduped, token-free "would refuse" line when today's rule admits
  * an unidentified caller. The class never changes the answer: that is
  * CROW_LLM_DOOR_ENFORCE=1's job, which is OFF by default and, when on, refuses
- * `unidentified` with 401 DOOR_CREDENTIAL_REQUIRED. The Nest's
+ * `unidentified` with 401 DOOR_CREDENTIAL_REQUIRED (and a caller it cannot name
+ * at all — the classifier threw — with 503 DOOR_IDENTITY_UNAVAILABLE). The Nest's
  * `llm-door:unidentified-callers` item summarises the last 24 h.
  *
  * The cloud door /llm/c is stricter than the rest (roles phase 2, Task 16;
@@ -294,7 +295,7 @@ function logBearerAdmission(req, deps, socketAddr) {
     doorCensusSeen.delete(where);
     doorCensusSeen.set(where, now);
     while (doorCensusSeen.size > DOOR_CENSUS_MAX_KEYS) doorCensusSeen.delete(doorCensusSeen.keys().next().value);
-    const route = printable(`${req.method || "-"} ${(req.baseUrl || "") + (req.path || "")}`.trim(), 120) || "-";
+    const route = doorRouteOf(req);
     const raw = req.headers["x-crow-client"];
     const client = printable(Array.isArray(raw) ? raw[0] : raw, 80).trim() || "-";
     deps.logFn(`[llm-router] bearer admitted from a non-tailnet source (would be refused after AR3): ${where} route=${route} client=${client}`);
@@ -315,9 +316,17 @@ function logBearerAdmission(req, deps, socketAddr) {
  * token-free "would refuse" line is recorded. Only with
  * CROW_LLM_DOOR_ENFORCE=1 does that same caller get refused instead, and then
  * with 401 DOOR_CREDENTIAL_REQUIRED (see doorRefusal), never the source rule's
- * 403. The class never decides anything else: a classifier failure leaves the
- * answer untouched.
+ * 403. In shadow mode a classifier failure leaves the answer untouched; under
+ * CROW_LLM_DOOR_ENFORCE=1 an undetermined caller is refused with 503
+ * DOOR_IDENTITY_UNAVAILABLE (see doorRefusal), because there the identity rule
+ * IS the door.
  */
+
+/** One WARN per process for a classifier that throws while the door enforces:
+ * the operator needs to see it, and a broken classifier is one bug, not one per
+ * request. */
+let doorIdentityFailureLogged = false;
+
 async function doorCallerAllowed(req, deps) {
   const socketAddr = deps.remoteAddressFn(req);
   // Today's answer first, unchanged: the socket AND every forwarded address
@@ -339,9 +348,7 @@ async function doorCallerAllowed(req, deps) {
   // Then WHO is calling, so a caller admitted only on its tailnet address can be
   // counted (shadow) or refused (CROW_LLM_DOOR_ENFORCE=1). A request already
   // classified by an earlier gate keeps that verdict (/llm/v1 and /llm/p are
-  // gated before the body parser AND again in handleDoor). A classifier that
-  // throws leaves the answer untouched: a broken census must not close a door
-  // that is open today.
+  // gated before the body parser AND again in handleDoor).
   if (!req.crowDoor) {
     try {
       req.crowDoor = await deps.classifyDoorCallerFn(req, {
@@ -357,6 +364,24 @@ async function doorCallerAllowed(req, deps) {
       });
     } catch {
       req.crowDoor = null;
+      // A classifier that throws proves nothing.
+      //  - shadow mode: unchanged, the answer stays YES (a broken census must
+      //    not close a door that is open today);
+      //  - CROW_LLM_DOOR_ENFORCE=1: identity IS the rule, so "unknown" must
+      //    refuse — 503 DOOR_IDENTITY_UNAVAILABLE (doorRefusal), which says our
+      //    census broke rather than pretending the caller lacks a credential.
+      //    A loopback caller included: under enforcement nobody is admitted on
+      //    an address alone, so an address we cannot classify is not a pass.
+      if (deps.enforceFn()) {
+        req.crowDoorUnavailable = true;
+        if (!doorIdentityFailureLogged) {
+          doorIdentityFailureLogged = true;
+          try {
+            deps.logFn(`[llm-router] WARN the door's caller classifier threw while CROW_LLM_DOOR_ENFORCE=1: refusing undetermined callers with DOOR_IDENTITY_UNAVAILABLE`);
+          } catch { /* logging never changes the answer */ }
+        }
+        return false;
+      }
     }
   }
 
@@ -377,37 +402,80 @@ async function doorCallerAllowed(req, deps) {
   return true;
 }
 
-/** The route as the census/log names it: bounded and printable, never a query
- *  string (`req.query` can carry a key). */
+/** The door a request came to, as a FIXED label (models/door-identity.js
+ *  DOOR_ROUTES): "v1", "p" or "acquire", else "other". Never the caller's path
+ *  or method — a caller-chosen subpath (/llm/v1/<random>, /llm/p/<random>/…)
+ *  would otherwise mint a fresh dedupe key and log line per request and push a
+ *  real source out of the census ring. */
 function doorRouteOf(req) {
-  const route = printable(`${req.method || "-"} ${(req.baseUrl || "") + (req.path || "")}`.trim(), 120) || "-";
-  return route;
+  const p = `${(req && req.baseUrl) || ""}${(req && req.path) || ""}`;
+  if (/^\/llm\/v1(?:\/|$)/i.test(p)) return "v1";
+  if (/^\/llm\/p(?:\/|$)/i.test(p)) return "p";
+  if (/^\/llm\/acquire(?:\/|$)/i.test(p)) return "acquire";
+  return "other";
+}
+
+/** The provider a request names: the /llm/p/<id>/… path segment (the door the
+ *  path-scoped callers use), else the model id's own prefix. Caller-chosen
+ *  either way, so it is only ever used to look a name up in this instance's own
+ *  providers, and is never echoed. */
+function doorProviderOf(req, model) {
+  const p = `${(req && req.baseUrl) || ""}${(req && req.path) || ""}`;
+  const m = /^\/llm\/p\/([^/]+)/i.exec(p);
+  if (m) {
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+  }
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(0, slash) : null;
+}
+
+/** The model label the census keeps: the caller's own model id ONLY when it
+ *  belongs to a provider this instance knows (the provider set is ours, so the
+ *  value is not free-form caller text), else "other", else null for a request
+ *  with no body to read. */
+function doorModelOf(req, deps) {
+  const raw = req && req.body && typeof req.body === "object" ? req.body.model : null;
+  if (typeof raw !== "string") return null;
+  const model = printable(raw, 120).trim();
+  if (!model) return null;
+  let providers = {};
+  try { providers = (deps.loadProvidersFn() || {}).providers || {}; } catch { providers = {}; }
+  const pid = doorProviderOf(req, model);
+  return pid && Object.prototype.hasOwnProperty.call(providers, pid) ? model : "other";
 }
 
 /**
  * Record this request's would-refuse/refused event once (the gate stashes the
- * verdict; the post-parser middleware fills the model id in). Idempotent, so the
+ * verdict; the middleware mounted after the body parser — or its error handler,
+ * when the body never parsed — fills the model id in). Idempotent, so the
  * acquire route can record where its body is already parsed. Never throws.
  */
 function noteDoorShadow(req, deps, enforced) {
   const d = req && req.crowDoor;
   if (!d || d.cls !== DOOR_CLASS.UNIDENTIFIED || d.recorded) return false;
   d.recorded = true;
-  const model = req.body && typeof req.body === "object" ? req.body.model : null;
   return recordDoorShadow({
     cls: d.cls,
     source: d.source,
     login: d.login,
     route: doorRouteOf(req),
-    model,
+    model: doorModelOf(req, deps),
     enforced,
   }, deps.nowFn(), deps.logFn);
 }
 
 /** The refusal body for a caller the door did not admit: 401 when the identity
- *  rule (CROW_LLM_DOOR_ENFORCE=1) refused an unidentified caller, 403 for the
+ *  rule (CROW_LLM_DOOR_ENFORCE=1) refused an unidentified caller, 503
+ *  DOOR_IDENTITY_UNAVAILABLE when it could not classify the caller at all while
+ *  enforcing (our census failed, not the caller's credential), 403 for the
  *  source rule that has always been here. */
 function doorRefusal(req, res, { message, acquire = false }) {
+  if (req && req.crowDoorUnavailable) {
+    const m = "the model door could not establish who is calling, and it now requires a Crow credential";
+    return acquire
+      ? res.status(503).json({ ok: false, error: "DOOR_IDENTITY_UNAVAILABLE", message: m })
+      : res.status(503).json({ error: { code: "DOOR_IDENTITY_UNAVAILABLE", message: m } });
+  }
   if (req && req.crowDoorRefused) {
     const m = "this caller has no Crow credential, and the model door now requires one";
     return acquire
@@ -1081,6 +1149,11 @@ export default function llmRouterRouter(opts = {}) {
   // companion/glasses transcript (with tool history + base64 image parts) can
   // exceed that and 413.
   router.use("/llm", express.json({ limit: "10mb" }));
+  // The census for a body the parser refused: a malformed or oversize body calls
+  // next(err), which skips the middleware below, so an unidentified caller's
+  // parser error would otherwise leave no trace at all. This needs no body, so
+  // it records with model=null and passes the error on, unchanged.
+  router.use("/llm", (err, req, _res, next) => { noteDoorShadow(req, deps, req.crowDoorRefused === true); next(err); });
   // The shadow census' model id: /llm/v1 and /llm/p gate the caller BEFORE this
   // parser (so a refused caller's body is never parsed), which leaves the model
   // only known here. A no-op unless the gate stashed an unidentified caller.
