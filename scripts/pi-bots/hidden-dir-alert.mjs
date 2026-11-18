@@ -2,8 +2,9 @@
  * The operator-visible bell for a bot spawn the hidden-entry rule REFUSED
  * (scripts/pi-bots/hidden_files.mjs): a secret FOLDER that was hidden before and
  * is now gone or replaced, a secret folder or file that is a link (or sits
- * behind one), an entry that could not be masked at all, or an identity record
- * Crow cannot read.
+ * behind one), a secret folder with a link inside it (or one Crow could not look
+ * through), an entry that could not be masked at all, or an identity record
+ * Crow cannot read or write.
  *
  * Why a bell and not only the failed turn: the refusal stops EVERY bot on the
  * instance, and the operator never sees a bot's failed turn in a channel they
@@ -32,15 +33,18 @@
  * per 24 h window, so a refusal loop cannot fill `alerts/pending`.
  *
  * Nothing here ever throws, and no path is written into the text: the title and
- * body name the entry `~/rel` and the exact reset command, never an absolute
- * path and never any content.
+ * body name the entry `~/rel`, the entry's name when there is one to name, and
+ * the exact reset command, never an absolute path and never any content. The
+ * command is the one for the INSTANCE that refused (hiddenDirResetCommand): on a
+ * co-hosted instance the bare command would forget the DEFAULT instance's
+ * records, so the bell spells that instance's home `--crow-home ~/.crow-<x>`.
  */
 import Database from "better-sqlite3";
 import { maskSecrets } from "../../servers/shared/secret-mask.js";
 import { writeAlertFile } from "../../servers/shared/alert-spool.js";
 import { notificationTypeEnabled } from "../../servers/shared/notifications.js";
 import { resolveSqlitePath } from "./instance-paths.mjs";
-import { HIDDEN_DIR_RESET_COMMAND } from "./hidden_files.mjs";
+import { INNER_LINK_MAX_ENTRIES, hiddenDirResetCommand } from "./hidden_files.mjs";
 
 /** `notifications.source` every refusal bell carries. */
 export const HIDDEN_DIR_ALERT_SOURCE = "bot-sandbox";
@@ -55,33 +59,77 @@ export const HIDDEN_DIR_ALERT_ACTION_URL = "/dashboard/settings?section=bot-runt
  * The sentence for each cause `resolveHiddenSecretPath` reports. Kept here (not
  * built from the refusal text) because the refusal names the absolute path of
  * the identity record — the bell must not.
+ *
+ * `x` carries what the cause needs beyond the entry: the LINK'S NAME inside a
+ * folder (`entry`, for `inner-link`), how many entries a folder holds
+ * (`count`), and for a `record` refusal which of the two it was (`recordWhy`:
+ * unreadable, or not writable).
  */
 const CAUSE_TEXT = Object.freeze({
   missing: (rel) => "~/" + rel + " was there the last time a bot ran and is gone now.",
   replaced: (rel, kind) => "~/" + rel + " is not the " + noun(kind) + " Crow hid the last time (it was replaced).",
   link: (rel, kind) => "~/" + rel + " is a link, or sits behind one, so Crow can't hide " + what(kind) + ".",
   unmasked: (rel) => "Crow could not hide ~/" + rel + " on the spawn it just tried.",
-  record: () => "Crow's record of the secret folders it hides is unreadable, so it can't tell whether one moved or was replaced.",
+  "inner-link": (rel, kind, x) => (x && x.entry
+    ? "~/" + rel + " has a link inside it (~/" + rel + "/" + x.entry +
+      "), so Crow can't hide the folder whole: the mask covers the link, not what it points at."
+    : "Crow could not look inside ~/" + rel + " on the spawn it just tried, so it can't tell whether a link in it leads to a credential."),
+  "inner-many": (rel, kind, x) => "~/" + rel + " holds " + ((x && x.count) || "more than " + INNER_LINK_MAX_ENTRIES) +
+    " entries, more than the " + INNER_LINK_MAX_ENTRIES + " Crow will look through for links.",
+  record: (rel, kind, x) => (x && x.recordWhy === "not writable"
+    ? "Crow could not write its record of the secret folders it hides, so it can't remember which folder it hid."
+    : "Crow's record of the secret folders it hides is unreadable, so it can't tell whether one moved or was replaced."),
 });
 
 const noun = (kind) => (kind === "file" ? "file" : "folder");
 const what = (kind) => (kind === "file" ? "it" : "the credentials in it");
 
 /**
+ * What the operator should DO about one cause, ending with the command that
+ * re-confirms the entry. Each cause has its own action, because one sentence for
+ * all of them told the operator the wrong thing: a link is not something to
+ * "replace with a real folder" when the entry should not exist at all, a record
+ * Crow cannot WRITE is not fixed by forgetting it, and a folder full of entries
+ * is not fixed by re-confirming it either.
+ */
+function remedyFor(cause, kind, { reset, entry, recordWhy }) {
+  if (cause === "link") {
+    return "Remove the link (or, if you use that tool, replace it with a real " + noun(kind) +
+      "), then run " + reset + " and start the bot again.";
+  }
+  if (cause === "inner-link") {
+    return entry
+      ? "Replace the link with a real file in the folder (or remove it), then run " + reset + " and start the bot again."
+      : "Make the folder readable by its owner, then start the bot again.";
+  }
+  if (cause === "inner-many") {
+    return "Move the folder's contents aside (Crow will not look through more than " + INNER_LINK_MAX_ENTRIES +
+      " entries), then run " + reset + " and start the bot again.";
+  }
+  if (cause === "record" && recordWhy === "not writable") {
+    return "Check that the Crow secrets folder is writable by its owner, then start the bot again.";
+  }
+  return "If that was you, run " + reset + " and start the bot again.";
+}
+
+/**
  * The bell's title and body for one refusal: the entry `~/rel`, what happened,
- * and the one command that re-confirms it. Both fields are masked with the
- * shared display mask.
+ * and the command that re-confirms it — on the instance that refused.
  *
- * @param {{rel:string, kind?:"dir"|"file", cause?:string}} entry
+ * `crowHome` is that instance's Crow home, so a co-hosted instance's bell names
+ * its own record (`--crow-home ~/.crow-<x>`, ~-relative: no absolute path in a
+ * bell) instead of the default instance's.
+ *
+ * @param {{rel:string, kind?:"dir"|"file", cause?:string, entry?:string|null,
+ *          recordWhy?:string|null, count?:number|null,
+ *          crowHome?:string|null}} entry
  * @returns {{title:string, body:string}}
  */
-export function hiddenDirAlertText({ rel, kind = "dir", cause = "missing" } = {}) {
+export function hiddenDirAlertText({ rel, kind = "dir", cause = "missing", entry = null, recordWhy = null, count = null, crowHome = null } = {}) {
   const say = CAUSE_TEXT[cause] || CAUSE_TEXT.missing;
-  const remedy = cause === "link"
-    ? "Replace it with a real " + noun(kind) + "; if Crow then still refuses a bot, run "
-    : "If that was you, run ";
+  const extra = { reset: hiddenDirResetCommand({ crowHome }), entry, recordWhy };
   const title = maskSecrets("A bot could not start: ~/" + rel);
-  const body = maskSecrets(say(String(rel), kind) + " " + remedy + HIDDEN_DIR_RESET_COMMAND + " and start the bot again.");
+  const body = maskSecrets(say(String(rel), kind, { entry, recordWhy, count }) + " " + remedyFor(cause, kind, extra));
   return { title, body };
 }
 
@@ -96,16 +144,23 @@ function openExistingStore(dbPath) {
 /**
  * Write the refusal bell into the instance store, synchronously.
  *
+ * `entry` (a link's name inside the folder), `recordWhy` and `count` are what the
+ * cause needs to say the sentence, and `crowHome` is the Crow home of the
+ * instance that refused (so the command in the bell is ITS reset command).
+ *
  * @param {{dbPath?:string, rel:string, kind?:string, cause?:string,
- *          nowMs?:number, open?:Function}} opts  `open` is the test seam: it
- *   must return a better-sqlite3 connection, or something falsy for "no store".
+ *          entry?:string|null, recordWhy?:string|null, count?:number|null,
+ *          crowHome?:string|null, nowMs?:number, open?:Function}} opts  `open` is
+ *   the test seam: it must return a better-sqlite3 connection, or something falsy
+ *   for "no store".
  * @returns {{written:boolean, reason:string, id?:number}}
  *   `reason` is `"written"`, `"deduped"`, `"disabled"` (the operator switched
  *   system notifications off — a choice, never retried), `"no-store"` (no path,
  *   no file) or `"error"`. Only the last two mean "the store could not be used",
  *   which is what makes the caller spool instead.
  */
-export function bellHiddenDirRefusal({ dbPath, rel, kind = "dir", cause = "missing", nowMs = Date.now(), open = openExistingStore } = {}) {
+export function bellHiddenDirRefusal({ dbPath, rel, kind = "dir", cause = "missing", entry = null, recordWhy = null,
+  count = null, crowHome = null, nowMs = Date.now(), open = openExistingStore } = {}) {
   let conn = null;
   try {
     if (!dbPath) return { written: false, reason: "no-store" };
@@ -120,7 +175,14 @@ export function bellHiddenDirRefusal({ dbPath, rel, kind = "dir", cause = "missi
       "AND json_extract(metadata, '$.hidden_rel') = ? AND created_at >= datetime(?, 'unixepoch') LIMIT 1",
     ).get(HIDDEN_DIR_ALERT_SOURCE, rel, cutoff);
     if (recent) return { written: false, reason: "deduped", id: Number(recent.id) };
-    const { title, body } = hiddenDirAlertText({ rel, kind, cause });
+    const { title, body } = hiddenDirAlertText({ rel, kind, cause, entry, recordWhy, count, crowHome });
+    // The cause says WHICH sentence, so the row records which rule fired without
+    // parsing it; `hidden_entry` names the link inside the folder, never its
+    // target. The dedupe stays per ENTRY, so a folder's missing/replaced/link
+    // states share one window.
+    const metadata = { code: HIDDEN_DIR_ALERT_CODE, hidden_rel: rel, hidden_kind: noun(kind), cause };
+    if (entry) metadata.hidden_entry = entry;
+    if (recordWhy) metadata.hidden_record = recordWhy;
     // `created_at` is stamped from the CALLER's clock (`nowMs`), the same clock
     // the dedupe window uses, so the two can never disagree — and a test can move
     // the window without touching the host's clock.
@@ -128,7 +190,7 @@ export function bellHiddenDirRefusal({ dbPath, rel, kind = "dir", cause = "missi
       "INSERT INTO notifications (type, source, title, body, priority, action_url, metadata, created_at) " +
       "VALUES ('system', ?, ?, ?, 'high', ?, ?, datetime(?, 'unixepoch'))",
     ).run(HIDDEN_DIR_ALERT_SOURCE, title, body, HIDDEN_DIR_ALERT_ACTION_URL,
-      JSON.stringify({ code: HIDDEN_DIR_ALERT_CODE, hidden_rel: rel, hidden_kind: noun(kind), cause }),
+      JSON.stringify(metadata),
       Math.floor(nowMs / 1000));
     return { written: true, reason: "written", id: Number(info.lastInsertRowid) };
   } catch (err) {
@@ -154,9 +216,10 @@ function relSlug(rel) {
  *
  * @returns {string|null} the file written, or null
  */
-export function spoolHiddenDirRefusal({ rel, kind = "dir", cause = "missing", nowMs = Date.now(), write = writeAlertFile } = {}) {
+export function spoolHiddenDirRefusal({ rel, kind = "dir", cause = "missing", entry = null, recordWhy = null,
+  count = null, crowHome = null, nowMs = Date.now(), write = writeAlertFile } = {}) {
   try {
-    const { title, body } = hiddenDirAlertText({ rel, kind, cause });
+    const { title, body } = hiddenDirAlertText({ rel, kind, cause, entry, recordWhy, count, crowHome });
     const window = Math.floor(nowMs / HIDDEN_DIR_ALERT_COOLDOWN_MS);
     return write({
       code: HIDDEN_DIR_ALERT_CODE + "-" + relSlug(rel),
@@ -176,11 +239,12 @@ export function spoolHiddenDirRefusal({ rel, kind = "dir", cause = "missing", no
  *
  * @returns {{written:boolean, reason:string, spooled:boolean}}
  */
-export function notifyHiddenDirRefusal({ dbPath, rel, kind = "dir", cause = "missing", nowMs = Date.now(), bell = bellHiddenDirRefusal, spool = spoolHiddenDirRefusal } = {}) {
+export function notifyHiddenDirRefusal({ dbPath, rel, kind = "dir", cause = "missing", entry = null, recordWhy = null,
+  count = null, crowHome = null, nowMs = Date.now(), bell = bellHiddenDirRefusal, spool = spoolHiddenDirRefusal } = {}) {
   try {
-    const result = bell({ dbPath, rel, kind, cause, nowMs });
+    const result = bell({ dbPath, rel, kind, cause, entry, recordWhy, count, crowHome, nowMs });
     if (result.written || result.reason === "deduped" || result.reason === "disabled") return { ...result, spooled: false };
-    const file = spool({ rel, kind, cause, nowMs });
+    const file = spool({ rel, kind, cause, entry, recordWhy, count, crowHome, nowMs });
     return { ...result, spooled: Boolean(file) };
   } catch (err) {
     return { written: false, reason: "error", error: String(err?.message || err), spooled: false };

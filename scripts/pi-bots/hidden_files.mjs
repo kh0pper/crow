@@ -12,6 +12,7 @@
  */
 import { readdirSync, lstatSync, realpathSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { OPERATOR_SECRET_DIRS, OPERATOR_SECRET_FILES } from "../../servers/shared/operator-secret-paths.js";
 
@@ -319,6 +320,80 @@ export const SSH_LINK_REFUSAL = secretLinkRefusal(SSH_DIR_REL, "dir");
 export const GNUPG_LINK_REFUSAL = secretLinkRefusal(GNUPG_DIR_REL, "dir");
 export const GCLOUD_LINK_REFUSAL = secretLinkRefusal(GCLOUD_DIR_REL, "dir");
 
+// ---- what a secret FOLDER holds -------------------------------------------
+
+/**
+ * How many entries Crow looks through when it looks INSIDE a secret folder. A
+ * folder past this is refused rather than half-checked: the point of the look is
+ * "there is no link in here", and a bounded look cannot say that about a folder
+ * nobody bounded.
+ */
+export const INNER_LINK_MAX_ENTRIES = 1000;
+
+/**
+ * Look inside one secret FOLDER (the entries directly in it, depth 1) for the
+ * one thing the whole-folder mask cannot cover: a SYMLINK. The mask hides the
+ * folder's own listing — every name in it, the link included — but not what a
+ * link points AT. An operator who keeps a key outside the folder and links it in
+ * (`~/.ssh/id_rsa -> ~/keys/id_rsa`) would leave the real key readable at
+ * `~/keys/id_rsa` inside the sandbox, and a bot can read a path it can guess even
+ * though it cannot list the folder. So a folder with a link at depth 1 refuses
+ * the spawn until the link becomes a real file in the folder (or is removed).
+ *
+ * It runs on EVERY spawn, not only the first sight: the readdir + lstat is cheap
+ * for the handful of folders on the list, and a link added to a folder Crow
+ * already records is exactly as good an escape as one in a decoy. The first
+ * sight is what makes a bot-planted DECOY matter — an operator who never had a
+ * `~/.ssh` gets one recorded on the next spawn, and the look is what stops that
+ * first record from blessing a folder a bot arranged.
+ *
+ * A folder that cannot be listed is a refusal too (fail closed: an entry Crow
+ * cannot inspect is never assumed to have no link), and so is one with more than
+ * `max` entries.
+ *
+ * @param {string} dir   the resolved folder (the caller lstat'ed it already)
+ * @param {number} [max] how many entries Crow will look through
+ * @returns {{cause:"inner-link", name:string}|{cause:"inner-many", count:number}|
+ *           {cause:"inner-unreadable"}|null}  the problem, or null
+ */
+export function innerEntryProblem(dir, max = INNER_LINK_MAX_ENTRIES) {
+  let names;
+  try { names = readdirSync(dir); } catch { return { cause: "inner-unreadable" }; }
+  if (names.length > max) return { cause: "inner-many", count: names.length };
+  for (const name of names) {
+    let st;
+    // lstat per entry (not the dirent's d_type): a filesystem that reports a
+    // type of "unknown" would look like "not a link" and let one through.
+    try { st = lstatSync(join(dir, name)); } catch { return { cause: "inner-unreadable" }; }
+    if (st.isSymbolicLink()) return { cause: "inner-link", name };
+  }
+  return null;
+}
+
+/**
+ * The refusal for a secret FOLDER that holds a link directly inside it: one
+ * sentence, naming the entry the operator already knows (`~/rel`) and the link's
+ * name in it — never what the link points at, and never any content.
+ */
+export function secretInnerLinkRefusal(rel, name) {
+  return "A bot could not start: ~/" + rel + " has a link inside it (~/" + rel + "/" + name +
+    "), so Crow can't hide the folder whole. Replace it with a real file in the folder, or remove it.";
+}
+
+/** The refusal for a secret folder Crow could not list, so it cannot say there
+ *  is no link in it (fail closed). */
+export function secretInnerUnreadableRefusal(rel) {
+  return "A bot could not start: Crow could not look inside ~/" + rel +
+    ", so it can't tell whether a link there leads to a credential. Make the folder readable by its owner.";
+}
+
+/** The refusal for a secret folder with more entries than Crow will look
+ *  through (never a real credential folder; a decoy stuffed to hide one). */
+export function secretInnerTooManyRefusal(rel, count, max = INNER_LINK_MAX_ENTRIES) {
+  return "A bot could not start: ~/" + rel + " holds " + (count || "more than " + max) +
+    " entries, more than the " + max + " Crow will look through for links. Move its contents aside.";
+}
+
 // ---- the identity memory ----------------------------------------------------
 
 /**
@@ -329,7 +404,8 @@ export const GCLOUD_LINK_REFUSAL = secretLinkRefusal(GCLOUD_DIR_REL, "dir");
  * rule above: a folder that was hidden before and then goes missing, or is
  * replaced by another one at the same path, is how a re-pointed ancestor or a
  * swapped-in decoy shows up AFTER the fact, and it refuses the spawn until the
- * operator re-confirms (see HIDDEN_DIR_RESET_COMMAND).
+ * operator re-confirms (see HIDDEN_DIR_RESET_COMMAND, and hiddenDirResetCommand
+ * below for the co-hosted instance whose record it was).
  *
  * FOLDERS ONLY, deliberately. A FILE gets no identity memory (its own section in
  * resolveHiddenSecretPath): `npm config set` and `docker login` rewrite
@@ -359,6 +435,41 @@ export const HIDDEN_DIR_STATE_VERSION = 1;
  *  deleting the record). The next spawn records them all again. Also the remedy
  *  named in the bell that a refused spawn raises. */
 export const HIDDEN_DIR_RESET_COMMAND = "node scripts/pi-bots/hidden-dir-memory.mjs --reset";
+
+/** The operator's host-default Crow home, relative to the operator's home: what
+ *  the plain reset command above resolves when CROW_HOME is unset. */
+export const DEFAULT_CROW_HOME_REL = ".crow";
+
+/**
+ * The reset command for ONE instance — the instance whose record refused the
+ * spawn, not whichever home the operator's own shell happens to resolve.
+ *
+ * HIDDEN_DIR_RESET_COMMAND reads its Crow home from CROW_HOME (default
+ * ~/.crow), so on a co-hosted instance (`CROW_HOME=~/.crow-<x>`) the bare command
+ * would forget the DEFAULT instance's records and leave the refusing one in
+ * place. When this instance's home is not the default, the command names it with
+ * the CLI's `--crow-home`, in ~-relative form: the bell never carries an absolute
+ * path. The operator's shell expands a leading `~/` in that word, so the command
+ * stays copy-pasteable.
+ *
+ * A Crow home OUTSIDE the operator's home folder has no ~-relative spelling, so
+ * it gets the bare command and the operator passes `--crow-home` themselves
+ * (`hidden-dir-memory.mjs --help` documents it). Co-hosted instances live under
+ * $HOME, which is the case this is for; naming an absolute path in a bell is not
+ * an option.
+ *
+ * @param {{crowHome?:string|null, homeDir?:string}} [opts] the Crow home that
+ *   refused (null/absent: the caller knows none, keep the plain command).
+ */
+export function hiddenDirResetCommand({ crowHome = null, homeDir = homedir() } = {}) {
+  if (!crowHome) return HIDDEN_DIR_RESET_COMMAND;
+  const real = (p) => { try { return realpathSync(p); } catch { return String(p); } };
+  const home = real(crowHome);
+  const homeRoot = real(homeDir);
+  if (home === join(homeRoot, DEFAULT_CROW_HOME_REL)) return HIDDEN_DIR_RESET_COMMAND;
+  if (homeRoot === "/" || !home.startsWith(homeRoot + "/")) return HIDDEN_DIR_RESET_COMMAND;
+  return HIDDEN_DIR_RESET_COMMAND + " --crow-home ~/" + home.slice(homeRoot.length + 1);
+}
 
 /** The record's file name for one home: its resolved path hashed, so a moved
  *  home spelling (a symlinked $HOME) and a symlinked `/tmp` do not split it. */
@@ -454,10 +565,17 @@ export function resetAllHiddenDirIdentity(crowHome) {
 
 /** The refusal for a record the spawn cannot use: unreadable/corrupt (fail
  *  closed — an entry that cannot be checked is never assumed new), or one it
- *  could not write. */
-export function hiddenDirStateRefusal(statePath, why = "unreadable") {
-  return "A bot could not start: Crow's record of the secret folders and files it hides is " + why +
-    ", so it can't tell whether one moved or was replaced. Run " + HIDDEN_DIR_RESET_COMMAND +
+ *  could not write. The two are not the same failure, so they are not the same
+ *  sentence: forgetting a record Crow could not WRITE fails for the very reason
+ *  the write did, so that one names the folder's permissions instead of offering
+ *  a reset that would fail too. */
+export function hiddenDirStateRefusal(statePath, why = "unreadable", { crowHome = null } = {}) {
+  if (why === "not writable") {
+    return "A bot could not start: Crow could not write its record of the secret folders it hides, so it can't" +
+      " remember which folder it hid. Check that Crow's secrets folder is writable by its owner, then start the bot again.";
+  }
+  return "A bot could not start: Crow's record of the secret folders it hides is " + why +
+    ", so it can't tell whether one moved or was replaced. Run " + hiddenDirResetCommand({ crowHome }) +
     " (or delete " + statePath + ") and start the bot again.";
 }
 
@@ -468,12 +586,13 @@ export function hiddenDirStateRefusal(statePath, why = "unreadable") {
  * decoy, and never any content. `pathKind` only picks the noun in the replaced
  * sentence (a folder or a file).
  */
-export function reConfirmRefusal(rel, kind, statePath, pathKind = "dir") {
+export function reConfirmRefusal(rel, kind, statePath, pathKind = "dir", { crowHome = null } = {}) {
   const what = kind === "missing"
     ? "was there the last time a bot ran and is gone now"
     : "is not the " + (pathKind === "file" ? "file" : "folder") + " Crow hid the last time (it was replaced)";
   return "A bot could not start: ~/" + rel + " " + what + ", so Crow won't run a bot until you re-confirm. " +
-    "If that was you, run " + HIDDEN_DIR_RESET_COMMAND + " (or delete " + statePath + ") and start the bot again.";
+    "If that was you, run " + hiddenDirResetCommand({ crowHome }) + " (or delete " + statePath +
+    ") and start the bot again.";
 }
 
 /**
@@ -499,23 +618,52 @@ export function reConfirmRefusal(rel, kind, statePath, pathKind = "dir") {
  * a missing or replaced credential FILE is simply nothing to mask on that
  * spawn, while an existing one is masked at whatever inode holds that name.
  *
+ * A FOLDER is also looked INTO on every spawn (innerEntryProblem): masking a
+ * folder whole hides its names, not what a link inside it points at, so a link at
+ * depth 1 refuses the spawn. That look is also the first-sight decoy hardening:
+ * the record made on the first sight is what makes a bot-planted folder trusted
+ * later, so the sight that records it is the one that must not bless a folder with
+ * a link in it.
+ *
+ * THE WINDOW BEFORE THE MOUNT. Every check here — the walk, the identity
+ * comparison, the look inside — reads the filesystem at one moment, and the
+ * masks are made later, when the child is spawned and bwrap mounts the tmpfs
+ * over each folder. Between the two, a writer with the operator's own uid can
+ * rename the folder away, swap a decoy in, or add a link: the checks would have
+ * approved an entry that is no longer the one mounted. That is deliberate and
+ * unavoidable at this level: there is no atomic "check and mount this inode",
+ * and the default (bwrap) tier shares the uid, the filesystem and the mount
+ * namespace setup with the very bot it confines — it is a mask over paths, not a
+ * boundary against a cooperating same-uid writer. What the checks buy is
+ * DETECTION across spawns: a swap that survives into the next spawn is refused
+ * by the identity memory and the look inside, and the operator is told. The
+ * contain tier, which starts from an empty root and binds only named paths, is
+ * the tier that closes the window.
+ *
  * @param {string} home        the operator's home (HOME; may be a symlink)
  * @param {string} rel         one of OPERATOR_SECRET_PATHS
- * @param {{kind?:"dir"|"file", statePath?:string, displayPath?:string}} [opts]
+ * @param {{kind?:"dir"|"file", statePath?:string, displayPath?:string,
+ *          crowHome?:string|null}} [opts]
  *   `kind` says whether the entry is hidden whole (a folder) or masked with an
  *   empty file (a file). `displayPath` is what a refusal sentence names (the
  *   bridge reads/writes the record through the anchored secrets dir, whose
- *   /proc/self/fd path nobody should have to read).
+ *   /proc/self/fd path nobody should have to read). `crowHome` is the Crow home
+ *   the record belongs to, so the reset command a refusal names is the one for
+ *   THIS instance (hiddenDirResetCommand) and not the default instance's.
  * @returns {{rel:string, label:string, kind:"dir"|"file", dir:string|null,
  *            path:string|null, dev?:number, ino?:number, absent:boolean,
  *            remembered:boolean, refusal:string|null, cause:string|null}}
  *   `dir` is the resolved folder (null for a file entry and for every refusal);
  *   `path` is the resolved folder OR file. `cause` is set exactly when `refusal`
- *   is, and says which rule fired — `"link"`, `"missing"`, `"replaced"` or
- *   `"record"` — so a caller can describe it without parsing the sentence (the
- *   operator bell in the bridge does).
+ *   is, and says which rule fired — `"link"`, `"missing"`, `"replaced"`,
+ *   `"record"`, `"inner-link"`, `"inner-many"` or `"inner-unreadable"` — so a
+ *   caller can describe it without parsing the sentence (the operator bell in
+ *   the bridge does). A record refusal also carries `recordWhy` (the reason
+ *   `hiddenDirStateRefusal` was given), and an inner-link one carries `innerName`
+ *   (the link's name in the folder) while an inner-many one carries `innerCount`
+ *   (how many entries the folder holds).
  */
-export function resolveHiddenSecretPath(home, rel, { kind = "dir", statePath = null, displayPath = null } = {}) {
+export function resolveHiddenSecretPath(home, rel, { kind = "dir", statePath = null, displayPath = null, crowHome = null } = {}) {
   const label = "~/" + rel;
   const shown = displayPath || statePath;
   const k = kind === "file" ? "file" : "dir";
@@ -524,7 +672,9 @@ export function resolveHiddenSecretPath(home, rel, { kind = "dir", statePath = n
   // The record is read FIRST: a corrupt one refuses before anything else is
   // measured, and a state file that cannot be read is never read as "empty".
   const memory = statePath ? readHiddenDirMemory(statePath) : { ok: true, dirs: {} };
-  if (!memory.ok) return { ...result, refusal: hiddenDirStateRefusal(shown, memory.reason), cause: "record" };
+  if (!memory.ok) {
+    return { ...result, refusal: hiddenDirStateRefusal(shown, memory.reason, { crowHome }), cause: "record", recordWhy: memory.reason };
+  }
   // Files are never remembered (the identity-memory block above): their entries
   // are not even looked up, so an old record cannot refuse an ordinary rewrite.
   const remembered = k === "file" ? null : (memory.dirs[rel] || null);
@@ -557,7 +707,10 @@ export function resolveHiddenSecretPath(home, rel, { kind = "dir", statePath = n
     // to worry about because the mask is remade from whatever is at the path on
     // every spawn.
     result.absent = true;
-    if (remembered) { result.refusal = reConfirmRefusal(rel, "missing", shown, k); result.cause = "missing"; }
+    if (remembered) {
+      result.refusal = reConfirmRefusal(rel, "missing", shown, k, { crowHome });
+      result.cause = "missing";
+    }
     return result;
   }
   const { path: resolved, st } = found;
@@ -568,15 +721,40 @@ export function resolveHiddenSecretPath(home, rel, { kind = "dir", statePath = n
   if (remembered && (remembered.dev !== st.dev || remembered.ino !== st.ino)) {
     result.dir = null;
     result.path = null;
-    result.refusal = reConfirmRefusal(rel, "replaced", shown, k);
+    result.refusal = reConfirmRefusal(rel, "replaced", shown, k, { crowHome });
     result.cause = "replaced";
     return result;
+  }
+  // A folder is looked INTO on every spawn (see the doc block above and
+  // innerEntryProblem): a link at depth 1 would leave what it points at readable
+  // beside the folder's own tmpfs. Before the record is written, deliberately —
+  // the first sight records identity, and it must not record a folder holding a
+  // link. Nothing is written and nothing is handed to the mask on a refusal.
+  if (k === "dir") {
+    const inner = innerEntryProblem(resolved);
+    if (inner) {
+      result.dir = null;
+      result.path = null;
+      result.cause = inner.cause;
+      if (inner.cause === "inner-link") {
+        result.innerName = inner.name;
+        result.refusal = secretInnerLinkRefusal(rel, inner.name);
+      } else if (inner.cause === "inner-many") {
+        result.innerCount = inner.count;
+        result.refusal = secretInnerTooManyRefusal(rel, inner.count);
+      } else {
+        result.refusal = secretInnerUnreadableRefusal(rel);
+      }
+      return result;
+    }
   }
   if (k === "dir" && !remembered && statePath) {
     // Only the folder's OWN dev:ino — never its contents, an mtime or a size: a
     // tool that writes files inside it (`gcloud auth login`) changes none of them.
     try { writeHiddenDirMemory(statePath, { ...memory.dirs, [rel]: { dev: st.dev, ino: st.ino } }, anchor); }
-    catch { return { ...result, dir: null, path: null, refusal: hiddenDirStateRefusal(shown, "not writable"), cause: "record" }; }
+    catch {
+      return { ...result, dir: null, path: null, refusal: hiddenDirStateRefusal(shown, "not writable", { crowHome }), cause: "record", recordWhy: "not writable" };
+    }
   }
   return result;
 }

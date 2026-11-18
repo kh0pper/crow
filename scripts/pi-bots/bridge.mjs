@@ -1068,6 +1068,11 @@ export class PiRpc {
     };
     let launch;
     let hiddenCandidates = null;
+    // The Crow home the hidden-entry record belongs to, for the reset command a
+    // refusal and its bell name (co-hosted instances keep their own record). Set
+    // where the record is resolved, read again by the refusal check below the
+    // launch, which sits outside that block.
+    let hiddenDirCrowHome = null;
     // Folders this spawn hides WHOLE (a tmpfs): every secrets dir, plus env/ and
     // android-keystore/. Filled below with the launch's own plan; read by the
     // refusal check so a link into one gets its own plain sentence.
@@ -1136,7 +1141,10 @@ export class PiRpc {
       // hidden before and is now gone, or is a different entry, refuses the
       // spawn until the operator re-confirms (delete the record, or run
       // `node scripts/pi-bots/hidden-dir-memory.mjs --reset`), and an unreadable
-      // record refuses it too (fail closed). A FILE gets no identity memory: the
+      // record refuses it too (fail closed). A FOLDER is also looked INTO on every
+      // spawn: a symlink at depth 1 refuses it (the tmpfs hides the link's name,
+      // never what it points at), which is also what keeps the first sight from
+      // recording a decoy a bot arranged. A FILE gets no identity memory: the
       // same tool rewrite that an operator runs every day (`npm config set`,
       // `docker login`) renames a new inode over it, and refusing every bot until
       // a manual reset for that would be an availability bug, not a tamper
@@ -1150,15 +1158,23 @@ export class PiRpc {
       // /proc/self/fd number to act on it. One record per operator home.
       // A refusal also RINGS THE BELL: the operator must see that bots are
       // stopped, not only the failed turn in one channel (hidden-dir-alert.mjs;
-      // once per entry per 24 h, the alert spool when the store is unusable).
+      // once per entry per 24 h, the alert spool when the store is unusable). The
+      // bell's reset command names THIS instance's home when it is not the default
+      // one (`--crow-home ~/.crow-<x>`), so the operator forgets the record that
+      // refused and not the default instance's.
       const hiddenDirStateName = hiddenDirStateFile(HOME);
       const hiddenDirStateReadPath = anchoredPath(process.env, hiddenDirStateName) || join(secretsHere, hiddenDirStateName);
       const hiddenDirShownPath = join(homeReal || dirname(secretsHere), "secrets", hiddenDirStateName);
+      // The Crow home this record belongs to, for the reset command a refusal and
+      // its bell name: a co-hosted instance must tell the operator to forget ITS
+      // record (`--crow-home ~/.crow-<x>`), never the default instance's.
+      hiddenDirCrowHome = homeReal || dirname(secretsHere);
       const resolveSecretPath = (rel, kind) => {
-        const r = resolveHiddenSecretPath(HOME, rel, { kind, statePath: hiddenDirStateReadPath, displayPath: hiddenDirShownPath });
+        const r = resolveHiddenSecretPath(HOME, rel, { kind, statePath: hiddenDirStateReadPath, displayPath: hiddenDirShownPath, crowHome: hiddenDirCrowHome });
         if (r.refusal) {
           logUnhideableOnce(hiddenDirStateReadPath + "#" + rel, r.refusal);
-          notifyHiddenDirRefusal({ dbPath: CROW_DB, rel, kind, cause: r.cause });
+          notifyHiddenDirRefusal({ dbPath: CROW_DB, rel, kind, cause: r.cause, entry: r.innerName || null,
+            recordWhy: r.recordWhy || null, count: r.innerCount || null, crowHome: hiddenDirCrowHome });
           throw new Error(r.refusal);
         }
         return r;
@@ -1208,6 +1224,19 @@ export class PiRpc {
       // so the mask always applies. Every other credential folder on the list is
       // the same dir mask without the creation: hidden when it exists, never
       // made.
+      // THE CHECK-TO-MOUNT WINDOW. Everything above (the lstat walk, the identity
+      // record, the look inside each folder) measured the filesystem at one
+      // moment; the masks below are made when the child starts, in wrapPiSpawn.
+      // A writer with the operator's own uid can rename a folder away, swap a
+      // decoy in or add a link between the two — the checks approved an entry that
+      // is no longer the one mounted. Nothing here can close that: there is no
+      // atomic "check and mount this inode", and the default (bwrap) tier is a
+      // mask over paths inside the same uid and filesystem as the bot, NOT a
+      // boundary against a cooperating same-uid writer. What the checks give is
+      // detection across spawns: a swap that survives into the next spawn is
+      // refused by the identity memory and the look inside, and the operator gets
+      // the bell. The contain tier (an empty root, only named paths bound) is the
+      // one that closes the window.
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
         hideDirs: [secretsHere, ...others, ...(contain ? [] : [...secretDirPaths, ...instanceSecretDirs])], hideFiles, hideFileRoots, hidePinDirs, seccompFd: contain ? SECCOMP_FD : null, passFds,
         // The bot's OWN key dir, bound back inside the secrets tmpfs from the
@@ -1303,7 +1332,7 @@ export class PiRpc {
           // Bots are stopped for every channel here too: the operator sees it in
           // the bell, once per entry per 24 h (same rail as the link/re-confirm
           // refusals above).
-          notifyHiddenDirRefusal({ dbPath: CROW_DB, rel: secret.rel, kind: "dir", cause: "unmasked" });
+          notifyHiddenDirRefusal({ dbPath: CROW_DB, rel: secret.rel, kind: "dir", cause: "unmasked", crowHome: hiddenDirCrowHome });
           this._runContainCleanup();
           throw new Error(refusal);
         }

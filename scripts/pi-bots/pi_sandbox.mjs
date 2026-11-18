@@ -86,8 +86,10 @@
  *    ~/.pgpass, ~/.config/containers/auth.json) are masked with an empty one.
  *    That whole set is ONE list, servers/shared/operator-secret-paths.js. Each
  *    entry is resolved by hidden_files.mjs resolveHiddenSecretPath: a symlink
- *    anywhere on the way refuses the spawn, and the entry's dev:ino is
- *    remembered so one that is later missing or replaced refuses it too.
+ *    anywhere on the way, or one directly INSIDE a folder (the mask covers the
+ *    link's name, not what it points at), refuses the spawn, and a FOLDER's
+ *    dev:ino is remembered so one that is later missing or replaced refuses it
+ *    too. A credential FILE carries no memory (a tool rewrite is a new inode).
  *    A git-enabled bot's own key dir under the secrets dir is bound back
  *    read-only inside the tmpfs (--ro-bind-fd; see servers/shared/bot-git).
  *    Still readable, because something inside the sandbox reads each one:

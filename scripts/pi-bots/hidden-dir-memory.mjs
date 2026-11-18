@@ -23,36 +23,80 @@
  *   node scripts/pi-bots/hidden-dir-memory.mjs            list what is recorded
  *   node scripts/pi-bots/hidden-dir-memory.mjs --list     the same
  *   node scripts/pi-bots/hidden-dir-memory.mjs --reset    forget every record
+ *   node scripts/pi-bots/hidden-dir-memory.mjs --reset --crow-home ~/.crow-<x>
  *   node scripts/pi-bots/hidden-dir-memory.mjs --help
+ *
+ * `--crow-home <dir>` acts on THAT instance's record instead of the one CROW_HOME
+ * (default ~/.crow) resolves. A co-hosted instance keeps its own
+ * `<CROW_HOME>/secrets/` records, so an operator acting on that instance's bell
+ * must not reset the default instance's: the bell spells the command out with
+ * this flag, in ~-relative form. A leading `~/` in the value is expanded here as
+ * well, so a quoted copy of the command works too.
  *
  * There is one record per operator home (`hidden-secret-dirs-<id>.json`), so a
  * co-hosted or moved home never inherits another one's entries. Read-only apart
  * from --reset; it never touches the folders or files themselves.
  */
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { readHiddenDirMemory, hiddenDirStateFiles, resetAllHiddenDirIdentity } from "./hidden_files.mjs";
 import { secretsDir } from "../../servers/shared/secret-values.js";
 
 const USAGE = [
-  "usage: node scripts/pi-bots/hidden-dir-memory.mjs [--list | --reset | --help]",
+  "usage: node scripts/pi-bots/hidden-dir-memory.mjs [--list | --reset | --help] [--crow-home <dir>]",
   "",
-  "  --list   show the secret folders Crow remembers hiding (the default)",
-  "  --reset  forget every record, so the next bot spawn records them again",
+  "  --list              show the secret folders Crow remembers hiding (the default)",
+  "  --reset             forget every record, so the next bot spawn records them again",
+  "  --crow-home <dir>   act on this instance's record (default: CROW_HOME, else ~/.crow)",
 ].join("\n");
+
+/** Expand a leading `~` in a flag value (a quoted copy of a bell's command). */
+function expandHome(p) {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
 
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
   console.log(USAGE);
   process.exit(0);
 }
-const unknown = args.filter((a) => !["--list", "--reset"].includes(a));
+const unknown = [];
+let crowHomeFlag = null;
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === "--crow-home") {
+    const v = args[i + 1];
+    if (!v || v.startsWith("--")) {
+      console.error("hidden-dir-memory: --crow-home needs a directory\n" + USAGE);
+      process.exit(2);
+    }
+    crowHomeFlag = v;
+    i += 1;
+    continue;
+  }
+  if (a.startsWith("--crow-home=")) {
+    const v = a.slice("--crow-home=".length);
+    if (!v) {
+      console.error("hidden-dir-memory: --crow-home needs a directory\n" + USAGE);
+      process.exit(2);
+    }
+    crowHomeFlag = v;
+    continue;
+  }
+  if (!["--list", "--reset"].includes(a)) unknown.push(a);
+}
 if (unknown.length > 0) {
   console.error("hidden-dir-memory: unknown argument: " + unknown[0] + "\n" + USAGE);
   process.exit(2);
 }
 
-const dir = secretsDir();
-const crowHome = dirname(dir);
+// The instance to act on: the flag wins over CROW_HOME, which wins over ~/.crow
+// (secretsDir() resolves the same way the gateway does — hidden_files.mjs
+// hiddenDirResetCommand spells a non-default home out as this flag).
+const dir = crowHomeFlag ? join(expandHome(crowHomeFlag), "secrets") : secretsDir();
+const crowHome = crowHomeFlag ? expandHome(crowHomeFlag) : dirname(dir);
 if (args.includes("--reset")) {
   const gone = resetAllHiddenDirIdentity(crowHome);
   console.log(gone.length === 0
@@ -80,6 +124,7 @@ for (const file of files) {
   for (const rel of rels) console.log("  ~/" + rel + "  device " + memory.dirs[rel].dev + "  inode " + memory.dirs[rel].ino);
 }
 if (bad > 0) {
-  console.error("A bot spawn is refused until you reset it: node scripts/pi-bots/hidden-dir-memory.mjs --reset");
+  console.error("A bot spawn is refused until you reset it: node scripts/pi-bots/hidden-dir-memory.mjs --reset" +
+    (crowHomeFlag ? " --crow-home " + crowHomeFlag : ""));
   process.exit(1);
 }
