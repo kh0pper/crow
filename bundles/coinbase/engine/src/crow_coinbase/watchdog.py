@@ -20,7 +20,9 @@ threshold is still fresh, on either side.
 One stale spell is one episode, and the episode lives in the engine's own database
 (`kv`, under `watchdog:episode`), so a watchdog restarted in the middle of a spell
 joins the one already in progress instead of starting another: one ALERT event
-per episode, however many stale passes follow.  The record is cleared only by a
+per episode, however many stale passes follow, and that event and the mark it
+records are written in ONE transaction, so an episode can never be left marked
+as alerted with no alert to read.  The record is cleared only by a
 heartbeat that is TRULY FRESH — a valid numeric `ts` within half the threshold of
 this clock — so a heartbeat flapping around the threshold (stale, then merely old,
 then stale again) stays one episode instead of alerting on every wobble.  A pass
@@ -34,8 +36,10 @@ never an order somebody else put on the same account — so an order that appear
 in the middle of an episode is swept by the next pass.  The exchange is built on
 the first sweep and reused afterwards, and nothing in that path puts an order on.
 A pass whose sweep asked for at least one cancel answers "acted"; a pass with
-nothing to cancel asks for nothing and answers "stale"; and a sweep that raises is
-written down as an error event and automatically retried by the next stale pass.
+nothing to cancel asks for nothing and answers "stale"; and a sweep that raises
+answers "stale" as well, writes ONE error event for the episode — later failing
+passes in the same episode log the traceback but write no further event — and is
+retried by the next stale pass, however many have failed before it.
 
 `main` is the process entry point: it answers the refusal code for a live switch
 this build cannot honour, builds the store and the dry-run exchange over the data
@@ -248,13 +252,18 @@ class Watchdog:
         record, and the next spell alerts again.  A merely fresh pass writes
         nothing at all, so a restarted watchdog still joins the episode it finds.
 
-        A stale pass raises the alert once per episode — the record is stored
-        BEFORE the alert is written, so an alert that cannot be written is not
-        repeated — and under the cancel policy sweeps the book on every stale
-        pass, not just the first: an order that appeared mid-episode goes with the
-        next pass.  "acted" is the answer of a pass whose sweep requested at least
-        one cancel; a pass with nothing to cancel answers "stale".  A sweep that
-        raises is recorded as an error event and the next pass sweeps again.
+        A stale pass raises the alert once per episode.  The episode's mark and
+        the ALERT event are written inside ONE transaction, so a store that
+        refuses the ALERT takes the mark back with it and the next pass owes the
+        alert again; the message is logged only once that transaction has
+        committed.  Under the cancel policy every stale pass sweeps the book, not
+        just the first: an order that appeared mid-episode goes with the next
+        pass.  "acted" is the answer of a pass whose sweep requested at least one
+        cancel; a pass with nothing to cancel answers "stale".  A sweep that
+        raises answers "stale" too: its episode is marked `sweep_error` and one
+        error event is written for it, a later failing pass in the same episode
+        logs the traceback without writing another, and every stale pass sweeps
+        again regardless.
         """
         reason, age = self._inspect()
         if reason is None:
@@ -265,10 +274,14 @@ class Watchdog:
         episode = self._episode()
         if not episode["alerted"]:
             episode["alerted"] = True
-            self.store.put(KV_EPISODE, episode)
             message = f"engine heartbeat stale: {reason}"
+            # The mark and the alert commit together or not at all: a mark left
+            # behind by an alert that could not be written would swallow the one
+            # alert this episode owes.
+            with self.store.tx():
+                self.store.put(KV_EPISODE, episode)
+                self.store.event(ALERT_LEVEL, message)
             log.error(message)
-            self.store.event(ALERT_LEVEL, message)
 
         if self.policy != CANCEL_POLICY:
             return "stale"
@@ -278,7 +291,14 @@ class Watchdog:
         except Exception as error:  # noqa: BLE001 - the next pass tries again
             message = f"watchdog cancel failed: {error}"
             log.exception(message)
-            self.store.event("error", message)
+            if not episode["sweep_error"]:
+                episode["sweep_error"] = True
+                # Same rule as the alert: the flag and the event it announces
+                # are one write, so the episode is not marked as written down
+                # by an event that never landed.
+                with self.store.tx():
+                    self.store.put(KV_EPISODE, episode)
+                    self.store.event("error", message)
             return "stale"
         return "acted" if requested else "stale"
 
@@ -286,13 +306,18 @@ class Watchdog:
     def _episode(self) -> dict:
         """The spell in progress, a fresh one when nothing is stored.
 
-        Only `alerted` is kept: alerts are once per episode, while the sweep runs
-        on every stale pass and needs no record of its own.
+        Both flags are kept, each defaulting to False when the stored record
+        does not carry it: `alerted` keeps the alert to once per episode and
+        `sweep_error` keeps the error event to once per episode, while the sweep
+        itself still runs on every stale pass and needs no record of its own.
         """
         stored = self.store.get(KV_EPISODE)
         if not isinstance(stored, dict):
-            return {"alerted": False}
-        return {"alerted": bool(stored.get("alerted"))}
+            return {"alerted": False, "sweep_error": False}
+        return {
+            "alerted": bool(stored.get("alerted")),
+            "sweep_error": bool(stored.get("sweep_error")),
+        }
 
     # ------------------------------------------------ the exchange
     def _sweep_exchange(self) -> Any:

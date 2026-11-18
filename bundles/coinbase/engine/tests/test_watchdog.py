@@ -152,8 +152,11 @@ class SteppingClock:
 class AlertBreakingStore:
     """A store whose `event` fails the first time it is asked for an ALERT.
 
-    Every other attribute is the real store's, so the episode record and the
-    info and error events are written exactly as they are in production.
+    Every other attribute is the real store's, so `tx`, `put` and `get` reach the
+    real database and the episode record is written exactly as it is in
+    production: the watchdog's transaction around the record and the alert is the
+    real one, and only the ALERT write inside it raises.  The info and error
+    events are written as they are in production too.
     """
 
     def __init__(self, store, fail_times=1):
@@ -626,7 +629,7 @@ def test_alert_once_per_episode(tmp_path):
 
 
 def test_cancel_failure_retries_next_check(tmp_path):
-    """A cancel that raises leaves an error event and the next pass sweeps again."""
+    """A cancel that raises is written down once and the next pass sweeps again."""
     t = [NOW]
     store = open_store(tmp_path)
     fake = cb_orders_exchange()
@@ -642,6 +645,8 @@ def test_cancel_failure_retries_next_check(tmp_path):
     assert len(messages(store, "ALERT")) == 1
     assert len(fake.cancelled) == 1
     assert len(messages(store, "info")) == 1  # the request is written down
+    # The error is remembered for the episode, which is what keeps it to one.
+    assert (episode_record(store) or {}).get("sweep_error") is True
 
     # The book is untouched by the failure, so this pass asks for the same ids
     # and gets through.  The exchange is the one the first sweep built.
@@ -649,6 +654,7 @@ def test_cancel_failure_retries_next_check(tmp_path):
     assert len(fake.cancelled) == 2
     assert set(fake.cancelled[1]) == CB_ORDER_IDS
     assert len(messages(store, "ALERT")) == 1
+    assert len(messages(store, "error")) == 1
     assert len(messages(store, "info")) == 2
     assert factory.calls == 1
 
@@ -656,8 +662,67 @@ def test_cancel_failure_retries_next_check(tmp_path):
     assert left == {"manual-1", "", "xcb-foo"}
 
 
-def test_episode_saved_before_alert(tmp_path):
-    """The episode record is written before the alert, so a failed alert is not retried."""
+def test_sweep_error_event_once_per_episode(tmp_path):
+    """A sweep that keeps failing is retried every pass but written down once."""
+    t = [NOW]
+    store = open_store(tmp_path)
+    fake = cb_orders_exchange(fail_cancel_times=3)
+    factory = Factory(fake)
+    wd = watchdog(tmp_path, store, factory, "cancel", t=t)
+
+    write_heartbeat(tmp_path, t[0])
+    t[0] += STALE + 1
+
+    # Three stale passes in one episode: three cancel attempts, one error event.
+    for attempts in (1, 2, 3):
+        assert wd.check() == "stale"
+        assert len(fake.cancelled) == attempts
+        assert set(fake.cancelled[-1]) == CB_ORDER_IDS
+        assert (episode_record(store) or {}).get("sweep_error") is True
+    assert len(messages(store, "error")) == 1
+    assert len(messages(store, "ALERT")) == 1
+    assert len(messages(store, "info")) == 3  # every attempt is written down
+    assert factory.calls == 1
+
+    # The fourth pass gets through with the same ids: the sweep is still retried
+    # on every stale pass, however quiet the record keeps it.
+    assert wd.check() == "acted"
+    assert len(fake.cancelled) == 4
+    assert set(fake.cancelled[3]) == CB_ORDER_IDS
+    assert len(messages(store, "error")) == 1
+    assert len(messages(store, "ALERT")) == 1
+    assert (episode_record(store) or {}).get("alerted") is True
+    left = {entry["client_order_id"] for entry in fake.list_open_orders(None)}
+    assert left == {"manual-1", "", "xcb-foo"}
+
+    # A truly fresh heartbeat ends the episode, and a new spell may write an
+    # error event of its own: the once-per-episode count went with the episode.
+    write_heartbeat(tmp_path, t[0])
+    assert wd.check() == "ok"
+    assert episode_record(store) is None
+
+    t[0] += STALE + 1
+    fake.orders = cb_order_list()
+    fake.fail_cancel_times = 1
+    assert wd.check() == "stale"
+    assert len(fake.cancelled) == 5
+    assert len(messages(store, "error")) == 2
+    assert len(messages(store, "ALERT")) == 2
+    assert (episode_record(store) or {}).get("sweep_error") is True
+
+
+# ---------------------------------------------------------------- the alert and the record
+
+
+def test_failed_alert_write_leaves_episode_unmarked(tmp_path):
+    """The record and the ALERT share one transaction: a failed write marks nothing.
+
+    The episode save (`alerted` True) and the ALERT event are written together, so
+    a store that refuses the ALERT rolls the record back with it instead of
+    leaving an episode marked with no alert to read.  The next pass therefore
+    opens the episode from the beginning: it writes exactly one ALERT and marks
+    the record.
+    """
     t = [NOW]
     real_store = open_store(tmp_path)
     store = AlertBreakingStore(real_store)
@@ -670,16 +735,23 @@ def test_episode_saved_before_alert(tmp_path):
     with pytest.raises(RuntimeError):
         wd.check()
 
-    # The record was already there when the ALERT write failed.
-    assert (episode_record(store) or {}).get("alerted") is True
-    assert messages(store, "ALERT") == []
+    # The record was written in the same transaction as the ALERT, so the failed
+    # ALERT took it with it: nothing is marked, and no alert row exists.
     assert store.alert_attempts == 1
+    assert not (episode_record(store) or {}).get("alerted")
+    assert messages(store, "ALERT") == []
 
-    # So the next pass knows about the episode and does not write the alert again.
+    # Nothing is marked, so the next pass writes the alert it owed: exactly one,
+    # and the record that comes with it.
     assert wd.check() == "stale"
-    assert store.alert_attempts == 1
-    assert messages(store, "ALERT") == []
+    assert store.alert_attempts == 2
+    assert len(messages(store, "ALERT")) == 1
     assert (episode_record(store) or {}).get("alerted") is True
+
+    # The episode is marked now, so a further stale pass does not alert again.
+    assert wd.check() == "stale"
+    assert store.alert_attempts == 2
+    assert len(messages(store, "ALERT")) == 1
 
 
 # ---------------------------------------------------------------- the heartbeat file itself
