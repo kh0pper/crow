@@ -5011,17 +5011,24 @@ test("the strip lists the song's plan blocks and outlines the current one as the
   assert.equal(blocks[1].getAttribute("aria-disabled"), "true", "and says so");
   assert.equal(blocks[0].getAttribute("data-scene-id"), SCENE, "the scene block names the scene it plays");
 
-  // The lanes draw the same blocks as bands under their ruler.
+  // The lanes' ruler draws the plan's placement blocks as bands, and the
+  // sections in their own row above them: a section is one band there, once.
   const bands = Array.from(ui.document.querySelectorAll("[data-role=rec-lanes] .st-lane-band"));
-  assert.deepEqual(bands.map((node) => String(node.textContent)), ["Verse", "Chorus"],
-    "the ruler carries the plan's blocks as bands");
+  assert.deepEqual(bands.map((node) => String(node.textContent)), ["Verse"],
+    "the ruler carries the plan's placement blocks as bands");
+  assert.deepEqual(
+    Array.from(ui.document.querySelectorAll("[data-role=rec-lanes] [data-role=rec-section]")).map((node) => String(node.textContent)),
+    ["Chorus"],
+    "and the section sits in the section row, not again in the plan row",
+  );
   const bars = viewOf(ui).recLanesBars;
   for (const band of bands) {
     assert.ok(String(band.style.width).endsWith("%"), "a band is placed by percentage of the ruler's bars");
     assert.ok(String(band.style.left).endsWith("%"), "from its own first bar");
   }
-  assert.equal(Number.parseFloat(bands[1].style.left), Math.round((2 / bars) * 100 * 1000) / 1000,
-    "the second band starts where its block does on the ruler's own bar scale");
+  assert.equal(Number.parseFloat(bands[0].style.left), 0, "the first band starts on the ruler's first bar");
+  assert.equal(Number.parseFloat(bands[0].style.width), Math.round((2 / bars) * 100 * 1000) / 1000,
+    "and spans the two bars its block covers on the ruler's own bar scale");
 
   // The transport moves into the second block: a position report redraws the
   // strip, and the count-in controls beside it are the very nodes they were.
@@ -5485,11 +5492,12 @@ test("the By-hand undo note is on the page only while By hand is selected", asyn
   const ui = await bootPanel();
   const note = () => ui.document.querySelector("[data-role=scene-plan-undo-note]");
   assert.ok(note(), "a device that plays scenes by hand says what one undo does");
-  const text = String(note().textContent);
-  assert.match(text, /saved in parts/, "that the take is saved in parts");
-  assert.match(text, /performance is one more step/, "that the performance is one step of its own");
-  assert.match(text, /Undo takes the performance back first/, "and that one undo takes the placements back only");
-  assert.match(text, /clip and the takes stay/, "leaving the clip and the takes until they are undone too");
+  assert.equal(
+    String(note().textContent),
+    "A by-hand take is saved in parts. Its placements are one step in History; undoing that step "
+      + "removes them and leaves the clip and every pass take, which are steps of their own.",
+    "in two short sentences: the placements are one step, the clip and the takes are others",
+  );
 
   ui.click("[data-act=plan-mode][data-mode=follow]");
   await ui.settle();
@@ -5498,6 +5506,235 @@ test("the By-hand undo note is on the page only while By hand is selected", asyn
   ui.click("[data-act=plan-mode][data-mode=hand]");
   await ui.settle();
   assert.ok(note(), "and it is back with By hand");
+});
+
+// ---- the plan widget's own words in each view -------------------------------
+//
+// The Scene plan widget is on the page in every view, and what By hand means
+// depends on the view: the Session view plays scenes (a tap plays one, and the
+// take is written into the plan from the arrangement bar the playhead stands
+// on), while the Timeline has Record play the plan itself. Follow plays the plan
+// in both, so a block there says it plays nothing rather than offering a press.
+
+/** The sentence the Timeline's options row carries while By hand is chosen. */
+const PLAN_HAND_TIMELINE_NOTE =
+  "In the Timeline, Record plays the plan. Switch to Session to play scenes by hand.";
+
+/** The Session view's tap sentence, before the bar it is written from. */
+const PLAN_HAND_NOTE = "Tap a block to play its scene on the next bar.";
+
+test("Plan UI: By hand names the write bar in Session and one line in the Timeline", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+
+  assert.equal(viewOf(ui).mode, "session", "the page opens in the Session view");
+  assert.equal(viewOf(ui).planMode, "hand", "with By hand chosen");
+  assert.equal(
+    planModeNoteText(ui),
+    PLAN_HAND_NOTE + " Writes into the plan from bar 1.",
+    "the Session note says what a tap plays and the bar the take is written from",
+  );
+  assert.ok(ui.document.querySelector("[data-role=scene-plan-undo-note]"), "and one undo beside it");
+
+  // The bar the note names is the arrangement playhead's, read as the note is
+  // drawn: arrangement bar 4 is bar 5 of the note.
+  await standPlayheadAt(ui, 4);
+  assert.equal(viewOf(ui).planMode, "hand", "the take still plays scenes by hand");
+  assert.equal(viewOf(ui).playhead, 4, "the playhead was left on arrangement bar 4");
+  assert.equal(
+    planModeNoteText(ui),
+    PLAN_HAND_NOTE + " Writes into the plan from bar 5.",
+    "and the note follows the playhead",
+  );
+
+  // The Timeline answers with one line about Record, and the undo note is gone.
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  assert.equal(planModeNoteText(ui), PLAN_HAND_TIMELINE_NOTE, "the Timeline says Record plays the plan there");
+  assert.equal(ui.document.querySelector("[data-role=scene-plan-undo-note]"), null, "one line, not two");
+  assert.equal(
+    planModeNoteText(ui).indexOf("Switch to Session") > 0,
+    true,
+    "and names the view where a scene is played by hand",
+  );
+
+  // Back in Session the tap sentence and the undo note are back with it, and a
+  // switch into the Timeline has put the playhead back on bar 1, which is the bar
+  // the note reads there.
+  ui.click("[data-act=mode-session]");
+  await ui.settle();
+  assert.equal(viewOf(ui).playhead, 0, "switching into the Timeline put the playhead back on bar 1");
+  assert.equal(planModeNoteText(ui), PLAN_HAND_NOTE + " Writes into the plan from bar 1.", "the Session note is back");
+  assert.ok(ui.document.querySelector("[data-role=scene-plan-undo-note]"), "and the undo note with it");
+});
+
+test("Plan UI: a plan of sections alone does not invite a tap", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "section.add", { id: "s-only", start_bar: 0, end_bar: 4, name: "Chorus" });
+  await ui.pushState();
+
+  assert.deepEqual(planBlockLabels(ui), ["Chorus"], "the plan is the section alone");
+  const text = planModeNoteText(ui);
+  assert.doesNotMatch(text, /Tap a block/, "no scene block is on the plan, so nothing says to tap one");
+  assert.match(text, /Sections are only marks/, "it says what a section is");
+  assert.match(text, /a scene is what a tap plays/, "and that a scene is what plays");
+  assert.match(text, /from bar 1/, "and still names the bar the take is written from");
+
+  // A placement outside the section puts a scene block on the plan, and the tap
+  // sentence comes back with it.
+  runCommand(ui.doc, "arrangement.place", {
+    id: "p-late",
+    track_id: AUDIO_TRACK,
+    clip_id: CLIP,
+    start_bar: 8,
+    bars: 2,
+  });
+  await ui.pushState();
+  assert.deepEqual(planBlockLabels(ui), ["Chorus", "Verse"], "the plan has a scene block now");
+  assert.equal(planModeNoteText(ui), PLAN_HAND_NOTE + " Writes into the plan from bar 1.",
+    "and the note invites the tap again");
+});
+
+test("Plan UI: a refused Record click in Follow leaves the view where it was", async () => {
+  const ui = await bootPanel({ clip: true, takes: [{ id: T_OLD }], latency: CALIBRATED, countIn: 1 });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  assert.equal(ui.page.__studioTest.setPunch(4, 6), true, "the range fits the clip as it stands");
+  await ui.settle();
+  await shortenClip(ui, 1);
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+  assert.equal(viewOf(ui).planMode, "follow", "the take follows the plan");
+  assert.equal(viewOf(ui).mode, "session", "from the Session view");
+  const modes = ui.engine.modes.length;
+  const commandsBefore = commandsSent(ui);
+
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  assert.equal(viewOf(ui).mode, "session", "the refused click left the view where the operator put it");
+  assert.equal(ui.engine.modes.length, modes, "and moved no voice with it");
+  assert.equal(viewOf(ui).rec, null, "no take was made");
+  assert.equal(ui.engine.plays, 0, "the transport was never started");
+  assert.equal(ui.engine.recorders.length, 0, "and no recorder was built");
+  assert.equal(commandsSent(ui), commandsBefore, "nothing was written");
+  assert.ok(
+    noticeText(ui).includes("The punch range is outside this clip."),
+    `the page says why (got: ${noticeText(ui)})`,
+  );
+});
+
+test("Plan UI: the Session view outlines the scene that is playing, not the transport's bar", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  // A block that is scrolled into view says so, so the strip's own scroll is
+  // visible to the case: the phone strip is the one thing that scrolls sideways.
+  const scrolled = [];
+  Object.getPrototypeOf(planBlockNodes(ui)[0]).scrollIntoView = function scrollIntoView() {
+    scrolled.push(String(this.getAttribute("data-start-bar")));
+  };
+  ui.click("[data-act=play]");
+  await ui.settle();
+
+  // No scene has played yet, so the transport's bar is all the strip has.
+  ui.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  await ui.settle();
+  assert.match(String(planBlockNodes(ui)[1].className), /st-plan-block-current/,
+    "with nothing playing the bar the transport is in is outlined");
+  assert.deepEqual(scrolled, ["2"], "and the block it moved to is scrolled into view");
+
+  // A launch says which scene is playing: the strip outlines ITS block, wherever
+  // the transport's own bar stands.
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: 0 }),
+  );
+  await ui.settle();
+  const blocks = planBlockNodes(ui);
+  assert.match(String(blocks[0].className), /st-plan-block-current/, "the block of the scene playing is outlined");
+  assert.doesNotMatch(String(blocks[1].className), /st-plan-block-current/,
+    "not the block the transport's bar falls in");
+  assert.match(String(blocks[1].className), /st-plan-block-next/, "and the block after the playing one is dashed");
+  assert.deepEqual(scrolled, ["2", "0"], "the block the outline moved to is scrolled into view");
+
+  // A second position report inside the section does not move the outline: the
+  // session's bar is not a bar of the plan, and the strip is not scrolled again.
+  ui.engine.position({ bar: 4, beat: 1, sixteenth: 1 });
+  await ui.settle();
+  assert.match(String(planBlockNodes(ui)[0].className), /st-plan-block-current/, "the playing scene keeps the outline");
+  assert.deepEqual(scrolled, ["2", "0"], "and the operator's own scroll is left where it is");
+
+  // The Timeline reads the transport's own bar again.
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  const moved = planBlockNodes(ui);
+  assert.match(String(moved[1].className), /st-plan-block-current/,
+    "in the Timeline the block under the transport's bar is the current one");
+  assert.doesNotMatch(String(moved[0].className), /st-plan-block-current/, "and the playing scene's is not");
+});
+
+test("Plan UI: Follow marks the plan's scene blocks aria-disabled and leaves the sections disabled", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  const sceneBlock = () => planBlockNodes(ui).find((node) => node.getAttribute("data-scene-id"));
+  const sectionBlock = () => planBlockNodes(ui).find((node) => !node.getAttribute("data-scene-id"));
+  assert.equal(sceneBlock().getAttribute("aria-disabled"), null, "a By-hand block can be tapped");
+
+  const launched = ui.engine.launched.length;
+  ui.click("[data-act=plan-mode][data-mode=follow]");
+  await ui.settle();
+
+  assert.equal(sceneBlock().getAttribute("aria-disabled"), "true", "a block that plays nothing in Follow says so");
+  assert.equal(sceneBlock().disabled, false, "and is not a disabled control");
+  assert.equal(sectionBlock().disabled, true, "a section keeps its disabled attribute");
+  assert.equal(sectionBlock().getAttribute("aria-disabled"), "true", "and its own aria-disabled");
+
+  ui.click(`[data-act=plan-block][data-scene-id=${SCENE}]`);
+  await ui.settle(24);
+  assert.equal(ui.engine.launched.length, launched, "and a press on it plays nothing");
+});
+
+test("Plan UI: in the Timeline a block tap plays nothing while a take runs", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.ok(viewOf(ui).rec, "a take is open in the Timeline");
+  assert.equal(viewOf(ui).planMode, "hand", "with By hand chosen");
+
+  const launched = ui.engine.launched.length;
+  ui.click(`[data-act=plan-block][data-scene-id=${SCENE}]`);
+  await ui.settle(24);
+
+  assert.equal(ui.engine.launched.length, launched, "the plan is what Record plays there, so a tap launches no scene");
+  assert.ok(viewOf(ui).rec, "and the take is left exactly as it was");
+  assert.equal(
+    ui.document.querySelector(`[data-act=plan-block][data-scene-id=${SCENE}]`).getAttribute("aria-disabled"),
+    "true",
+    "the block says it plays nothing there",
+  );
+});
+
+test("Plan UI: a section is one band on the lanes' ruler", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await placeThePlan(ui);
+  const ruler = ui.document.querySelector("[data-role=rec-lanes]");
+  assert.ok(ruler, "the lanes draw a ruler");
+
+  const sections = Array.from(ruler.querySelectorAll("[data-role=rec-section]")).map((node) => String(node.textContent));
+  const bands = Array.from(ruler.querySelectorAll(".st-lane-band")).map((node) => String(node.textContent));
+  assert.deepEqual(sections, ["Chorus"], "the section is drawn in the section row");
+  assert.equal(bands.indexOf("Chorus"), -1, "and not again in the plan row");
+  assert.deepEqual(bands, ["Verse"], "which carries the placement's own block");
+  assert.equal(
+    sections.concat(bands).filter((label) => label === "Chorus").length,
+    1,
+    "so a section appears once on the ruler",
+  );
 });
 
 // ---- R15 review fixes: the take's own origin, its seeds and its notice ------

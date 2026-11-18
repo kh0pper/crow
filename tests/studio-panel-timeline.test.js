@@ -1278,6 +1278,30 @@ test("the mode switch keeps the choice per song", async () => {
   );
 });
 
+// ---- the plan widget's own words in each view -------------------------------
+
+test("Plan UI: in the Timeline the By-hand note says Record plays the plan", async () => {
+  const ui = await bootTimeline();
+  const note = () => String(ui.document.querySelector("[data-role=scene-plan-mode-note]").textContent);
+  const undo = () => ui.document.querySelector("[data-role=scene-plan-undo-note]");
+
+  assert.equal(ui.document.querySelector("[data-act=plan-mode][data-mode=hand]").getAttribute("aria-pressed"),
+    "true", "a device that has never chosen one plays scenes by hand");
+  assert.ok(undo(), "the Session view carries what one undo does");
+
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  assert.equal(note(), "In the Timeline, Record plays the plan. Switch to Session to play scenes by hand.",
+    "the Timeline says what Record does there, in one line");
+  assert.equal(undo(), null, "and the undo note is not beside it");
+
+  ui.click("[data-act=mode-session]");
+  await ui.settle();
+  assert.ok(undo(), "back in Session the undo note is on the page again");
+  assert.notEqual(note().indexOf("Writes into the plan from bar"), -1,
+    "and the note names the bar the take is written from");
+});
+
 // ---- the review's own cases ----------------------------------------------
 
 test("a refused performance can still be placed", async () => {

@@ -1319,6 +1319,9 @@ const STYLES = `
   .studio .st-plan-block-current { outline: 2px solid var(--st-accent, #E8A33D); outline-offset: -2px; }
   .studio .st-plan-block-next { border-style: dashed; }
   .studio .st-plan-block-queued { border-style: dashed; }
+  /* A block that plays nothing right now (a section, or a scene while the plan
+     is what plays) still says what it covers, and says it quietly. */
+  .studio .st-plan-block[aria-disabled="true"] { color: var(--st-muted); cursor: default; }
   .studio .st-plan-empty { margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted); }
   .studio .st-plan-mode { display: flex; flex-wrap: wrap; gap: 6px; }
   .studio .st-plan-mode .st-btn { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
