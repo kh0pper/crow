@@ -40,10 +40,10 @@ gateway, and one called `exchange.py` is not the adapter.
   SDK client's own name, so it is a finding outside `exchange.py`.
 * Every SDK order method but one is off limits in every file, the two write
   files included: an attribute or a bare name starting with `create_order`,
-  `market_order`, `limit_order`, `stop_limit`, `trigger_bracket`, `edit_order`
-  or `preview_` is a finding, with the single exemption of the exact name
-  `limit_order_gtc` inside `exchange.py`.  Only attributes and names are
-  scanned, so `exchange.py`'s `"preview_failure_reason"` string constant — a
+  `market_order`, `limit_order`, `stop_limit`, `trigger_bracket`, `edit_order`,
+  `close_position` or `preview_` is a finding, with the single exemption of the
+  exact name `limit_order_gtc` inside `exchange.py`.  Only attributes and names
+  are scanned, so `exchange.py`'s `"preview_failure_reason"` string constant — a
   string, not a call — stays quiet.
 * Universal, in every file including the two write files: `getattr`/`setattr`/
   `delattr`/`vars` whose first argument is the name `self`, any `__dict__`
@@ -109,6 +109,7 @@ SDK_ORDER_PREFIXES = (
     "stop_limit",
     "trigger_bracket",
     "edit_order",
+    "close_position",
     "preview_",
 )
 SDK_ALLOWED_ORDER_NAME = "limit_order_gtc"
@@ -652,6 +653,27 @@ NEGATIVE_CASES = [
             """
         ),
         id="sdk-limit_order_gtc-outside-exchange",
+    ),
+    pytest.param(
+        "runner.py",
+        _module(
+            """
+            def flatten(ex, product):
+                return ex.close_position(product_id=product, size="1")
+            """
+        ),
+        id="sdk-close_position-in-runner",
+    ),
+    pytest.param(
+        "exchange.py",
+        _module(
+            """
+            class LiveExchange:
+                def flatten(self, product):
+                    return self.client.close_position(product_id=product).to_dict()
+            """
+        ),
+        id="sdk-close_position-in-exchange",
     ),
 ]
 

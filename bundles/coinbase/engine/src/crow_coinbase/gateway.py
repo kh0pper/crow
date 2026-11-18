@@ -55,9 +55,6 @@ from .money import ProductSpec
 from .snapshot import SnapshotCache
 from .store import (
     ACTIVE,
-    CANCELLED,
-    FAILED,
-    FILLED,
     OPEN,
     PENDING_SUBMIT,
     REJECTED,
@@ -111,9 +108,11 @@ MAX_FUTURE_S = 5.0
 # A bot's own drawdown stop when its params do not name a usable one (percent).
 DEFAULT_DRAWDOWN_PCT = 20
 
-# The exchange statuses an adopted order may carry that the store names itself.
-# Any other status records the order id alone and leaves the row PENDING_SUBMIT.
-ADOPTED_STATUSES = frozenset({OPEN, FILLED, CANCELLED, FAILED})
+# The one exchange status an adopted order may carry into the row: OPEN.
+# Every other status (FILLED, CANCELLED, FAILED, anything unknown) records the
+# order id alone and leaves the row PENDING_SUBMIT, so reconcile's pending path
+# finds it and applies the fills; a terminal status written here would skip that.
+ADOPTED_STATUSES = frozenset({OPEN})
 
 
 @dataclass(frozen=True)
@@ -501,8 +500,8 @@ class OrderGateway:
         price before every send, so the engine always has a name for an order
         whose answer was lost.  An unknown outcome (None from `_send`) leaves the
         row PENDING_SUBMIT and counts as accepted: the reconcile loop resolves it.
-        An adopted order already carries the status the exchange reported, so it
-        is left as it is.  Each retry re-runs the chain at its own price, because
+        An adopted order's row is settled by `_adopt` (OPEN only when the exchange
+        says OPEN), so it is left as it is.  Each retry re-runs the chain at its own price, because
         a reprice moves a sell UP and can push the notional over a cap.
         """
         level = intent.level if intent.level is not None else 0
@@ -629,11 +628,12 @@ class OrderGateway:
             return None
 
     def _adopt(self, cid: str, found: dict) -> dict:
-        """Record the id and the status the exchange reports for a found order.
+        """Record a found order: always its id, and its status only when it is OPEN.
 
-        The row takes the exchange's own status when the store names it (OPEN,
-        FILLED, CANCELLED, FAILED); any other status records the id alone and
-        leaves the row PENDING_SUBMIT.  A filled order is therefore never reopened.
+        An OPEN order is written as OPEN.  Any other status the exchange reports
+        (FILLED, CANCELLED, FAILED, unknown) records the order id alone and leaves
+        the row PENDING_SUBMIT, because reconcile's pending path looks the row up
+        and applies the fills: a terminal status written here would skip that.
         The result carries `adopted`, so the caller does not write the row again.
         """
         fields = {"order_id": found["order_id"]}

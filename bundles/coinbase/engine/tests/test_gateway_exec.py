@@ -441,7 +441,11 @@ def test_timeout_after_order_landed_does_not_double_place(store):
 
 
 def test_adopted_filled_order_is_not_marked_open(store):
-    """An adopted order carries the status the exchange reports for it."""
+    """An adopted order the exchange reports as FILLED stays PENDING_SUBMIT.
+
+    Only the id is recorded: reconcile's pending path looks the row up and
+    applies the fills, which a terminal status written here would skip.
+    """
     exchange = ScriptedExchange(
         place_script=["land_then_timeout"], landed_status=FILLED
     )
@@ -453,7 +457,24 @@ def test_adopted_filled_order_is_not_marked_open(store):
     assert len(exchange.place_calls) == 1
 
     row = store.order(res.cid)
-    assert row["status"] == FILLED
+    assert row["status"] == PENDING_SUBMIT
+    assert row["order_id"] == "ex-landed"
+
+
+def test_adopted_cancelled_order_is_not_marked_cancelled(store):
+    """An adopted order the exchange reports as CANCELLED also stays PENDING_SUBMIT."""
+    exchange = ScriptedExchange(
+        place_script=["land_then_timeout"], landed_status="CANCELLED"
+    )
+    gw = make_gateway(store, exchange=exchange)
+
+    res = gw.submit("bot", "b1", place())
+    assert res.ok is True
+    assert res.refusal is None
+    assert len(exchange.place_calls) == 1
+
+    row = store.order(res.cid)
+    assert row["status"] == PENDING_SUBMIT
     assert row["order_id"] == "ex-landed"
 
 
