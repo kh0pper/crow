@@ -754,12 +754,16 @@ function composeBuildContexts(appSrc, { manifest = null, destDir = appSrc, env =
 /** Never refreshed through manifest.refreshFiles, at any depth: instance-local secrets and state. */
 const REFRESH_FILES_NEVER = /^(\.env.*|data|node_modules|\.git)$/i;
 
+/** A compose file by basename (docker-compose.yml, docker-compose.override.yaml, …). */
+const COMPOSE_FILE_NAME = /^docker-compose(\..+)?\.ya?ml$/;
+
 /**
  * manifest.refreshFiles (Crow Workspace W2, F4): an OPT-IN list of bundle-relative paths a docker bundle wants
  * re-copied on a version change — e.g. ["docker-compose.yml", "onlyoffice-plugin"]: the compose that adds a
  * read-only plugin mount, and the plugin directory it mounts. The running containers are NOT recreated (they keep
- * the old compose until the bundle is restarted). An entry is copied only when it is a plain relative path inside
- * the bundle (no absolute path, "..", "\\" or "$"; never manifest.json, which is the refresh's commit marker), names
+ * the old compose until the bundle is restarted). A NON-docker bundle never gets a compose file this way: it has no
+ * owner-edit check (catchUpInstalledCompose only runs for docker bundles), so its declared compose entry is skipped.
+ * An entry is copied only when it is a plain relative path inside the bundle (no absolute path, "..", "\\" or "$"; never manifest.json, which is the refresh's commit marker), names
  * no .env*, data, node_modules or .git at any depth, exists in the repo copy (realpath inside the bundle), and does
  * not overlap a READ-WRITE bind mount of the installed compose or its overrides (that is data). Returns the
  * bundle-relative paths to copy.
@@ -778,11 +782,15 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
   }
   const projectDir = join(destReal, composeRel ? dirname(composeRel) : ".");
   const rwBinds = texts.flatMap((t) => composeBindSources(t, projectDir, env, { rwOnly: true })).map(realOrSelf);
+  const isDocker = !!manifest?.docker;
   const out = new Set();
   for (const p of list.slice(0, 50)) {
     if (typeof p !== "string" || !p || isAbsolute(p) || p.includes("\\") || p.includes("$")) continue;
     const rel = relativePath(".", p);
     if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    // A non-docker bundle's compose is not refreshed here: only catchUpInstalledCompose
+    // (docker bundles) has the owner-edit check, so this is the old behaviour for it.
+    if (!isDocker && COMPOSE_FILE_NAME.test(basename(rel))) continue;
     // The installed compose's bookkeeping is Crow's own record, never a repo file.
     if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE || rel === COMPOSE_STATE_FILE || rel === COMPOSE_NEEDS_CONFIG_FILE || rel === COMPOSE_IMAGE_CHANGE_FILE) continue;
     if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
@@ -1045,8 +1053,9 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
  *      symlink exists (install-parity — an April-era install may predate it).
  *   3. manifest.refreshFiles (see manifestRefreshFiles: never .env*, data or a
- *      read-write mount) is copied for EVERY bundle type, a declared directory
- *      pruned to the repo's contents. The compose
+ *      read-write mount, and never a compose file on a NON-docker bundle) is
+ *      copied for EVERY bundle type, a declared directory pruned to the repo's
+ *      contents. The compose
  *      file itself is NOT part of this version-keyed step: it is caught up on every
  *      boot at any version by catchUpInstalledCompose, which never overwrites an
  *      owner edit and never breaks Start on a missing required key. The running
@@ -1147,7 +1156,9 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
   // a non-docker bundle's code can live outside the fixed dirs above —
   // google-workspace's Python package (google_workspace_mcp/) and its Apps Script
   // shim (apps-script-shim/) are named exactly that way, or a version bump would
-  // ship the new manifest over stale code. Each item goes through the
+  // ship the new manifest over stale code. A non-docker bundle's declared compose
+  // entry is skipped (manifestRefreshFiles) — no owner-edit check exists there.
+  // Each item goes through the
   // build-context skip filter (no .venv/__pycache__/.pytest_cache/node_modules/
   // .git), and a declared DIRECTORY is pruned to the repo's own contents so a
   // module deleted upstream does not keep living in the installed copy.

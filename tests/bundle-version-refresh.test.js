@@ -1928,4 +1928,28 @@ describe("manifest.refreshFiles — declared code roots of a non-docker bundle",
     assert.ok(existsSync(join(destBundleDir(id), "apps-script-shim", "forms-destination-shim.gs")), "and the Apps Script shim");
     assert.equal(JSON.parse(readAt(destBundleDir(id), "manifest.json")).version, repoManifest.version);
   });
+
+  test("a non-docker bundle's declared compose file is skipped (code roots still refresh)", async () => {
+    const id = "roots-nondocker-compose";
+    const repoRoot = freshRoot(`crowrepo-roots-${id}-`);
+    // Seven non-docker bundles declare their compose file in refreshFiles; it is
+    // not refreshed for them (no owner-edit check outside catchUpInstalledCompose).
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "R", version: "2.0.0", type: "mcp-server", category: "misc", description: "d",
+      refreshFiles: ["docker-compose.yml", "pkg"],
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, "services:\n  app:\n    image: x:v2\n");
+    put(repoRoot, `${id}/pkg/a.py`, "a v2\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    const ownerEdited = "services:\n  app:\n    image: x:v1\n    # owner edit\n";
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, ownerEdited);
+    put(CROW_HOME, `bundles/${id}/pkg/a.py`, "a v1\n");
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "pkg/a.py"), "a v2\n", "the declared code root still refreshes");
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), ownerEdited, "the owner-edited compose is left byte-identical");
+  });
 });
