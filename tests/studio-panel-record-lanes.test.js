@@ -1766,7 +1766,10 @@ test("a range set while a take runs is stored and applies from the next pass", a
       discarded: false,
     },
   });
-  const ui = await bootLanes({ doc, latency: TAP_LATENCY, clock: 5, outputLatency: OUTPUT_LATENCY });
+  // The page's clock stands well inside pass 0 (192,000 frames is four seconds),
+  // so the next pass's boundary is further off than the lead the engine needs to
+  // arm a recorder: the new range takes over on that next pass.
+  const ui = await bootLanes({ doc, latency: TAP_LATENCY, clock: 4, outputLatency: OUTPUT_LATENCY });
   await ui.arm(AUDIO_TRACK);
   ui.click("[data-act=record]");
   await ui.settle(24);
@@ -1795,6 +1798,8 @@ test("a range set while a take runs is stored and applies from the next pass", a
   // already armed keeps the gate it started with.
   const rec = ui.view().rec;
   assert.equal(recorder.gates.length, 1, "the new range reaches the recorder once");
+  assert.deepEqual(rec.punch_plan, [{ from_pass: 1, from: 1, to: 5 }],
+    "the take's plan records the new range from the next pass on");
   const gate = recorder.gates[0];
   assert.equal(gate.anchorFrame, rec.anchor, "on the take's own anchor");
   assert.equal(gate.loopFrames, rec.loop_frames, "and its own pass length");

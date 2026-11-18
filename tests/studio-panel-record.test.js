@@ -1348,8 +1348,17 @@ async function bootPanel(options = {}) {
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
-    addEventListener() {},
-    removeEventListener() {},
+    // The page's own window listeners, so a pointer drag can be finished the way
+    // a browser finishes it (the comp bar's release is a window event).
+    listeners: {},
+    addEventListener(name, handler) {
+      (windowStub.listeners[name] ||= []).push(handler);
+    },
+    removeEventListener(name, handler) {
+      const list = windowStub.listeners[name] || [];
+      const at = list.indexOf(handler);
+      if (at >= 0) list.splice(at, 1);
+    },
   };
 
   const yjsUrl = pathToFileURL(
@@ -1371,6 +1380,14 @@ async function bootPanel(options = {}) {
   assert.equal(typeof windowStub.StudioPunch.spliceComp, "function", "the punch rules are evaluated");
 
   const timers = [];
+  // Everything the page says with console.warn: one case is about a comp write
+  // the page gives up on, and the words it says so with.
+  const warnings = [];
+  const consoleStub = {
+    log: (...args) => console.log(...args),
+    error: (...args) => console.error(...args),
+    warn: (text) => warnings.push(String(text)),
+  };
   const run = new Function(
     "document",
     "window",
@@ -1396,7 +1413,7 @@ async function bootPanel(options = {}) {
     fetchStub,
     globalThis.crypto,
     globalThis.atob,
-    console,
+    consoleStub,
     (fn) => {
       timers.push(fn);
       return timers.length;
@@ -1449,7 +1466,27 @@ async function bootPanel(options = {}) {
     await settle();
   };
 
-  return { document, doc, store, storage, engine, clock, mediaDevices, sent, requests, log, page, click, settle, frame, pushState, dropSocket, releaseFinish, timers };
+  // The page coming back after a drop: its reconnect timer runs (the stub hands
+  // it the same socket, open again) and the hub's state frame follows, which is
+  // what rebuilds the document and re-flushes what the page still owes.
+  const rejoin = async () => {
+    for (const fn of timers.splice(0)) fn();
+    await settle();
+    await pushState();
+  };
+
+  /** One DOM event the way a browser sends it: bubbling, cancelable, with props. */
+  const event = (type, props) => {
+    const made = new domWindow.Event(type, { bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(props || {})) made[key] = value;
+    return made;
+  };
+  /** Send one event to the window, as a pointer on the page would. */
+  const fireWindow = (type, made) => {
+    for (const handler of [...(windowStub.listeners[type] || [])]) handler(made);
+  };
+
+  return { document, doc, store, storage, engine, clock, mediaDevices, sent, requests, log, page, click, settle, frame, pushState, dropSocket, rejoin, releaseFinish, timers, event, fireWindow, warnings };
 }
 
 /**
@@ -3342,10 +3379,102 @@ test("R19: the Play button during the count-in does nothing", async () => {
 /** The take the fixture clip's comp already holds. */
 const T_OLD = "6f1c1f7a-0000-4000-8000-000000000001";
 
-/** Three passes of one punched take, in the order they land. */
-const T_A = "6f1c1f7a-0000-4000-8000-000000000002";
-const T_B = "6f1c1f7a-0000-4000-8000-000000000003";
-const T_C = "6f1c1f7a-0000-4000-8000-000000000004";
+/** A second audio clip on the recording track, in a scene of its own. */
+const CLIP_B = "c-guitar-b";
+
+/** A second take the fixture clip may hold: what a comp drag can be given. */
+const T_OTHER = "6f1c1f7a-0000-4000-8000-000000000005";
+
+/** The page clock the take's own pass 0 stands in: 52,800 frames, inside the pass
+ * that begins on 48,000 (48,000 + the 3,408-frame round trip is its first frame).
+ */
+const PASS0_CLOCK = 1.1;
+
+/** The frame one pass of the fixture take begins on. */
+function passFrame(pass) {
+  return ARM_FRAME + Math.round(pass * PASS_FRAMES) + ROUND_TRIP_FRAMES;
+}
+
+/**
+ * The one run the page is holding for a recording.
+ * @param {object} ui a booted panel
+ * @returns {object} the run
+ */
+function onlyRun(ui) {
+  const runs = Object.values(viewOf(ui).punchRuns);
+  assert.equal(runs.length, 1, `one run is open (got ${runs.length})`);
+  return runs[0];
+}
+
+/**
+ * The passes a run has landed, in pass order.
+ * @param {object} run
+ * @returns {object[]}
+ */
+function landedPasses(run) {
+  return Object.values(run.landed).sort((a, b) => Number(a.pass) - Number(b.pass));
+}
+
+/**
+ * The pass one run has booked, or null.
+ * @param {object} run
+ * @param {number} pass
+ * @returns {object|null} `{take_id, pass, from, to}`
+ */
+function bookedAt(run, pass) {
+  for (const [takeId, entry] of Object.entries(run.booked)) {
+    if (Number(entry.pass) === Number(pass)) return { take_id: takeId, ...entry };
+  }
+  return null;
+}
+
+/**
+ * The takes a comp write put into the comp, other than the one the clip already
+ * held.
+ * @param {object[]} segments
+ * @returns {string[]}
+ */
+function compTakeIds(segments) {
+  const ids = new Set();
+  for (const segment of segments) {
+    if (String(segment.take_id) === T_OLD) continue;
+    ids.add(String(segment.take_id));
+  }
+  return Array.from(ids);
+}
+
+/**
+ * The song's own side of a comp write: the takes it names are in the song (the
+ * gateway's `take.add` after an upload), and then `clip.set_comp` is applied.
+ * @param {object} ui a booted panel
+ * @param {object[]} segments the write's own segments
+ */
+async function landInDoc(ui, segments) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const takes = snapshot(ui.doc).takes || {};
+  for (const takeId of compTakeIds(segments)) {
+    if (takes[takeId]) continue;
+    runCommand(ui.doc, "take.add", {
+      clip_id: CLIP,
+      take: {
+        id: takeId,
+        storage_key: "projects/31/studio/song-1/takes/" + takeId + ".wav",
+        rate: 48000,
+        channels: 2,
+        frames: PASS_FRAMES,
+        offset_frames: 0,
+        compensated: false,
+        bpm: 240,
+        recorded_at: new Date(Date.UTC(2026, 0, 1, 10)).toISOString(),
+        author_label: "You",
+        discarded: false,
+      },
+    });
+  }
+  runCommand(ui.doc, "clip.set_comp", { clip_id: CLIP, segments });
+  await ui.pushState();
+}
 
 /** A pass of the fixture clip: one bar of four beats at 240 BPM, 48 kHz. */
 const PASS_FRAMES = 48000;
@@ -3385,15 +3514,20 @@ async function docComp(ui, clipId = CLIP) {
 }
 
 /**
- * Arm the audio track, set the punch range (or none) and press Record.
+ * Arm the audio track (unless a case already has), set the punch range (or none)
+ * and press Record.
  * @param {object} ui a booted panel
  * @param {number|null} from the range's first clip beat, or null for no punch
  * @param {number} [to] the range's end beat
+ * @param {{armed?: boolean}} [options] `armed` for a second take on a track that
+ *   is still armed (the arm button is a toggle)
  * @returns {Promise<object>} the recorder the page built
  */
-async function recordWithPunch(ui, from, to) {
-  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
-  await ui.settle();
+async function recordWithPunch(ui, from, to, options = {}) {
+  if (options.armed !== true) {
+    ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+    await ui.settle();
+  }
   if (from !== null) {
     assert.equal(ui.page.__studioTest.setPunch(from, to), true, `a range of ${from} to ${to} fits the clip`);
     await ui.settle();
@@ -3441,21 +3575,6 @@ async function endTake(ui, recorder, passes) {
   }
   recorder.done({ segments, frames: passes * PASS_FRAMES, start_frame: ARM_FRAME });
   await ui.settle(30);
-}
-
-/**
- * A booted panel whose clip already holds a comp, for the comp-write cases: no
- * recording runs; a gated pass is handed over the way an upload hands it over.
- * @param {{takes?: string[]}} [options]
- * @returns {Promise<object>}
- */
-async function compPanel(options = {}) {
-  const ids = options.takes || [T_OLD, T_A, T_B, T_C];
-  return bootPanel({
-    clip: true,
-    lengthBars: 1,
-    takes: ids.map((id) => ({ id: id })),
-  });
 }
 
 test("R11: a range inside the clip sends one gatePeriodic whose per-pass frames equal passGateRanges (offset added), gated zeros outside, and takes of the full pass length", async () => {
@@ -3514,7 +3633,7 @@ test("R11: a range inside the clip sends one gatePeriodic whose per-pass frames 
   assert.equal(setCompCommands(ui).length, 0, "a take this device still owes writes no comp yet");
 });
 
-test("R11: the same clip-beat range applies on pass 0, 1 and 2", async () => {
+test("R11: the same clip-beat range applies on pass 0, 1 and 2, and the recording writes ONE comp when it ends", async () => {
   const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
   const recorder = await recordWithPunch(ui, 1, 3);
   await reportLaunch(ui);
@@ -3546,18 +3665,30 @@ test("R11: the same clip-beat range applies on pass 0, 1 and 2", async () => {
   // Every pass records and uploads, and no pass sends a gate of its own.
   await chunkPass(ui, recorder, 0);
   await chunkPass(ui, recorder, 1);
-  assert.equal(ui.requests.filter((request) => request.url.includes("/finish")).length, 1,
-    "the first pass uploads as it ends");
-  let sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, "and writes its comp when it lands");
+  assert.equal(finishCount(ui), 1, "the first pass uploads as it ends");
+  await ui.settle();
+  assert.equal(viewOf(ui).rec.active, true, "the take is still running");
+  assert.equal(setCompCommands(ui).length, 0, "and the comp is not written while it is");
+  const run = onlyRun(ui);
+  assert.deepEqual(landedPasses(run).map((pass) => pass.pass), [0], "the first pass has landed in its run");
+
+  await chunkPass(ui, recorder, 2);
+  assert.equal(finishCount(ui), 2, "the second pass uploads as it ends");
+  await endTake(ui, recorder, 3);
+  assert.equal(finishCount(ui), 3, "and the last one as the take ends");
+
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, `the whole recording writes one comp (got ${sent.length})`);
+  assert.equal(recorder.gates.length, 1, "still one gate: the range is periodic, not re-sent per pass");
+  assert.equal(sent[0].args.clip_id, CLIP, "against the clip the take recorded into");
+  const last = sent[0].args.segments.find((segment) => segment.take_id !== T_OLD);
+  assert.ok(last, "the comp names a punched take");
+  assert.deepEqual(sent[0].args.segments, spliceComp(
+    [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }], last.take_id, 1, 3, 4,
+  ), "one splice over the range, its latest pass owning it");
   ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
   await ui.settle();
-  await chunkPass(ui, recorder, 2);
-  assert.equal(ui.requests.filter((request) => request.url.includes("/finish")).length, 2,
-    "the second pass uploads as it ends");
-  sent = setCompCommands(ui);
-  assert.equal(sent.length, 2, "with a comp write of its own");
-  assert.equal(recorder.gates.length, 1, "still one gate: the range is periodic, not re-sent per pass");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and the run is done once the hub has taken the write");
 });
 
 test("R12: a range outside a shortened clip arms nothing, creates no pending row and says so", async () => {
@@ -3591,30 +3722,76 @@ test("R12: a range outside a shortened clip arms nothing, creates no pending row
   assert.ok(toast.includes("The punch range is outside this clip."), `the page says so (got: ${toast})`);
 });
 
-test("R12: a range set mid-take sends a gatePeriodic that applies from the next pass start", async () => {
-  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
-  const recorder = await recordWithPunch(ui, null);
+test("O2/S5: a range changed in pass 0 leaves pass 0 as it began and gives pass 1 the new one", async () => {
+  // The page's clock stands inside pass 0, so the pass that is already running
+  // keeps the range it started with and the new one takes over on the next pass.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED, clock: PASS0_CLOCK });
+  const recorder = await recordWithPunch(ui, 0, 1);
   await reportLaunch(ui);
-  assert.deepEqual(recorder.gates, [], "a take with no range has no gate");
-  assert.equal(viewOf(ui).rec.active, true, "the take is running");
+  assert.equal(recorder.gates.length, 1, "the range the take was armed with reached the recorder");
+  assert.equal("activeFrom" in recorder.gates[0], false, "covering the take from its first pass");
 
-  assert.equal(ui.page.__studioTest.setPunch(2, 3), true, "the operator sets a range while the take runs");
+  assert.equal(ui.page.__studioTest.setPunch(2, 3), true, "the operator sets another range while pass 0 runs");
   await ui.settle();
 
+  assert.deepEqual(viewOf(ui).rec.punch_plan, [
+    { from_pass: 0, from: 0, to: 1 },
+    { from_pass: 1, from: 2, to: 3 },
+  ], "the plan keeps pass 0's range and adds the new one from pass 1 on");
   assert.equal(viewOf(ui).punchNext, true, "the pass already armed keeps the gate it started with");
-  assert.equal(recorder.gates.length, 1, "the recorder is handed the new range once");
-  const gate = recorder.gates[0];
+  assert.equal(recorder.gates.length, 2, "the recorder is handed the new range once");
+  const gate = recorder.gates[1];
   assert.equal(gate.anchorFrame, ARM_FRAME, "on the take's own anchor");
   assert.equal(gate.loopFrames, PASS_FRAMES, "and the same periodic pass");
-  assert.equal(gate.fromFrames, 2 * BEAT_FRAMES, "the new range's first beat");
-  assert.equal(gate.toFrames, 3 * BEAT_FRAMES, "and its end");
-  assert.equal(
-    gate.activeFrom,
-    ARM_FRAME + Math.round(PASS_FRAMES) + ROUND_TRIP_FRAMES,
-    "it takes over at the first frame of the next pass",
-  );
-  assert.equal(viewOf(ui).rec.punch.from, 2, "and the take records the rest of its passes with it");
-  assert.equal(viewOf(ui).rec.punch.to, 3);
+  assert.equal(gate.fromFrames, 2 * BEAT_FRAMES, "opening on the new range's first beat");
+  assert.equal(gate.toFrames, 3 * BEAT_FRAMES, "and closing on its end");
+  assert.equal(gate.activeFrom, passFrame(1), "it takes over at the first frame of the next pass");
+
+  // Pass 0's first chunk arrives AFTER the change, the way a real take's does:
+  // its range comes from the plan, by its own pass index.
+  await chunkPass(ui, recorder, 0);
+  const run = onlyRun(ui);
+  const first = bookedAt(run, 0);
+  assert.deepEqual({ from: first.from, to: first.to }, { from: 0, to: 1 },
+    "pass 0 is booked with the range it began with");
+  await chunkPass(ui, recorder, 1);
+  const second = bookedAt(run, 1);
+  assert.deepEqual({ from: second.from, to: second.to }, { from: 2, to: 3 },
+    "and pass 1 is booked with the new one");
+
+  await endTake(ui, recorder, 2);
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, `the recording writes one comp (got ${sent.length})`);
+  const before = [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }];
+  assert.deepEqual(sent[0].args.segments, spliceComp(spliceComp(before, first.take_id, 0, 1, 4), second.take_id, 2, 3, 4),
+    "each pass over its own range, pass 0's first");
+});
+
+test("O2/S5: a range set before the take began covers pass 0 and replaces the plan", async () => {
+  // Nothing of the take has been captured yet on the page's clock, so the range
+  // is the whole take's, from its first pass.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(ui, 0, 1);
+  await reportLaunch(ui);
+  assert.equal(ui.page.__studioTest.setPunch(2, 3), true, "another range, before a frame of the take is here");
+  await ui.settle();
+
+  assert.deepEqual(viewOf(ui).rec.punch_plan, [{ from_pass: 0, from: 2, to: 3 }],
+    "the plan is the new range, from the first pass");
+  assert.equal(viewOf(ui).punchNext, false, "nothing waits for a later pass");
+  assert.equal(recorder.gates.length, 2, "the recorder is handed it");
+  assert.equal("activeFrom" in recorder.gates[1], false, "from the take's own first frame");
+
+  await chunkPass(ui, recorder, 0);
+  const run = onlyRun(ui);
+  assert.deepEqual({ from: bookedAt(run, 0).from, to: bookedAt(run, 0).to }, { from: 2, to: 3 },
+    "pass 0 is booked with the range set before it began");
+  await endTake(ui, recorder, 1);
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, "and the recording writes it once");
+  assert.deepEqual(sent[0].args.segments, spliceComp(
+    [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }], sent[0].args.segments[1].take_id, 2, 3, 4,
+  ), "over the range the plan gave");
 });
 
 test("R12: a punch on a clip with no comp records the take whole, sends no gate and no set_comp, and shows the no-take-to-punch-into notice", async () => {
@@ -3640,182 +3817,480 @@ test("R12: a punch on a clip with no comp records the take whole, sends no gate 
 
   await chunkPass(ui, recorder, 0);
   await endTake(ui, recorder, 1);
-  assert.equal(ui.requests.filter((request) => request.url.includes("/finish")).length, 1,
-    "the take landed");
+  assert.equal(finishCount(ui), 1, "the take landed");
   assert.equal(setCompCommands(ui).length, 0, "and no comp write follows it");
-  assert.deepEqual(viewOf(ui).punchTakes, {}, "nothing is waiting to be written");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "nothing is waiting to be written");
 });
 
-test("R13: a later gated take sends clip.set_comp whose segments equal spliceComp of the old comp", async () => {
-  const ui = await compPanel();
-  const before = [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }];
-  assert.deepEqual(await docComp(ui), before, "the clip's comp is the take it already had");
-
-  ui.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
+test("O3: passes landing across a running take make ONE set_comp at the end, and the latest pass wins where they overlap", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED, clock: PASS0_CLOCK });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  // A second range while pass 0 runs: its passes overlap beats 2 and 3.
+  assert.equal(ui.page.__studioTest.setPunch(2, 4), true, "a wider range, set while pass 0 runs");
   await ui.settle();
 
+  await chunkPass(ui, recorder, 0);
+  const run = onlyRun(ui);
+  const first = bookedAt(run, 0);
+  assert.deepEqual({ from: first.from, to: first.to }, { from: 1, to: 3 }, "pass 0 keeps the range it began with");
+  await chunkPass(ui, recorder, 1);
+  const second = bookedAt(run, 1);
+  assert.deepEqual({ from: second.from, to: second.to }, { from: 2, to: 4 }, "pass 1 records the new one");
+
+  // The first pass has landed while the take still runs, and nothing is written.
+  await ui.settle();
+  assert.equal(viewOf(ui).rec.active, true, "the take is still running");
+  assert.deepEqual(landedPasses(run).map((pass) => pass.pass), [0], "its first pass has landed");
+  assert.equal(setCompCommands(ui).length, 0, "and no comp is written while it is");
+
+  // Stop: the last pass lands and the whole recording is written, once.
+  await endTake(ui, recorder, 2);
   const sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, "one comp write for the landed pass");
-  assert.equal(sent[0].args.clip_id, CLIP, "for the clip the pass was recorded into");
-  assert.deepEqual(sent[0].args.segments, spliceComp(before, T_A, 1, 3, 4), "the one splice rule the comp drag uses");
+  assert.equal(sent.length, 1, `one comp write for the whole recording (got ${sent.length})`);
   assert.deepEqual(sent[0].args.segments, [
     { take_id: T_OLD, from_beat: 0, to_beat: 1 },
-    { take_id: T_A, from_beat: 1, to_beat: 3 },
-    { take_id: T_OLD, from_beat: 3, to_beat: 4 },
-  ], "the new take over the range, the old comp either side of it");
-
+    { take_id: first.take_id, from_beat: 1, to_beat: 2 },
+    { take_id: second.take_id, from_beat: 2, to_beat: 4 },
+  ], "each pass over its own range, the later one owning the beats both cover");
+  assert.notEqual(second.take_id, first.take_id, "which is not the earlier pass's take");
   ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
   await ui.settle();
-  assert.equal(viewOf(ui).punchComped[CLIP], 0, "the pass is written");
-  assert.equal(viewOf(ui).punchChain[CLIP], undefined, "and the chain is idle again");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and the run is done once the hub has taken the write");
 });
 
-test("R13: pass 2 landing before pass 1 writes pass 2 and pass 1 never overrides it (punchComped guard)", async () => {
-  const ui = await compPanel();
-  ui.page.__studioTest.punchLanded(CLIP, 2, T_B, { from: 1, to: 3 });
-  await ui.settle();
+test("O1: a second punched recording on the same clip is comped too", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  const first = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, first, 0);
+  await endTake(ui, first, 1);
   let sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, "the pass that landed first is written");
-  assert.ok(sent[0].args.segments.some((segment) => segment.take_id === T_B), "and it is pass 2's take");
+  assert.equal(sent.length, 1, "the first recording writes its comp");
+  // The song takes the write and the take it names, the way the hub does.
+  await landInDoc(ui, sent[0].args.segments);
   ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
   await ui.settle();
-  assert.equal(viewOf(ui).punchComped[CLIP], 2, "the comp is written for pass 2");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and its run is done");
 
-  // The earlier pass lands on the page afterwards.
-  ui.page.__studioTest.punchLanded(CLIP, 1, T_A, { from: 1, to: 3 });
-  await ui.settle();
+  // A SECOND recording on the same clip: its own number, its own run, and a comp
+  // write of its own once it lands.
+  const second = await recordWithPunch(ui, 1, 3, { armed: true });
+  await reportLaunch(ui);
+  await chunkPass(ui, second, 0);
+  await endTake(ui, second, 1);
   sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, "a lower pass never writes over a higher one");
-  assert.equal(viewOf(ui).punchComped[CLIP], 2, "the comp stays what pass 2 made it");
-  assert.equal(viewOf(ui).punchLanded[CLIP], undefined, "and nothing is left waiting");
+  assert.equal(sent.length, 2, `the second recording is comped too (got ${sent.length})`);
+  const before = await docComp(ui);
+  const landed = sent[1].args.segments.find((segment) => segment.from_beat === 1 && segment.to_beat === 3);
+  assert.ok(landed, "the second write puts its own take over the range");
+  assert.deepEqual(sent[1].args.segments, spliceComp(before, landed.take_id, 1, 3, 4),
+    "over the comp the first recording's write left");
 });
 
-test("R13: three landed passes produce ONE set_comp, for the highest", async () => {
-  const ui = await compPanel();
-  const before = [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }];
-
-  // Three passes land together: only the highest of them is worth writing, and
-  // the page is still in the same turn for all three.
-  ui.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  ui.page.__studioTest.punchLanded(CLIP, 1, T_B, { from: 1, to: 3 });
-  ui.page.__studioTest.punchLanded(CLIP, 2, T_C, { from: 1, to: 3 });
-  await ui.settle();
-
-  const sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, `three landed passes make one comp write (got ${sent.length})`);
-  assert.deepEqual(sent[0].args.segments, spliceComp(before, T_C, 1, 3, 4), "for the highest pass's take");
-  assert.equal(viewOf(ui).punchLanded[CLIP], undefined, "the passes it replaced are not written afterwards");
-});
-
-test("R13: with two punched passes the later pass owns the range and the earlier stays a listed take", async () => {
-  const ui = await compPanel({ takes: [T_OLD, T_A, T_B] });
-  const before = [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }];
-
-  ui.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  await ui.settle();
-  let sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, "the first pass is written");
+test("O4/S4: a range for another clip gates nothing and books nothing, mid-take or at the arm", async () => {
+  // Clip B is a second audio clip on the same track, in a scene of its own, with
+  // a comp of its own: the range below is stored for clip A.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
-  runCommand(ui.doc, "clip.set_comp", { clip_id: CLIP, segments: sent[0].args.segments });
+  runCommand(ui.doc, "scene.add", { id: "chorus", name: "Chorus" });
+  runCommand(ui.doc, "clip.add_audio", {
+    clip_id: CLIP_B,
+    track_id: AUDIO_TRACK,
+    scene_id: "chorus",
+    length_bars: 1,
+    name: "Guitar B",
+  });
   await ui.pushState();
-  ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
-  await ui.settle();
 
-  // The second pass lands over the same range: the later one owns it.
-  ui.page.__studioTest.punchLanded(CLIP, 1, T_B, { from: 1, to: 3 });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
   await ui.settle();
-  sent = setCompCommands(ui);
-  assert.equal(sent.length, 2, "a second pass makes a second write");
-  const afterFirst = spliceComp(before, T_A, 1, 3, 4);
-  assert.deepEqual(sent[1].args.segments, spliceComp(afterFirst, T_B, 1, 3, 4), "over the comp the first write made");
-  assert.deepEqual(sent[1].args.segments, [
-    { take_id: T_OLD, from_beat: 0, to_beat: 1 },
-    { take_id: T_B, from_beat: 1, to_beat: 3 },
-    { take_id: T_OLD, from_beat: 3, to_beat: 4 },
-  ], "the later pass's take where the earlier one was");
+  assert.equal(ui.page.__studioTest.setPunch(1, 3), true, "a range for the clip the record target holds");
+  await ui.settle();
+  assert.equal(viewOf(ui).punchClip, CLIP, "which is clip A");
 
-  runCommand(ui.doc, "clip.set_comp", { clip_id: CLIP, segments: sent[1].args.segments });
-  await ui.pushState();
-  const { snapshot } = await import("../bundles/studio/server/doc.js");
-  const song = snapshot(ui.doc);
-  assert.deepEqual(Object.keys(song.takes).sort(), [T_A, T_B, T_OLD].sort(), "both punched passes stay listed as takes");
-  assert.equal(song.clips[CLIP].comp.some((segment) => segment.take_id === T_A), false,
-    "and the comp no longer names the earlier pass over the range");
+  // Record: the launch names scene B, so the take records into clip B.
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: "chorus", bar: 0, frame: ARM_FRAME }),
+  );
+  await ui.settle();
+  assert.equal(viewOf(ui).rec.clip_id, CLIP_B, "the take records into clip B");
+  assert.deepEqual(recorder.gates, [], "the range set for clip A is not clip B's, so nothing is gated");
+  assert.equal(viewOf(ui).rec.punch, null, "and the take records whole");
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "no comp write follows a take that was not punched");
 });
 
-test("R13: each set_comp is computed from the snapshot that holds the previous one, with the echo of the first DELAYED (sendAwait waits for it)", async () => {
-  const ui = await compPanel();
-  const before = [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }];
-
-  ui.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  await ui.settle();
-  let sent = setCompCommands(ui);
-  assert.equal(sent.length, 1, "the first pass is on the wire");
-  const first = sent[0].args.segments;
-
-  // The song holds the first write, and the second pass lands before the hub has
-  // answered it.
+test("O4/S4: a mid-take range for a clip the take is not recording into is stored, with no gate and nothing waiting", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED, clock: PASS0_CLOCK });
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
-  runCommand(ui.doc, "clip.set_comp", { clip_id: CLIP, segments: first });
+  runCommand(ui.doc, "scene.add", { id: "chorus", name: "Chorus" });
+  runCommand(ui.doc, "clip.add_audio", {
+    clip_id: CLIP_B,
+    track_id: AUDIO_TRACK,
+    scene_id: "chorus",
+    length_bars: 1,
+    name: "Guitar B",
+  });
   await ui.pushState();
-  ui.page.__studioTest.punchLanded(CLIP, 1, T_B, { from: 1, to: 3 });
-  await ui.settle();
-  assert.equal(setCompCommands(ui).length, 1, "the chain waits for the answer to the write on the wire");
 
-  // The answer arrives: the next write is spliced onto the comp that holds it.
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: "chorus", bar: 0, frame: ARM_FRAME }),
+  );
+  await ui.settle();
+  assert.equal(viewOf(ui).rec.clip_id, CLIP_B, "the take records into clip B");
+
+  // Clip B goes, the way another view can remove it: the page now reads the
+  // record target's own clip (A) as the clip a range would be for.
+  runCommand(ui.doc, "clip.remove", { clip_id: CLIP_B });
+  await ui.pushState();
+  assert.equal(ui.page.__studioTest.setPunch(2, 3), true, "a range for the clip the page now reads");
+  await ui.settle();
+
+  assert.equal(viewOf(ui).punchClip, CLIP, "stored for clip A");
+  assert.deepEqual(viewOf(ui).punch, { from: 2, to: 3 }, "and the page holds it");
+  assert.equal(viewOf(ui).punchNext, false, "nothing is waiting for a later pass");
+  assert.equal(recorder.gates.length, 0, "the take recording into clip B is handed no gate");
+  assert.equal(noticeText(ui).includes("applies from the next pass"), false,
+    "and the page promises no pass");
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "nor does any comp write follow");
+});
+
+/**
+ * One comp drag on the takes widget's comp bar, the way the operator does it: a
+ * take row is clicked (it is the take the range is assigned to), then the
+ * pointer goes down on the bar and up again beside it.
+ * @param {object} ui a booted panel
+ * @param {string} takeId the take the range is assigned to
+ * @param {number} fromBeat the range's first clip beat
+ * @param {number} toBeat its last
+ */
+async function dragComp(ui, takeId, fromBeat, toBeat) {
+  ui.click(`[data-role=take][data-take-id=${takeId}]`);
+  await ui.settle();
+  const bar = ui.document.querySelector("[data-role=comp-bar]");
+  assert.ok(bar, "the takes widget draws the clip's comp bar");
+  bar.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 12, right: 400, bottom: 12 });
+  const at = (beat) => Math.round((Number(beat) / 4) * 400);
+  bar.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: at(fromBeat) }));
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: at(toBeat) }));
+  ui.fireWindow("pointerup", ui.event("pointerup", { clientX: at(toBeat) }));
+  await ui.settle();
+}
+
+test("O5: a comp drag's write waits for a punch write on the wire, and the punch write waits for a drag's", async () => {
+  // The punch write first: its answer is held back, and a drag is released while
+  // it is still out.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }, { id: T_OTHER }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  let sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, "the recording's one comp write is on the wire");
+  const punchSegments = sent[0].args.segments;
+
+  // The song holds it, and the operator drags a comp while its answer is owed.
+  await landInDoc(ui, punchSegments);
+  const beforeDrag = await docComp(ui);
+  await dragComp(ui, T_OTHER, 0, 2);
+  assert.equal(setCompCommands(ui).length, 1, "the drag's write waits for the answer to the punch's");
+
   ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
   await ui.settle();
   sent = setCompCommands(ui);
-  assert.equal(sent.length, 2, "and then the second pass is written");
-  assert.deepEqual(sent[1].args.segments, spliceComp(first, T_B, 1, 3, 4), "from the snapshot the first write left");
-  assert.deepEqual(sent[1].args.segments, spliceComp(before, T_B, 1, 3, 4),
-    "which is the same comp as writing the later pass once");
+  assert.equal(sent.length, 2, "and goes out once that answer is here");
+  assert.deepEqual(sent[1].args.segments, spliceComp(beforeDrag, T_OTHER, 0, 2, 4),
+    "computed from the snapshot that holds the punch's write");
+
+  // The other way round: a drag's write is out, and a punched pass lands behind
+  // it.
+  const other = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }, { id: T_OTHER }], latency: CALIBRATED });
+  other.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await other.settle();
+  await dragComp(other, T_OTHER, 1, 3);
+  let dragSent = setCompCommands(other);
+  assert.equal(dragSent.length, 1, "the drag's write went out");
+  await landInDoc(other, dragSent[0].args.segments);
+  const beforePunch = await docComp(other);
+
+  const planned = await recordWithPunch(other, 1, 3, { armed: true });
+  await reportLaunch(other);
+  await chunkPass(other, planned, 0);
+  await endTake(other, planned, 1);
+  assert.equal(setCompCommands(other).length, 1, "the punch's write waits for the drag's answer");
+
+  other.frame({ type: "result", cmd_id: dragSent[0].cmd_id, ok: true });
+  await other.settle();
+  const both = setCompCommands(other);
+  assert.equal(both.length, 2, "and goes out once the drag's is answered");
+  const landed = both[1].args.segments.find((segment) => segment.from_beat === 1 && segment.to_beat === 3);
+  assert.ok(landed, "the punch put its pass over the range");
+  assert.deepEqual(both[1].args.segments, spliceComp(beforePunch, landed.take_id, 1, 3, 4),
+    "computed from the snapshot that holds the drag's write");
 });
 
-test("R13: sendAwait rejects when the socket drops or the song changes and the chain writes nothing", async () => {
-  // A socket that goes away under a write.
-  const ui = await compPanel();
-  ui.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  await ui.settle();
-  assert.equal(setCompCommands(ui).length, 1, "the first pass went out");
+test("O6: a pass that lands while the socket is down is written once the page is back on it", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, recorder, 0);
+
+  // The socket goes before the pass lands, and the take ends behind it.
   await ui.dropSocket();
-  assert.deepEqual(viewOf(ui).awaiting, {}, "the command it waited on was let go with the socket");
-  ui.page.__studioTest.punchLanded(CLIP, 1, T_B, { from: 1, to: 3 });
-  await ui.settle();
-  assert.equal(setCompCommands(ui).length, 1, "nothing more is written after the drop");
-  assert.equal(viewOf(ui).punchChain[CLIP], undefined, "and the chain is not left running");
+  assert.equal(viewOf(ui).joined, false, "the page is off the wire");
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "the comp write had nowhere to go");
+  assert.equal(Object.values(viewOf(ui).punchRuns).length, 1, "the run is kept, waiting for the page to be back");
 
-  // A page whose song moved on under a write.
-  const other = await compPanel();
-  other.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  await other.settle();
-  let sent = setCompCommands(other);
-  assert.equal(sent.length, 1, "the write went out");
-  other.page.__studioLiveSong = "song-2";
-  other.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
-  await other.settle();
-  assert.equal(viewOf(other).punchComped[CLIP], undefined, "an answer for another song writes nothing");
-  other.page.__studioTest.punchLanded(CLIP, 1, T_B, { from: 1, to: 3 });
-  await other.settle();
-  assert.equal(setCompCommands(other).length, 1, "and neither does a pass landing after it");
+  // The page comes back on the wire with its document rebuilt.
+  await ui.rejoin();
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, `the comp is written once the page is back (got ${sent.length})`);
+  const landed = sent[0].args.segments.find((segment) => segment.take_id !== T_OLD);
+  assert.ok(landed, "the write puts the pass over its range");
+  assert.deepEqual([landed.from_beat, landed.to_beat], [1, 3], "the range it was recorded with");
+  ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
+  await ui.settle();
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and the run is done once the hub has taken the write");
 });
 
-test("R13: no clip.set_comp is sent when view.closed or the song changed; the take is listed", async () => {
-  const closed = await compPanel();
-  const before = await docComp(closed);
-  viewOf(closed).closed = true;
-  closed.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  await closed.settle();
-  assert.equal(setCompCommands(closed).length, 0, "a page that is closed writes nothing");
-  assert.deepEqual(await docComp(closed), before, "the comp is left as it was");
-  const { snapshot } = await import("../bundles/studio/server/doc.js");
-  assert.deepEqual(Object.keys(snapshot(closed.doc).takes).sort(), [T_A, T_B, T_C, T_OLD].sort(),
-    "and the takes the song holds are still listed");
+test("O7/S6: cancelling a second recording during its count-in leaves the first recording's comp write owed", async () => {
+  // The take routes are held open, so the first recording's passes are on their
+  // way when the second recording starts and is cancelled.
+  const ui = await bootPanel({
+    clip: true,
+    lengthBars: 1,
+    takes: [{ id: T_OLD }],
+    latency: CALIBRATED,
+    countIn: 1,
+    gateFinish: true,
+  });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  ui.engine.countBar(1, 96000, 12000);
+  await ui.settle(24);
+  assert.equal(recorder.armFrame, 96000, "the take began on the count-in's frame");
 
-  const moved = await compPanel();
+  await chunkPass(ui, recorder, 0);
+  await chunkPass(ui, recorder, 1);
+  await endTake(ui, recorder, 2);
+  assert.equal(setCompCommands(ui).length, 0, "the take is over and its passes are still landing");
+  const runs = Object.values(viewOf(ui).punchRuns);
+  assert.equal(runs.length, 1, "its run is waiting for them");
+  assert.equal(runs[0].ended, true, "with the take itself ended");
+
+  // A second recording is started and cancelled while it counts in.
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const second = viewOf(ui).rec;
+  assert.ok(second, "a second recording exists");
+  assert.equal(second.counting, true, "counting in");
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+  assert.equal(viewOf(ui).rec, null, "and it is gone");
+  assert.equal(Object.values(viewOf(ui).punchRuns).length, 1, "the first recording's run is untouched");
+
+  // Its passes land: the comp is written once.
+  ui.releaseFinish();
+  await ui.settle(40);
+  const sent = setCompCommands(ui);
+  assert.equal(sent.length, 1, `the first recording's comp is written exactly once (got ${sent.length})`);
+  ui.frame({ type: "result", cmd_id: sent[0].cmd_id, ok: true });
+  await ui.settle();
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and nothing is left waiting");
+});
+
+test("O11a: a mid-take range on a clip with no comp says there is nothing to punch into, and promises no pass", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, latency: CALIBRATED, clock: PASS0_CLOCK });
+  assert.deepEqual(await docComp(ui), [], "the clip holds no comp");
+  const recorder = await recordWithPunch(ui, null);
+  await reportLaunch(ui);
+  assert.equal(viewOf(ui).rec.active, true, "the take is running");
+
+  assert.equal(ui.page.__studioTest.setPunch(1, 3), true, "the range itself fits the clip");
+  await ui.settle();
+
+  assert.ok(noticeText(ui).includes("No take to punch into yet; recording the whole clip."),
+    `the notice says there is nothing to punch into (got: ${noticeText(ui)})`);
+  assert.equal(noticeText(ui).includes("applies from the next pass"), false,
+    "and it does not promise the next pass");
+  assert.equal(viewOf(ui).punchNext, false, "nothing waits for a later pass");
+  assert.equal(recorder.gates.length, 0, "the recorder is handed no gate");
+  assert.equal(viewOf(ui).rec.punch_plan, null, "and the take has no plan");
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "so no comp write follows it");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and no run is made");
+});
+
+test("O11b: a punched pass that finishes uploading after a reload leaves the comp as it was, and says so", async () => {
+  // The row a page left behind: it was a punched pass, and this page has no run
+  // to book it in.
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000bb";
+  const ui = await bootPanel({
+    clip: true,
+    lengthBars: 1,
+    takes: [{ id: T_OLD }],
+    latency: CALIBRATED,
+    pending: [{
+      take_id: takeId,
+      song_id: "song-1",
+      clip_id: CLIP,
+      rate: 48000,
+      channels: 2,
+      offset_frames: 0,
+      compensated: false,
+      bpm: 240,
+      chunk_count: 1,
+      begun: false,
+      finished: false,
+      punched: true,
+      created_at: new Date(0).toISOString(),
+    }],
+    chunks: [[takeId, 0, new Uint8Array(24).buffer]],
+  });
+  await ui.settle(24);
+
+  assert.equal(finishCount(ui), 1, "the pass finished uploading");
+  assert.ok(noticeText(ui).includes("Punched passes were added as takes after a reload; the comp was left as it was."),
+    `the page says the comp was left alone (got: ${noticeText(ui)})`);
+  assert.equal(setCompCommands(ui).length, 0, "and no comp is written for it");
+  assert.deepEqual(await docComp(ui), [{ take_id: T_OLD, from_beat: 0, to_beat: 4 }], "the comp is untouched");
+});
+
+test("O11c: a flush for a clip that is gone from the song writes nothing and says so on the console", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(ui, 1, 3);
+  await reportLaunch(ui);
+  await chunkPass(ui, recorder, 0);
+
+  // The clip goes, the way another view can remove it mid-take.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "clip.remove", { clip_id: CLIP });
+  await ui.pushState();
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  assert.equal(Boolean(snapshot(ui.doc).clips[CLIP]), false, "the song no longer holds the clip");
+
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "no comp write goes out for a clip that is not there");
+  assert.equal(ui.warnings.length, 1, `the page says so on the console (got ${ui.warnings.length})`);
+  assert.match(ui.warnings[0], /clip/i, "naming what is missing");
+  assert.deepEqual(viewOf(ui).punchRuns, {}, "and the run is not left waiting");
+});
+
+test("S1: a take that is not on the clip's own grid records whole, with no gate and no comp write", async () => {
+  const OFF_GRID = "Punch needs the clip playing from its start; recording the whole clip.";
+
+  // (a) the engine answers the next bar line instead of the clip's loop start.
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  assert.equal(ui.page.__studioTest.setPunch(1, 3), true, "a range is set on the clip");
+  await ui.settle();
+  ui.engine.looping = false;
+  ui.click("[data-act=play]");
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.equal(ui.engine.loopAsks.length, 1, "the page asked the engine where the loop starts");
+  assert.equal(recorder.armFrame, 96000, "and armed the take on the frame it named");
+  assert.equal(viewOf(ui).rec.punch, null, "the take records whole");
+  assert.deepEqual(recorder.gates, [], "no gate is sent for a take off the clip's grid");
+  assert.ok(noticeText(ui).includes(OFF_GRID), `the page says why (got: ${noticeText(ui)})`);
+  await chunkPass(ui, recorder, 0);
+  await endTake(ui, recorder, 1);
+  assert.equal(setCompCommands(ui).length, 0, "and nothing is comped");
+
+  // (b) the engine has no loop start to name at all, so the next bar line is the
+  // fallback: the same take, off the grid, records whole.
+  const fallback = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  fallback.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await fallback.settle();
+  assert.equal(fallback.page.__studioTest.setPunch(1, 3), true, "a range is set on the clip");
+  await fallback.settle();
+  delete fallback.engine.nextLoopFrame;
+  fallback.click("[data-act=play]");
+  await fallback.settle();
+  fallback.click("[data-act=record]");
+  await fallback.settle(24);
+  const barRecorder = fallback.engine.recorders[fallback.engine.recorders.length - 1];
+  assert.equal(barRecorder.armFrame, 48000, "the take armed on the bar line the engine answered");
+  assert.deepEqual(barRecorder.gates, [], "no gate: the bar line is not the clip's first beat");
+  assert.ok(noticeText(fallback).includes(OFF_GRID), "and the page says why");
+  await chunkPass(fallback, barRecorder, 0);
+  await endTake(fallback, barRecorder, 1);
+  assert.equal(setCompCommands(fallback).length, 0, "nothing is comped here either");
+});
+
+test("S1: an arrangement record while the transport plays anchors on the next bar line, so it is not punched", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "arrangement.place", {
+    id: "p-gtr",
+    track_id: AUDIO_TRACK,
+    clip_id: CLIP,
+    start_bar: 0,
+    bars: 1,
+  });
+  await ui.pushState();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  assert.equal(ui.page.__studioTest.setPunch(1, 3), true, "a range is set on the placement's clip");
+  await ui.settle();
+  viewOf(ui).mode = "arrangement";
+  ui.click("[data-act=play]");
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.equal(viewOf(ui).rec.clip_id, CLIP, "the take records into the placement's clip");
+  assert.equal(recorder.armFrame, 48000, "on the bar line the engine named");
+  assert.deepEqual(recorder.gates, [], "a running transport is off the clip's grid: no gate");
+  assert.equal(viewOf(ui).rec.punch, null, "and the take records whole");
+  assert.ok(noticeText(ui).includes("Punch needs the clip playing from its start; recording the whole clip."),
+    `the page says why (got: ${noticeText(ui)})`);
+});
+
+test("O10: the flush is measured against liveSongNow(), not the page's own song id", async () => {
+  // The page starts showing another song than its own before the take lands: the
+  // run was recorded in song-1, and this page is no longer that song.
+  const moved = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  const recorder = await recordWithPunch(moved, 1, 3);
+  await reportLaunch(moved);
+  await chunkPass(moved, recorder, 0);
   moved.page.__studioLiveSong = "song-2";
-  moved.page.__studioTest.punchLanded(CLIP, 0, T_A, { from: 1, to: 3 });
-  await moved.settle();
+  await endTake(moved, recorder, 1);
   assert.equal(setCompCommands(moved).length, 0, "a page showing another song writes nothing");
-  assert.deepEqual(await docComp(moved), before, "and leaves the comp alone");
+  assert.deepEqual(viewOf(moved).punchRuns, {}, "and drops the run");
+
+  // The other way: the run was made while the page was playing song-2, and it is
+  // still song-2 now — though the page's own song id is song-1.
+  const playing = await bootPanel({ clip: true, lengthBars: 1, takes: [{ id: T_OLD }], latency: CALIBRATED });
+  playing.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await playing.settle();
+  assert.equal(playing.page.__studioTest.setPunch(1, 3), true, "a range is set on the clip");
+  await playing.settle();
+  playing.page.__studioLiveSong = "song-2";
+  playing.click("[data-act=record]");
+  await playing.settle(24);
+  const planned = playing.engine.recorders[playing.engine.recorders.length - 1];
+  await reportLaunch(playing);
+  assert.equal(onlyRun(playing).song_id, "song-2", "the run's song is the one the page is playing now");
+  assert.equal(String(playing.page.getAttribute("data-studio-song")), "song-1", "which is not the page's own song id");
+  await chunkPass(playing, planned, 0);
+  await endTake(playing, planned, 1);
+  const sent = setCompCommands(playing);
+  assert.equal(sent.length, 1, "the run whose song is the one playing now is written");
+  assert.equal(sent[0].args.clip_id, CLIP, "against its own clip");
 });
