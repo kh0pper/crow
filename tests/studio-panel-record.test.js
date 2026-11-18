@@ -5320,12 +5320,14 @@ test("R15: a launch posted BEFORE count_in_done but with frame >= play_frame is 
   const early = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
   await pressRecord(early);
   assert.equal(countInPlays(early).length, 1, "Record counted one bar in");
+  // The downbeat is session bar 0 at the announced play frame: a launch there
+  // keeps its own bar, and the take stops on session bar 3.
   countOneBar(early, PLAY_FRAME, () => {
     launchAt(early, 0, 84000);
-    launchAt(early, 1, PLAY_FRAME);
+    launchAt(early, 0, PLAY_FRAME);
   });
   await early.settle();
-  early.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  await transportOnBar(early, 3);
   early.click("[data-act=stop]");
   await early.settle(24);
 
@@ -5333,7 +5335,7 @@ test("R15: a launch posted BEFORE count_in_done but with frame >= play_frame is 
   assert.equal(before.length, 1, "the take wrote one performance");
   assert.deepEqual(
     before[0].args.placements,
-    [{ track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 1, bars: 1 }],
+    [{ track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 3 }],
     "only the launch at or after the announced play frame is in it",
   );
 
@@ -5344,9 +5346,9 @@ test("R15: a launch posted BEFORE count_in_done but with frame >= play_frame is 
   countOneBar(late, PLAY_FRAME);
   await late.settle();
   launchAt(late, 0, 84000);
-  launchAt(late, 1, PLAY_FRAME);
+  launchAt(late, 0, PLAY_FRAME);
   await late.settle();
-  late.engine.position({ bar: 3, beat: 1, sixteenth: 1 });
+  await transportOnBar(late, 3);
   late.click("[data-act=stop]");
   await late.settle(24);
 
@@ -6085,6 +6087,11 @@ test("R15 fix 4: a take cancelled while the transport runs leaves the operator's
   await launchOnBar(ui, 4);
   assert.equal(viewOf(ui).recTimeline.launches.length, 2, "the toggle collected the two launches");
 
+  // The transport has played to session bar 6 when Record is pressed, so the
+  // toggle's own collection is written HERE, at that press, as one
+  // record_performance closed on the bar the press lands on (R15 fix 4).
+  await transportOnBar(ui, 6);
+
   // The recorder cannot be built: the take is cancelled, and the transport it
   // was pressed against keeps running.
   ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
@@ -6098,20 +6105,25 @@ test("R15 fix 4: a take cancelled while the transport runs leaves the operator's
   assert.equal(viewOf(ui).rec, null, "the take was cancelled");
   assert.equal(viewOf(ui).playing, true, "and the transport keeps running");
 
-  await transportOnBar(ui, 6);
-  ui.click("[data-act=stop]");
-  await ui.settle(24);
-
-  const sent = performances(ui);
-  assert.equal(sent.length, 1, "Stop still writes the launches the toggle had collected");
+  const atPress = performances(ui);
+  assert.equal(atPress.length, 1, "the press wrote the operator's own collection, once");
   assert.deepEqual(
-    sent[0].args.placements,
+    atPress[0].args.placements,
     [
       { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 4 },
       { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
     ],
-    "the two launches made before the press keep their own bars",
+    "the two launches closed by the next launch and by the bar the press landed on",
   );
+
+  await transportOnBar(ui, 6);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const after = performances(ui);
+  assert.equal(after.length, 1, "the cancelled take adds no write of its own");
+  assert.equal(after[0], atPress[0], "and a later Stop sends nothing more");
+  assert.equal(viewOf(ui).recTimeline.launches.length, 0, "the collection is empty");
 });
 
 test("R15 fix 6: a performance the wire could not carry is held, and Place what fits sends it once it is back", async () => {
