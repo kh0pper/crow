@@ -2164,9 +2164,10 @@ export function createProjectServer(dbPath, options = {}) {
   //   - the audit row: every write and delete appends file.write / file.delete with the path, size
   //     and sha256 (never the content).
   //
-  // Two more rules the core applies: a bot may not write or delete a dot-entry or a top-level
-  // CLAUDE.md / AGENTS.md / GEMINI.md (the names the operator's own runner reads as configuration,
-  // so a bot may not plant them in a workspace the operator opens), and a peer instance is refused
+  // Two more rules the core applies: a bot may not write or delete a dot-entry anywhere, or an agent
+  // instruction or config file at any depth (CLAUDE.md, AGENTS.md, GEMINI.md, opencode.json and the
+  // rest of BOT_REFUSED_NAMES — the names the operator's own runner reads as configuration, so a bot
+  // may not plant them in a workspace the operator opens), and a peer instance is refused
   // outright in v1: workspace files are for this instance's owner and its bots, and they are not
   // part of the project-share vocabulary.
   //

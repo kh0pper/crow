@@ -13,7 +13,8 @@
  *
  * Review round fixes carry their ids: B1 (the peer that reaches the file tools through /router/mcp,
  * where it exists only as a forwarded `_meta`; kind "peer" and the remote-bot form), I1 (a bot may
- * not write or delete a dot-entry or a top-level CLAUDE.md/AGENTS.md/GEMINI.md), I3 (parseRelPath
+ * not write or delete a dot-entry, or an agent instruction/config file at any depth — folded
+ * spellings and the owner included), I3 (parseRelPath
  * directly, and a hook that moves a folder out BETWEEN component opens so the post-open kernel-path
  * check is what refuses), N2 (the empty-folder delete re-checks its parent), N6 (hard-linked read).
  *
@@ -700,14 +701,14 @@ test("a project with no workspace folder yet says so instead of creating one", a
 // I1: a bot's writes and deletes cannot plant dot-entries or agent instruction files
 // ---------------------------------------------------------------------------------------------
 
-test("I1: a bot may not write or delete a dot-entry (any depth) or a top-level CLAUDE.md/AGENTS.md/GEMINI.md", async () => {
+test("I1: a bot may not write or delete a dot-entry (any depth) or an agent instruction/config file", async () => {
   const bot = await clientFor({ kind: "bot", id: BOT_RW }); // read_write on B, write_files included
   const BOT_PATH_RE = /dot-file or dot-folder/;
   const dotPaths = [".mcp.json", ".claude/settings.json", ".pi/agent.md", ".envrc", ".vscode/settings.json",
     "notes/.hidden.md", "docs/.claude/x.md", "a/b/.env.example"];
   for (const path of dotPaths) {
     const w = await refused(await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "pwn" }), BOT_PATH_RE);
-    assert.match(w, /top-level CLAUDE\.md, AGENTS\.md or GEMINI\.md/, "one fixed refusal for every shape");
+    assert.match(w, /agent instruction or config file/, "one fixed refusal for every shape");
     await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path }), BOT_PATH_RE);
   }
   for (const path of ["CLAUDE.md", "AGENTS.md", "agents.md", "Gemini.MD"]) {
@@ -731,6 +732,44 @@ test("I1: a bot may not write or delete a dot-entry (any depth) or a top-level C
   assert.equal(readFileSync(ws(B, "CLAUDE.md"), "utf8"), "# rules\n");
   assert.ok(!(await call(own, "crow_project_file_delete", { project_id: B.id, path: ".mcp.json" })).isError);
   assert.throws(() => lstatSync(ws(B, ".mcp.json")));
+});
+
+test("I1: the refused agent names hold at any depth and in a folded spelling, and never bind the owner", async () => {
+  const bot = await clientFor({ kind: "bot", id: BOT_RW });
+  const BOT_PATH_RE = /dot-file or dot-folder/;
+  const refusedNames = [
+    "sub/CLAUDE.md",               // nested
+    "a/b/AGENTS.md",               // deeper
+    "CLAUDE.local.md",
+    "AGENT.md",                    // the singular variant, in any case
+    "opencode.json", "opencode.jsonc",
+    "crush.json", "copilot-instructions.md", "conventions.md",
+    "CLAUDE.md ",                  // trailing whitespace only
+    "CLAUDE\u200b.md",              // a zero-width space inside the name
+    "\uff23LAUDE.md",               // a FULLWIDTH C, folded to C by NFKC
+  ];
+  for (const path of refusedNames) {
+    await refused(await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "pwn" }), BOT_PATH_RE);
+    await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path }), BOT_PATH_RE);
+  }
+  assert.throws(() => lstatSync(ws(B, "opencode.json")), "a refused write created nothing");
+  assert.throws(() => lstatSync(ws(B, "a", "b", "AGENTS.md")), "nor in a folder the bot may not have made");
+
+  // An ordinary name that merely begins with a refused one is still the bot's to write.
+  const fine = await call(bot, "crow_project_file_write", { project_id: B.id, path: "notes/claude-notes.md", content: "fine\n" });
+  assert.ok(!fine.isError, text(fine));
+  assert.equal(readFileSync(ws(B, "notes", "claude-notes.md"), "utf8"), "fine\n");
+
+  // The owner is unchanged: every one of the same paths is written, and the bot still cannot delete it.
+  const own = await owner();
+  for (const path of refusedNames) {
+    const w = await call(own, "crow_project_file_write", { project_id: B.id, path, content: `# ${path}\n` });
+    assert.ok(!w.isError, text(w));
+  }
+  assert.equal(readFileSync(ws(B, "sub", "CLAUDE.md"), "utf8"), "# sub/CLAUDE.md\n");
+  assert.equal(readFileSync(ws(B, "CLAUDE.md "), "utf8"), "# CLAUDE.md \n");
+  await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path: "a/b/AGENTS.md" }), BOT_PATH_RE);
+  assert.equal(readFileSync(ws(B, "a", "b", "AGENTS.md"), "utf8"), "# a/b/AGENTS.md\n", "the owner's file survived the bot's delete");
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -25,12 +25,15 @@
  *
  * BOT WRITES. A store built with `bot: true` (the caller is a bot, not the
  * operator) refuses a write or a delete in which ANY component starts with `.`
- * — no `.mcp.json`, `.claude/`, `.pi/`, `.envrc`, `.vscode/` — and the
- * top-level `CLAUDE.md`, `AGENTS.md` or `GEMINI.md`, in any case. Those are the
- * names the operator's own agent runner or editor reads as configuration and
- * instructions, so a bot may not plant them in a workspace the operator opens.
- * Reads and listings are unchanged, and every shape gets the same fixed
- * refusal.
+ * — no `.mcp.json`, `.claude/`, `.pi/`, `.envrc`, `.vscode/` — or in which ANY
+ * component, at ANY depth, names an agent instruction or config file the
+ * operator's own runner or editor reads: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`,
+ * `opencode.json` and the rest of BOT_REFUSED_NAMES. A bot may not plant those
+ * in a workspace the operator opens. The name is compared FOLDED — Unicode
+ * NFKC, invisible/format characters dropped, trailing whitespace trimmed,
+ * case-insensitive — so `CLAUDE.md `, a fullwidth spelling or a zero-width
+ * spelling is refused rather than created. Reads and listings are unchanged,
+ * and every shape gets the same fixed refusal.
  *
  * RACE SAFETY. Realpath-then-open is a two-step, and a path component can be
  * swapped for a symlink in between. So no path is ever resolved twice:
@@ -122,10 +125,48 @@ export const INTERNAL_TOP_DIR = "bots";
 export const PROJECTS_DIR = "projects";
 
 /**
- * The top-level names a bot may not create or delete in a workspace, whatever their case: agent
- * instruction files the operator's own runner reads and trusts.
+ * The file names a bot may never create or delete ANYWHERE in a workspace (lowercased, compared
+ * through botNameKey). Each is a name an agent runner or editor loads as instructions or config
+ * from the folder it is started in — so a file a bot planted under one would be read and obeyed by
+ * the operator's next session:
+ *
+ *   claude.md, claude.local.md   — Claude Code's project memory (and its machine-local override)
+ *   agents.md, agent.md          — the AGENTS.md convention (Codex CLI, Cursor, Amp, Gemini CLI, …)
+ *   gemini.md                    — Gemini CLI's project context file
+ *   opencode.json, .jsonc        — OpenCode's project config (agents, permissions, MCP servers)
+ *   crush.json                   — Crush's project config
+ *   copilot-instructions.md      — GitHub Copilot's `.github/copilot-instructions.md`
+ *   conventions.md               — aider's read-only conventions file
+ *   .cursorrules                 — Cursor's legacy project rules file (dot-prefixed, so the dot rule
+ *                                  below already covers it; listed so this one list reads whole)
  */
-export const BOT_REFUSED_TOP_NAMES = Object.freeze(["claude.md", "agents.md", "gemini.md"]);
+export const BOT_REFUSED_NAMES = Object.freeze([
+  "claude.md",
+  "claude.local.md",
+  "agents.md",
+  "agent.md",
+  "gemini.md",
+  "opencode.json",
+  "opencode.jsonc",
+  "crush.json",
+  ".cursorrules",
+  "copilot-instructions.md",
+  "conventions.md",
+]);
+
+/**
+ * Invisible and format characters a refused name can be spelled around: the U+200B–U+200F range, the
+ * U+2060–U+2064 word-joiner/invisible-operator range, a BOM (U+FEFF) and a soft hyphen (U+00AD).
+ */
+const INVISIBLE_NAME_CHARS = /[\u00ad\u200b-\u200f\u2060-\u2064\ufeff]/g;
+
+/**
+ * A path component folded to the key the bot rule compares: NFKC (which folds fullwidth and other
+ * compatibility spellings), invisible characters dropped, surrounding whitespace trimmed, lowercased.
+ */
+function botNameKey(name) {
+  return String(name).normalize("NFKC").replace(INVISIBLE_NAME_CHARS, "").trim().toLowerCase();
+}
 
 /** A fixed, project-name-free message per code; the tool result carries `.message`. */
 const MESSAGES = Object.freeze({
@@ -144,7 +185,9 @@ const MESSAGES = Object.freeze({
   invalid_argument: "That argument is not valid for this call.",
   bot_path:
     "A bot may not write or delete a dot-file or dot-folder (any name starting with \".\"), " +
-    "or a top-level CLAUDE.md, AGENTS.md or GEMINI.md, in a project's workspace.",
+    "or an agent instruction or config file (CLAUDE.md, AGENTS.md, AGENT.md, GEMINI.md, " +
+    "opencode.json, opencode.jsonc, crush.json, copilot-instructions.md, conventions.md, " +
+    ".cursorrules) at any depth in a project's workspace.",
 });
 
 /** A refusal the tools turn into `Error: <message>`; `code` is for logs and tests. */
@@ -190,14 +233,15 @@ export function isInternalName(name, { top = false } = {}) {
 /**
  * The bot rule for a write or a delete (I1): no component may start with `.` — the dot-entries an
  * editor, a shell or an agent runner picks up (`.mcp.json`, `.claude/`, `.pi/`, `.envrc`,
- * `.vscode/`) — and no top-level agent instruction file (BOT_REFUSED_TOP_NAMES). Only a store built
- * for a bot call applies it: an owner or an unidentified local caller is unchanged.
+ * `.vscode/`) — and no component, at ANY depth, may name an agent instruction or config file
+ * (BOT_REFUSED_NAMES), compared folded by botNameKey. Only a store built for a bot call applies it:
+ * an owner or an unidentified local caller is unchanged.
  */
 function refuseBotTarget(parts) {
   for (const part of parts) {
     if (part.startsWith(".")) fail("bot_path");
+    if (BOT_REFUSED_NAMES.includes(botNameKey(part))) fail("bot_path");
   }
-  if (BOT_REFUSED_TOP_NAMES.includes(parts[0].toLowerCase())) fail("bot_path");
 }
 
 /**
