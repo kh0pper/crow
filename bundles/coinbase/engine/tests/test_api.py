@@ -44,7 +44,7 @@ from crow_coinbase.gateway import HALTED, NOT_BOT_OWNERS, PORTFOLIO_OWNER
 from crow_coinbase.money import ProductSpec
 from crow_coinbase.runner import StartupRefused
 from crow_coinbase.store import ACTIVE, BOT_ID_RE, OPEN, PAUSED, STOPPED
-from crow_coinbase.strategies.base import OrderIntent
+from crow_coinbase.strategies.base import MarketSnapshot, OrderIntent
 
 # 32+ characters, the shortest token the engine starts with.  Test data only.
 TOKEN = "test-token-" + "x" * 32
@@ -248,6 +248,16 @@ ROUTE_BODIES = {
     "/bots": CREATE_BODY,
     "/bots/b1/recenter": {"center": "1.1"},
 }
+
+# The acknowledgement every high-water-mark route demands, spelled once.
+ACK = {"acknowledge_rebase": True}
+
+
+def price_at(engine, bid, ask):
+    """Put one fresh, usable snapshot in the cache the way a poll writes it."""
+    engine.gateway.snapshots.put(
+        MarketSnapshot(PRODUCT, D(bid), D(ask), D(bid), D(ask), time.time())
+    )
 
 BAD_HEADERS = [
     None,
@@ -698,11 +708,16 @@ def test_mutators_take_gateway_lock(engine, client, case):
     if case != "create":
         assert client.post("/bots", json=CREATE_BODY).status_code == 201
     if case == "resume":
+        # Resuming re-bases the bot's mark, so its equity has to be priceable.
+        price_at(engine, "0.99", "1.00")
         assert client.post("/bots/b1/pause").status_code == 200
         assert bot_row(engine)["status"] == PAUSED
     if case == "recenter":
         engine.store.set_init_done(BOT)
     if case == "halt-clear":
+        # Clearing a halt re-bases the portfolio mark, so its equity has to be
+        # priceable: a poll's snapshot is what makes it so.
+        price_at(engine, "0.99", "1.00")
         engine.gateway.halt("held by the test")
         assert engine.gateway.is_halted() is True
 
@@ -712,13 +727,13 @@ def test_mutators_take_gateway_lock(engine, client, case):
         if case == "pause":
             return client.post("/bots/b1/pause")
         if case == "resume":
-            return client.post("/bots/b1/resume")
+            return client.post("/bots/b1/resume", json=ACK)
         if case == "stop":
             return client.post("/bots/b1/stop")
         if case == "recenter":
             return client.post("/bots/b1/recenter", json={"center": "1.1"})
         if case == "halt-clear":
-            return client.post("/halt/clear")
+            return client.post("/halt/clear", json=ACK)
         return client.post("/kill")
 
     done = threading.Event()
@@ -845,9 +860,9 @@ def test_kill_then_submit_refused(engine, client):
     assert status["halted"] is True
     assert status["bots"][0]["status"] == STOPPED
 
-    cleared = client.post("/halt/clear")
+    cleared = client.post("/halt/clear", json=ACK)
     assert cleared.status_code == 200
-    assert cleared.json() == {"halted": False}
+    assert cleared.json()["halted"] is False
     assert client.get("/status").json()["halted"] is False
     assert bot_row(engine)["status"] == STOPPED
 
@@ -962,6 +977,253 @@ def test_stop_marks_stopped_even_when_cancel_fails(engine, client):
     again = client.post("/bots/b1/stop")
     assert again.status_code == 200
     assert bot_row(engine)["status"] == STOPPED
+
+
+# ---------------------------------------------------------------- rebasing recovery
+
+
+def book_rows(engine, bot_id=BOT):
+    """This bot's order rows as {cid: (status, opposite)}, for a before/after."""
+    return {
+        row["client_order_id"]: (row["status"], row["opposite"])
+        for row in engine.store.orders(owner=bot_id)
+    }
+
+
+def test_halt_clear_without_the_acknowledgement_writes_nothing(engine, client):
+    """No body, or a false field, is a 409 and nothing is written."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    engine.gateway.halt("held by the test")
+    mark = engine.store.hwm(PORTFOLIO_OWNER)
+    assert mark is not None
+    rows_before = book_rows(engine)
+
+    refusals = [
+        client.post("/halt/clear"),
+        client.post("/halt/clear", json={"acknowledge_rebase": False}),
+    ]
+    for response in refusals:
+        assert response.status_code == 409, response.text
+        detail = detail_text(response)
+        assert "acknowledge_rebase" in detail
+        assert "high-water mark" in detail
+        assert engine.gateway.is_halted() is True
+        assert engine.store.get("halted") is not None
+        assert engine.store.hwm(PORTFOLIO_OWNER) == mark
+        assert book_rows(engine) == rows_before
+
+    # Only a JSON true acknowledges: the string is refused, not coerced.
+    coerced = client.post("/halt/clear", json={"acknowledge_rebase": "true"})
+    assert coerced.status_code == 422, coerced.text
+    assert engine.gateway.is_halted() is True
+
+
+def test_halt_clear_with_unknown_equity_answers_503(engine, client):
+    """An unpriced portfolio cannot be re-based, so the halt stays."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    engine.gateway.halt("held by the test")
+    mark = engine.store.hwm(PORTFOLIO_OWNER)
+    rows_before = book_rows(engine)
+
+    # A crossed book is unusable, which is what makes the equity unknown.
+    engine.gateway.snapshots.put(
+        MarketSnapshot(
+            PRODUCT, D("1.02"), D("1.00"), D("1.00"), D("1.02"), time.time()
+        )
+    )
+    assert engine.gateway.portfolio_equity() is None
+
+    response = client.post("/halt/clear", json=ACK)
+    assert response.status_code == 503, response.text
+    assert "equity" in detail_text(response).lower()
+    assert engine.gateway.is_halted() is True
+    assert engine.store.get("halted") is not None
+    assert engine.store.hwm(PORTFOLIO_OWNER) == mark
+    assert book_rows(engine) == rows_before
+
+
+def test_halt_clear_rebases_and_reinitialises_every_grid(engine, client):
+    """With the ack: the mark comes down and every live grid re-inits its book."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    rebalancing = dict(
+        CREATE_BODY, id="r1", strategy="rebalance", params=REBALANCE_PARAMS
+    )
+    assert client.post("/bots", json=rebalancing).status_code == 201
+    small = dict(CREATE_BODY, id="b2", capital_quote="20", capital_base="5")
+    assert client.post("/bots", json=small).status_code == 201
+
+    engine.runner.cycle()  # every bot gets its first book
+    assert engine.store.orders(owner=BOT, statuses=(OPEN,))
+    assert client.post("/bots/b2/stop").status_code == 200
+    assert bot_row(engine, "b2")["status"] == STOPPED
+    engine.runner.cycle()
+    r1_rows_before = book_rows(engine, "r1")
+    r1_params_before = bot_row(engine, "r1")["params"]
+
+    price_at(engine, "0.99", "1.00")
+    mark = engine.store.hwm(PORTFOLIO_OWNER)
+    assert mark is not None
+    engine.gateway.halt("held by the test")
+
+    price_at(engine, "0.30", "0.31")
+    equity = engine.gateway.portfolio_equity()
+    assert equity is not None and equity < mark
+
+    cleared = client.post("/halt/clear", json=ACK)
+    assert cleared.status_code == 200, cleared.text
+    body = cleared.json()
+    assert body["halted"] is False
+    assert body["rebased"] == {PORTFOLIO_OWNER: str(equity)}
+    # The grid that is not stopped re-initialises; a stopped grid and a
+    # rebalancer have no grid to lay.
+    assert body["reinitialised"] == [BOT]
+
+    assert engine.store.hwm(PORTFOLIO_OWNER) == equity
+    assert engine.store.hwm(PORTFOLIO_OWNER) < mark
+    assert engine.store.get("halted") is None
+    assert engine.gateway.is_halted() is False
+
+    reinitialised = bot_row(engine)
+    assert reinitialised["init_done"] is False
+    assert reinitialised["status"] == ACTIVE
+    assert reinitialised["params"] == GRID_PARAMS
+    assert isinstance(engine.store.get("runner:init_since:b1"), (int, float))
+    assert bot_row(engine, "b2")["status"] == STOPPED
+    # A rebalancer has no book of its own to lay: nothing about it is re-inited.
+    assert bot_row(engine, "r1")["init_done"] is True
+    assert bot_row(engine, "r1")["params"] == r1_params_before
+    assert r1_rows_before  # there was a rebalancer book for the clear to leave be
+
+
+def test_halt_clear_reinit_failure_answers_502_and_keeps_the_halt(
+    engine, client, monkeypatch
+):
+    """A grid that cannot re-init holds the halt and the mark where they were."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    engine.gateway.halt("held by the test")
+    mark = engine.store.hwm(PORTFOLIO_OWNER)
+    rows_before = book_rows(engine)
+
+    def failing_reinit(bot_id):
+        raise RuntimeError("orders still live after the sweeps")
+
+    monkeypatch.setattr(engine.runner, "reinit_bot", failing_reinit)
+    response = client.post("/halt/clear", json=ACK)
+
+    assert response.status_code == 502, response.text
+    assert "the halt stays" in detail_text(response)
+    assert engine.gateway.is_halted() is True
+    assert engine.store.get("halted") is not None
+    assert engine.store.hwm(PORTFOLIO_OWNER) == mark
+    assert book_rows(engine) == rows_before
+
+
+def test_resume_without_the_acknowledgement_keeps_the_bot_paused(engine, client):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    assert client.post("/bots/b1/pause").status_code == 200
+    mark = engine.store.hwm(BOT)
+
+    for response in (
+        client.post("/bots/b1/resume"),
+        client.post("/bots/b1/resume", json={"acknowledge_rebase": False}),
+    ):
+        assert response.status_code == 409, response.text
+        detail = detail_text(response)
+        assert "acknowledge_rebase" in detail
+        assert "high-water mark" in detail
+        assert bot_row(engine)["status"] == PAUSED
+        assert engine.store.hwm(BOT) == mark
+
+
+def test_resume_rebases_the_bot_mark_down_and_activates(engine, client):
+    """Resuming writes the mark to the equity it is resumed at, down included."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    engine.store.update_hwm(BOT, D("1000"))
+    assert client.post("/bots/b1/pause").status_code == 200
+    assert bot_row(engine)["status"] == PAUSED
+
+    price_at(engine, "0.30", "0.31")
+    equity = engine.gateway.ledger.equity(BOT, {PRODUCT: D("0.305")}, PRODUCT)
+    assert equity < D("1000")
+
+    resumed = client.post("/bots/b1/resume", json=ACK)
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["status"] == ACTIVE
+    assert bot_row(engine)["status"] == ACTIVE
+    assert engine.store.hwm(BOT) == equity
+
+
+def test_resume_without_a_price_answers_503(engine, client):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    assert client.post("/bots/b1/pause").status_code == 200
+    # A crossed book cannot price the bot, so nothing may be re-based off it.
+    engine.gateway.snapshots.put(
+        MarketSnapshot(
+            PRODUCT, D("1.02"), D("1.00"), D("1.00"), D("1.02"), time.time()
+        )
+    )
+    response = client.post("/bots/b1/resume", json=ACK)
+    assert response.status_code == 503, response.text
+    assert bot_row(engine)["status"] == PAUSED
+    assert engine.store.hwm(BOT) is None
+
+
+# ---------------------------------------------------------------- the price is not in the tx
+
+
+def probe_app(engine, price_for):
+    """A second app over the same pieces, with a price callable of the test's own."""
+    return api_module.create_app(
+        store=engine.store,
+        gateway=engine.gateway,
+        runner=engine.runner,
+        exchange=engine.exchange,
+        strategies=engine.runner.strategies,
+        limits=engine.limits,
+        spec_for=engine.runner.spec_for,
+        price_for=price_for,
+        token=TOKEN,
+        heartbeat_path=engine.runner.heartbeat_path,
+    )
+
+
+def test_create_bot_prices_before_the_transaction(tmp_path):
+    """The price is a network read: it happens with no write transaction open."""
+    engine = make_engine(tmp_path / "priced").engine
+    seen = []
+
+    def probing_price_for(product):
+        seen.append((product, engine.store.conn().in_transaction))
+        return D("0.995")
+
+    with TestClient(probe_app(engine, probing_price_for)) as client:
+        client.headers.update(HEADERS)
+        created = client.post("/bots", json=CREATE_BODY)
+        assert created.status_code == 201, created.text
+
+    assert seen == [(PRODUCT, False)]
+    assert [row["id"] for row in engine.store.list_bots()] == [BOT]
+    assert count_rows(engine, "sim_deposits") == 2
+
+    failures = []
+
+    def failing_price_for(product):
+        failures.append((product, engine.store.conn().in_transaction))
+        raise RuntimeError("the book is unavailable")
+
+    with TestClient(probe_app(engine, failing_price_for)) as client:
+        client.headers.update(HEADERS)
+        refused = client.post("/bots", json=dict(CREATE_BODY, id="b2"))
+
+    assert refused.status_code == 503, refused.text
+    assert "cannot price" in detail_text(refused)
+    assert failures == [(PRODUCT, False)]
+    assert [row["id"] for row in engine.store.list_bots()] == [BOT]
+    assert count_rows(engine, "sim_deposits") == 2
 
 
 # ---------------------------------------------------------------- health
@@ -1095,31 +1357,78 @@ def test_health_rejects_non_finite_and_future_heartbeat(tmp_path):
 
 # ---------------------------------------------------------------- fills
 
+# The tax column set, written out here so a reordering of records.COLUMNS fails
+# this test instead of being followed along with.
+TAX_COLUMNS = [
+    "timestamp_utc",
+    "product",
+    "base_currency",
+    "quote_currency",
+    "side",
+    "trade_type",
+    "base_size",
+    "price",
+    "fee",
+    "gross_quote",
+    "net_quote",
+    "trade_id",
+    "order_id",
+    "client_order_id",
+    "mode",
+]
 
-def test_export_one_row_per_fill(engine, client, harness):
-    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+
+def trade_both_ways(engine, harness):
+    """Run the grid through one buy and one sell, and return its fill rows."""
     book = harness.books.market_for(PRODUCT)
     engine.runner.cycle()
     trade_through(book, low="0.98", high="1.0")
     engine.runner.cycle()
-
-    fill_rows = fetch(
-        engine, "SELECT trade_id, trade_time FROM fills ORDER BY trade_time, trade_id"
+    trade_through(book, low="1.0", high="1.05")
+    engine.runner.cycle()
+    return fetch(
+        engine,
+        "SELECT trade_id, trade_time, side, size, price, commission FROM fills "
+        "ORDER BY trade_time, trade_id",
     )
-    assert len(fill_rows) == 1
+
+
+def test_export_one_row_per_fill(engine, client, harness):
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    fill_rows = trade_both_ways(engine, harness)
+    assert {row["side"] for row in fill_rows} == {"BUY", "SELL"}
 
     exported = client.get("/export/fills.csv")
     assert exported.status_code == 200
     table = list(csv.reader(io.StringIO(exported.text)))
+    assert table[0] == TAX_COLUMNS
     assert table[0] == records.COLUMNS
     assert len(table) - 1 == len(fill_rows)
 
-    trade_index = records.COLUMNS.index("trade_id")
-    mode_index = records.COLUMNS.index("mode")
-    trade_ids = [row[trade_index] for row in table[1:]]
+    column = {name: index for index, name in enumerate(table[0])}
+    by_id = {row["trade_id"]: row for row in fill_rows}
+    sides: dict[str, list[str]] = {}
+    for exported_row in table[1:]:
+        db_row = by_id[exported_row[column["trade_id"]]]
+        gross = D(db_row["size"]) * D(db_row["price"])
+        fee = D(db_row["commission"])
+        assert exported_row[column["product"]] == PRODUCT
+        assert exported_row[column["base_currency"]] == "XRP"
+        assert exported_row[column["quote_currency"]] == "USDC"
+        assert exported_row[column["trade_type"]] == "FILL"
+        assert D(exported_row[column["gross_quote"]]) == gross
+        expected = -(gross + fee) if db_row["side"] == "BUY" else gross - fee
+        assert D(exported_row[column["net_quote"]]) == expected
+        sides.setdefault(db_row["side"], []).append(exported_row[column["net_quote"]])
+
+    # A buy paid out, a sell was paid: the two net signs never meet.
+    assert all(D(value) < 0 for value in sides["BUY"])
+    assert all(D(value) > 0 for value in sides["SELL"])
+
+    trade_ids = [row[column["trade_id"]] for row in table[1:]]
     assert len(set(trade_ids)) == len(trade_ids)
     assert sorted(trade_ids) == sorted(row["trade_id"] for row in fill_rows)
-    assert {row[mode_index] for row in table[1:]} == {"dry"}
+    assert {row[column["mode"]] for row in table[1:]} == {"dry"}
 
     year = fill_rows[0]["trade_time"][:4]
     this_year = list(
@@ -1147,6 +1456,19 @@ def test_export_one_row_per_fill(engine, client, harness):
     bot_fills = client.get(f"/bots/{BOT}/fills")
     assert bot_fills.status_code == 200
     assert sorted(fill["trade_id"] for fill in bot_fills.json()) == sorted(trade_ids)
+
+
+def test_export_twice_is_identical(engine, client, harness):
+    """Each export is built from scratch: no id from an earlier one is remembered."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    fill_rows = trade_both_ways(engine, harness)
+    assert len(fill_rows) >= 2
+
+    first = client.get("/export/fills.csv").text
+    second = client.get("/export/fills.csv").text
+
+    assert first == second
+    assert len(list(csv.reader(io.StringIO(second)))) - 1 == len(fill_rows)
 
 
 # ---------------------------------------------------------------- the process wrapper
@@ -1279,18 +1601,25 @@ def test_main_configures_logging(monkeypatch, tmp_path):
 
 
 def test_pause_resume_and_stop_unknown_bot_404(engine, client):
-    for path in ("/bots/ghost/pause", "/bots/ghost/resume", "/bots/ghost/stop"):
-        assert client.post(path).status_code == 404
+    assert client.post("/bots/ghost/pause").status_code == 404
+    assert client.post("/bots/ghost/stop").status_code == 404
+    # The acknowledgement is read before the bot is looked up, so no body is a
+    # 409 whatever the id; with it, an unknown id is the 404 it always was.
+    assert client.post("/bots/ghost/resume").status_code == 409
+    assert client.post("/bots/ghost/resume", json=ACK).status_code == 404
 
     assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    price_at(engine, "0.99", "1.00")
 
     assert client.post("/bots/b1/resume").status_code == 409
+    assert client.post("/bots/b1/resume", json=ACK).status_code == 409
+    assert "not PAUSED" in detail_text(client.post("/bots/b1/resume", json=ACK))
     assert bot_row(engine)["status"] == ACTIVE
 
     assert client.post("/bots/b1/pause").status_code == 200
     assert bot_row(engine)["status"] == PAUSED
 
-    assert client.post("/bots/b1/resume").status_code == 200
+    assert client.post("/bots/b1/resume", json=ACK).status_code == 200
     assert bot_row(engine)["status"] == ACTIVE
 
     assert client.post("/bots/b1/pause").status_code == 200
@@ -1298,6 +1627,7 @@ def test_pause_resume_and_stop_unknown_bot_404(engine, client):
     assert bot_row(engine)["status"] == STOPPED
 
     assert client.post("/bots/b1/resume").status_code == 409
+    assert client.post("/bots/b1/resume", json=ACK).status_code == 409
     assert client.post("/bots/b1/pause").status_code == 409
     assert bot_row(engine)["status"] == STOPPED
 
@@ -1360,12 +1690,75 @@ def test_pnl_shape(engine, client):
     assert list(body["bots"]) == [BOT]
     entry = body["bots"][BOT]
     assert set(entry) == {"realized", "fees", "equity", "vs_hold"}
+    # A grid bot with no sell yet keeps a decimal string, not null.
     assert entry["realized"] == "0"
     assert D(entry["fees"]) == D("0")
     assert entry["equity"] is not None
     assert D(entry["equity"]).is_finite()
     assert entry["vs_hold"] is not None
     assert D(entry["vs_hold"]).is_finite()
+
+
+def test_pnl_realized_null_for_rebalance_but_not_for_grid(engine, client):
+    """A rebalancer has no cost basis, so it reports no realized profit."""
+    rebalancing = dict(
+        CREATE_BODY, id="r1", strategy="rebalance", params=REBALANCE_PARAMS
+    )
+    assert client.post("/bots", json=rebalancing).status_code == 201
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+
+    bots = client.get("/pnl").json()["bots"]
+    assert bots["r1"]["realized"] is None
+    assert bots[BOT]["realized"] == "0"
+    assert isinstance(bots[BOT]["realized"], str)
+
+
+def test_pnl_stale_snapshot_marks_nothing(engine, client):
+    """A book no order could be checked against prices no equity."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+    healthy = client.get("/pnl").json()["bots"][BOT]
+    assert healthy["equity"] is not None
+    assert healthy["vs_hold"] is not None
+
+    # The same book, stamped well past the staleness window.
+    engine.gateway.snapshots.put(
+        MarketSnapshot(
+            product=PRODUCT,
+            bid=D("0.99"),
+            ask=D("1.00"),
+            low=D("0.99"),
+            high=D("1.00"),
+            ts=time.time() - 10_000,
+        )
+    )
+
+    stale = client.get("/pnl").json()["bots"][BOT]
+    assert stale["equity"] is None
+    assert stale["vs_hold"] is None
+    assert stale["realized"] == "0"
+
+
+def test_pnl_crossed_snapshot_marks_nothing(engine, client):
+    """A crossed book is unusable too: no mark comes off it."""
+    assert client.post("/bots", json=CREATE_BODY).status_code == 201
+    engine.runner.cycle()
+
+    engine.gateway.snapshots.put(
+        MarketSnapshot(
+            product=PRODUCT,
+            bid=D("1.02"),
+            ask=D("1.00"),
+            low=D("1.00"),
+            high=D("1.02"),
+            ts=time.time(),
+        )
+    )
+
+    entry = client.get("/pnl").json()["bots"][BOT]
+    assert entry["equity"] is None
+    assert entry["vs_hold"] is None
 
 
 def test_status_and_bots_shape(engine, client):

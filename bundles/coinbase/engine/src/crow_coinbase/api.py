@@ -16,7 +16,10 @@ that writes the bot row.  Every mutation runs under `gateway.lock` — the lock 
 cycle holds — because a request and a running cycle must never build a book at
 the same time.  The kill switch is the one exception to the order and not to the
 lock: it halts first, without the lock, so a kill never queues behind a cycle,
-and only then takes the lock to sweep the book and stop the bots.
+and only then takes the lock to sweep the book and stop the bots.  Clearing a
+halt is an acknowledgement rather than a reset: the portfolio high-water mark is
+written down to today's equity and every grid bot re-initialises its book, so the
+drawdown the stop fired on cannot fire again on the next cycle.
 
 Handlers are plain functions, so FastAPI runs them on worker threads; the store
 hands every thread its own sqlite connection, so a handler can read while the
@@ -44,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from . import records
 from .benchmark import KEY_PREFIX, Benchmark
-from .gateway import NOT_BOT_OWNERS, OrderGateway
+from .gateway import NOT_BOT_OWNERS, PORTFOLIO_OWNER, OrderGateway
 from .limits import Limits
 from .money import ProductSpec
 from .runner import Runner, StartupRefused, realized_pnl
@@ -92,6 +95,10 @@ CSV_NAME = "fills.csv"
 CSV_PREFIX = "fills-"
 CSV_SUFFIX = ".csv"
 ALL_YEARS = "all"
+
+# The strategy that funds a target mix instead of buying a position: it keeps no
+# cost basis, so it has no realized profit to report.
+REBALANCE = "rebalance"
 
 
 # ---------------------------------------------------------------- tokens
@@ -207,6 +214,48 @@ class Recenter(BaseModel):
     @classmethod
     def _not_a_boolean(cls, value: Any, info: ValidationInfo) -> Any:
         return _no_boolean(value, str(info.field_name))
+
+
+# What a route that re-bases a high-water mark says when it was not acknowledged:
+# the write it makes and the body that authorises it.
+HALT_CLEAR_ACK = (
+    "clearing the halt re-bases the portfolio high-water mark to the current "
+    'equity; send {"acknowledge_rebase": true} to acknowledge that and clear it'
+)
+RESUME_ACK = (
+    "resuming re-bases the bot's high-water mark to its current equity; send "
+    '{"acknowledge_rebase": true} to acknowledge that and resume it'
+)
+# What POST /halt/clear says when no product can be priced.
+EQUITY_UNKNOWN = (
+    "portfolio equity is unknown: a product cannot be priced, so the high-water "
+    "mark cannot be re-based and the halt stays"
+)
+
+
+class Acknowledge(BaseModel):
+    """The whole body of a route that re-bases a high-water mark: one explicit yes.
+
+    `extra="forbid"` and the validator keep the acknowledgement literal: only a
+    JSON `true` clears a halt or resumes a bot, never the string `"true"` and
+    never a field this build does not know.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_rebase: bool
+
+    @field_validator("acknowledge_rebase", mode="before")
+    @classmethod
+    def _only_a_boolean(cls, value: Any) -> Any:
+        if not isinstance(value, bool):
+            raise ValueError("acknowledge_rebase must be true or false")
+        return value
+
+
+def _acknowledged(body: Optional[Acknowledge]) -> bool:
+    """True only for a body that says so: no body is not an acknowledgement."""
+    return body is not None and body.acknowledge_rebase is True
 
 
 # ---------------------------------------------------------------- money parsing
@@ -383,6 +432,7 @@ def _record_fill(row: Any) -> dict:
         "trade_time": row["trade_time"],
         "trade_id": row["trade_id"],
         "order_id": row["order_id"],
+        "trade_type": row["trade_type"],
     }
 
 
@@ -397,7 +447,9 @@ def _fills_csv(rows: list[Any]) -> str:
 
     Each row goes through `records.append_fill` into a scratch file, so the web
     export and the on-disk trades file can never disagree about a column's
-    formatting.  An empty selection still answers the header line.
+    formatting.  An empty selection still answers the header line.  The scratch
+    file is fresh on every call, so no trade id remembered from an earlier export
+    can suppress a row of this one, and its ids are dropped once it is read.
     """
     with tempfile.TemporaryDirectory() as scratch:
         path = Path(scratch) / CSV_NAME
@@ -411,7 +463,9 @@ def _fills_csv(rows: list[Any]) -> str:
             )
         if not path.exists():
             _write_header(path)
-        return path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+    records.forget(path)
+    return text
 
 
 # ---------------------------------------------------------------- the heartbeat
@@ -462,14 +516,15 @@ def _check_new_bot(
     limits: Limits,
     strategies: Mapping[str, Strategy],
     spec_for: Callable[[str], ProductSpec],
-    price_for: Callable[[str], D],
     body: BotCreate,
 ) -> tuple[D, D]:
-    """Every refusal a new bot can earn, in the order they are checked.
+    """Every refusal a new bot can earn before its capital is priced.
 
-    Nothing is written here: the caller runs this inside the transaction that
-    writes the row and its one seed, so a refusal anywhere leaves the store
-    exactly as it was.  Returns the parsed `(capital_quote, capital_base)`.
+    Nothing is written here and nothing is fetched from the exchange: the caller
+    runs this before it opens the transaction that writes the row and its one
+    seed, and prices the capital afterwards with `_check_bot_capital`, so a
+    refusal anywhere leaves the store exactly as it was.  Returns the parsed
+    `(capital_quote, capital_base)`.
     """
     bot_id = body.id
     if not BOT_ID_RE.fullmatch(bot_id):
@@ -499,18 +554,35 @@ def _check_new_bot(
     base = _amount(body.capital_base, "capital_base")
     if quote + base <= 0:
         raise _invalid("capital must be more than zero: both amounts are zero")
+    return quote, base
+
+
+def _check_bot_capital(
+    limits: Limits,
+    product: str,
+    quote: D,
+    base: D,
+    price_for: Callable[[str], D],
+) -> None:
+    """Refuse capital over the cap, measured in quote terms.
+
+    A base amount is valued at the product's price, which is a read of the
+    exchange (or of the last poll's snapshot): it happens here, before the caller
+    opens the transaction that writes the bot, so a slow or failing price never
+    holds a write lock.  A price the exchange cannot give is a 503, the same
+    answer as when the product cannot be priced at all.
+    """
     value = quote
     if base > 0:
         try:
-            price = price_for(body.product)
+            price = price_for(product)
         except Exception as error:  # noqa: BLE001 - the price is the exchange's
-            raise _unavailable(f"cannot price {body.product}: {error}") from None
+            raise _unavailable(f"cannot price {product}: {error}") from None
         value += base * D(price)
     if value > limits.max_bot_capital_usd:
         raise _invalid(
             f"capital {value} is over the {limits.max_bot_capital_usd} USD cap"
         )
-    return quote, base
 
 
 # ---------------------------------------------------------------- the app
@@ -636,17 +708,20 @@ def create_app(
     def create_bot(body: BotCreate) -> dict:
         """Create one dry-run bot and fund it, once, in the same transaction.
 
-        The whole body runs under the cycle lock, and inside it one immediate
-        transaction holds both the bot row and the simulated money that funds
-        it: a failure after the funding rolls both back, so an id is never left
+        The whole body runs under the cycle lock.  The check that reads the
+        exchange for a price runs before the transaction, so a network call never
+        holds a write lock; inside the one immediate transaction that follows,
+        the bot row and the simulated money that funds it are written together: a
+        failure after the funding rolls both back, so an id is never left
         half-created and a seed is never applied twice.
         """
         with gateway.lock:
             try:
+                quote, base = _check_new_bot(
+                    store, limits, strategies, spec_for, body
+                )
+                _check_bot_capital(limits, body.product, quote, base, price_for)
                 with store.tx():
-                    quote, base = _check_new_bot(
-                        store, limits, strategies, spec_for, price_for, body
-                    )
                     row = store.create_bot(
                         body.id,
                         body.product,
@@ -675,12 +750,32 @@ def create_app(
             return _bot_json(bot)
 
     @app.post("/bots/{bot_id}/resume", dependencies=guard)
-    def resume_bot(bot_id: str) -> dict:
-        """PAUSED -> ACTIVE; a stopped bot is not resumed in P1, it is a conflict."""
+    def resume_bot(bot_id: str, body: Optional[Acknowledge] = None) -> dict:
+        """PAUSED -> ACTIVE, re-basing the bot's own high-water mark first.
+
+        A bot paused by its own drawdown stop is resumed against a mark written
+        down to its equity as of now, so the same drawdown does not pause it again
+        on the next cycle; that is why the request carries an acknowledgement.
+        The acknowledgement is checked first, then the status: a STOPPED bot is
+        not resumed in P1, it is a conflict.  A book that cannot be priced answers
+        503 and leaves the bot paused, since no mark can be written off it.
+        """
+        if not _acknowledged(body):
+            raise _conflict(RESUME_ACK)
         with gateway.lock:
             bot = _require_bot(store, bot_id)
             if bot["status"] != PAUSED:
                 raise _conflict(f"bot {bot_id} is {bot['status']}, not {PAUSED}")
+            product = bot["product"]
+            mid = runner._mid(product)
+            if mid is None:
+                raise _unavailable(
+                    f"cannot price {product} for {bot_id}: its equity is unknown, "
+                    "so the bot stays paused"
+                )
+            runner.rebase_hwm(
+                bot_id, runner.ledger.equity(bot_id, {product: mid}, product)
+            )
             store.set_bot_status(bot_id, ACTIVE)
             bot["status"] = ACTIVE
             return _bot_json(bot)
@@ -782,11 +877,48 @@ def create_app(
         )
 
     @app.post("/halt/clear", dependencies=guard)
-    def clear_halt() -> dict:
-        """Lower the halt.  A bot stopped by a kill is not restarted by this."""
+    def clear_halt(body: Optional[Acknowledge] = None) -> dict:
+        """Clear the halt, re-basing the portfolio mark and re-initialising grids.
+
+        Clearing is an acknowledgement, not a reset: the portfolio high-water mark
+        is written down to today's equity, so the same drawdown does not halt the
+        engine again on the next cycle; the request has to say so.  Every grid bot
+        that is not STOPPED re-initialises its book first, so the engine resumes
+        with a live book rather than the one the halt left resting; if one of them
+        cannot, nothing is re-based or cleared and the halt stays.  An equity that
+        cannot be priced answers 503 and the halt stays with it.  A bot stopped by
+        a kill is not restarted by this.
+        """
+        if not _acknowledged(body):
+            raise _conflict(HALT_CLEAR_ACK)
         with gateway.lock:
+            equity = gateway.portfolio_equity()
+            if equity is None:
+                raise _unavailable(EQUITY_UNKNOWN)
+            reinitialised: list[str] = []
+            for bot in store.list_bots():
+                if bot["status"] == STOPPED:
+                    continue
+                strategy = strategies.get(bot["strategy"])
+                if strategy is None or not hasattr(strategy, "recenter"):
+                    continue
+                try:
+                    runner.reinit_bot(bot["id"])
+                except Exception as error:  # noqa: BLE001 - the halt stays
+                    log.warning(
+                        "bot %s: re-init on clear failed: %s", bot["id"], error
+                    )
+                    raise _bad_gateway(
+                        f"could not re-init {bot['id']}: {error}; the halt stays"
+                    ) from None
+                reinitialised.append(bot["id"])
+            runner.rebase_hwm(PORTFOLIO_OWNER, equity)
             gateway.clear_halt()
-        return {"halted": False}
+        return {
+            "halted": False,
+            "rebased": {PORTFOLIO_OWNER: _text(equity)},
+            "reinitialised": reinitialised,
+        }
 
     # ------------------------------------------------ fills
     @app.get("/bots/{bot_id}/fills", dependencies=guard)
@@ -801,7 +933,12 @@ def create_app(
 
     @app.get("/export/fills.csv", dependencies=guard)
     def export_fills(year: Optional[str] = None) -> Response:
-        """The fills as a CSV download, all of them or one calendar year's."""
+        """The authoritative tax export: one row per booked fill, all or one year's.
+
+        Built from the database, so it carries every fill the engine booked; the
+        `trades.csv` beside the database is a convenience copy that can in
+        principle lag behind it.
+        """
         stamp = ALL_YEARS
         if year is not None:
             if not YEAR_RE.fullmatch(year):
@@ -823,9 +960,13 @@ def create_app(
     def pnl() -> dict:
         """Realized profit, fees, marked equity and the hold-the-mix shadow, per bot.
 
-        A bot whose product has no snapshot has no mark, so its equity and its
-        comparison against the benchmark are null rather than invented; the
-        same is true of a bot whose benchmark was never started.
+        A bot's equity is marked at the mid of a snapshot the gateway can price an
+        order from (`runner._mid`), so a missing, stale or crossed book leaves its
+        equity and its comparison against the benchmark null rather than marked
+        off a book nothing could be checked against; the same is true of a bot
+        whose benchmark was never started.  `realized` is null for a strategy that
+        keeps no cost basis (a rebalancer funds a target mix instead of buying a
+        position), and a decimal string otherwise.
         """
         realized = realized_pnl(store)
         benchmark = Benchmark(store)
@@ -834,19 +975,21 @@ def create_app(
             bot_id = bot["id"]
             product = bot["product"]
             equity: Optional[D] = None
-            mid: Optional[D] = None
-            snap = gateway.snapshots.get(product)
-            if snap is not None:
-                mid = (snap.bid + snap.ask) / 2
-                equity = gateway.ledger.equity(bot_id, {product: mid}, product)
             vs_hold: Optional[D] = None
-            if equity is not None and mid is not None:
+            mid = runner._mid(product)
+            if mid is not None:
+                equity = gateway.ledger.equity(bot_id, {product: mid}, product)
                 try:
                     vs_hold = benchmark.vs_hold(bot_id, equity, mid)
                 except KeyError:
                     vs_hold = None
+            gained = (
+                None
+                if bot["strategy"] == REBALANCE
+                else _text(realized.get(bot_id, D(0)))
+            )
             entries[bot_id] = {
-                "realized": _text(realized.get(bot_id, D(0))),
+                "realized": gained,
                 "fees": _text(_fee_total(store, bot_id)),
                 "equity": None if equity is None else _text(equity),
                 "vs_hold": None if vs_hold is None else _text(vs_hold),

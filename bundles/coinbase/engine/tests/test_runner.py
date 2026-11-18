@@ -32,6 +32,7 @@ from crow_coinbase.gateway import (
     DAILY_CAP,
     DRAWDOWN_STOP,
     HALTED,
+    INSUFFICIENT_HOLDING,
     PORTFOLIO_OWNER,
     RATE_CAP,
     STALE_MARKET,
@@ -53,6 +54,7 @@ from crow_coinbase.runner import (
 )
 from crow_coinbase.store import (
     ACTIVE,
+    CANCELLED,
     FAILED,
     FILLED,
     LIVE_STATUSES,
@@ -1128,9 +1130,14 @@ def test_three_rejected_follow_ups_skip_the_fill_with_one_alert(envs):
     after = env.store.order(parent)
     assert after["opposite"] == OPP_SKIPPED
     assert after["note"] == "follow-up rejected x3"
-    alerts = messages(env.store, "ALERT")
+
+    def follow_up_alerts():
+        return [
+            message for message in messages(env.store, "ALERT") if parent in message
+        ]
+
+    alerts = follow_up_alerts()
     assert len(alerts) == 1
-    assert parent in alerts[0]
     assert reason in alerts[0]
 
     # No new follow-up was offered: the three refused rows are the whole story.
@@ -1144,7 +1151,7 @@ def test_three_rejected_follow_ups_skip_the_fill_with_one_alert(envs):
     rows_after = len(orders(env.store, BOT))
     env.runner.cycle()
 
-    assert len(messages(env.store, "ALERT")) == 1
+    assert len(follow_up_alerts()) == 1
     assert len(orders(env.store, BOT)) == rows_after
     assert env.store.order(parent)["opposite"] == OPP_SKIPPED
     assert len(children_of(env, parent)) == 3
@@ -1715,17 +1722,38 @@ def test_unallocated_negative_alerts_and_blocks_buys(envs):
 def test_portfolio_drawdown_halts_until_cleared(envs):
     spy = SpyStrategy(inner=GridStrategy())
     env = envs(strategies={"grid": spy, "rebalance": RebalanceStrategy()})
-    env.runner.cycle()
-    env.runner.cycle()
-    assert env.store.hwm(PORTFOLIO_OWNER) == D("149.75")
+    # A stopped bot on another product carries most of the portfolio mark.  Its
+    # price is what drops, so the grid's own product never leaves its band: the
+    # halt is the portfolio's, and the grid has a book to lay once it is cleared.
+    env.add_bot(
+        "b2",
+        product=SECOND_PRODUCT,
+        capital_quote=D("0"),
+        capital_base=D("100"),
+        status=STOPPED,
+        seed=True,
+    )
+    btc = FakeMarket()
+    env.markets[SECOND_PRODUCT] = btc
 
-    env.market.set_book(D("0.30"), D("0.31"))
     env.runner.cycle()
+    env.runner.cycle()
+    high = env.store.hwm(PORTFOLIO_OWNER)
+    assert high == D("249.25")
+
+    btc.set_book(D("0.30"), D("0.31"))
+    env.runner.cycle()
+
+    def portfolio_alerts():
+        return [
+            message
+            for message in messages(env.store, "ALERT")
+            if "portfolio" in message.lower()
+        ]
 
     assert env.gateway.is_halted() is True
-    alerts = messages(env.store, "ALERT")
-    assert any("portfolio" in message.lower() for message in alerts)
-    alert_count = len(alerts)
+    assert len(portfolio_alerts()) == 1
+    assert bot_row(env)["status"] == ACTIVE  # the grid is untouched by the halt
 
     calls_before = (spy.init_calls, spy.decide_calls)
     rows_before = len(orders(env.store, BOT))
@@ -1733,13 +1761,84 @@ def test_portfolio_drawdown_halts_until_cleared(envs):
 
     assert (spy.init_calls, spy.decide_calls) == calls_before
     assert len(orders(env.store, BOT)) == rows_before
-    assert len(messages(env.store, "ALERT")) == alert_count
+    assert len(portfolio_alerts()) == 1
     assert heartbeat(env)["cycle"] == 4
+    assert len(orders(env.store, BOT, LIVE_STATUSES)) == 6
 
+    low = env.gateway.portfolio_equity()
+    assert low is not None and low < high
+    assert env.store.hwm(PORTFOLIO_OWNER) == high
+    assert env.store.get("runner:init_since:b1") is None
+
+    # Clearing, through the path the API takes: every grid that is not stopped
+    # re-initialises, then the portfolio mark is re-based to today's equity, then
+    # the halt comes down.  The price never comes back.
+    for bot in env.store.list_bots():
+        if bot["status"] == STOPPED:
+            continue
+        env.runner.reinit_bot(bot["id"])
+    env.runner.rebase_hwm(PORTFOLIO_OWNER, env.gateway.portfolio_equity())
     env.gateway.clear_halt()
-    env.market.set_book(D("0.99"), D("1.00"))
-    env.runner.cycle()
+
+    assert env.store.hwm(PORTFOLIO_OWNER) == low
+    assert any("re-based" in message for message in messages(env.store, "info"))
     assert env.gateway.is_halted() is False
+    assert any("re-initialised" in message for message in messages(env.store, "info"))
+    assert bot_row(env)["init_done"] is False
+    assert orders(env.store, BOT, LIVE_STATUSES) == []
+    epoch = env.store.get("runner:init_since:b1")
+    assert isinstance(epoch, (int, float))
+
+    env.runner.cycle()
+
+    # Still at the low price: the mark sits at the equity rather than above it,
+    # so nothing halts again, and the grid lays its book from the re-init.
+    assert env.gateway.is_halted() is False
+    assert len(portfolio_alerts()) == 1
+    assert env.store.hwm(PORTFOLIO_OWNER) == low
+    assert spy.init_calls == calls_before[0] + 1
+    assert env.store.get("runner:init_since:b1") == epoch
+    assert len(orders(env.store, BOT, LIVE_STATUSES)) == 6
+    assert bot_row(env)["init_done"] is True
+
+
+def test_resume_rebases_bot_hwm(envs):
+    env = envs(
+        params={**GRID_PARAMS, "drawdown_pct": 1},
+        env={"CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT": "90"},
+    )
+    env.runner.cycle()
+    env.runner.cycle()
+    assert env.store.hwm(BOT) == D("149.75")
+
+    def pause_alerts():
+        return [
+            message
+            for message in messages(env.store, "ALERT")
+            if "paused" in message.lower()
+        ]
+
+    # Still inside the grid's band, but a little over 1% under the mark.
+    env.market.set_book(D("0.959"), D("0.961"))
+    env.runner.cycle()
+
+    assert bot_row(env)["status"] == PAUSED
+    assert len(pause_alerts()) == 1
+    assert env.store.hwm(BOT) == D("149.75")
+    assert env.gateway.is_halted() is False
+
+    low = env.gateway.ledger.equity(BOT, {PRODUCT: D("0.96")}, PRODUCT)
+    assert low == D("148")
+    env.runner.rebase_hwm(BOT, low)
+    env.store.set_bot_status(BOT, ACTIVE)
+    assert env.store.hwm(BOT) == low
+
+    env.runner.cycle()
+
+    # The mark is the equity now, so the same price is no drawdown at all.
+    assert bot_row(env)["status"] == ACTIVE
+    assert len(pause_alerts()) == 1
+    assert env.store.hwm(BOT) == low
 
 
 def test_owner_drawdown_pauses_bot(envs):
@@ -2332,6 +2431,264 @@ def test_recenter_epoch_uses_wall_clock_not_injected_now(envs):
     assert isinstance(epoch, (int, float))
     assert float(epoch) != 5000.0
     assert abs(float(epoch) - time.time()) < 5
+
+
+# ---------------------------------------------------------------- an idle book
+
+
+def empty_book(env, owner=BOT):
+    """Take every one of this owner's orders off the exchange, and reconcile."""
+    order_ids = [
+        order["order_id"]
+        for order in env.exchange.list_open_orders(None)
+        if str(order.get("client_order_id") or "").startswith(f"cb-{owner}-")
+    ]
+    env.exchange.cancel(order_ids)
+    reconcile(env.store, env.exchange, now=time.time())
+    assert orders(env.store, owner, LIVE_STATUSES) == []
+
+
+def idle_alerts(env):
+    return [
+        message
+        for message in messages(env.store, "ALERT")
+        if "no live orders" in message
+    ]
+
+
+def test_idle_grid_alerts_once_per_episode(envs):
+    env = envs()
+    env.runner.cycle()
+    assert len(orders(env.store, BOT, LIVE_STATUSES)) == 6
+    empty_book(env)
+
+    for _ in range(3):
+        env.runner.cycle()
+
+    # One episode, one alert, however many cycles it lasts.
+    assert len(idle_alerts(env)) == 1
+    assert BOT in idle_alerts(env)[0]
+    assert env.store.get(f"runner:idle_book:{BOT}") is True
+    # The check reads the stored rows itself: it adds no warning of its own.
+    assert [m for m in messages(env.store, "warn") if "client_order_id" in m] == []
+
+    # The book comes back, so the episode is over and the key is cleared.
+    env.runner.reinit_bot(BOT)
+    env.runner.cycle()
+    assert len(orders(env.store, BOT, LIVE_STATUSES)) == 6
+    assert env.store.get(f"runner:idle_book:{BOT}") is None
+    assert len(idle_alerts(env)) == 1
+
+    # A later emptying is a new episode, and says so once.
+    empty_book(env)
+    env.runner.cycle()
+    env.runner.cycle()
+    assert len(idle_alerts(env)) == 2
+    assert env.store.get(f"runner:idle_book:{BOT}") is True
+
+
+def test_idle_alert_skips_a_paused_bot_and_a_rebalancer(envs):
+    env = envs()
+    env.add_bot("r1", strategy="rebalance", params=REBALANCE_PARAMS)
+    env.runner.cycle()
+    assert orders(env.store, "r1") == []
+    assert bot_row(env, "r1")["status"] == ACTIVE
+    assert bot_row(env, "r1")["init_done"] is True
+
+    empty_book(env)
+    env.store.set_bot_status(BOT, PAUSED)
+
+    for _ in range(3):
+        env.runner.cycle()
+
+    # Neither the paused grid nor the rebalancer (which rests no book at all) is
+    # an idle grid, so neither ever alerts.
+    assert idle_alerts(env) == []
+    assert env.store.get(f"runner:idle_book:{BOT}") is None
+    assert env.store.get("runner:idle_book:r1") is None
+
+
+# ---------------------------------------------------------------- refused follow-ups
+
+
+def test_refused_follow_up_warns_once_per_fill_and_code(envs):
+    env = envs()
+    env.runner.cycle()
+    parent = answered_buy(env)
+    env.store.update_order(parent, opposite=OPP_TODO)
+
+    real_submit = env.gateway.submit
+    code = {"value": RATE_CAP}
+
+    def refusing_submit(source, owner, intent, product=None):
+        if intent.action == "place" and intent.consumes_fill:
+            return GatewayResult(False, None, code["value"])
+        return real_submit(source, owner, intent, product)
+
+    env.gateway.submit = refusing_submit
+
+    def refusals():
+        return [
+            message
+            for message in messages(env.store, "warn")
+            if "place refused" in message
+        ]
+
+    for _ in range(3):
+        env.runner.cycle()
+
+    # One fill refused for the same reason three cycles running: said once.
+    assert len(refusals()) == 1
+    assert RATE_CAP in refusals()[0]
+    assert parent in refusals()[0]
+    assert env.store.get(f"runner:refused:{parent}") == RATE_CAP
+    assert env.store.order(parent)["opposite"] == OPP_TODO
+    assert children_of(env, parent) == []
+
+    # A different code is news again, and then silent in its turn.
+    code["value"] = STALE_MARKET
+    env.runner.cycle()
+    assert len(refusals()) == 2
+    assert STALE_MARKET in refusals()[1]
+    assert env.store.get(f"runner:refused:{parent}") == STALE_MARKET
+    env.runner.cycle()
+    assert len(refusals()) == 2
+
+    # An acceptance ends the episode and clears the record.
+    env.gateway.submit = real_submit
+    env.runner.cycle()
+    assert env.store.order(parent)["opposite"] == OPP_PLACED
+    assert env.store.get(f"runner:refused:{parent}") is None
+    assert len(children_of(env, parent, live_only=True)) == 1
+    assert len(refusals()) == 2
+
+
+def test_rebuy_refused_when_only_the_other_bot_has_quote(envs):
+    env = envs(
+        params={**GRID_PARAMS, "rebuy_sizing": "fixed", "quote_per_buy": "10"},
+        capital_quote=D("0"),
+        capital_base=D("50"),
+    )
+    # A second bot on another product holds far more quote than the rebuy below
+    # costs, so the exchange is not short of it and an exchange-wide or
+    # portfolio-wide funds check would let that order through.
+    env.add_bot(
+        "b2",
+        product=SECOND_PRODUCT,
+        capital_quote=D("5000"),
+        capital_base=D("0"),
+        seed=True,
+    )
+    env.markets[SECOND_PRODUCT] = FakeMarket()
+
+    env.runner.cycle()
+    sells = [row for row in orders(env.store, BOT, OPEN) if row["side"] == "SELL"]
+    assert sorted(row["level"] for row in sells) == [1, 2, 3]
+
+    # The level-1 sell partly filled and the rest of it was taken off the book.
+    sell = [row for row in sells if row["level"] == 1][0]
+    sell_cid = sell["client_order_id"]
+    env.exchange.cancel([sell["order_id"]])
+    reconcile(env.store, env.exchange, now=time.time())
+    assert env.store.order(sell_cid)["status"] == CANCELLED
+
+    filled_size = D("2")
+    filled_value = filled_size * sell["price"]
+    fees = filled_value * FEE_RATE
+    env.store.update_order(
+        sell_cid,
+        filled_size=filled_size,
+        filled_value=filled_value,
+        fees=fees,
+        opposite=OPP_TODO,
+    )
+    # The simulated account is credited with the quote the fill produced, so the
+    # order answering it is refused for this owner's funds rather than for a
+    # short exchange.  The base side is left in that account: the follow-up
+    # spends quote, and only a negative unallocated refuses an order.
+    env.exchange.deposit(QUOTE, filled_value - fees, "cover the partial fill")
+
+    levels = money.build_levels(D("1"), D("1.5"), 3, 3, SPEC)
+    plan, why = money.opposite_order(
+        money.SELL,
+        1,
+        filled_size,
+        filled_value - fees,
+        levels,
+        FEE_RATE,
+        SPEC,
+        "fixed",
+        D("10"),
+    )
+    assert why is None and plan is not None
+    assert (plan.side, plan.level) == (money.BUY, 0)
+    placed_price = money.maker_price(
+        plan.side, plan.price, env.market.bid, env.market.ask, SPEC.price_increment
+    )
+    cost = money.buy_cost(plan.size, placed_price, FEE_RATE)
+    own = env.gateway.ledger.holding(BOT, PRODUCT)
+    other = env.gateway.ledger.holding("b2", SECOND_PRODUCT)
+    assert cost > own.available_quote
+    assert cost < other.available_quote
+
+    rows_before = {
+        row["client_order_id"]: (row["status"], row["opposite"], row["consumes_fill"])
+        for row in orders(env.store, BOT)
+    }
+
+    env.runner.cycle()
+    env.runner.cycle()
+
+    # The fixed rebuy is too big for this bot's own free quote: no order row was
+    # written, the fill is still waiting for its opposite order, and the refusal
+    # says which bot it was.
+    assert {
+        row["client_order_id"]: (row["status"], row["opposite"], row["consumes_fill"])
+        for row in orders(env.store, BOT)
+    } == rows_before
+    assert env.store.order(sell_cid)["opposite"] == OPP_TODO
+    assert children_of(env, sell_cid) == []
+
+    refusals = [
+        message
+        for message in messages(env.store, "warn")
+        if "place refused" in message
+    ]
+    assert len(refusals) == 1
+    assert refusals[0].startswith(f"bot {BOT}: ")
+    assert INSUFFICIENT_HOLDING in refusals[0]
+    assert sell_cid in refusals[0]
+
+    # The other bot never paid for any of it.
+    assert env.gateway.ledger.holding("b2", SECOND_PRODUCT) == other
+
+    # The rest of the sell fills, so this bot now holds the quote the rebuy asks
+    # for: the same order goes out on the next cycle and the fill is retired.
+    full_size = sell["size"]
+    full_value = full_size * sell["price"]
+    full_fees = full_value * FEE_RATE
+    env.store.update_order(
+        sell_cid,
+        filled_size=full_size,
+        filled_value=full_value,
+        fees=full_fees,
+    )
+    env.exchange.deposit(
+        QUOTE,
+        (full_value - full_fees) - (filled_value - fees),
+        "cover the rest of the fill",
+    )
+    assert env.gateway.ledger.holding(BOT, PRODUCT).available_quote > cost
+
+    env.runner.cycle()
+
+    children = children_of(env, sell_cid)
+    assert len(children) == 1
+    assert (children[0]["side"], children[0]["level"]) == (money.BUY, 0)
+    assert children[0]["status"] == OPEN
+    assert env.store.order(sell_cid)["opposite"] == OPP_PLACED
+    assert env.store.get(f"runner:refused:{sell_cid}") is None
+    assert len(orders(env.store, BOT)) == len(rows_before) + 1
 
 
 # ---------------------------------------------------------------- the loop

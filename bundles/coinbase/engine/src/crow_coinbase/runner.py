@@ -7,7 +7,8 @@ method per step, so the body reads as that order:
     2. step the dry-run exchange
     3. reconcile the store against the exchange
     4. re-check the portfolio and the per-bot drawdown stops
-    5. one decision per ACTIVE bot, its orders through the gateway
+    5. one decision per ACTIVE bot, its orders through the gateway; then alert a
+       grid whose book is empty and has no fill left to answer
     6. ratchet the high-water marks
     7. alert while the exchange is short of what its owners hold
     8. write the heartbeat, and return it
@@ -108,6 +109,16 @@ LIVE_IN_P1 = "live trading lands in P2"
 # One alert per negative-unallocated episode: the key holds the currency list.
 UNALLOCATED_KEY = "runner:unallocated_alert"
 UNALLOCATED_PREFIX = "unallocated negative: "
+
+# One alert per empty-book episode: the key holds True while the episode lasts.
+IDLE_BOOK_PREFIX = "runner:idle_book:"
+IDLE_BOOK_NOTE = (
+    "grid has no live orders and no pending fills; recenter or re-init it"
+)
+
+# The kv key holding, per fill, the refusal code last warned about: a follow-up
+# the exchange keeps refusing is news once per fill and code, not once a cycle.
+REFUSED_PREFIX = "runner:refused:"
 
 # A recenter settles the cancelled rows before it reinstates the grid.
 RECENTER_SETTLE_TRIES = 10
@@ -232,7 +243,9 @@ def realized_pnl(store: Store, owner: Optional[str] = None) -> dict[str, Decimal
         if not settled:
             continue
         gain = money.realized_on_sell(
-            filled, row["filled_value"] - row["fees"], basis
+            sell_size=filled,
+            sell_net_quote=row["filled_value"] - row["fees"],
+            basis_per_base=basis,
         )
         totals[row["owner"]] = totals.get(row["owner"], D(0)) + gain
     return totals
@@ -355,6 +368,7 @@ class Runner:
             errors: list[str] = []
             if not self.gateway.is_halted():  # 5
                 errors = self._run_bots()
+                self._check_idle_books()
             self._ratchet_marks()  # 6
             self._check_unallocated()  # 7
             return self._heartbeat(errors)  # 8
@@ -500,6 +514,53 @@ class Runner:
                 )
                 failed.append(row["id"])
         return failed
+
+    # ------------------------------------------------ step 5d: an empty book
+    def _check_idle_books(self) -> None:
+        """Alert once while a grid that should be resting has nothing on the book.
+
+        A grid's orders are its instrument: a bot whose first book is done, that
+        is ACTIVE, has no row in a live status and nothing left to answer has a
+        book that vanished — swept by hand, or never laid.  Only a strategy with
+        a `recenter` (a level grid) is checked, and a bot whose first book is
+        still retrying is not: it is mid-init, not idle.
+
+        One alert per episode: the kv key holds True from the alert until the
+        condition clears, so three cycles over one empty book say it once and the
+        next emptying after the book comes back says it again.
+        """
+        for bot in self.store.list_bots():
+            if bot["status"] != ACTIVE or not bot["init_done"]:
+                continue
+            bot_id = bot["id"]
+            strategy = self.strategies.get(bot["strategy"])
+            if strategy is None or not hasattr(strategy, "recenter"):
+                continue
+            key = f"{IDLE_BOOK_PREFIX}{bot_id}"
+            if self._book_is_idle(bot_id):
+                if self.store.get(key) is not None:
+                    continue
+                message = f"bot {bot_id}: {IDLE_BOOK_NOTE}"
+                log.error(message)
+                self.store.event("ALERT", message)
+                self.store.put(key, True)
+                continue
+            if self.store.get(key) is not None:
+                self.store.put(key, None)
+
+    def _book_is_idle(self, bot_id: str) -> bool:
+        """True when this owner has no live order row and no fill to answer.
+
+        The pending check reads the stored rows directly rather than through
+        `_pending_fills`, which warns about a malformed row: a check that runs
+        every cycle must not add warnings of its own.
+        """
+        if self.store.orders(owner=bot_id, statuses=LIVE_STATUSES):
+            return False
+        for row in self.store.orders(owner=bot_id, statuses=(FILLED, CANCELLED)):
+            if row["filled_size"] > 0 and row["opposite"] == OPP_TODO:
+                return False
+        return True
 
     def _process_bot(self, bot_id: str) -> None:
         """One bot's turn: heal, read, decide, send, then record what it decided.
@@ -868,20 +929,42 @@ class Runner:
                     f"bot {bot_id}: init refused {result.refusal} "
                     f"for level {intent.level}"
                 )
+                log.warning(message)
+                self.store.event("warn", message)
             else:
-                message = (
-                    f"bot {bot_id}: place refused {result.refusal} "
-                    f"(level {intent.level}, fill {intent.consumes_fill or '-'}); "
-                    "the fill stays pending"
-                )
-            log.warning(message)
-            self.store.event("warn", message)
+                self._warn_refused(bot_id, intent, result.refusal)
             return result.refusal
         if result.cid:
             self._annotate(bot, intent, result.cid)
         if intent.consumes_fill:
             self._retire_fill(intent.consumes_fill)
+            self.store.put(f"{REFUSED_PREFIX}{intent.consumes_fill}", None)
         return None
+
+    def _warn_refused(
+        self, bot_id: str, intent: OrderIntent, refusal: Optional[str]
+    ) -> None:
+        """Warn that a place was refused, once per fill and refusal code.
+
+        A follow-up the exchange keeps refusing stays pending, so the same answer
+        would otherwise be written every cycle.  The kv key holds the code last
+        warned about for that fill (`runner:refused:<fill>`), so a repeat of it is
+        silent while a different code is news again; the caller clears the key
+        once the fill is finally answered.  A place that answers no fill has no
+        such memory and warns every time.
+        """
+        if intent.consumes_fill:
+            key = f"{REFUSED_PREFIX}{intent.consumes_fill}"
+            if self.store.get(key) == refusal:
+                return
+            self.store.put(key, refusal)
+        message = (
+            f"bot {bot_id}: place refused {refusal} "
+            f"(level {intent.level}, fill {intent.consumes_fill or '-'}); "
+            "the fill stays pending"
+        )
+        log.warning(message)
+        self.store.event("warn", message)
 
     def _annotate(self, bot: dict, intent: OrderIntent, cid: str) -> None:
         """Write the parent id and the cost basis the gateway cannot take.
@@ -1026,20 +1109,15 @@ class Runner:
         os.replace(tmp, path)
         return payload
 
-    # ------------------------------------------------ recenter
+    # ------------------------------------------------ recenter and re-init
     def recenter(self, bot_id: str, new_center: Any) -> None:
         """Move a grid bot's center, then reinstate its book around the new one.
 
         The new params are built and put through the strategy's own checks BEFORE
         anything is touched, so a center that cannot build a grid changes nothing
-        at all.  Then, in order:
-        the bot is paused (no cycle may place while the book is in pieces), its
-        orders are swept off the exchange and reconciled until none of its rows is
-        live, every fill still pending is retired as `recentered` (an old fill
-        must never be answered on the new grid), and the params, the new grid's
-        epoch, `init_done` and the bot's own prior status are written together so
-        the next cycle lays the new book, and a bot that was already paused is
-        still paused afterwards.
+        at all.  Then `_reinstate_book` pauses the bot, sweeps and retires its
+        book and writes the new params with a new grid epoch, so the next cycle
+        lays the new book.
 
         An abort (the book never settles) leaves the bot paused with its old
         params and grid in place, so the recenter can simply be retried.
@@ -1059,14 +1137,54 @@ class Runner:
             new_params = self._recentered_params(
                 bot, strategy, recenter, new_center
             )
-            prior_status = bot["status"]
-
-            self.store.set_bot_status(bot_id, PAUSED)
-            self._settle_recenter(bot_id)
-            self._retire_pending_fills(bot_id)
-            self._write_recentered(
-                bot_id, new_params, new_center, prior_status
+            self._reinstate_book(
+                bot,
+                new_params,
+                f"bot {bot_id}: recentered on {new_center}; the book re-inits",
             )
+
+    def reinit_bot(self, bot_id: str) -> None:
+        """Lay a bot's book again on the params it already has.
+
+        The same write path as `recenter` without a new center: the bot is
+        paused, its orders are swept off the exchange and reconciled until none
+        of its rows is live, every fill still pending is retired as `recentered`,
+        and the params it already had are written back with a new grid epoch and
+        `init_done` cleared, so the next cycle lays a fresh book.
+
+        A STOPPED bot is refused with `ValueError` (nothing is touched): a stop
+        or a kill closed its book, and nothing here may re-open one.
+        """
+        with self.gateway.lock:
+            bot = self.store.get_bot(bot_id)
+            if bot is None:
+                raise ValueError(f"no bot {bot_id!r}")
+            if bot["status"] == STOPPED:
+                raise ValueError(f"bot {bot_id} is stopped; start it to re-init")
+            self._reinstate_book(
+                bot,
+                dict(bot["params"] or {}),
+                f"bot {bot_id}: re-initialised; the book re-inits",
+            )
+
+    def _reinstate_book(self, bot: dict, params: dict, message: str) -> None:
+        """Tear a bot's book down and write it back ready for a new one.
+
+        Shared by `recenter` and `reinit_bot`, so a book is never taken apart one
+        way and written back another.  In order: the bot is paused (no cycle may
+        place while the book is in pieces), its orders are swept off the exchange
+        and reconciled until none of its rows is live, every fill still pending
+        is retired as `recentered` (an old fill must never be answered on a new
+        grid), and the params, the new grid's epoch, `init_done` and the bot's own
+        prior status are written together so the next cycle lays the new book —
+        a bot that was already paused is still paused afterwards.
+        """
+        bot_id = bot["id"]
+        prior_status = bot["status"]
+        self.store.set_bot_status(bot_id, PAUSED)
+        self._settle_recenter(bot_id)
+        self._retire_pending_fills(bot_id)
+        self._write_recentered(bot_id, params, prior_status, message)
 
     def _recentered_params(
         self,
@@ -1136,11 +1254,11 @@ class Runner:
             )
 
     def _write_recentered(
-        self, bot_id: str, new_params: dict, new_center: Any, status: str
+        self, bot_id: str, new_params: dict, status: str, message: str
     ) -> None:
         """Write the new params, the new grid's epoch and the bot's status, once.
 
-        One transaction on purpose: a reader that saw the new center without the
+        One transaction on purpose: a reader that saw the new params without the
         epoch (or the other way round) could count the replaced grid's rows as
         today's and hold a level of the new one back.  Every write inside it goes
         through a store setter, which joins the caller's open transaction rather
@@ -1149,14 +1267,34 @@ class Runner:
         `_init_epoch` the float back.  It is stamped with the wall clock
         (`time.time()`), not with the injected `now`: the level filter compares it
         with a row's `created_at`, which the store stamps with the wall clock, so
-        the two have to share a clock even when a caller moves `now`.
+        the two have to share a clock even when a caller moves `now`.  *message*
+        is the one info event the caller's path reports.
         """
         with self.store.tx():
             self.store.set_bot_params(bot_id, new_params)
             self.store.set_init_done(bot_id, False)
             self.store.set_bot_status(bot_id, status)
             self.store.put(f"{INIT_SINCE_PREFIX}{bot_id}", time.time())
-        message = f"bot {bot_id}: recentered on {new_center}; the book re-inits"
+        log.info(message)
+        self.store.event("info", message)
+
+    # ------------------------------------------------ high-water marks
+    def rebase_hwm(self, owner: str, equity: Any) -> None:
+        """Write an owner's high-water mark to exactly *equity*, up or down.
+
+        `store.update_hwm` only ratchets up, so a mark that has to come down —
+        which is what clearing a sticky drawdown stop means — is written here,
+        in one transaction.  The caller has priced its own equity and is saying
+        so explicitly; nothing here decides whether the new mark is sensible.
+        """
+        value = D(str(equity))
+        with self.store.tx() as db:
+            db.execute(
+                "INSERT INTO hwm(owner,value) VALUES(?,?) "
+                "ON CONFLICT(owner) DO UPDATE SET value=excluded.value",
+                (owner, str(value)),
+            )
+        message = f"hwm for {owner} re-based to {value}"
         log.info(message)
         self.store.event("info", message)
 

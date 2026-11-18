@@ -13,9 +13,12 @@ A queued cancel is not a settled order: only FILLED, CANCELLED, EXPIRED and
 FAILED settle a row, so a `CANCEL_QUEUED` order stays live and its filled
 amounts keep being recorded while the cancel is in flight.
 
-Every fill is booked once: a trade already in `fills` is skipped, the
-`trades.csv` row is written before the database row, and a `trade_type` that is
-null or absent counts as a FILL.  A fill that cannot be booked is left out and
+Every fill is booked once: a trade already in `fills` is skipped, a trade id
+`trades.csv` already holds gets no second row there, and a `trade_type` that is
+null or absent counts as a FILL.  `trades.csv` is a convenience file written as
+each fill is booked; the authoritative tax export is `/export/fills.csv`, built
+from the database with one row per booked fill, so a `trades.csv` row missing a
+cycle is never a lost trade.  A fill that cannot be booked is left out and
 recorded as a warning: one with no `trade_id` (warned about every cycle, since
 there is no id to remember it by), one naming another order id, and one for
 another product (the last two once per trade id).  Ids that do not start with
@@ -389,17 +392,18 @@ def _shape_of(cid: str, snap: dict) -> tuple[str, int]:
 # ---------------------------------------------------------------- fills
 
 
-def _book_fills(
-    store: Store, exchange: Any, trades_csv: Path, mode: str
-) -> None:
-    """Book the fills behind every filled row: `trades.csv` first, then the database.
+def _book_fills(store: Store, exchange: Any, trades_csv: Path, mode: str) -> None:
+    """Book the fills behind every filled row: `trades.csv`, then the database.
 
     A row is skipped once `fills_ok` says its booked FILL sizes match the
     `filled_size` the exchange reported, so a cycle over an unchanged book writes
     nothing and a partial fill sitting on a resting order is booked as soon as it
     appears.  A trade already in `fills` (booked by the stream, or by an earlier
-    cycle) adds no CSV row of its own, and the CSV write comes before the insert,
-    so a cycle that dies between the two leaves a row records can still be read.
+    cycle) adds no CSV row of its own, and a trade id the CSV already holds is not
+    written there a second time, so a cycle that died between the two writes
+    leaves one CSV row and no duplicate.  The authoritative tax export is
+    `/export/fills.csv`, built from the database with one row per booked fill:
+    this file is a convenience copy that can in principle lag behind it.
     """
     for row in store.orders(statuses=FILLABLE_STATUSES):
         if row["filled_size"] <= 0 or row["fills_ok"]:
@@ -429,7 +433,9 @@ def _book_fill(store: Store, row: dict, fill: dict, trades_csv: Path, mode: str)
     order's trade in this owner's records — and each of those is warned about
     once per trade id, so a permanent mismatch does not fill the event log every
     cycle.  A trade already in `fills` is skipped in silence: it was booked
-    already, by the stream or by an earlier cycle.
+    already, by the stream or by an earlier cycle.  The CSV row is written before
+    the database row and only when the CSV does not already hold that trade id,
+    so a cycle that died between the two writes does not duplicate it.
     """
     trade_id = fill.get("trade_id")
     if not trade_id:
@@ -461,7 +467,8 @@ def _book_fill(store: Store, row: dict, fill: dict, trades_csv: Path, mode: str)
             f"{row['product']!r}; left unbooked",
         )
         return
-    records.append_fill(trades_csv, product, fill, cid, mode)
+    if not records.has_trade(trades_csv, trade_id):
+        records.append_fill(trades_csv, product, fill, cid, mode)
     store.record_fill(fill, cid)
 
 

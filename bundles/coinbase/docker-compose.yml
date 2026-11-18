@@ -7,14 +7,16 @@
 ## The engine's API is published on 127.0.0.1 only: Crow's MCP server and panel run on
 ## the host and reach it there. Keep this ports entry loopback.
 ##
-## Each service gets its own environment anchor. The engine needs the account credentials;
-## the watchdog needs none of them, so it carries the configuration values it reads and
-## nothing else, and it runs with no network at all: switching the network namespace off
-## leaves it with the shared data volume, which is the only thing its cancel path touches.
+## Each service gets its own environment anchor. The engine currently takes none of the
+## account credentials: this release is dry-run only and reads none, so the exchange
+## credentials are not passed in this release and are added again in the live phase (P2).
+## The watchdog carries the configuration values it reads and nothing else, and it runs
+## with no network at all: switching the network namespace off leaves it with the shared
+## data volume, which is the only thing its cancel path touches.
 
 x-coinbase-env: &env
-  COINBASE_API_KEY: ${COINBASE_API_KEY:-}
-  COINBASE_API_SECRET: ${COINBASE_API_SECRET:-}
+  # The exchange credentials are not passed in this release and are added again in the
+  # live phase (P2): every order here is simulated and no credential is read.
   CROW_COINBASE_PORTFOLIO_ID: ${CROW_COINBASE_PORTFOLIO_ID:-}
   CROW_COINBASE_ENGINE_TOKEN: ${CROW_COINBASE_ENGINE_TOKEN:?CROW_COINBASE_ENGINE_TOKEN is required}
   CROW_COINBASE_LIVE: ${CROW_COINBASE_LIVE:-false}

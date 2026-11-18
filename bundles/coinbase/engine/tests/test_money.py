@@ -136,3 +136,17 @@ def test_round_trip_profit_is_positive_at_2_5pct():
     profit = G.realized_on_sell(size, G.sell_net(size, lv[0], FEE), cost / size)
     assert D("0.2") < profit < D("0.25")  # ~2.5% - 1% fees on ~15 USDC
 
+
+def test_realized_on_sell_keywords_name_quote_and_base():
+    """The two money inputs are named after the columns they come from."""
+    gain = G.realized_on_sell(
+        sell_size=D("10"), sell_net_quote=D("10.2"), basis_per_base=D("1.0")
+    )
+    assert gain == D("0.2")  # 10.2 quote received - 10 base at 1.0 each
+    assert (
+        G.realized_on_sell(
+            sell_size=D("10"), sell_net_quote=D("9.5"), basis_per_base=D("1.0")
+        )
+        == D("-0.5")
+    )
+

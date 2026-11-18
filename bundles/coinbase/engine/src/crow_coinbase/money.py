@@ -261,7 +261,11 @@ def reprice_away(side: str, price: Decimal, tick: Decimal) -> Decimal:
 
 
 def realized_on_sell(
-    sell_size: Decimal, sell_net_usdc: Decimal, basis_per_xrp: Decimal
+    sell_size: Decimal, sell_net_quote: Decimal, basis_per_base: Decimal
 ) -> Decimal:
-    """Profit of a sell against the cost basis of the XRP it sold (basis incl. buy fee)."""
-    return D(sell_net_usdc) - D(sell_size) * D(basis_per_xrp)
+    """Profit of a sell against the cost basis of the base it sold.
+
+    `sell_net_quote` is what the sell produced after its fee, and `basis_per_base`
+    is the quote paid per unit of base (buy fee included).
+    """
+    return D(sell_net_quote) - D(sell_size) * D(basis_per_base)

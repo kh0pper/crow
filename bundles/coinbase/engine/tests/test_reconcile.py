@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from crow_coinbase import records
 from crow_coinbase.exchange import PermanentError, TransientError
 from crow_coinbase.reconcile import reconcile
 from crow_coinbase.store import (
@@ -609,7 +610,64 @@ def test_fill_recorded_once_across_two_reconciles(store, trades_csv, monkeypatch
     monkeypatch.setattr(store, "record_fill", real_record_fill)
     sync(store, exchange, trades_csv)
     assert len(fill_rows(store, "t-3")) == 1
-    assert csv_rows_for(trades_csv, "t-3")
+    assert len(csv_rows_for(trades_csv, "t-3")) == 1
+
+
+def test_crash_between_csv_and_database_leaves_one_csv_row(
+    store, trades_csv, monkeypatch
+):
+    """A cycle that died after the CSV row does not append that row a second time.
+
+    The fills table gets the fill once, and the CSV keeps exactly the one row the
+    dead cycle wrote.
+    """
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    exchange = FakeExchange(
+        [snap("ex-1", cid, status="FILLED", filled_size="10", filled_value="10")],
+        fills_by_order={
+            "ex-1": [trade_fill("t-crash", "ex-1", size="10", price="1.0")]
+        },
+        hidden=["ex-1"],
+    )
+
+    def broken(fill, cid):
+        raise RuntimeError("database went away after the CSV write")
+
+    real_record_fill = store.record_fill
+    monkeypatch.setattr(store, "record_fill", broken)
+    with pytest.raises(RuntimeError):
+        sync(store, exchange, trades_csv)
+    assert len(csv_rows_for(trades_csv, "t-crash")) == 1
+    assert fill_rows(store, "t-crash") == []
+
+    monkeypatch.setattr(store, "record_fill", real_record_fill)
+    sync(store, exchange, trades_csv)
+
+    assert len(fill_rows(store, "t-crash")) == 1
+    assert len(csv_rows_for(trades_csv, "t-crash")) == 1
+    assert len(csv_data_rows(trades_csv)) == 1
+
+
+def test_trade_id_from_a_previous_process_is_not_appended_again(store, trades_csv):
+    """A file already holding the id gets no second row, with an empty cache."""
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    earlier = trade_fill("t-old", "ex-1", size="10", price="1.0")
+    exchange = FakeExchange(
+        [snap("ex-1", cid, status="FILLED", filled_size="10", filled_value="10")],
+        fills_by_order={"ex-1": [earlier]},
+        hidden=["ex-1"],
+    )
+    # An earlier process wrote the CSV row and died before the database row.
+    records.append_fill(trades_csv, PRODUCT, earlier, cid, "dry")
+    records.reset_cache()
+
+    sync(store, exchange, trades_csv)
+
+    assert len(fill_rows(store, "t-old")) == 1
+    assert len(csv_rows_for(trades_csv, "t-old")) == 1
+    assert len(csv_data_rows(trades_csv)) == 1
 
 
 def test_null_trade_type_counts_as_fill(store, trades_csv):
