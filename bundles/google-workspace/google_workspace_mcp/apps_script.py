@@ -14,15 +14,37 @@ Apps Script file model: each project is a flat list of files, each
 `type` is SERVER_JS (.gs), JSON (the appsscript manifest), or HTML. updateContent
 replaces the ENTIRE file set and MUST include the manifest, so single-file edits
 go through apps_script_update_file (get -> swap one -> push the full set back).
+
+Guard: with GWS_OUTBOUND_GUARD on, the three write/run tools are refused. Pushed
+or run script can send mail or share files with no way for this server to see it
+coming, so only apps_script_get_content stays available.
 """
 
 import asyncio
 import logging
 
+from . import outbound_guard
 from .auth import get_script_service
 from .guardrails import handle_google_errors
 
 logger = logging.getLogger(__name__)
+
+# Apps Script is a general-purpose escape hatch around every other guard in this
+# server: a script can send mail (MailApp/GmailApp), share a Drive file, or call
+# almost any Google API with the token's scopes. There is no way to inspect a
+# push or a run from here, so while the outbound guard is on the three write/run
+# tools are refused outright. Reading source stays available: it sends nothing.
+_GUARD_REFUSAL = (
+    "Apps Script can send mail or share files; it is off while the outbound guard "
+    "is on (GWS_OUTBOUND_GUARD). Read-only apps_script_get_content still works."
+)
+
+
+def _guard_refusal() -> dict | None:
+    """The refusal dict for a write/run tool while GWS_OUTBOUND_GUARD is on, else None."""
+    if not outbound_guard.guard_enabled():
+        return None
+    return {"success": False, "error": _GUARD_REFUSAL}
 
 
 @handle_google_errors
@@ -62,7 +84,12 @@ async def apps_script_update_file(
     `file_name` is the API name with NO extension ('Code', not 'Code.gs') — use
     the name as returned by apps_script_get_content. `file_type` (only used when
     creating a new file) is SERVER_JS, HTML, or JSON.
+
+    Refused while GWS_OUTBOUND_GUARD is on (pushed source can send mail or share).
     """
+    refusal = _guard_refusal()
+    if refusal:
+        return refusal
     svc = get_script_service()
     cur = await asyncio.to_thread(
         lambda: svc.projects().getContent(scriptId=script_id).execute()
@@ -97,7 +124,13 @@ async def apps_script_update_content(script_id: str, files: list) -> dict:
     """Advanced: replace the ENTIRE project file set in one call. `files` is a
     list of {name, type, source} and MUST include the manifest
     ({"name": "appsscript", "type": "JSON", "source": "{...}"}) or the call
-    fails. Prefer apps_script_update_file for single edits."""
+    fails. Prefer apps_script_update_file for single edits.
+
+    Refused while GWS_OUTBOUND_GUARD is on (pushed source can send mail or share).
+    """
+    refusal = _guard_refusal()
+    if refusal:
+        return refusal
     svc = get_script_service()
     res = await asyncio.to_thread(
         lambda: svc.projects().updateContent(
@@ -126,7 +159,12 @@ async def apps_script_run(
     function uses. For container-bound scripts this often is not possible without
     first moving the script to a standard GCP project. On a script-side error,
     returns success=False with the structured error (not an exception).
+
+    Refused while GWS_OUTBOUND_GUARD is on (a run can send mail or share files).
     """
+    refusal = _guard_refusal()
+    if refusal:
+        return refusal
     svc = get_script_service()
     body = {
         "function": function_name,

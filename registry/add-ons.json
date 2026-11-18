@@ -2315,7 +2315,7 @@
     {
       "id": "google-workspace",
       "name": "Google Workspace",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "type": "bundle",
       "description": "Google Workspace tools for the assistant — Drive, Docs, Sheets, Slides, Gmail, Calendar, Apps Script, Forms, BigQuery and Looker Studio — using your own Google sign-in.",
       "author": "Crow",
@@ -2346,7 +2346,11 @@
           "GMAIL_SEND_TO_SELF_ALLOWLIST",
           "GOOGLE_BIGQUERY_PROJECT",
           "GDOCS_DEFAULT_FONT",
-          "GWS_FORMS_SHIM_SCRIPT_ID"
+          "GWS_FORMS_SHIM_SCRIPT_ID",
+          "GWS_CALENDAR_NO_INVITES",
+          "GWS_OAUTH_SCOPES",
+          "GWS_OUTBOUND_GUARD",
+          "GWS_OUTBOUND_ALLOWLIST"
         ]
       },
       "requires": {
@@ -2394,6 +2398,50 @@
           "description": "Optional: the Apps Script project id for forms_set_destination's shim (deployment steps in apps-script-shim/). Unset: the tool returns those steps instead of failing.",
           "required": false,
           "advanced": true
+        },
+        {
+          "name": "GWS_CALENDAR_NO_INVITES",
+          "description": "Optional, off unless set (1/true/on). On: events may only be added to your own calendar — attendees are refused, Google is never asked to email anyone, and responding to an invitation is refused because that emails the organizer.",
+          "required": false,
+          "advanced": true,
+          "pattern": "^(0|1|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Nn]|[Oo][Ff][Ff]|[Yy][Ee][Ss]|[Nn][Oo])$",
+          "pattern_hint": {
+            "en": "0 or 1 (also true/false, on/off, yes/no)",
+            "es": "0 o 1 (también true/false, on/off, yes/no)"
+          }
+        },
+        {
+          "name": "GWS_OAUTH_SCOPES",
+          "description": "Optional: the OAuth scopes to authorize and refresh with, instead of the full set — comma- or space-separated short names or full https URLs, e.g. gmail.compose,drive.file,calendar.events. Changing it means re-running the authorize step.",
+          "required": false,
+          "advanced": true,
+          "pattern": "^(?:[A-Za-z0-9._-]+|https://\\S+)(?:[,\\s]+(?:[A-Za-z0-9._-]+|https://\\S+))*$",
+          "pattern_hint": {
+            "en": "a comma- or space-separated list of scopes, e.g. gmail.compose,drive.file",
+            "es": "una lista de permisos separada por comas o espacios, p. ej. gmail.compose,drive.file"
+          }
+        },
+        {
+          "name": "GWS_OUTBOUND_GUARD",
+          "description": "Optional, OFF unless set (1/true/on). On: every action that makes Google send mail or an invitation — calendar guests and invite replies, a Drive share's or ownership transfer's notification email, a Gmail filter's forward address — is refused unless the recipient is on GWS_OUTBOUND_ALLOWLIST. Nothing is sent and no request is made for a refused address.",
+          "required": false,
+          "advanced": true,
+          "pattern": "^(0|1|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Nn]|[Oo][Ff][Ff]|[Yy][Ee][Ss]|[Nn][Oo])$",
+          "pattern_hint": {
+            "en": "0 or 1 (also true/false, on/off, yes/no)",
+            "es": "0 o 1 (también true/false, on/off, yes/no)"
+          }
+        },
+        {
+          "name": "GWS_OUTBOUND_ALLOWLIST",
+          "description": "Optional: comma-separated addresses and domains the outbound actions above may reach, e.g. you@example.com,example.org (a domain allows every address at exactly that domain). Read only while GWS_OUTBOUND_GUARD is on; empty then means nothing may be sent.",
+          "required": false,
+          "advanced": true,
+          "pattern": "^[A-Za-z0-9@._,+\\s-]*$",
+          "pattern_hint": {
+            "en": "a comma-separated list of addresses or domains, e.g. you@example.com,example.org",
+            "es": "una lista separada por comas de direcciones o dominios, p. ej. tu@example.com,example.org"
+          }
         }
       ],
       "sandbox": {
@@ -2404,7 +2452,7 @@
       },
       "ports": [],
       "webUI": null,
-      "notes": "No ports and no container: a stdio MCP server on this computer, run with uv from the installed copy. Inside the add-on wall it gets the internet (Google's APIs) and exactly one folder of yours, read-write — the folder holding the token file, because the OAuth token is rewritten there when it refreshes. Point both GOOGLE_CREDENTIALS_FILE and GOOGLE_TOKEN_FILE at ~/.config/google-workspace-mcp/ and it finds both. Sending mail is off until GMAIL_SEND_TO_SELF_ALLOWLIST names your own address; everything else drafts.",
+      "notes": "No ports and no container: a stdio MCP server on this computer, run with uv from the installed copy. Inside the add-on wall it gets the internet (Google's APIs) and exactly one folder of yours, read-write — the folder holding the token file, because the OAuth token is rewritten there when it refreshes. Point both GOOGLE_CREDENTIALS_FILE and GOOGLE_TOKEN_FILE at ~/.config/google-workspace-mcp/ and it finds both. Sending mail is off until GMAIL_SEND_TO_SELF_ALLOWLIST names your own address; everything else drafts. The actions that make Google write to someone else (calendar guests, invite replies, share notifications, ownership transfers, Gmail filter forwards) are sorted out before they leave: GWS_CALENDAR_NO_INVITES drops invitations entirely, and GWS_OUTBOUND_GUARD (off by default) refuses any recipient not on GWS_OUTBOUND_ALLOWLIST.",
       "official": true
     },
     {

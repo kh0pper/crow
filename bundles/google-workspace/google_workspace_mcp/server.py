@@ -79,7 +79,8 @@ async def gdocs_find_replace(
 
 @mcp.tool()
 async def gdocs_append(doc_id: str, markdown: str) -> dict:
-    """Append formatted markdown content to the end of a Google Doc."""
+    """Append formatted markdown content to the end of a Google Doc. GFM pipe tables become native
+    tables, and inline [label](url) links become real hyperlinks (inside table cells too)."""
     return await docs.gdocs_append(doc_id, markdown)
 
 
@@ -97,7 +98,10 @@ async def gdocs_insert_image(
     placeholder token); otherwise it inserts at `index` (default: doc start). PNG/GIF size auto-scales to
     max_width_pt (aspect preserved). Mechanism: the image is briefly shared anyone-with-link so the Docs API can
     fetch it, then un-shared + (unless keep_drive_copy) trashed — the doc keeps its own embedded copy. The brief
-    public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA)."""
+    public window means: do NOT use for images containing sensitive/regulated data (FERPA/HIPAA). A revoke that
+    fails is reported as a failure (the file is still public). With GWS_OUTBOUND_GUARD on a LOCAL image is refused
+    outright, and a Drive-hosted image must ALREADY be shared anyone-with-the-link: the guard never adds an
+    anyone/domain permission, so an unshared file is refused with nothing changed."""
     return await docs.gdocs_insert_image(
         doc_id, image, anchor_text=anchor_text, index=index,
         max_width_pt=max_width_pt, keep_drive_copy=keep_drive_copy,
@@ -118,6 +122,7 @@ async def gdocs_replace_section(doc_id: str, heading: str, markdown: str) -> dic
     """
     Replace content between two headings using safe delete+reinsert.
     Preserves the heading itself; replaces everything until the next same-or-higher-level heading.
+    A section whose last element is a native table is deleted through the table's end.
     """
     return await docs.gdocs_replace_section(doc_id, heading, markdown)
 
@@ -132,6 +137,7 @@ async def gdocs_create(
     """
     Create a new Google Doc in a folder. With find_existing=True (default),
     returns existing doc with same title instead of creating a duplicate.
+    With GWS_OUTBOUND_GUARD on, the folder's owners and sharing are checked first.
     """
     return await docs.gdocs_create(
         folder_id, title, content=content, find_existing=find_existing
@@ -179,11 +185,13 @@ async def gdocs_format_text(
     link_url: Optional[str] = None,
     color_hex: Optional[str] = None,
 ) -> dict:
-    """Apply inline character formatting to existing visible text in a Google Doc — the ONLY gdocs
-    tool that sets a HYPERLINK (find-replace/insert/rewrite cannot). Finds `find` and applies any of
+    """Apply inline character formatting to existing visible text in a Google Doc — the only gdocs
+    tool that styles text in place (find-replace/rewrite cannot). Also finds text inside native
+    table cells. Finds `find` and applies any of
     bold/italic/underline, a link (`link_url`), and/or a text color (`color_hex` like '#1155cc').
     `occurrence`: 0-based match index, or -1 for ALL matches. Adds/removes no text — style only. To
-    turn a bare URL into a labeled link: find-replace the label in, then format_text it with link_url."""
+    turn a bare URL into a labeled link: find-replace the label in, then format_text it with link_url
+    (or just write [label](url) and append/insert it — markdown links render as real hyperlinks)."""
     return await docs.gdocs_format_text(
         doc_id, find, occurrence=occurrence, bold=bold, italic=italic,
         underline=underline, link_url=link_url, color_hex=color_hex,
@@ -234,13 +242,13 @@ async def gdrive_search(query: str, max_results: int = 20) -> dict:
 async def gdrive_create_folder(
     name: str, parent_id: Optional[str] = None
 ) -> dict:
-    """Create a Drive folder. Idempotent: if a folder with the same name already exists in the same parent, returns that folder's id instead of creating a duplicate. Returns data.folder_id and data.created (True if newly created, False if reused)."""
+    """Create a Drive folder. Idempotent: if a folder with the same name already exists in the same parent, returns that folder's id instead of creating a duplicate. Returns data.folder_id and data.created (True if newly created, False if reused). With GWS_OUTBOUND_GUARD on, parent_id's owners and sharing are checked first."""
     return await drive.gdrive_create_folder(name, parent_id)
 
 
 @mcp.tool()
 async def gdrive_move_file(file_id: str, new_parent_id: str) -> dict:
-    """Move a file into a new parent folder. Removes all OTHER parents so the file ends up only under new_parent_id. No-op (data.moved=False) if the file is already only in new_parent_id."""
+    """Move a file into a new parent folder. Removes all OTHER parents so the file ends up only under new_parent_id. No-op (data.moved=False) if the file is already only in new_parent_id. With GWS_OUTBOUND_GUARD on, the destination's owners and sharing are checked first."""
     return await drive.gdrive_move_file(file_id, new_parent_id)
 
 
@@ -250,7 +258,8 @@ async def gdrive_copy_file(
 ) -> dict:
     """Copy a Drive file (incl. Sheets/Docs + their bound Apps Script); returns the new file id. `new_title` names
     the copy; `parent_id` places it in a folder. Use to make a safe sandbox/test copy before mutating production.
-    Caveat: a copied Sheet's IMPORTRANGE needs re-auth in the copy, and add-on configs still point at the originals."""
+    Caveat: a copied Sheet's IMPORTRANGE needs re-auth in the copy, and add-on configs still point at the originals.
+    With GWS_OUTBOUND_GUARD on, a parent_id folder's owners and sharing are checked first."""
     return await drive.gdrive_copy_file(file_id, new_title=new_title, parent_id=parent_id)
 
 
@@ -277,11 +286,22 @@ async def gdrive_export(file_id: str, local_path: str, mime_type: Optional[str] 
 
 @mcp.tool()
 async def gdrive_upload_file(
-    local_path: str, folder_id: str, name: Optional[str] = None, mime_type: Optional[str] = None
+    local_path: str,
+    folder_id: str,
+    name: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    convert_to: Optional[str] = None,
 ) -> dict:
     """Upload a local file into a Drive folder as a NEW file. name defaults to the local basename.
-    To replace an existing file's content keeping its id and links, use gdrive_upload_new_version."""
-    return await drive.gdrive_upload_file(local_path, folder_id, name=name, mime_type=mime_type)
+    convert_to = a Google-native target (application/vnd.google-apps.presentation | document |
+    spreadsheet, or the short alias slides/presentation, docs/document, sheets/spreadsheet) makes
+    Drive convert a pptx/docx/xlsx upload into a native Slides/Doc/Sheet; any other convert_to
+    value is refused before the upload starts.
+    To replace an existing file's content keeping its id and links, use gdrive_upload_new_version.
+    With GWS_OUTBOUND_GUARD on, the destination folder's owners and sharing are checked first."""
+    return await drive.gdrive_upload_file(
+        local_path, folder_id, name=name, mime_type=mime_type, convert_to=convert_to
+    )
 
 
 @mcp.tool()
@@ -301,19 +321,19 @@ async def gdrive_rename(file_id: str, new_name: str) -> dict:
 
 @mcp.tool()
 async def gdrive_transfer_ownership(file_id: str, new_owner_email: str) -> dict:
-    """Transfer ownership of a Drive file/folder to another user by email. Same-domain (Workspace) = immediate; consumer/cross-domain = recipient must accept (pending_owner=True). NOTE: transferring a folder does NOT re-own the files inside it — walk the tree and transfer each item to re-home a whole directory."""
+    """Transfer ownership of a Drive file/folder to another user by email. Same-domain (Workspace) = immediate; consumer/cross-domain = recipient must accept (pending_owner=True). NOTE: transferring a folder does NOT re-own the files inside it — walk the tree and transfer each item to re-home a whole directory. Google emails the new owner, so GWS_OUTBOUND_GUARD (when on) requires the address on GWS_OUTBOUND_ALLOWLIST."""
     return await drive.gdrive_transfer_ownership(file_id, new_owner_email)
 
 
 @mcp.tool()
 async def gdrive_create_shortcut(target_id: str, parent_id: str, name: str | None = None) -> dict:
-    """Create a Drive shortcut (pointer) to target_id inside parent_id (name defaults to the target's). Works across drives — e.g. a shortcut in a Shared Drive pointing at a My Drive folder."""
+    """Create a Drive shortcut (pointer) to target_id inside parent_id (name defaults to the target's). Works across drives — e.g. a shortcut in a Shared Drive pointing at a My Drive folder. With GWS_OUTBOUND_GUARD on, the destination folder's owners and sharing are checked first."""
     return await drive.gdrive_create_shortcut(target_id, parent_id, name=name)
 
 
 @mcp.tool()
 async def gdrive_share(file_id: str, email: str, role: str = "writer", notify: bool = False) -> dict:
-    """Share a Drive file/folder with a user by email — ADDS a reader|writer|commenter permission (does NOT transfer ownership; use gdrive_transfer_ownership for that). Sharing a folder cascades to its contents. notify=False (default) grants silently; notify=True sends the 'shared with you' email (required for consumer/cross-domain recipients). Re-checkable via gdrive_get_permissions."""
+    """Share a Drive file/folder with a user by email — ADDS a reader|writer|commenter permission (does NOT transfer ownership; use gdrive_transfer_ownership for that). Sharing a folder cascades to its contents. notify=False (default) grants silently; notify=True sends the 'shared with you' email (required for consumer/cross-domain recipients). Under GWS_OUTBOUND_GUARD the address must be allowlisted whatever notify says: granting access is itself the outbound effect. Re-checkable via gdrive_get_permissions."""
     return await drive.gdrive_share(file_id, email, role=role, notify=notify)
 
 
@@ -554,6 +574,9 @@ async def gmail_create_filter(
     to_address, subject, query, etc.) and one action (add_labels,
     remove_labels, mark_as_read, archive, forward) are required. Filters
     are immutable in Gmail — to edit one, delete via UI and recreate.
+
+    forward mails a copy of every matching message OUT, so under
+    GWS_OUTBOUND_GUARD the address must be on GWS_OUTBOUND_ALLOWLIST.
     """
     return await gmail.gmail_create_filter(
         add_labels=add_labels, remove_labels=remove_labels,
@@ -613,6 +636,12 @@ async def gcal_create_event(
     Create a Google Calendar event. start/end are RFC3339 timestamps or
     date strings ('2026-04-23' → all-day). send_updates defaults to
     'none' for draft-like behavior; pass 'all' to actually send invites.
+
+    Guests are the outbound path: with GWS_CALENDAR_NO_INVITES on, the event may
+    only go on the 'primary' calendar (any other calendar_id is refused, since
+    writing there can notify its owner) and attendees are refused, with nothing
+    emailed; with GWS_OUTBOUND_GUARD on, every attendee must be on
+    GWS_OUTBOUND_ALLOWLIST, and so must a calendar_id other than 'primary'.
     """
     return await gcal_mod.gcal_create_event(
         summary=summary, start=start, end=end, calendar_id=calendar_id,
@@ -628,7 +657,7 @@ async def gcal_respond_to_event(
     calendar_id: str = "primary",
     comment: Optional[str] = None,
 ) -> dict:
-    """Respond to a calendar invitation. `response` must be accepted/declined/tentative."""
+    """Respond to a calendar invitation. `response` must be accepted/declined/tentative. The reply emails the organizer, so GWS_CALENDAR_NO_INVITES refuses this tool outright and GWS_OUTBOUND_GUARD requires the organizer on GWS_OUTBOUND_ALLOWLIST (and a calendar_id other than 'primary' on it too)."""
     return await gcal_mod.gcal_respond_to_event(
         event_id, response, calendar_id=calendar_id, comment=comment,
     )
@@ -652,7 +681,8 @@ async def sheets_create(
     """Create a new Google Spreadsheet, optionally inside a Drive folder. With find_existing=True
     (default) and a folder_id, returns an existing same-title spreadsheet in that folder instead of
     creating a duplicate. `tabs` (optional) names the initial tabs: the first replaces the default
-    'Sheet1', the rest are appended in order."""
+    'Sheet1', the rest are appended in order. With GWS_OUTBOUND_GUARD on, the folder's owners and
+    sharing are checked first."""
     return await sheets.sheets_create(
         title, folder_id=folder_id, tabs=tabs, find_existing=find_existing
     )
@@ -741,14 +771,16 @@ async def apps_script_update_file(
 ) -> dict:
     """Replace the source of ONE file in an Apps Script project, leaving the manifest and other files untouched
     (fetches current content, swaps the named file, pushes the full set back). `file_name` has NO extension
-    ('Code', not 'Code.gs') — use the name from apps_script_get_content. `file_type` (new files only): SERVER_JS|HTML|JSON."""
+    ('Code', not 'Code.gs') — use the name from apps_script_get_content. `file_type` (new files only): SERVER_JS|HTML|JSON.
+    Refused while GWS_OUTBOUND_GUARD is on: pushed Apps Script can send mail or share files."""
     return await apps_script.apps_script_update_file(script_id, file_name, source, file_type=file_type)
 
 
 @mcp.tool()
 async def apps_script_update_content(script_id: str, files: list) -> dict:
     """Advanced: replace the ENTIRE project file set. `files` = list of {name, type, source}; MUST include the
-    manifest ({"name":"appsscript","type":"JSON","source":"{...}"}). Prefer apps_script_update_file for single edits."""
+    manifest ({"name":"appsscript","type":"JSON","source":"{...}"}). Prefer apps_script_update_file for single edits.
+    Refused while GWS_OUTBOUND_GUARD is on: pushed Apps Script can send mail or share files."""
     return await apps_script.apps_script_update_content(script_id, files)
 
 
@@ -758,7 +790,8 @@ async def apps_script_run(
 ) -> dict:
     """Run a function via scripts.run and return its result. REQUIRES the script deployed as an API Executable and
     its GCP project == this OAuth client's project (often not possible for container-bound scripts without moving
-    them to a standard GCP project). Returns success=False with the structured error on a script-side failure."""
+    them to a standard GCP project). Returns success=False with the structured error on a script-side failure.
+    Refused while the outbound guard is on: a run can send mail or share files."""
     return await apps_script.apps_script_run(script_id, function_name, parameters=parameters, dev_mode=dev_mode)
 
 
@@ -777,7 +810,8 @@ async def forms_create(
     `questions` = [{"title", "type": CHECKBOX|RADIO|DROP_DOWN|SHORT_TEXT|PARAGRAPH, "options", "required"}] created in
     order, optional move into `folder_id`. Returns form_id, edit_url, responder_uri, item ids, and an access check:
     a new form is usually restricted to the Workspace organization (no API lifts it); the result says so and names the
-    Settings > Responses toggle to flip before sharing outside the org. Use forms_batch_update for further edits."""
+    Settings > Responses toggle to flip before sharing outside the org. Use forms_batch_update for further edits.
+    With GWS_OUTBOUND_GUARD on, the folder's owners and sharing are checked before the form is created."""
     return await forms.forms_create(
         title,
         document_title=document_title,
@@ -827,7 +861,9 @@ async def forms_set_destination(
     """Link a Google Form's responses into a spreadsheet (the UI's 'Link to Sheets' — creates a 'Form Responses'
     tab there). The REST Forms API can't do this, so the call runs through a one-time-deployed Apps Script shim
     (see apps-script-shim/forms-destination-shim.gs); without the shim configured (GWS_FORMS_SHIM_SCRIPT_ID env or
-    `shim_script_id`) the tool returns the setup instructions instead. Verifies via the form's linkedSheetId."""
+    `shim_script_id`) the tool returns the setup instructions instead. Under GWS_OUTBOUND_GUARD only the shim id
+    configured on this server may run, so a different `shim_script_id` is refused.
+    Verifies via the form's linkedSheetId."""
     return await forms.forms_set_destination(form_id, spreadsheet_id, shim_script_id=shim_script_id)
 
 
@@ -881,7 +917,7 @@ async def gslides_find_replace(
 
 @mcp.tool()
 async def gslides_create(title: str, folder_id: Optional[str] = None) -> dict:
-    """Create a new Google Slides presentation; optionally move it into a Drive folder."""
+    """Create a new Google Slides presentation; optionally move it into a Drive folder (whose owners and sharing are checked first while GWS_OUTBOUND_GUARD is on)."""
     return await slides.gslides_create(title, folder_id=folder_id)
 
 

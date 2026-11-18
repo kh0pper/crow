@@ -17,6 +17,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from .scopes import resolve_scopes
+
 logger = logging.getLogger(__name__)
 
 # Scopes covering Drive, Docs, Sheets, Slides, Gmail, and Calendar. Adding or
@@ -52,6 +54,11 @@ SCOPES = [
     # the OAuth client's GCP project.
     "https://www.googleapis.com/auth/datastudio.readonly",
 ]
+# GWS_OAUTH_SCOPES narrows that list (short names or full URLs) so one account can
+# be authorized with only what its assistant needs. The same resolved list feeds
+# the authorize flow AND the token load: google-auth sends the scopes on refresh,
+# and a scope the token was never granted fails the refresh.
+SCOPES = resolve_scopes(SCOPES)
 
 # Default credential paths, overridable via env vars:
 #   GOOGLE_CREDENTIALS_FILE — the OAuth client secret downloaded from Google Cloud

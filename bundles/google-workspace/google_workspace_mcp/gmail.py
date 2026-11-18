@@ -21,6 +21,7 @@ from typing import Optional
 
 from .auth import get_gmail_service
 from .guardrails import handle_google_errors
+from . import outbound_guard
 
 # Self-send allowlist. EMPTY by default — gmail_send_to_self is the ONLY tool
 # that actually sends (not drafts), so it is disabled until you opt in by
@@ -561,9 +562,10 @@ async def gmail_create_filter(
     with gmail_create_label FIRST. Returns the new filter's id.
 
     Filters are immutable — to edit, delete via the Gmail UI and recreate.
-    """
-    service = get_gmail_service()
 
+    `forward` makes Gmail mail copies OUT to that address, so with
+    GWS_OUTBOUND_GUARD on it must be on GWS_OUTBOUND_ALLOWLIST.
+    """
     criteria: dict = {}
     if from_address:
         criteria["from"] = from_address
@@ -582,6 +584,16 @@ async def gmail_create_filter(
     if not criteria:
         return {"success": False, "error": "at least one criterion (from_address, to_address, subject, query, etc.) is required"}
 
+    # Outbound guard, before any label lookup: a forward address mails a copy of
+    # every matching message to someone the caller named. Refused means the filter
+    # is never created, so nothing leaves the mailbox. The trimmed address is what
+    # goes into the filter body.
+    if forward:
+        forward = outbound_guard.clean_recipient(forward)
+        refusal = outbound_guard.check_recipients([forward], "forwarding matching mail")
+        if refusal:
+            return {"success": False, "error": refusal}
+
     action: dict = {}
     add_ids = await _resolve_label_names(add_labels or [])
     remove_ids = await _resolve_label_names(remove_labels or [])
@@ -599,6 +611,7 @@ async def gmail_create_filter(
         return {"success": False, "error": "at least one action (add_labels, remove_labels, mark_as_read, archive, forward) is required"}
 
     body = {"criteria": criteria, "action": action}
+    service = get_gmail_service()
     created = await asyncio.to_thread(
         lambda: service.users().settings().filters().create(userId="me", body=body).execute()
     )
