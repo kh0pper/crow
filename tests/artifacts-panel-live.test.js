@@ -195,7 +195,7 @@ test("a contact thread included in the round makes a LOCKED new session; its wor
   try {
     await t.send("Page.navigate", { url: `http://dash.test:${s.port}/login` }); await sleep(300);
     await t.send("Page.navigate", { url: `http://dash.test:${s.port}/dashboard/artifacts/view/${art.id}` });
-    assert.ok(await yes(t, "!!document.querySelector('.cv-send')"));
+    assert.ok(await yes(t, "!!document.querySelector('.cv-send') && !document.querySelector('.cv-send').disabled"));
     await t.evalIn("document.querySelector('.cv-send').click()");
     assert.ok(await yes(t, "!!document.querySelector('dialog.cv-preview[open]')"));
     // The preview: the owner's thread is ticked, the contact's is UNTICKED,
@@ -238,7 +238,7 @@ test("a bot without the Artifacts tools: the owner sees the delivery failure, ne
   try {
     await t.send("Page.navigate", { url: `http://dash.test:${s.port}/login` }); await sleep(300);
     await t.send("Page.navigate", { url: `http://dash.test:${s.port}/dashboard/artifacts/view/${art.id}` });
-    assert.ok(await yes(t, "!!document.querySelector('.cv-send')"));
+    assert.ok(await yes(t, "!!document.querySelector('.cv-send') && !document.querySelector('.cv-send').disabled"));
     await t.evalIn("document.querySelector('.cv-send').click()");
     assert.ok(await yes(t, "!!document.querySelector('dialog.cv-preview[open]')"));
     await t.evalIn("document.querySelector('dialog.cv-preview .cv-primary').click()");
