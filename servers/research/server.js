@@ -30,7 +30,7 @@ import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
 import { statusLabel, UNFETCHED_LABEL } from "./fetch-labels.js";
 import { UNKNOWN, resolveCallActor, auditActor, actorLabel, isPeerCall } from "./actor.js";
-import { makeShareGate, notFoundResult, refusalResult, scopePredicate } from "../shared/project-share-scope.js";
+import { makeShareGate, notFoundResult, refusalResult, scopePredicate, boundByBotRules } from "../shared/project-share-scope.js";
 import { createProjectFileStore, ProjectFileError, projectFileDataDir } from "../shared/project-files.js";
 import { listSharesForBot, resolveBotAccess } from "../shared/project-bot-shares.js";
 import { ensureProvenanceSchema, ensureWithdrawalSchema } from "./ensure-schema.js";
@@ -2164,18 +2164,33 @@ export function createProjectServer(dbPath, options = {}) {
   //   - the audit row: every write and delete appends file.write / file.delete with the path, size
   //     and sha256 (never the content).
   //
-  // A peer instance is refused outright in v1: workspace files are for this instance's owner and
-  // its bots, and they are not part of the project-share vocabulary. The project must exist and not
-  // be archived, and its workspace folder must sit inside this instance's data dir.
+  // Two more rules the core applies: a bot may not write or delete a dot-entry or a top-level
+  // CLAUDE.md / AGENTS.md / GEMINI.md (the names the operator's own runner reads as configuration,
+  // so a bot may not plant them in a workspace the operator opens), and a peer instance is refused
+  // outright in v1: workspace files are for this instance's owner and its bots, and they are not
+  // part of the project-share vocabulary.
+  //
+  // A peer reaches these tools two ways, and `isPeerCall` catches both: the bearer token the mount
+  // records in `authInfo`, and the {kind:"peer"} / remote-bot (`instance`) marker a forwarding
+  // router passes in `_meta` (forwardActorMeta → peerActorMeta). The second matters most: the
+  // router's in-process client carries no authInfo, and `resolveCallActor` would read the marker as
+  // an unidentified local caller — which keeps full access.
+  //
+  // The project must exist and not be archived, and its workspace folder must sit inside this
+  // instance's `<data>/projects` folder.
   //
   // Version history (servers/shared/history/workspace-history.js) records the workspace on its next
   // snapshot, so every write and delete becomes a version the owner can restore.
   const PEER_FILE_REFUSAL =
     "Project files are available to this instance's owner and its bots only; a peer instance may not use them.";
 
-  // Test seam: awaited by the file tools after the workspace root is opened and before any
-  // component of the path is (the resolve-then-swap race test drives it).
-  const fileHooks = typeof options.beforeFileOpen === "function" ? { beforeOpen: options.beforeFileOpen } : {};
+  // Test seams: awaited by the file tools after the workspace root is opened and before any
+  // component of the path is (the resolve-then-swap race test drives it), and after each folder
+  // component is opened and verified (the between-opens race test drives that one).
+  const fileHooks = {
+    ...(typeof options.beforeFileOpen === "function" ? { beforeOpen: options.beforeFileOpen } : {}),
+    ...(typeof options.afterFileComponentOpen === "function" ? { afterComponentOpen: options.afterFileComponentOpen } : {}),
+  };
 
   /** Bytes as a short human figure. */
   const fileBytes = (n) => `${Number(n).toLocaleString("en-US")} bytes`;
@@ -2208,6 +2223,10 @@ export function createProjectServer(dbPath, options = {}) {
         workspaceDir: row.workspace_dir,
         dataDir: projectFileDataDir(),
         hooks: fileHooks,
+        // A bot's write or delete may not leave a dot-entry or an agent instruction file behind: the
+        // operator's own editor and runner would read it as configuration on the next open. The
+        // shares gate above already decided the bot may touch this project at all.
+        bot: boundByBotRules(gate.actor),
       });
       return await fn({ projectId, project, store, actor: gate.actor });
     } catch (err) {

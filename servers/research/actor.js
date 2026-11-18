@@ -20,13 +20,29 @@ function isPeer(extra) {
 }
 
 /**
- * Did this call arrive from a peer instance (`authInfo.token === "peer-instance"`)? The same test
- * `resolveCallActor` makes before it narrows such a call to UNKNOWN. A tool that must refuse a
- * peer outright (rather than treat it as an unidentified local caller) asks here: it answers true
- * for exactly the calls the gateway's peer mounts make.
+ * Did this call arrive from a peer instance? TWO shapes count, because a peer reaches a tool two ways:
+ *
+ *  - the bearer token the gateway's peer mounts record in `authInfo` (`authInfo.token ===
+ *    "peer-instance"`) — a direct mount, which `resolveCallActor` also narrows to UNKNOWN;
+ *  - the `crow/actor` a forwarding router passes in `_meta` (forwardActorMeta → peerActorMeta):
+ *    `{kind: "peer"}` for the ordinary form, and `{kind: "bot", instance}` for the remote-bot form
+ *    a peer's gateway produces. A dispatcher's in-process client (router.js's
+ *    createInProcessClient over InMemoryTransport) carries NO authInfo at all, so this marker is the
+ *    only trace of the peer there — and `resolveCallActor` alone reads it as an unidentified LOCAL
+ *    caller, which is the operator's own-client rule. Hence both shapes here.
+ *
+ * `kind: "peer"` cannot widen anything, and a local caller that sends either shape only refuses
+ * itself. A tool that must refuse a peer outright (rather than treat it as an unidentified local
+ * caller) asks here instead of looking at the resolved actor.
  */
 export function isPeerCall(extra) {
-  return isPeer(extra);
+  if (isPeer(extra)) return true;
+  const m = metaActor(extra);
+  if (!m || typeof m !== "object") return false;
+  // `instance` marks a peer's remote-bot form (peerActorMeta). A LOCAL bot never carries it: a
+  // router's forwardActorMeta keeps only kind and id, so a locally forwarded bot stays a local bot
+  // here and keeps the share gate's answer rather than this refusal.
+  return m.kind === "peer" || m.instance != null;
 }
 
 function metaActor(extra) {

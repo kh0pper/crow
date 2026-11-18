@@ -9,9 +9,10 @@
  *
  * THE FOLDER. A project's files live in `project_spaces.workspace_dir`
  * (`<data dir>/projects/<slug>-<id>/workspace`). Before anything is opened the
- * folder is realpath'd and required to sit INSIDE this instance's data dir: a
- * row naming `/etc` (a hand-edited DB, a restored backup) is refused rather
- * than read.
+ * folder is realpath'd and required to sit INSIDE `<data dir>/projects` — not
+ * merely inside the data dir, whose `history/`, `datasets/` and add-on folders
+ * are no project's workspace: a row naming `/etc`, or `<data>/history` (a
+ * hand-edited DB, a restored backup), is refused rather than read.
  *
  * PATH RULES. A caller's `path` is relative to that folder and is checked as a
  * list of components: no absolute path, no NUL, no backslash, no empty
@@ -21,6 +22,15 @@
  * content). The history git dir lives outside the workspace
  * (`<data>/history/workspaces/<id>-<uuid>.git`), so the `.git` rule covers a
  * workspace that is itself a repository.
+ *
+ * BOT WRITES. A store built with `bot: true` (the caller is a bot, not the
+ * operator) refuses a write or a delete in which ANY component starts with `.`
+ * — no `.mcp.json`, `.claude/`, `.pi/`, `.envrc`, `.vscode/` — and the
+ * top-level `CLAUDE.md`, `AGENTS.md` or `GEMINI.md`, in any case. Those are the
+ * names the operator's own agent runner or editor reads as configuration and
+ * instructions, so a bot may not plant them in a workspace the operator opens.
+ * Reads and listings are unchanged, and every shape gets the same fixed
+ * refusal.
  *
  * RACE SAFETY. Realpath-then-open is a two-step, and a path component can be
  * swapped for a symlink in between. So no path is ever resolved twice:
@@ -32,8 +42,13 @@
  *     refused (ELOOP) instead of followed, and a directory swapped after it
  *     was opened is still the directory that was checked;
  *   - each opened fd's kernel path is re-read and must be under the root: a
- *     directory renamed out of the workspace (or deleted) is refused, because
- *     readlink then answers a path outside the root (or `… (deleted)`).
+ *     directory RENAMED out of the workspace is refused, because readlink then
+ *     answers a path outside the root. A directory DELETED in place is the one
+ *     case this check cannot see — readlink still answers its old path with
+ *     ` (deleted)` appended, which is still under the root — so a deleted
+ *     folder is caught where it is USED instead: an open, rename, rmdir or
+ *     unlink through its fd fails with ENOENT, and the call is refused before
+ *     anything is read or written.
  *
  * Writes follow the atomic recipe the rest of the repo uses: a temp file in
  * the SAME directory, created O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW at 0600,
@@ -41,7 +56,9 @@
  * same directory fd. A symlink, a folder, a FIFO, a device or a hard-linked
  * file at the target refuses the write; nothing is truncated in place, so a
  * failed write (quota, size cap, conflict, I/O error) leaves the old file
- * exactly as it was.
+ * exactly as it was. A READ refuses a hard-linked file for the same reason
+ * from the other side: its bytes are another name's too, and that name need
+ * not be inside the workspace.
  *
  * QUOTA. `CROW_PROJECT_FILE_QUOTA_MB` (default 500) caps the total bytes in
  * one workspace. It is measured with a bounded walk (entry and time capped);
@@ -69,7 +86,7 @@ import {
   writeSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { resolveDataDir } from "../db.js";
 
 /** Every limit a call obeys. Sized for an MCP round trip, not for bulk sync. */
@@ -101,6 +118,15 @@ export const PROJECT_FILE_ENCODINGS = Object.freeze(["utf8", "base64"]);
 /** The top-level folder of bot worlds: never project content. */
 export const INTERNAL_TOP_DIR = "bots";
 
+/** The one folder a project workspace may sit in, below the instance data dir. */
+export const PROJECTS_DIR = "projects";
+
+/**
+ * The top-level names a bot may not create or delete in a workspace, whatever their case: agent
+ * instruction files the operator's own runner reads and trusts.
+ */
+export const BOT_REFUSED_TOP_NAMES = Object.freeze(["claude.md", "agents.md", "gemini.md"]);
+
 /** A fixed, project-name-free message per code; the tool result carries `.message`. */
 const MESSAGES = Object.freeze({
   invalid_path: "That path is not a relative path inside the project's workspace.",
@@ -116,6 +142,9 @@ const MESSAGES = Object.freeze({
   quota: "This project's workspace is over its size quota.",
   conflict: "That file changed since it was read; read it again before writing.",
   invalid_argument: "That argument is not valid for this call.",
+  bot_path:
+    "A bot may not write or delete a dot-file or dot-folder (any name starting with \".\"), " +
+    "or a top-level CLAUDE.md, AGENTS.md or GEMINI.md, in a project's workspace.",
 });
 
 /** A refusal the tools turn into `Error: <message>`; `code` is for logs and tests. */
@@ -156,6 +185,19 @@ export function isInternalName(name, { top = false } = {}) {
   if (!n) return false;
   if (n.startsWith(".git")) return true;
   return top && n === INTERNAL_TOP_DIR;
+}
+
+/**
+ * The bot rule for a write or a delete (I1): no component may start with `.` — the dot-entries an
+ * editor, a shell or an agent runner picks up (`.mcp.json`, `.claude/`, `.pi/`, `.envrc`,
+ * `.vscode/`) — and no top-level agent instruction file (BOT_REFUSED_TOP_NAMES). Only a store built
+ * for a bot call applies it: an owner or an unidentified local caller is unchanged.
+ */
+function refuseBotTarget(parts) {
+  for (const part of parts) {
+    if (part.startsWith(".")) fail("bot_path");
+  }
+  if (BOT_REFUSED_TOP_NAMES.includes(parts[0].toLowerCase())) fail("bot_path");
 }
 
 /**
@@ -258,17 +300,21 @@ class FdSet {
 
 /**
  * The workspace root for one call: realpath'd, checked inside this instance's
- * data dir, opened O_DIRECTORY|O_NOFOLLOW with its kernel path confirmed.
+ * `<data>/projects` folder, opened O_DIRECTORY|O_NOFOLLOW with its kernel path confirmed.
  */
 function openWorkspaceRoot(workspaceDir, dataDir) {
   if (typeof workspaceDir !== "string" || workspaceDir.trim() === "") fail("no_workspace");
   if (!isAbsolute(workspaceDir)) fail("no_workspace", "This project's workspace folder is not an absolute path.");
   const dataReal = realOf(resolve(String(dataDir || ".")));
   if (!dataReal) fail("no_workspace", "This instance's data folder is not available.");
+  // The data dir is not enough: `history/`, `datasets/` and add-on folders live there too, and none
+  // of them is a project's workspace. Project creation puts every workspace under projects/.
+  const parentReal = realOf(join(dataReal, PROJECTS_DIR));
+  if (!parentReal) fail("no_workspace", "This instance's projects folder is not available.");
   const rootReal = realOf(resolve(workspaceDir));
   if (!rootReal) fail("no_workspace", "This project's workspace folder is missing.");
-  if (!strictlyInside(rootReal, dataReal)) {
-    fail("outside_root", "This project's workspace folder is outside this instance's data folder.");
+  if (!strictlyInside(rootReal, parentReal)) {
+    fail("outside_root", "This project's workspace folder is outside this instance's projects folder.");
   }
   let fd;
   try {
@@ -439,14 +485,22 @@ const looksBinary = (buf) => buf.includes(0);
 /**
  * The file tools for ONE project folder.
  *
- * @param {{workspaceDir?: string, dataDir?: string, env?: object,
- *          hooks?: {beforeOpen?: Function}}} [opts]
+ * @param {{workspaceDir?: string, dataDir?: string, env?: object, bot?: boolean,
+ *          hooks?: {beforeOpen?: Function, afterComponentOpen?: Function}}} [opts]
  *   `hooks.beforeOpen({kind, path})` is awaited after the workspace root is
  *   opened and before any component is: a test seam for the resolve-then-swap
  *   race (it is also useful for a future instrumentation point).
+ *   `hooks.afterComponentOpen({kind, path, parts, index})` is awaited after one
+ *   folder component is opened AND its kernel path verified, before the next
+ *   component: the seam that moves a verified folder out of the workspace, so
+ *   the post-open kernel-path check of what is opened next is what refuses.
+ *   `bot: true` marks the call as a bot's: writes and deletes then obey the bot
+ *   path rule (refuseBotTarget), reads and listings are unchanged.
  */
-export function createProjectFileStore({ workspaceDir, dataDir, env = process.env, hooks = {} } = {}) {
+export function createProjectFileStore({ workspaceDir, dataDir, env = process.env, hooks = {}, bot = false } = {}) {
   const hook = hooks && typeof hooks.beforeOpen === "function" ? hooks.beforeOpen : null;
+  const afterComponentOpen = hooks && typeof hooks.afterComponentOpen === "function" ? hooks.afterComponentOpen : null;
+  const botCaller = bot === true;
 
   /** Open the root (and run the hook), returning the fd set the caller closes. */
   async function begin(kind, relPath) {
@@ -461,17 +515,19 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
         throw err;
       }
     }
-    return { root, fds };
+    return { root, fds, ctx: { kind, path: relPath } };
   }
 
   /**
    * The folder `parts` names, opened component by component from the root fd.
    * With `createDirs`, a missing folder is made (0750) through its parent's fd
-   * first; a name that is a link or a file then refuses in the open.
+   * first; a name that is a link or a file then refuses in the open. `ctx` is
+   * the call ({kind, path}) `hooks.afterComponentOpen` is told about.
    */
-  function openFolder(fds, root, parts, { createDirs = false } = {}) {
+  async function openFolder(ctx, fds, root, parts, { createDirs = false } = {}) {
     let fd = root.fd;
-    for (const name of parts) {
+    for (let i = 0; i < parts.length; i++) {
+      const name = parts[i];
       try {
         fd = openDirAt(fds, fd, name, root.real);
       } catch (err) {
@@ -489,6 +545,7 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
         }
         fd = openDirAt(fds, fd, name, root.real);
       }
+      if (afterComponentOpen) await afterComponentOpen({ ...ctx, parts, index: i });
     }
     return fd;
   }
@@ -506,9 +563,9 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       const parts = parseRelPath(path, { allowEmpty: true });
       const max = clampInt(limit, { min: 1, max: PROJECT_FILE_LIMITS.listEntries, fallback: 200 });
       const base = parts.join("/");
-      const { root, fds } = await begin("list", base);
+      const { root, fds, ctx } = await begin("list", base);
       try {
-        const dirFd = openFolder(fds, root, parts);
+        const dirFd = await openFolder(ctx, fds, root, parts);
         const entries = [];
         let truncated = false;
         // Breadth-first, so a limit cuts the deepest entries first and a
@@ -555,7 +612,9 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
 
     /**
      * Bytes of one file. UTF-8 text unless `encoding` is "base64"; a binary
-     * file is refused as utf8 rather than returned as mojibake.
+     * file is refused as utf8 rather than returned as mojibake. A hard-linked
+     * file is refused: the same bytes are another name's as well, and that name
+     * need not be inside this workspace.
      *
      * @returns {Promise<{path: string, size: number, offset: number, bytes: number,
      *   encoding: string, content: string, truncated: boolean}>}
@@ -567,9 +626,9 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       const want = clampInt(maxBytes, { min: 1, max: PROJECT_FILE_LIMITS.readBytes, fallback: PROJECT_FILE_LIMITS.readBytes });
       const name = parts[parts.length - 1];
       const rel = parts.join("/");
-      const { root, fds } = await begin("read", rel);
+      const { root, fds, ctx } = await begin("read", rel);
       try {
-        const parentFd = openFolder(fds, root, parts.slice(0, -1));
+        const parentFd = await openFolder(ctx, fds, root, parts.slice(0, -1));
         const st = statRegularFile(parentFd, name);
         if (!st) fail("not_found");
         const fd = openAt(fds, parentFd, name);
@@ -577,6 +636,7 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
         if (seen === null || !inside(seen, root.real)) fail("outside_root");
         const fst = fstatSync(fd);
         if (!fst.isFile()) fail("not_file", "That path is not a regular file.");
+        if (fst.nlink > 1) fail("invalid_path", "That path is hard-linked to another name, so it is never read.");
         const size = fst.size;
         const from = Math.min(start, size);
         const length = Math.min(want, PROJECT_FILE_LIMITS.readBytes, size - from);
@@ -618,6 +678,7 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
      */
     async write({ path, content, encoding, createDirs = true, ifMatchSha256 } = {}) {
       const parts = parseRelPath(path);
+      if (botCaller) refuseBotTarget(parts);
       const enc = normalizeEncoding(encoding);
       const expect = normalizeSha256(ifMatchSha256);
       if (typeof content !== "string") fail("invalid_argument", "content must be text.");
@@ -634,11 +695,11 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
       }
       const name = parts[parts.length - 1];
       const rel = parts.join("/");
-      const { root, fds } = await begin("write", rel);
+      const { root, fds, ctx } = await begin("write", rel);
       let tmpName = null;
       let parentFd = null;
       try {
-        parentFd = openFolder(fds, root, parts.slice(0, -1), { createDirs: createDirs !== false });
+        parentFd = await openFolder(ctx, fds, root, parts.slice(0, -1), { createDirs: createDirs !== false });
         const existing = statRegularFile(parentFd, name);
         if (existing && existing.nlink > 1) {
           fail("invalid_path", "That path is hard-linked to another name, so it is never overwritten.");
@@ -714,12 +775,13 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
      */
     async remove({ path, ifMatchSha256 } = {}) {
       const parts = parseRelPath(path);
+      if (botCaller) refuseBotTarget(parts);
       const expect = normalizeSha256(ifMatchSha256);
       const name = parts[parts.length - 1];
       const rel = parts.join("/");
-      const { root, fds } = await begin("delete", rel);
+      const { root, fds, ctx } = await begin("delete", rel);
       try {
-        const parentFd = openFolder(fds, root, parts.slice(0, -1));
+        const parentFd = await openFolder(ctx, fds, root, parts.slice(0, -1));
         const st = statEntry(parentFd, name);
         if (!st) fail("not_found");
         if (st.isSymbolicLink()) fail("invalid_path", "That path is a link, which the file tools do not follow.");
@@ -732,6 +794,10 @@ export function createProjectFileStore({ workspaceDir, dataDir, env = process.en
             fail("unavailable", "That folder could not be read.");
           }
           if (rest.length > 0) fail("not_empty");
+          // The parent must still be the folder that was checked, right before the rmdir — the
+          // same re-check the file branch makes before its unlink.
+          const seen = kernelPath(parentFd);
+          if (seen === null || !inside(seen, root.real)) fail("outside_root");
           try {
             rmdirSync(fdPath(parentFd, name));
           } catch {

@@ -261,8 +261,9 @@ export function isOperatorVoice(actor) {
   );
 }
 
-/** Everything below a bot: any bot actor the bot rules bind (the voice bot is not one). */
-const boundByBotRules = (actor) => isBot(actor) && !isOperatorVoice(actor);
+/** Everything below a bot: any bot actor the bot rules bind (the voice bot is not one). Exported so a
+ *  rule outside this module (the workspace file tools' bot path rule) binds exactly the same actors. */
+export const boundByBotRules = (actor) => isBot(actor) && !isOperatorVoice(actor);
 
 const deny = (code) => {
   const refusal = new ShareRefusal(code);

@@ -140,6 +140,10 @@ export const CONFIRM_TTL_MS = 60_000;
 const DESTRUCTIVE_EXACT = new Set([
   "crow_delete_post", "crow_delete_memory", "crow_delete_setlist",
   "crow_unpublish_post", "crow_remove_backend", "crow_dismiss_all_notifications",
+  // The workspace file tools, for parity with crow_delete_file (which the regex below catches):
+  // a write replaces a file's bytes and a delete removes one or an empty folder, and the regex
+  // never reaches them — "crow_project_file_delete" starts with "crow_project", not "crow_delete".
+  "crow_project_file_write", "crow_project_file_delete",
 ]);
 const DESTRUCTIVE_REGEX = /^crow_(delete|remove|destroy|unpublish)_/;
 // English words end at \b; Spanish ones at a space, punctuation or the end (\b fails after "í" in JS).

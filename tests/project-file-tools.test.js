@@ -4,11 +4,18 @@
  *
  * What this covers, in the order the design lists it: path escapes (.., absolute, empty segments,
  * backslash, NUL, internal .git and bots folders), symlinks (a link file, a linked parent folder, and
- * the resolve-then-swap race), hard links, non-regular files, the read/write/list caps, the
- * per-project quota, if_match_sha256, atomic writes (nothing half-written, no temp left behind),
- * the actor matrix (owner, unidentified caller, bot with no share, bot with a read share, bot with a
- * write share and write_files, bot with a write share but no write_files, peer instance), the audit
- * rows, an archived project, and a workspace folder outside the instance data dir.
+ * the resolve-then-swap race), hard links (a write and, since N6, a read), non-regular files, the
+ * read/write/list caps, the per-project quota, if_match_sha256, atomic writes (nothing half-written,
+ * no temp left behind), the actor matrix (owner, unidentified caller, bot with no share, bot with a
+ * read share, bot with a write share and write_files, bot with a write share but no write_files, peer
+ * instance), the audit rows, an archived project, and a workspace folder outside `<data>/projects`
+ * (I2: a folder elsewhere in the data dir, `history/` and `datasets/` included, is no workspace).
+ *
+ * Review round fixes carry their ids: B1 (the peer that reaches the file tools through /router/mcp,
+ * where it exists only as a forwarded `_meta`; kind "peer" and the remote-bot form), I1 (a bot may
+ * not write or delete a dot-entry or a top-level CLAUDE.md/AGENTS.md/GEMINI.md), I3 (parseRelPath
+ * directly, and a hook that moves a folder out BETWEEN component opens so the post-open kernel-path
+ * check is what refuses), N2 (the empty-folder delete re-checks its parent), N6 (hard-linked read).
  *
  * Scratch CROW_HOME + data dir with a real crow.db from scripts/init-db.js: nothing here touches
  * ~/.crow. The files are real files under a real workspace folder.
@@ -257,11 +264,33 @@ test("a workspace folder outside the instance data dir is refused", async () => 
   await db.execute({ sql: "UPDATE project_spaces SET workspace_dir = ? WHERE id = ?", args: [elsewhere, Number(id)] });
 
   const c = await owner();
-  await refused(await call(c, "crow_project_file_list", { project_id: Number(id) }), /outside this instance's data folder/);
+  await refused(await call(c, "crow_project_file_list", { project_id: Number(id) }), /outside this instance's projects folder/);
   await refused(await call(c, "crow_project_file_read", { project_id: Number(id), path: "x.txt" }), /outside this instance/);
   await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "y.txt", content: "y" }), /outside this instance/);
   assert.equal(readFileSync(join(elsewhere, "x.txt"), "utf8"), "x\n");
   assert.deepEqual(readdirSync(elsewhere), ["x.txt"]);
+});
+
+test("I2: a workspace row inside the data dir but outside <data>/projects (history/, datasets/) is refused", async () => {
+  const c = await owner();
+  for (const [name, sub] of [["Files History", ["history", "snapshots-workspace"]], ["Files Datasets", ["datasets", "ds-workspace"]]]) {
+    const { id } = await createProjectSpace(db, { name });
+    const notAWorkspace = join(DATA, ...sub);
+    mkdirSync(notAWorkspace, { recursive: true });
+    writeFileSync(join(notAWorkspace, "kept.txt"), "kept\n");
+    await db.execute({ sql: "UPDATE project_spaces SET workspace_dir = ? WHERE id = ?", args: [notAWorkspace, Number(id)] });
+
+    await refused(await call(c, "crow_project_file_list", { project_id: Number(id) }), /outside this instance's projects folder/);
+    await refused(await call(c, "crow_project_file_read", { project_id: Number(id), path: "kept.txt" }), /outside this instance's projects folder/);
+    await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "pwn.txt", content: "pwn" }), /outside this instance's projects folder/);
+    await refused(await call(c, "crow_project_file_delete", { project_id: Number(id), path: "kept.txt" }), /outside this instance's projects folder/);
+    assert.deepEqual(readdirSync(notAWorkspace), ["kept.txt"], `${name}: nothing was written or deleted`);
+    assert.equal(readFileSync(join(notAWorkspace, "kept.txt"), "utf8"), "kept\n");
+  }
+  // The projects folder itself is not a workspace either (strictly inside, not equal).
+  const { id } = await createProjectSpace(db, { name: "Files Projects Root" });
+  await db.execute({ sql: "UPDATE project_spaces SET workspace_dir = ? WHERE id = ?", args: [join(DATA, "projects"), Number(id)] });
+  await refused(await call(c, "crow_project_file_list", { project_id: Number(id) }), /outside this instance's projects folder/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -340,6 +369,9 @@ test("a hard-linked file is never overwritten; non-regular files are refused", a
   await refused(await call(c, "crow_project_file_write", { project_id: A.id, path: "kinds/one.txt", content: "overwrite" }), /hard-linked/);
   assert.equal(readFileSync(ws(A, "kinds", "one.txt"), "utf8"), "linked content\n");
   assert.equal(readFileSync(ws(A, "kinds", "two.txt"), "utf8"), "linked content\n");
+  // N6: a read is refused too — the same bytes are another name's, and that name need not be here.
+  await refused(await call(c, "crow_project_file_read", { project_id: A.id, path: "kinds/one.txt" }), /hard-linked/);
+  await refused(await call(c, "crow_project_file_read", { project_id: A.id, path: "kinds/two.txt" }), /hard-linked/);
 
   let hasFifo = true;
   try {
@@ -568,6 +600,77 @@ test("a peer instance is refused outright", async () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// B1: the peer that arrives only as `_meta` (through the router's in-process client)
+// ---------------------------------------------------------------------------------------------
+
+test("B1: a peer is refused the file tools through /router/mcp, where no authInfo ever arrives", async () => {
+  const { createRouterServer } = await import("../servers/gateway/router.js");
+  const router = createRouterServer({ actor: OWNER });
+  try {
+    const tool = router._registeredTools.crow_projects;
+    assert.ok(tool && typeof tool.handler === "function", "the router registers crow_projects");
+    const viaRouter = (action, params, extra) => tool.handler({ action, params }, extra);
+
+    // (a) the shape the peer MOUNT makes: the bearer token in authInfo. The router forwards it as
+    // _meta {kind:"peer"} and its in-process client (InMemoryTransport) carries no authInfo at all,
+    // which is exactly the hole: the project server used to read it as an unidentified local caller.
+    const write = await viaRouter("crow_project_file_write", { project_id: A.id, path: "peer-router.txt", content: "pwn" },
+      { authInfo: { token: "peer-instance" } });
+    assert.equal(write.isError, true, text(write));
+    assert.match(text(write), /peer instance may not use them/);
+    const read = await viaRouter("crow_project_file_read", { project_id: A.id, path: "limits/big.txt" },
+      { authInfo: { token: "peer-instance" } });
+    assert.equal(read.isError, true, text(read));
+    assert.match(text(read), /peer instance may not use them/);
+
+    // (2) a peer marker that arrived as _meta is forwarded as-is and refused just the same.
+    const forwarded = await viaRouter("crow_project_file_write", { project_id: A.id, path: "peer-router.txt", content: "pwn" },
+      { _meta: { "crow/actor": { kind: "peer", instance: "peer-1", from: "delta" } } });
+    assert.equal(forwarded.isError, true, text(forwarded));
+    assert.match(text(forwarded), /peer instance may not use them/);
+
+    assert.ok(!readdirSync(A.workspaceDir).includes("peer-router.txt"), "nothing was written for the peer");
+  } finally {
+    router.close();
+  }
+});
+
+test("B1: a handler call carrying a peer marker in _meta is refused — kind peer and the remote-bot form", async () => {
+  const server = createProjectServer(DB_FILE, { actor: OWNER });
+  try {
+    // (b) the ordinary peer form and (c) the remote-bot form a peer's gateway signs: kind "bot" WITH
+    // an instance. A local bot's _meta carries no instance (forwardActorMeta strips it), so neither
+    // shape can come from here.
+    for (const extra of [
+      { _meta: { "crow/actor": { kind: "peer" } } },
+      { _meta: { "crow/actor": { kind: "peer", instance: "peer-1" } } },
+      { _meta: { "crow/actor": { kind: "bot", id: "some-bot@peer-1", instance: "peer-1" } } },
+    ]) {
+      for (const [name, args] of [
+        ["crow_project_file_read", { project_id: A.id, path: "limits/big.txt" }],
+        ["crow_project_file_write", { project_id: A.id, path: "peer-direct.txt", content: "pwn" }],
+        ["crow_project_file_delete", { project_id: A.id, path: "limits/big.txt" }],
+      ]) {
+        const r = await server._registeredTools[name].handler(args, extra);
+        assert.equal(r.isError, true, `${name} ${JSON.stringify(extra)}: ${text(r)}`);
+        assert.match(text(r), /peer instance may not use them/);
+      }
+    }
+    assert.ok(!readdirSync(A.workspaceDir).includes("peer-direct.txt"));
+    assert.ok(lstatSync(ws(A, "limits", "big.txt")).isFile(), "the peer's delete never ran");
+
+    // A LOCAL bot's _meta is not a peer: the share gate answers, with its own message. (B is not
+    // BOT_NO's home project and no share names it.)
+    const localBot = await server._registeredTools.crow_project_file_read.handler(
+      { project_id: B.id, path: "readable.txt" }, { _meta: { "crow/actor": { kind: "bot", id: BOT_NO } } });
+    assert.equal(localBot.isError, true, text(localBot));
+    assert.match(text(localBot), /No share grants this bot access/);
+  } finally {
+    server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
 // Project state
 // ---------------------------------------------------------------------------------------------
 
@@ -591,4 +694,125 @@ test("a project with no workspace folder yet says so instead of creating one", a
   await refused(await call(c, "crow_project_file_list", { project_id: Number(id) }), /workspace folder/);
   await refused(await call(c, "crow_project_file_write", { project_id: Number(id), path: "a.txt", content: "a" }));
   assert.throws(() => lstatSync(workspaceDir), "the tools never create the workspace folder");
+});
+
+// ---------------------------------------------------------------------------------------------
+// I1: a bot's writes and deletes cannot plant dot-entries or agent instruction files
+// ---------------------------------------------------------------------------------------------
+
+test("I1: a bot may not write or delete a dot-entry (any depth) or a top-level CLAUDE.md/AGENTS.md/GEMINI.md", async () => {
+  const bot = await clientFor({ kind: "bot", id: BOT_RW }); // read_write on B, write_files included
+  const BOT_PATH_RE = /dot-file or dot-folder/;
+  const dotPaths = [".mcp.json", ".claude/settings.json", ".pi/agent.md", ".envrc", ".vscode/settings.json",
+    "notes/.hidden.md", "docs/.claude/x.md", "a/b/.env.example"];
+  for (const path of dotPaths) {
+    const w = await refused(await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "pwn" }), BOT_PATH_RE);
+    assert.match(w, /top-level CLAUDE\.md, AGENTS\.md or GEMINI\.md/, "one fixed refusal for every shape");
+    await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path }), BOT_PATH_RE);
+  }
+  for (const path of ["CLAUDE.md", "AGENTS.md", "agents.md", "Gemini.MD"]) {
+    await refused(await call(bot, "crow_project_file_write", { project_id: B.id, path, content: "pwn" }), BOT_PATH_RE);
+    await refused(await call(bot, "crow_project_file_delete", { project_id: B.id, path }), BOT_PATH_RE);
+  }
+  assert.deepEqual(readdirSync(B.workspaceDir).filter((n) => n.startsWith(".") || /^(claude|agents|gemini)\.md$/i.test(n)), [],
+    "nothing the bot refused was created (and no delete leaked whether it existed)");
+
+  // The bot keeps its ordinary writes and deletes.
+  assert.ok(!(await call(bot, "crow_project_file_write", { project_id: B.id, path: "ordinary.md", content: "fine\n" })).isError);
+  assert.ok(!(await call(bot, "crow_project_file_delete", { project_id: B.id, path: "ordinary.md" })).isError);
+
+  // The owner is unchanged: the same paths, allowed.
+  const own = await owner();
+  const dot = await call(own, "crow_project_file_write", { project_id: B.id, path: ".mcp.json", content: "{}\n" });
+  assert.ok(!dot.isError, text(dot));
+  assert.equal(readFileSync(ws(B, ".mcp.json"), "utf8"), "{}\n");
+  const agent = await call(own, "crow_project_file_write", { project_id: B.id, path: "CLAUDE.md", content: "# rules\n" });
+  assert.ok(!agent.isError, text(agent));
+  assert.equal(readFileSync(ws(B, "CLAUDE.md"), "utf8"), "# rules\n");
+  assert.ok(!(await call(own, "crow_project_file_delete", { project_id: B.id, path: ".mcp.json" })).isError);
+  assert.throws(() => lstatSync(ws(B, ".mcp.json")));
+});
+
+// ---------------------------------------------------------------------------------------------
+// I3: the path rules and the between-opens race, exercised directly
+// ---------------------------------------------------------------------------------------------
+
+test("I3: parseRelPath refuses each shape on its own", async () => {
+  const { parseRelPath, ProjectFileError } = await import("../servers/shared/project-files.js");
+  const invalid = (value) => assert.throws(
+    () => parseRelPath(value),
+    (err) => err instanceof ProjectFileError && err.code === "invalid_path",
+    `${JSON.stringify(value)} must be refused`,
+  );
+  for (const value of [
+    "..", "../x", "x/../y", ".", "./x", "x/./y",       // no . or .. component, no relative prefix
+    "/etc/passwd", "/",                                    // not absolute
+    "a//b", "a/", "",                                      // no empty component
+    "x\u0000y",                                            // NUL
+    "x\\y", "x\\",                                        // no backslash
+    "a\u0001b", "a\u007fb", "a\tb",                      // no control character
+    ".GIT/config", "Notes/.Git/HEAD",                      // .git* at any depth
+    "Bots/x", "bots/x",                                    // bots at the top level
+    "x".repeat(256),                                       // component cap
+  ]) invalid(value);
+  // Not text at all.
+  invalid(42);
+  invalid(null);
+  // A valid path, and the boundaries that are NOT parseRelPath's business.
+  assert.deepEqual(parseRelPath("a/b/c.txt"), ["a", "b", "c.txt"]);
+  assert.deepEqual(parseRelPath("docs/bots/x.txt"), ["docs", "bots", "x.txt"], "bots is internal only at the top");
+  assert.deepEqual(parseRelPath(".env"), [".env"], "a dot-entry is allowed here; the bot rule is a separate check");
+  assert.deepEqual(parseRelPath("notes/bots.txt"), ["notes", "bots.txt"], "the bots rule matches the name exactly");
+  // allowEmpty is what a listing uses for "the workspace root".
+  assert.deepEqual(parseRelPath("", { allowEmpty: true }), []);
+  assert.deepEqual(parseRelPath(undefined, { allowEmpty: true }), []);
+});
+
+test("I3: a folder moved out of the workspace BETWEEN component opens is refused by the post-open kernelPath check", async () => {
+  // The hook fires after the parent folder component was opened AND its kernel path verified, so the
+  // open of the target itself still succeeds (it is fd-relative) and only the re-read of the opened
+  // fd's kernel path can see that the folder is no longer in the workspace.
+  //
+  // MUTATION CHECK (for the orchestrator; not run here): in servers/shared/project-files.js read(),
+  // delete the two lines
+  //     const seen = kernelPath(fd);
+  //     if (seen === null || !inside(seen, root.real)) fail("outside_root");
+  // and the FIRST case below fails — the read returns the bytes. Deleting write()'s pre-rename
+  // parent check fails case 2 (the bytes land in the moved folder), and deleting remove()'s
+  // pre-rmdir parent check (N2) fails case 3 (the rmdir empties the moved folder).
+  const moved = (from, to) => {
+    let done = false;
+    return { fired: () => done, hook: () => { if (done) return; done = true; renameSync(from, to); } };
+  };
+
+  // (1) read: the post-open check of the opened FILE is what refuses.
+  mkdirSync(ws(A, "between-read"), { recursive: true });
+  writeFileSync(ws(A, "between-read", "notes.txt"), "between content\n");
+  const readMove = moved(ws(A, "between-read"), join(dir, "between-read-moved"));
+  const reader = await clientFor(OWNER, { afterFileComponentOpen: readMove.hook });
+  const read = await call(reader, "crow_project_file_read", { project_id: A.id, path: "between-read/notes.txt" });
+  assert.equal(read.isError, true, text(read));
+  assert.match(text(read), /outside the project's workspace folder/);
+  assert.ok(!text(read).includes("between content"), "no byte was returned");
+  assert.ok(readMove.fired(), "the hook really moved the folder out of the workspace");
+  assert.equal(readFileSync(join(dir, "between-read-moved", "notes.txt"), "utf8"), "between content\n", "the file itself is untouched");
+
+  // (2) write: the parent's re-check before the rename refuses, and no temp file is left behind.
+  mkdirSync(ws(A, "between-write"), { recursive: true });
+  const writeMove = moved(ws(A, "between-write"), join(dir, "between-write-moved"));
+  const writer = await clientFor(OWNER, { afterFileComponentOpen: writeMove.hook });
+  const write = await call(writer, "crow_project_file_write", { project_id: A.id, path: "between-write/pwn.txt", content: "pwn" });
+  assert.equal(write.isError, true, text(write));
+  assert.match(text(write), /outside the project's workspace folder/);
+  assert.deepEqual(readdirSync(join(dir, "between-write-moved")), [], "nothing was written, and no temp file survived");
+
+  // (3) delete of an EMPTY folder: N2's parent re-check refuses before the rmdir. Without it the
+  // rmdir would go through the fd and empty the folder in its new place.
+  mkdirSync(ws(A, "between-delete", "empty-sub"), { recursive: true });
+  const deleteMove = moved(ws(A, "between-delete"), join(dir, "between-delete-moved"));
+  const deleter = await clientFor(OWNER, { afterFileComponentOpen: deleteMove.hook });
+  const del = await call(deleter, "crow_project_file_delete", { project_id: A.id, path: "between-delete/empty-sub" });
+  assert.equal(del.isError, true, text(del));
+  assert.match(text(del), /outside the project's workspace folder/);
+  assert.ok(lstatSync(join(dir, "between-delete-moved", "empty-sub")).isDirectory(), "the folder was not removed outside the workspace");
 });
