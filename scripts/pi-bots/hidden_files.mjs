@@ -244,6 +244,28 @@ export const GCLOUD_DIR_REL = ".config/gcloud";
  *  reachable. Never used for a folder that does not exist. */
 export const GCLOUD_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hide ~/.config/gcloud.";
 
+/**
+ * The refusal when the folder exists and the launch's own mask list does not
+ * report it hidden, or null when there is nothing to refuse (a host with no
+ * gcloud CLI starts exactly as before). Hidden-or-refuse, decided in ONE place
+ * so the rule can be exercised without a bwrap host: `gcloudDir` is the folder
+ * the spawn found, `masked` the dirs wrapPiSpawn says it really masked. A
+ * launch that reports nothing at all is not trusted (masked undefined refuses).
+ */
+export function gcloudNotHiddenRefusal({ gcloudDir, masked } = {}) {
+  if (!gcloudDir) return null;
+  return (masked || []).includes(gcloudDir) ? null : GCLOUD_NOT_HIDDEN_REFUSAL;
+}
+
+/**
+ * The refusal when ~/.config/gcloud is itself a symbolic link. The mask follows
+ * the link and hides its target, but a bot can re-point the link (~/.config is
+ * writable inside the sandbox), so the NEXT spawn would resolve and mask a decoy
+ * and leave the real credential folder on the host unmasked. A link is refused
+ * outright instead: one fixed sentence, the same shape as the others.
+ */
+export const GCLOUD_LINK_REFUSAL = "A bot could not start: ~/.config/gcloud is a symbolic link, so Crow can't hide the credentials it leads to. Replace the link with the real folder.";
+
 function bundleIds(root, readdir) {
   try { return readdir(join(root, "bundles")); } catch { return []; }
 }

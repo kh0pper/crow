@@ -204,7 +204,7 @@ sharing it — so it is decided in one place (`local_paths.py`) and nowhere else
   unique, so repeated exports create new files), a missing parent folder is
   refused, a non-regular file (folder, device, pipe) is refused for reading, a
   local image's first bytes must really be PNG/JPEG/GIF/WebP, and the sign-in
-  folder, `~/.ssh` and `~/.gnupg` are refused always;
+  folder, `~/.ssh`, `~/.gnupg` and `~/.config/gcloud` are refused always;
 - downloads and exports are **created**, never overwritten: a target that
   already exists, or is a symlink, is refused (give a new name); files are created
   at mode 0600. A default name is built from the Google id with every character
@@ -219,7 +219,10 @@ sharing it — so it is decided in one place (`local_paths.py`) and nowhere else
 anything inside the **Google sign-in folder** (the folders holding
 `GOOGLE_TOKEN_FILE` and `GOOGLE_CREDENTIALS_FILE`, and any
 `~/.config/google-workspace-mcp*` sibling), the token and credentials files
-themselves, `~/.ssh` and `~/.gnupg`. The comparison is on the real path, so a
+themselves, `~/.ssh`, `~/.gnupg` and `~/.config/gcloud` (the Google Cloud CLI's
+credentials: `application_default_credentials.json`, `credentials.db`,
+`access_tokens.db`, `legacy_credentials/`). The comparison is on the real path,
+so a
 symlink pointing into them is refused too, and if those folders cannot be
 resolved nothing local is allowed at all (it fails closed). A refused call makes
 no Google request: the path is decided before any client is built.

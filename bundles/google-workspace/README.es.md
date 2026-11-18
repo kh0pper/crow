@@ -219,8 +219,8 @@ ningún otro.
   es único, así que exportar dos veces crea dos archivos), una carpeta contenedora
   que falta se rechaza, un archivo que no es regular (carpeta, dispositivo,
   tubería) se rechaza al leer, los primeros bytes de una imagen local tienen que
-  ser de verdad PNG/JPEG/GIF/WebP, y la carpeta de inicio de sesión, `~/.ssh` y
-  `~/.gnupg` se rechazan siempre;
+  ser de verdad PNG/JPEG/GIF/WebP, y la carpeta de inicio de sesión, `~/.ssh`,
+  `~/.gnupg` y `~/.config/gcloud` se rechazan siempre;
 - las descargas y exportaciones se **crean**, nunca se sobrescriben: un destino
   que ya existe, o que es un enlace simbólico, se rechaza (da otro nombre); los
   archivos se crean con modo 0600. El nombre por defecto se arma con el id de
@@ -236,7 +236,9 @@ GIF o WebP (se revisan sus primeros bytes), no un archivo con nombre de imagen.
 ella—: cualquier cosa dentro de la **carpeta de inicio de sesión de Google** (las
 carpetas que contienen `GOOGLE_TOKEN_FILE` y `GOOGLE_CREDENTIALS_FILE`, y
 cualquier hermana `~/.config/google-workspace-mcp*`), el propio token y las
-credenciales, `~/.ssh` y `~/.gnupg`. La comparación es sobre la ruta real, así que
+credenciales, `~/.ssh`, `~/.gnupg` y `~/.config/gcloud` (las credenciales del CLI
+de Google Cloud: `application_default_credentials.json`, `credentials.db`,
+`access_tokens.db`, `legacy_credentials/`). La comparación es sobre la ruta real, así que
 un enlace simbólico que apunte ahí también se rechaza, y si esas carpetas no se
 pueden resolver no se permite nada local (falla cerrado). Una llamada rechazada
 no hace ninguna petición a Google: la ruta se decide antes de crear cualquier

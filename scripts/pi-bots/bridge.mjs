@@ -53,7 +53,7 @@ import { gitPreSpawn, gitPostLaunch, countEnabledPiBots } from "./bot_git_spawn.
 import { BOT_GIT_DIRNAME, checkKeyDir, gitAllowedForInstance, isSafeKeyPath, isValidGitBotId } from "../../servers/shared/bot-git/paths.js";
 import { botGitMeta, writeSpawnFiles } from "../../servers/shared/bot-git/store.js";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
-  GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL } from "./hidden_files.mjs";
+  GCLOUD_DIR_REL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal } from "./hidden_files.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
@@ -1074,11 +1074,17 @@ export class PiRpc {
       // reads any of it. Hidden WHOLE (a dir, tmpfs) like ~/.ssh, but NEVER
       // created: a host without the gcloud CLI is left exactly as it is, and
       // the folder is hidden — or the spawn refused below — only when it really
-      // exists. Resolved when present, so the credentials are hidden at their
-      // real path even when ~/.config/gcloud is a link.
+      // exists. A folder that is itself a SYMLINK refuses the spawn instead: the
+      // mask would follow the link and hide its target, but a bot can re-point
+      // the link (its parent ~/.config is writable inside the sandbox), so the
+      // next spawn would mask a decoy and leave the real folder readable.
       let gcloudDir = null;
       if (!contain) {
-        const at = realRoot(join(HOME, GCLOUD_DIR_REL)) || join(HOME, GCLOUD_DIR_REL);
+        const named = join(HOME, GCLOUD_DIR_REL);
+        let gcloudIsLink = false;
+        try { gcloudIsLink = lstatSync(named).isSymbolicLink(); } catch { /* no gcloud CLI on this host */ }
+        if (gcloudIsLink) throw new Error(GCLOUD_LINK_REFUSAL);
+        const at = realRoot(named) || named;
         try { if (statSync(at).isDirectory()) gcloudDir = at; } catch { /* no gcloud CLI on this host */ }
       }
       // Folders hidden WHOLE (a tmpfs), so a candidate inside one is already
@@ -1198,10 +1204,13 @@ export class PiRpc {
         throw new Error(SSH_NOT_HIDDEN_REFUSAL);
       }
       // Hidden-or-refuse, only for a folder that EXISTS: a bot never runs with
-      // the operator's gcloud credentials reachable inside it.
-      if (hiddenCandidates.gcloudDir && !launch.masked.includes(hiddenCandidates.gcloudDir)) {
+      // the operator's gcloud credentials reachable inside it. The rule itself
+      // is gcloudNotHiddenRefusal (one place, unit-tested), so this only throws
+      // what it answers.
+      const gcloudRefusal = gcloudNotHiddenRefusal({ gcloudDir: hiddenCandidates.gcloudDir, masked: launch.masked });
+      if (gcloudRefusal) {
         this._runContainCleanup();
-        throw new Error(GCLOUD_NOT_HIDDEN_REFUSAL);
+        throw new Error(gcloudRefusal);
       }
     }
     if (!isContainTier(launch.tier) && launch.wrapper === "bwrap" && others.some((d) => !launch.masked.includes(d))) {

@@ -10,7 +10,7 @@ import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
-  GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL,
+  GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal,
   BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName } from "../scripts/pi-bots/hidden_files.mjs";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
@@ -472,15 +472,28 @@ test("unmaskableRefusal: one plain sentence per cause (hard link, outside, hidde
   assert.ok(!bridge.includes("Crow could not hide ~/.ssh."), "and holds no copy of it");
 });
 
-test("GCLOUD_NOT_HIDDEN_REFUSAL: one sentence, thrown by the bridge, hidden-or-refuse only for a folder that exists", () => {
+test("GCLOUD_NOT_HIDDEN_REFUSAL: the shared sentence, decided by gcloudNotHiddenRefusal, only for a folder that exists", () => {
   assert.equal(GCLOUD_DIR_REL, ".config/gcloud", "the Google Cloud CLI's credential folder, below the home");
   assert.equal(GCLOUD_NOT_HIDDEN_REFUSAL, "A bot could not start: Crow could not hide ~/.config/gcloud.");
+  // BEHAVIOUR, not a regex over the bridge: the refusal rule is one function, so
+  // it is exercised directly. A host with no gcloud CLI must start exactly as
+  // before; a folder the launch reports masked is fine; a folder that was found
+  // and is not in the mask list refuses; a launch that reports no mask list at
+  // all is not trusted.
+  assert.equal(gcloudNotHiddenRefusal({ gcloudDir: null, masked: [] }), null, "no gcloud CLI on this host: nothing to refuse");
+  assert.equal(gcloudNotHiddenRefusal(), null, "no folder at all is never a refusal");
+  assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: ["/h/.config/gcloud", "/x"] }), null, "masked: the spawn runs");
+  assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: ["/x"] }), GCLOUD_NOT_HIDDEN_REFUSAL, "found but not masked: refused");
+  assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: undefined }), GCLOUD_NOT_HIDDEN_REFUSAL, "a launch that reports nothing is not trusted");
+  // Wiring only, and the one thing the helper cannot prove: the bridge asks the
+  // shared rule with THIS launch's own mask list (forcing bwrap to fail a single
+  // mask needs a real bwrap host, so the end-to-end refusal stays the
+  // orchestrator's to run; the two spawn tests below cover the other half — the
+  // folder hidden when it exists, and never created when it does not).
   const bridge = readFileSync(join(import.meta.dirname, "..", "scripts", "pi-bots", "bridge.mjs"), "utf8");
-  assert.ok(bridge.includes("new Error(GCLOUD_NOT_HIDDEN_REFUSAL)"), "the bridge throws the shared sentence");
-  assert.ok(!bridge.includes("Crow could not hide ~/.config/gcloud."), "and holds no copy of it");
-  // The refusal is gated on a folder that really exists (a host with no gcloud
-  // CLI must start bots exactly as before) and is never created by Crow.
-  assert.match(bridge, /if \(hiddenCandidates\.gcloudDir && !launch\.masked\.includes\(hiddenCandidates\.gcloudDir\)\)/, "hidden-or-refuse only when the folder was found");
+  assert.ok(bridge.includes("gcloudNotHiddenRefusal({ gcloudDir: hiddenCandidates.gcloudDir, masked: launch.masked })"),
+    "the bridge asks the shared rule with its launch's mask list");
+  assert.ok(!bridge.includes("Crow could not hide ~/.config/gcloud."), "and holds no copy of the sentence");
   assert.ok(!/mkdirSync\([^)]*gcloud/.test(bridge), "Crow never creates ~/.config/gcloud");
 });
 
@@ -657,6 +670,25 @@ test("~/.config/gcloud is never created when it is missing, and the spawn still 
     assert.equal(report.list.gcloud, "ENOENT", "nothing is there inside either");
     assert.equal(existsSync(gcloudDir), false, "Crow did not create it (no gcloud CLI on this host)");
   } finally { rmSync(gcloudDir, { recursive: true, force: true }); }
+});
+
+test("~/.config/gcloud that is a SYMLINK refuses the spawn: the mask follows the link, and a bot could re-point it", { skip: noSandbox }, async () => {
+  assert.equal(GCLOUD_LINK_REFUSAL, "A bot could not start: ~/.config/gcloud is a symbolic link, so Crow can't hide the credentials it leads to. Replace the link with the real folder.");
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  const realDir = join(USER_HOME, "real-gcloud");
+  rmSync(gcloudDir, { recursive: true, force: true });
+  rmSync(realDir, { recursive: true, force: true });
+  mkdirSync(join(USER_HOME, ".config"), { recursive: true });
+  mkdirSync(realDir, { recursive: true });
+  const adc = join(realDir, "application_default_credentials.json");
+  writeFileSync(adc, '{"fake":"application-default-credentials"}\n', { mode: 0o600 });
+  symlinkSync(realDir, gcloudDir);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, GCLOUD_LINK_REFUSAL, "one fixed sentence, so the fix is obvious");
+    assert.ok(!e.message.includes("application-default-credentials"), "no content in the message");
+  } finally { rmSync(gcloudDir, { force: true }); rmSync(realDir, { recursive: true, force: true }); }
 });
 
 test("the instance env/ and android-keystore/ folders list empty inside", { skip: noSandbox }, async () => {

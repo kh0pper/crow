@@ -107,7 +107,7 @@ de Extensiones.
 | `GWS_OAUTH_SCOPES` | Reduce lo que el servidor le pide a Google (p. ej. `gmail.compose,drive.file`); sin definir pide el conjunto completo. Cambiarlo exige volver a autorizar. |
 | `GWS_OUTBOUND_GUARD` | Apagado salvo que se defina. Encendido: toda acción que haga que Google contacte a alguien se rechaza si su dirección no está en `GWS_OUTBOUND_ALLOWLIST` (ver abajo). |
 | `GWS_OUTBOUND_ALLOWLIST` | Direcciones y dominios a los que se puede escribir, p. ej. `tu@example.com,example.org`; solo se lee mientras el tope está encendido, y vacía entonces no envía nada. |
-| `GWS_FILES_DIR` | La única carpeta que pueden usar las herramientas que leen o escriben un archivo local; vacía acepta cualquier ruta salvo la carpeta de inicio de sesión, `~/.ssh` y `~/.gnupg` — salvo que el tope esté encendido, que entonces rechaza todo archivo local. |
+| `GWS_FILES_DIR` | La única carpeta que pueden usar las herramientas que leen o escriben un archivo local; vacía acepta cualquier ruta salvo la carpeta de inicio de sesión, `~/.ssh`, `~/.gnupg` y `~/.config/gcloud` — salvo que el tope esté encendido, que entonces rechaza todo archivo local. |
 
 ## Dentro del muro del complemento
 
