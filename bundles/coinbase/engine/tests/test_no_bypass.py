@@ -8,14 +8,17 @@ implement them).  Every other module in the package has to go through the
 gateway, so a stray `ex.place_limit(...)` in an api, reconcile or runner module
 is a bypass and this scan reports it.
 
-The scan is static: `scan_source(filename, source)` parses the text with `ast`
-and returns finding strings, and it imports nothing from the package (it has to
-run on source that may not import).  Rules are chosen by the file's basename:
+The scan is static: `scan_source(relative_path, source)` parses the text with
+`ast` and returns finding strings, and it imports nothing from the package (it
+has to run on source that may not import).  Rules are keyed by the file's path
+relative to `src/crow_coinbase` (`gateway.py`, `strategies/gateway.py`), never
+by its basename: a submodule that happens to be called `gateway.py` is not the
+gateway, and one called `exchange.py` is not the adapter.
 
 * `WRITE_NAMES` as an `ast.Attribute` (`ex.cancel(...)`) or as a bare
-  `ast.Name` (`place_limit(...)`) is a finding outside `gateway.py`/
-  `exchange.py`; in `watchdog.py` only `cancel` is allowed, because the
-  watchdog takes orders off the book and never puts them on.
+  `ast.Name` (`place_limit(...)`) is a finding unless the whole relative path is
+  `gateway.py`/`exchange.py`; in `watchdog.py` only `cancel` is allowed,
+  because the watchdog takes orders off the book and never puts them on.
 * A string constant (`getattr(ex, "place_limit")`, `{"place_limit": ...}`) is a
   finding on those same terms for every write name but `cancel`.  Outside the
   two write files, `place_limit`, `deposit`, `limit_order_gtc` and
@@ -29,6 +32,19 @@ run on source that may not import).  Rules are chosen by the file's basename:
   keyword value, a tuple member, a `Literal[...]` element or a dict value is
   not a finding.  `watchdog.py` may cancel, so even the lookup spelling is
   allowed there.
+* The gateway's own send/adopt/reprice steps — `_send`, `_submit_place`,
+  `_adopt`, `_evaluate_place` — write an order row and call the exchange by
+  design, so as an attribute (`gw._send(...)`) or as a bare name (`_send(...)`)
+  each is a finding in every file but `gateway.py`.
+* `client` as an attribute (`ex.client.get_accounts()`, `self.client`) is the
+  SDK client's own name, so it is a finding outside `exchange.py`.
+* Every SDK order method but one is off limits in every file, the two write
+  files included: an attribute or a bare name starting with `create_order`,
+  `market_order`, `limit_order`, `stop_limit`, `trigger_bracket`, `edit_order`
+  or `preview_` is a finding, with the single exemption of the exact name
+  `limit_order_gtc` inside `exchange.py`.  Only attributes and names are
+  scanned, so `exchange.py`'s `"preview_failure_reason"` string constant — a
+  string, not a call — stays quiet.
 * Universal, in every file including the two write files: `getattr`/`setattr`/
   `delattr`/`vars` whose first argument is the name `self`, any `__dict__`
   attribute access, a call to `eval`/`exec`/`__import__`, and an `importlib`
@@ -45,11 +61,12 @@ action in a `Literal[...]` annotation both pass unremarked, as does a runner
 comparing `intent.action == "cancel"` or a grid building
 `OrderIntent(action="cancel", ...)`.
 
-The real-tree test walks `src/crow_coinbase/**/*.py` and asserts every file
-comes back with no findings, and that `gateway.py` and `exchange.py` were among
-the files scanned (so an empty or mis-rooted glob cannot pass).  The
-parametrized tests feed `scan_source` snippets: each bypass snippet has to
-produce at least one finding, and the allowed snippets have to produce none.
+The real-tree test walks `src/crow_coinbase/**/*.py`, scans each file under its
+path relative to the package root, and asserts every file comes back with no
+findings, and that `gateway.py` and `exchange.py` are among the relative paths
+scanned (so an empty or mis-rooted glob cannot pass).  The parametrized tests
+feed `scan_source` snippets: each bypass snippet has to produce at least one
+finding, and the allowed snippets have to produce none.
 """
 
 from __future__ import annotations
@@ -69,13 +86,32 @@ WRITE_NAMES = frozenset(
         "cancel_orders",
     }
 )
-# The only files that may reach the write surface.
+# The only files that may reach the write surface, by path from the package root.
 WRITE_ALLOWED_FILES = frozenset({"gateway.py", "exchange.py"})
 # The watchdog may take orders off the book, never put them on.
 WATCHDOG_FILE = "watchdog.py"
 WATCHDOG_WRITE_NAMES = frozenset({"cancel"})
-# The only file that may import the Coinbase SDK.
+# The only file that may import the Coinbase SDK — and the only one that may
+# name the SDK client, or call one of its order methods.
 COINBASE_ALLOWED_FILES = frozenset({"exchange.py"})
+# The gateway's private execution steps: they write the order row and reach the
+# exchange, so only the gateway itself may name them.
+GATEWAY_FILE = "gateway.py"
+GATEWAY_PRIVATE_NAMES = frozenset(
+    {"_send", "_submit_place", "_adopt", "_evaluate_place"}
+)
+# The SDK's other order entry points.  The one the adapter needs,
+# `limit_order_gtc`, is exempted by name inside exchange.py alone.
+SDK_ORDER_PREFIXES = (
+    "create_order",
+    "market_order",
+    "limit_order",
+    "stop_limit",
+    "trigger_bracket",
+    "edit_order",
+    "preview_",
+)
+SDK_ALLOWED_ORDER_NAME = "limit_order_gtc"
 # Builtins that read or rebind attributes by name.
 SELF_INSPECTION_BUILTINS = frozenset({"getattr", "setattr", "delattr", "vars"})
 # Builtins that build code or imports at runtime.
@@ -101,11 +137,6 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "crow_coinbase"
 # ---------------------------------------------------------------- scan helpers
 
 
-def _basename(filename: str) -> str:
-    """The file's basename: rules are keyed by it, not by the whole path."""
-    return Path(filename).name
-
-
 def _dotted(node: ast.AST) -> str:
     """The dotted spelling of a Name/Attribute chain (`builtins.eval`), else ""."""
     if isinstance(node, ast.Name):
@@ -127,6 +158,17 @@ def _is_coinbase_module(module: str) -> bool:
 
 def _is_importlib_module(module: str) -> bool:
     return module == "importlib" or module.startswith("importlib.")
+
+
+def _is_sdk_order_name(name: str, relative: str) -> bool:
+    """True when *name* is an SDK order method this package must not reach.
+
+    Every SDK order entry point is refused in every file; the adapter's own
+    `limit_order_gtc` is the one exemption, and only inside `exchange.py`.
+    """
+    if name == SDK_ALLOWED_ORDER_NAME and relative in COINBASE_ALLOWED_FILES:
+        return False
+    return name.startswith(SDK_ORDER_PREFIXES)
 
 
 def _lookup_arguments(tree: ast.AST) -> set[int]:
@@ -151,37 +193,55 @@ def _lookup_arguments(tree: ast.AST) -> set[int]:
 def scan_source(filename: str, source: str) -> list[str]:
     """Return one finding string per rule violation in *source*.
 
-    *filename* is used for its basename alone (and in the finding text), so a
-    snippet can be scanned under a name that only exists in this test file.
+    *filename* is the file's path relative to the package root — `gateway.py`,
+    `strategies/gateway.py` — and the allow rules compare that whole path, so a
+    snippet can be scanned under a path that only exists in this test file and a
+    same-named submodule never inherits an exemption.
     """
-    name = _basename(filename)
-    tree = ast.parse(source, filename=name)
+    relative = Path(filename).as_posix()
+    tree = ast.parse(source, filename=relative)
     lookup_arguments = _lookup_arguments(tree)
     findings: list[str] = []
 
     def add(node: ast.AST, code: str, detail: str) -> None:
-        findings.append(f"{name}:{getattr(node, 'lineno', 0)}: {code}: {detail}")
+        findings.append(f"{relative}:{getattr(node, 'lineno', 0)}: {code}: {detail}")
 
     def write_allowed(attr: str) -> bool:
-        if name in WRITE_ALLOWED_FILES:
+        if relative in WRITE_ALLOWED_FILES:
             return True
-        return name == WATCHDOG_FILE and attr in WATCHDOG_WRITE_NAMES
+        return relative == WATCHDOG_FILE and attr in WATCHDOG_WRITE_NAMES
 
-    sdk_detail = "RESTClient outside " + str(sorted(COINBASE_ALLOWED_FILES))
+    sdk_files = str(sorted(COINBASE_ALLOWED_FILES))
+    sdk_detail = "RESTClient outside " + sdk_files
+    client_detail = "SDK client outside " + sdk_files
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
             if node.attr in WRITE_NAMES and not write_allowed(node.attr):
-                add(node, "WRITE_ACCESS", f"{node.attr} reached from {name}")
+                add(node, "WRITE_ACCESS", f"{node.attr} reached from {relative}")
+            if node.attr in GATEWAY_PRIVATE_NAMES and relative != GATEWAY_FILE:
+                add(node, "PRIVATE_STEP", f"{node.attr} reached from {relative}")
+            if node.attr == "client" and relative not in COINBASE_ALLOWED_FILES:
+                add(node, "SDK_CLIENT", client_detail)
+            if _is_sdk_order_name(node.attr, relative):
+                add(node, "SDK_ORDER", f"SDK order method {node.attr} in {relative}")
             if node.attr == "__dict__":
                 add(node, "DICT_ACCESS", "__dict__ attribute access")
-            if node.attr == "RESTClient" and name not in COINBASE_ALLOWED_FILES:
+            if node.attr == "RESTClient" and relative not in COINBASE_ALLOWED_FILES:
                 add(node, "REST_CLIENT", sdk_detail)
 
         elif isinstance(node, ast.Name):
             if node.id in WRITE_NAMES and not write_allowed(node.id):
-                add(node, "WRITE_NAME", f"{node.id} used as a bare name in {name}")
-            if node.id == "RESTClient" and name not in COINBASE_ALLOWED_FILES:
+                add(node, "WRITE_NAME", f"{node.id} used as a bare name in {relative}")
+            if node.id in GATEWAY_PRIVATE_NAMES and relative != GATEWAY_FILE:
+                add(
+                    node,
+                    "PRIVATE_STEP",
+                    f"{node.id} used as a bare name in {relative}",
+                )
+            if _is_sdk_order_name(node.id, relative):
+                add(node, "SDK_ORDER", f"SDK order name {node.id} in {relative}")
+            if node.id == "RESTClient" and relative not in COINBASE_ALLOWED_FILES:
                 add(node, "REST_CLIENT", sdk_detail)
 
         elif isinstance(node, ast.Constant):
@@ -199,7 +259,7 @@ def scan_source(filename: str, source: str) -> list[str]:
             add(
                 node,
                 "WRITE_NAME",
-                f"string {node.value!r} names a write method in {name}",
+                f"string {node.value!r} names a write method in {relative}",
             )
 
         elif isinstance(node, ast.Call):
@@ -217,16 +277,16 @@ def scan_source(filename: str, source: str) -> list[str]:
                     add(node, "IMPORTLIB", f"import {alias.name}")
                 if (
                     _is_coinbase_module(alias.name)
-                    and name not in COINBASE_ALLOWED_FILES
+                    and relative not in COINBASE_ALLOWED_FILES
                 ):
-                    add(node, "COINBASE_IMPORT", f"import {alias.name} in {name}")
+                    add(node, "COINBASE_IMPORT", f"import {alias.name} in {relative}")
 
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             if _is_importlib_module(module):
                 add(node, "IMPORTLIB", f"from {module} import ...")
-            if _is_coinbase_module(module) and name not in COINBASE_ALLOWED_FILES:
-                add(node, "COINBASE_IMPORT", f"from {module} import ... in {name}")
+            if _is_coinbase_module(module) and relative not in COINBASE_ALLOWED_FILES:
+                add(node, "COINBASE_IMPORT", f"from {module} import ... in {relative}")
 
     return findings
 
@@ -246,8 +306,9 @@ def test_real_tree_has_no_write_bypass():
     scanned: set[str] = set()
     findings: list[str] = []
     for path in files:
-        scanned.add(path.name)
-        findings.extend(scan_source(path.name, path.read_text(encoding="utf-8")))
+        relative = path.relative_to(SRC).as_posix()
+        scanned.add(relative)
+        findings.extend(scan_source(relative, path.read_text(encoding="utf-8")))
 
     # An empty or mis-rooted glob would make the findings assertion vacuous.
     assert "gateway.py" in scanned, f"gateway.py not scanned; saw {sorted(scanned)}"
@@ -457,6 +518,141 @@ NEGATIVE_CASES = [
         ),
         id="setattr-self-in-worker",
     ),
+    # ---- the allow rules are keyed on the whole relative path, not the basename
+    pytest.param(
+        "strategies/gateway.py",
+        _module(
+            """
+            def send(self, cid, product, side, size, price):
+                return self.exchange.place_limit(cid, product, side, size, price)
+            """
+        ),
+        id="submodule-named-gateway-is-not-the-gateway",
+    ),
+    pytest.param(
+        "strategies/exchange.py",
+        _module(
+            """
+            from coinbase.rest import RESTClient
+            """
+        ),
+        id="submodule-named-exchange-is-not-the-adapter",
+    ),
+    # ---- the gateway's private execution steps
+    pytest.param(
+        "api.py",
+        _module(
+            """
+            def resend(gw, cid, product, side, size, price):
+                return gw._send(cid, product, side, size, price)
+            """
+        ),
+        id="private-send-in-api",
+    ),
+    pytest.param(
+        "runner.py",
+        _module(
+            """
+            def evaluate(gw, source, owner, intent, product):
+                return gw._evaluate_place(source, owner, intent, product)
+            """
+        ),
+        id="private-evaluate_place-in-runner",
+    ),
+    pytest.param(
+        "reconcile.py",
+        _module(
+            """
+            def handler(gw):
+                return gw._adopt
+            """
+        ),
+        id="private-adopt-in-reconcile",
+    ),
+    pytest.param(
+        "api.py",
+        _module(
+            """
+            def place(gw, source, owner, intent, product):
+                return gw._submit_place(source, owner, intent, product)
+            """
+        ),
+        id="private-submit_place-in-api",
+    ),
+    pytest.param(
+        "runner.py",
+        _module(
+            """
+            def route(handler):
+                return _send(handler)
+            """
+        ),
+        id="bare-private-step-name-in-runner",
+    ),
+    # ---- the SDK client and the SDK's other order methods
+    pytest.param(
+        "api.py",
+        _module(
+            """
+            def accounts(ex):
+                return ex.client.get_accounts()
+            """
+        ),
+        id="sdk-client-in-api",
+    ),
+    pytest.param(
+        "exchange.py",
+        _module(
+            """
+            class LiveExchange:
+                def market_buy(self, cid, product, size):
+                    return self.client.market_order_buy(
+                        client_order_id=cid, product_id=product, base_size=size
+                    ).to_dict()
+            """
+        ),
+        id="sdk-market-order-in-exchange",
+    ),
+    pytest.param(
+        "exchange.py",
+        _module(
+            """
+            def place(client, cid):
+                return client.create_order(client_order_id=cid)
+            """
+        ),
+        id="sdk-create_order-in-exchange",
+    ),
+    pytest.param(
+        "runner.py",
+        _module(
+            """
+            def amend(x, order_id):
+                return x.edit_order(order_id=order_id)
+            """
+        ),
+        id="sdk-edit_order-in-runner",
+    ),
+    pytest.param(
+        "gateway.py",
+        _module(
+            """
+            def preview(x, cid, product, side, size, price):
+                return x.preview_order(cid, product, side, size, price)
+            """
+        ),
+        id="sdk-preview-order-in-gateway",
+    ),
+    pytest.param(
+        "strategies/exchange.py",
+        _module(
+            """
+            def place(x, cid, product, side, size, price):
+                return x.limit_order_gtc(cid, product, side, size, price)
+            """
+        ),
+        id="sdk-limit_order_gtc-outside-exchange",
+    ),
 ]
 
 
@@ -494,6 +690,19 @@ ALLOWED_CASES = [
         id="gateway-cancel-vocabulary",
     ),
     pytest.param(
+        "gateway.py",
+        _module(
+            """
+            def resend(self, cid, product, side, size, price):
+                return self._send(cid, product, side, size, price)
+
+            def evaluate(self, source, owner, intent, product):
+                return self._evaluate_place(source, owner, intent, product)
+            """
+        ),
+        id="gateway-private-steps",
+    ),
+    pytest.param(
         "exchange.py",
         _module(
             """
@@ -518,6 +727,20 @@ ALLOWED_CASES = [
             """
         ),
         id="exchange-sdk-and-write-methods",
+    ),
+    pytest.param(
+        "exchange.py",
+        _module(
+            """
+            class Balances:
+                def __init__(self, client):
+                    self.client = client
+
+                def accounts(self):
+                    return self.client.get_accounts(limit=250).to_dict()
+            """
+        ),
+        id="exchange-sdk-client-read",
     ),
     pytest.param(
         "limits.py",

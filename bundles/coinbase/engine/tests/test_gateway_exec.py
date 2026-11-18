@@ -19,6 +19,7 @@ from decimal import Decimal as D
 
 import pytest
 
+from crow_coinbase import money
 from crow_coinbase.exchange import (
     DryRunExchange,
     PermanentError,
@@ -39,7 +40,14 @@ from crow_coinbase.ledger import Ledger
 from crow_coinbase.limits import CapWindow, Limits
 from crow_coinbase.money import ProductSpec
 from crow_coinbase.snapshot import SnapshotCache
-from crow_coinbase.store import CANCELLED, OPEN, PENDING_SUBMIT, REJECTED, Store
+from crow_coinbase.store import (
+    CANCELLED,
+    FILLED,
+    OPEN,
+    PENDING_SUBMIT,
+    REJECTED,
+    Store,
+)
 from crow_coinbase.strategies.base import MarketSnapshot, OrderIntent
 
 PRODUCT = "XRP-USDC"
@@ -70,10 +78,11 @@ class ScriptedExchange:
 
     `place_script` is consumed one entry per `place_limit` call: a result dict, an
     exception INSTANCE to raise, or the string "land_then_timeout" (the order
-    reaches the book and the answer is lost).  An empty script answers the happy
-    path with `ex-<n>`.  `find_by_client_id` answers from `landed`, unless
-    `find_script` raises first.  `on_place` runs at the start of every place with
-    the cid, so a test can look at the store row at call time or trip a halt.
+    reaches the book and the answer is lost, carrying `landed_status`).  An empty
+    script answers the happy path with `ex-<n>`.  `find_by_client_id` answers from
+    `landed`, unless `find_script` raises first.  `on_place` runs at the start of
+    every place with the cid, so a test can look at the store row at call time or
+    trip a halt.
     """
 
     def __init__(
@@ -83,6 +92,7 @@ class ScriptedExchange:
         place_script=None,
         find_script=None,
         on_place=None,
+        landed_status="OPEN",
     ):
         self.place_calls = []
         self.find_calls = []
@@ -93,6 +103,8 @@ class ScriptedExchange:
         self.place_script = list(place_script or ())
         self.find_script = list(find_script or ())
         self.on_place = on_place
+        # The status the exchange reports for an order whose answer was lost.
+        self.landed_status = landed_status
         self._sent = 0
 
     def new_client_order_id(self, prefix, side, level):
@@ -108,7 +120,9 @@ class ScriptedExchange:
             return {"ok": True, "order_id": f"ex-{self._sent}", "reason": None}
         if isinstance(step, str):
             assert step == "land_then_timeout"
-            self.landed[cid] = exchange_order(cid, "ex-landed", side=side)
+            self.landed[cid] = exchange_order(
+                cid, "ex-landed", side=side, status=self.landed_status
+            )
             raise TransientError("answer lost after the order landed")
         if isinstance(step, Exception):
             raise step
@@ -208,6 +222,31 @@ def ready_cache(*, skew=0.0, ts=None):
     cache.put(snapshot(ts))
     cache.set_clock(100.0 + skew, 100.0)  # server - local == skew
     return cache
+
+
+class ChangingSnapshots:
+    """A snapshot cache whose book changes on every read.
+
+    `books` is a list of (bid, ask) pairs; the last pair repeats forever.  Every
+    `get(product)` builds a NEW snapshot from the next pair and records it in
+    `served`, so a test can count the book evaluations one submit made and see
+    which book each of them priced against.  Only `get` and `skew_s` are there,
+    the two reads the gateway makes of a cache; the skew is fresh and zero.
+    """
+
+    def __init__(self, books):
+        self.books = [(D(bid), D(ask)) for bid, ask in books]
+        self.served = []
+
+    def get(self, product):
+        index = min(len(self.served), len(self.books) - 1)
+        bid, ask = self.books[index]
+        snap = snapshot(bid=bid, ask=ask, product=product)
+        self.served.append(snap)
+        return snap
+
+    def skew_s(self):
+        return 0.0
 
 
 def make_gateway(
@@ -399,6 +438,40 @@ def test_timeout_after_order_landed_does_not_double_place(store):
     assert row["status"] == OPEN
     assert row["order_id"] == "ex-landed"
     assert len(store.orders()) == 1
+
+
+def test_adopted_filled_order_is_not_marked_open(store):
+    """An adopted order carries the status the exchange reports for it."""
+    exchange = ScriptedExchange(
+        place_script=["land_then_timeout"], landed_status=FILLED
+    )
+    gw = make_gateway(store, exchange=exchange)
+
+    res = gw.submit("bot", "b1", place())
+    assert res.ok is True
+    assert res.refusal is None
+    assert len(exchange.place_calls) == 1
+
+    row = store.order(res.cid)
+    assert row["status"] == FILLED
+    assert row["order_id"] == "ex-landed"
+
+
+def test_failed_lookup_does_not_reject_a_possibly_live_order(store):
+    """A lookup that errors is not evidence the order failed: the row stays live."""
+    exchange = ScriptedExchange(
+        place_script=[TransientError("lost")],
+        find_script=[PermanentError("lookup refused")],
+    )
+    gw = make_gateway(store, exchange=exchange)
+
+    res = gw.submit("bot", "b1", place())
+    assert res.ok is True
+    assert res.refusal is None
+    assert len(exchange.place_calls) == 1
+
+    row = store.order(res.cid)
+    assert row["status"] == PENDING_SUBMIT
 
 
 def test_timeout_before_landing_resends_same_cid(store):
@@ -612,6 +685,96 @@ def test_reprice_stops_when_halted_between_attempts(store):
     rows = store.orders()
     assert len(rows) == 1
     assert rows[0]["status"] == REJECTED
+
+
+# ---------------------------------------------------------------- book drift
+
+
+def test_submit_prices_from_the_checked_book(store):
+    """The send is priced from the book the chain looked at, not a fresh read.
+
+    A second read during one submit would price the order against a book that no
+    cap, minimum or funds step ever saw.
+    """
+    snaps = ChangingSnapshots([(D("0.99"), D("1.00")), (D("0.50"), D("0.51"))])
+    exchange = ScriptedExchange()
+    gw = make_gateway(store, exchange=exchange, snapshots=snaps)
+
+    res = gw.submit("bot", "b1", place())
+    assert res.ok is True
+    assert res.refusal is None
+
+    # One snapshot for the submit: the priced book is the checked book.
+    assert len(snaps.served) == 1
+    assert len(exchange.place_calls) == 1
+    priced = snaps.served[0]
+    assert exchange.place_calls[0][4] == money.maker_price(
+        "BUY", D("0.95"), priced.bid, priced.ask, SPEC.price_increment
+    )
+
+
+def test_submit_never_sends_when_the_book_goes_bad_after_the_check(store):
+    """A book that turns crossed between the check and the send never misprices."""
+    # The second book is crossed: no bid can sit above its ask.
+    snaps = ChangingSnapshots([(D("0.99"), D("1.00")), (D("1.00"), D("0.90"))])
+    exchange = ScriptedExchange()
+    gw = make_gateway(store, exchange=exchange, snapshots=snaps)
+
+    res = gw.submit("bot", "b1", place())
+
+    if res.ok:
+        assert len(exchange.place_calls) == 1
+        assert exchange.place_calls[0][4] == D("0.95")
+        # One book evaluation per send: an unusable book never prices an order.
+        assert len(snaps.served) == len(exchange.place_calls)
+    else:
+        assert res.refusal is not None
+
+
+def test_reprice_is_evaluated_against_its_own_book(store):
+    """A repriced retry runs the chain on its own read of the book."""
+    snaps = ChangingSnapshots([(D("0.99"), D("1.00")), (D("0.90"), D("0.91"))])
+    exchange = ScriptedExchange(
+        place_script=[{"ok": False, "order_id": None, "reason": POST_ONLY}]
+    )
+    gw = make_gateway(store, exchange=exchange, snapshots=snaps)
+
+    res = gw.submit("bot", "b1", place())
+    assert res.ok is True
+    assert res.refusal is None
+
+    assert len(exchange.place_calls) == 2
+    assert len(snaps.served) == 2
+    first, second = exchange.place_calls
+    price0 = money.maker_price(
+        "BUY",
+        D("0.95"),
+        snaps.served[0].bid,
+        snaps.served[0].ask,
+        SPEC.price_increment,
+    )
+    price1 = money.maker_price(
+        "BUY",
+        money.reprice_away("BUY", price0, SPEC.price_increment),
+        snaps.served[1].bid,
+        snaps.served[1].ask,
+        SPEC.price_increment,
+    )
+    assert first[4] == price0
+    assert second[4] == price1
+
+
+def test_check_alone_never_reaches_the_exchange(store):
+    """`check()` answers the same happy intent without touching exchange or store."""
+    exchange = ScriptedExchange()
+    gw = make_gateway(store, exchange=exchange)
+
+    assert gw.check("bot", "b1", place()) is None
+    assert exchange.place_calls == []
+    assert exchange.find_calls == []
+    assert exchange.cancel_calls == []
+    assert exchange.list_calls == []
+    assert store.orders() == []
 
 
 # ---------------------------------------------------------------- cancel
@@ -875,3 +1038,30 @@ def test_dry_exchange_end_to_end(store):
     assert exchange.list_open_orders() == []
     assert store.order(res.cid)["status"] == OPEN  # reconcile settles the row
     assert "cancel" in (store.order(res.cid)["note"] or "")
+
+
+def test_seed_dry_rolls_back_the_first_deposit_when_the_second_fails(store):
+    """Both deposits share one transaction: a failure in the second undoes the first."""
+    exchange = DryRunExchange(store.conn, lambda product: FakeMarket(), FEE_RATE)
+    before = exchange.totals()
+
+    real_deposit = exchange.deposit
+    deposits = []
+
+    def flaky_deposit(currency, amount, note):
+        deposits.append(currency)
+        if len(deposits) > 1:
+            raise RuntimeError("boom")
+        return real_deposit(currency, amount, note)
+
+    exchange.deposit = flaky_deposit
+    gw = make_gateway(store, exchange=exchange)
+
+    with pytest.raises(RuntimeError):
+        gw.seed_dry("b1", D("100"), D("50"))
+
+    assert len(deposits) == 2  # the quote deposit did run before the base failed
+    after = exchange.totals()
+    assert after == before
+    assert all(amount <= 0 for amount in after.values())
+    assert store.conn().execute("SELECT COUNT(*) FROM sim_deposits").fetchone()[0] == 0

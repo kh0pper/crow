@@ -20,14 +20,16 @@ clock skew.  P1 is dry-run only, so a route that is not "dry" is refused while
 `live_enabled` is false.
 
 Execution sits beside the chain and runs under the cycle lock.  `submit()` runs
-`check()` first and refuses without touching the exchange; past that it writes the
-order row BEFORE the exchange call, so a lost answer can never leave an order the
-engine has no name for.  A post-only rejection is repriced one tick further from
-the market and retried under a fresh client order id, up to
-`max_post_only_retries` times, and each retry re-runs the whole chain at its new
-price.  A transient failure is looked up by client order id and re-sent under the
-same id only when it did not land; three attempts and an unknown outcome leave
-the row PENDING_SUBMIT for the reconcile loop.  `cancel_all()` is the kill path:
+the same chain first (`_evaluate_place`) and refuses without touching the
+exchange; past that it writes the order row BEFORE the exchange call, so a lost
+answer can never leave an order the engine has no name for, and the row and the
+send both carry the price that very chain measured.  A post-only rejection is
+repriced one tick further from the market and retried under a fresh client order
+id, up to `max_post_only_retries` times; each retry re-runs the whole chain on
+its own read of the book and sends the price that read produced.  A transient
+failure is looked up by client order id and re-sent under the same id only when
+it did not land; a lookup that cannot answer leaves the row PENDING_SUBMIT,
+which is also where three lost answers leave it, for the reconcile loop.  `cancel_all()` is the kill path:
 it sweeps the open `cb-` orders off the exchange without going through `check()`,
 so it works while halted.  `halt()` sets the in-memory flag before persisting it
 and never waits for the cycle lock; `is_halted()` reads that flag, the persisted
@@ -51,7 +53,17 @@ from .ledger import Ledger
 from .limits import CapWindow, Limits
 from .money import ProductSpec
 from .snapshot import SnapshotCache
-from .store import ACTIVE, OPEN, PENDING_SUBMIT, REJECTED, RESERVED_OWNERS, Store
+from .store import (
+    ACTIVE,
+    CANCELLED,
+    FAILED,
+    FILLED,
+    OPEN,
+    PENDING_SUBMIT,
+    REJECTED,
+    RESERVED_OWNERS,
+    Store,
+)
 from .strategies.base import MarketSnapshot, OrderIntent
 
 D = Decimal
@@ -98,6 +110,10 @@ MAX_CLOCK_SKEW_S = 5.0
 MAX_FUTURE_S = 5.0
 # A bot's own drawdown stop when its params do not name a usable one (percent).
 DEFAULT_DRAWDOWN_PCT = 20
+
+# The exchange statuses an adopted order may carry that the store names itself.
+# Any other status records the order id alone and leaves the row PENDING_SUBMIT.
+ADOPTED_STATUSES = frozenset({OPEN, FILLED, CANCELLED, FAILED})
 
 
 @dataclass(frozen=True)
@@ -168,41 +184,66 @@ class OrderGateway:
     ) -> Optional[str]:
         """Return the first refusal for *intent*, or None when it may go out.
 
-        Place intents run the whole chain in the module docstring's order; cancel
-        intents run the shape check and then the ownership check alone.  `source`
-        is "bot" or "ai", and it has to match the owner: "ai" only ever acts as
-        the `ai` owner, "bot" only as a real bot.  `product` defaults to the
-        owner's bot row product and must be given when the owner has no bot row
-        ("ai").  Reads store, caps, ledger and snapshots; calls no exchange method
-        and writes nothing.
+        A place intent is answered by `_evaluate_place` and only its refusal is
+        kept: the chain runs in the module docstring's order.  A cancel intent
+        runs the shape check and then the ownership check alone.  `source` is
+        "bot" or "ai", and it has to match the owner: "ai" only ever acts as the
+        `ai` owner, "bot" only as a real bot.  `product` defaults to the owner's
+        bot row product and must be given when the owner has no bot row ("ai").
+        Reads store, caps, ledger and snapshots; calls no exchange method and
+        writes nothing.
         """
         if intent.action == "cancel":
             if self._is_bad_cancel(intent):
                 return BAD_INTENT
             return self._check_cancel(owner, intent)
+        return self._evaluate_place(source, owner, intent, product)[0]
 
+    def _evaluate_place(
+        self,
+        source: str,
+        owner: str,
+        intent: OrderIntent,
+        product: Optional[str],
+    ) -> tuple[
+        Optional[str],
+        Optional[str],
+        Optional[MarketSnapshot],
+        Optional[ProductSpec],
+        Optional[Decimal],
+    ]:
+        """Run the whole place chain once and report what it measured.
+
+        Returns `(refusal, product, snap, spec, price)`.  On a refusal only the
+        first item is set and the rest are None.  On success `product` is the
+        resolved product, `snap` the single snapshot the chain read, `spec` its
+        spec and `price` the maker price every minimum, cap, funds and drawdown
+        step was measured against: the caller sends that price rather than
+        reading a fresher book of its own.  Read-only and exchange-free, exactly
+        like `check()`.
+        """
         if self._is_bad_place(intent):
-            return BAD_INTENT
+            return BAD_INTENT, None, None, None, None
         bot = self.store.get_bot(owner)
         if not self._is_bound(source, owner, bot):
-            return WRONG_OWNER
+            return WRONG_OWNER, None, None, None, None
         if self.is_halted():
-            return HALTED
+            return HALTED, None, None, None, None
         if self.route_for(owner) != "dry" and not self.live_enabled:
-            return LIVE_DISABLED
+            return LIVE_DISABLED, None, None, None, None
 
         resolved = self._resolve_product(bot, product)
         if resolved is None:
-            return PRODUCT_NOT_ALLOWED
+            return PRODUCT_NOT_ALLOWED, None, None, None, None
         if source == "bot" and bot["status"] != ACTIVE:
-            return OWNER_PAUSED
+            return OWNER_PAUSED, None, None, None, None
 
         snap = self.snapshots.get(resolved)
         if snap is None or self._is_unusable(snap):
-            return STALE_MARKET
+            return STALE_MARKET, None, None, None, None
         skew = self.snapshots.skew_s()
         if skew is None or abs(skew) > MAX_CLOCK_SKEW_S:
-            return CLOCK_SKEW
+            return CLOCK_SKEW, None, None, None, None
 
         spec = self.spec_for(resolved)
         price = money.maker_price(
@@ -210,11 +251,14 @@ class OrderGateway:
         )
         refusal = self._check_size_and_caps(source, intent, price, spec)
         if refusal is not None:
-            return refusal
+            return refusal, None, None, None, None
         refusal = self._check_funds(owner, resolved, intent, price)
         if refusal is not None:
-            return refusal
-        return self._check_drawdown(source, owner, resolved, snap, bot)
+            return refusal, None, None, None, None
+        refusal = self._check_drawdown(source, owner, resolved, snap, bot)
+        if refusal is not None:
+            return refusal, None, None, None, None
+        return None, resolved, snap, spec, price
 
     # ------------------------------------------------ cancel
     def _check_cancel(self, owner: str, intent: OrderIntent) -> Optional[str]:
@@ -451,36 +495,25 @@ class OrderGateway:
     ) -> GatewayResult:
         """Place one post-only order, repricing and retrying a post-only refusal.
 
-        The row is written before every send, so the engine always has a name for
-        an order whose answer was lost.  An unknown outcome (None from `_send`)
-        leaves the row PENDING_SUBMIT and counts as accepted: the reconcile loop
-        resolves it.  Each retry re-runs the chain at its own price, because a
-        reprice moves a sell UP and can push the notional over a cap.
+        Every attempt runs the whole chain through `_evaluate_place` and sends
+        exactly the price that call returned, so one attempt reads the book once:
+        the priced book is always the checked one.  The row is written with that
+        price before every send, so the engine always has a name for an order
+        whose answer was lost.  An unknown outcome (None from `_send`) leaves the
+        row PENDING_SUBMIT and counts as accepted: the reconcile loop resolves it.
+        An adopted order already carries the status the exchange reported, so it
+        is left as it is.  Each retry re-runs the chain at its own price, because
+        a reprice moves a sell UP and can push the notional over a cap.
         """
-        refusal = self.check(source, owner, intent, product)
-        if refusal is not None:
-            return GatewayResult(False, None, refusal)
-        bot = self.store.get_bot(owner)
-        resolved = self._resolve_product(bot, product)
-        if resolved is None:
-            return GatewayResult(False, None, PRODUCT_NOT_ALLOWED)
-        snap = self.snapshots.get(resolved)
-        if snap is None:
-            return GatewayResult(False, None, STALE_MARKET)
-        spec = self.spec_for(resolved)
-        price = money.maker_price(
-            intent.side, intent.limit_price, snap.bid, snap.ask, spec.price_increment
-        )
         level = intent.level if intent.level is not None else 0
-
+        attempt_intent = intent
         cid: Optional[str] = None
-        for attempt in range(self.max_post_only_retries + 1):
-            if attempt > 0:
-                refusal = self.check(
-                    source, owner, replace(intent, limit_price=price), product
-                )
-                if refusal is not None:
-                    return GatewayResult(False, None, refusal)
+        for _attempt in range(self.max_post_only_retries + 1):
+            refusal, resolved, _snap, spec, price = self._evaluate_place(
+                source, owner, attempt_intent, product
+            )
+            if refusal is not None:
+                return GatewayResult(False, None, refusal)
             cid = new_client_order_id(f"cb-{owner}-", intent.side, level)
             self.store.insert_order(
                 cid,
@@ -493,21 +526,25 @@ class OrderGateway:
                 intent.size,
                 consumes_fill=intent.consumes_fill,
             )
-            try:
-                res = self._send(cid, resolved, intent.side, intent.size, price)
-            except PermanentError as error:
-                self.store.update_order(cid, status=REJECTED, note=str(error))
-                return GatewayResult(False, cid, EXCHANGE_REJECTED)
+            res = self._send(cid, resolved, intent.side, intent.size, price)
             if res is None:
                 return GatewayResult(True, cid, None)
             if res["ok"]:
-                self.store.update_order(cid, status=OPEN, order_id=res["order_id"])
+                if not res.get("adopted"):
+                    self.store.update_order(
+                        cid, status=OPEN, order_id=res["order_id"]
+                    )
                 return GatewayResult(True, cid, None)
             reason = str(res.get("reason") or "")
             self.store.update_order(cid, status=REJECTED, note=reason)
             if "POST_ONLY" not in reason:
                 return GatewayResult(False, cid, EXCHANGE_REJECTED)
-            price = money.reprice_away(intent.side, price, spec.price_increment)
+            attempt_intent = replace(
+                intent,
+                limit_price=money.reprice_away(
+                    intent.side, price, spec.price_increment
+                ),
+            )
         return GatewayResult(False, cid, POST_ONLY_EXHAUSTED)
 
     def _submit_cancel(
@@ -550,25 +587,41 @@ class OrderGateway:
     ) -> Optional[dict]:
         """Place ONE order, adopting it rather than re-placing it after a timeout.
 
-        At most three place calls per cid.  After a transient failure the order is
-        looked up by client order id: found means it landed (adopt its id, open the
-        row only when it is OPEN, never send again); not found means the same cid
-        is re-sent.  Three lost answers return None, an outcome nobody knows.
+        At most three place calls per cid.  A `PermanentError` from `place_limit`
+        is the exchange refusing the order, so it is reported as a not-ok result
+        (the caller records REJECTED).  After a transient failure the order is
+        looked up by client order id: found means it landed (adopt its id and
+        status, never send again); not found means the same cid is re-sent.  A
+        lookup that fails transiently also counts as not found.  A lookup that
+        fails permanently says nothing about the order — the answer was lost, so
+        this returns None and the row stays PENDING_SUBMIT for reconcile.  Three
+        lost answers return None too, an outcome nobody knows.
         """
         created = self.now()
         for attempt in range(3):
             try:
                 return self.exchange.place_limit(cid, product, side, size, price)
+            except PermanentError as error:
+                log.warning("place %s refused: %s", cid, error)
+                return {"ok": False, "order_id": None, "reason": str(error)}
             except TransientError as error:
                 log.warning("place %s: %s; looking it up", cid, error)
                 self.sleep(min(2**attempt, 10))
-                found = self._lookup(cid, created, product)
+                try:
+                    found = self._lookup(cid, created, product)
+                except PermanentError as lookup_error:
+                    log.warning(
+                        "lookup %s failed (%s); the outcome is unknown",
+                        cid,
+                        lookup_error,
+                    )
+                    return None
                 if found is not None:
                     return self._adopt(cid, found)
         return None
 
     def _lookup(self, cid: str, created: float, product: str) -> Optional[dict]:
-        """The order the exchange holds for *cid*; a failed lookup counts as none."""
+        """The order the exchange holds for *cid*; a transient lookup counts as none."""
         try:
             return self.exchange.find_by_client_id(cid, created, product)
         except TransientError as error:
@@ -576,12 +629,23 @@ class OrderGateway:
             return None
 
     def _adopt(self, cid: str, found: dict) -> dict:
-        """Record the id the exchange gave the order and report it as placed."""
+        """Record the id and the status the exchange reports for a found order.
+
+        The row takes the exchange's own status when the store names it (OPEN,
+        FILLED, CANCELLED, FAILED); any other status records the id alone and
+        leaves the row PENDING_SUBMIT.  A filled order is therefore never reopened.
+        The result carries `adopted`, so the caller does not write the row again.
+        """
         fields = {"order_id": found["order_id"]}
-        if found.get("status") == "OPEN":
-            fields["status"] = OPEN
+        if found.get("status") in ADOPTED_STATUSES:
+            fields["status"] = found["status"]
         self.store.update_order(cid, **fields)
-        return {"ok": True, "order_id": found["order_id"], "reason": None}
+        return {
+            "ok": True,
+            "order_id": found["order_id"],
+            "reason": None,
+            "adopted": True,
+        }
 
     # ------------------------------------------------ kill path
     def cancel_all(
