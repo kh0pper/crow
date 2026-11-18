@@ -598,8 +598,16 @@ export async function mountMcpServers(app, deps) {
       try {
         const origin = await import("../artifact-origin/runtime.js");
         origin.setContentResolver(artStore.contentResolver(artDb, blobs));
-        const srv = await origin.startArtifactOriginFromEnv(process.env);
-        if (srv) console.log(`[gateway] artifact origin listening on ${process.env.CROW_ARTIFACT_ORIGIN_BIND || "127.0.0.1"}:${process.env.CROW_ARTIFACT_ORIGIN_PORT}`);
+        // Not awaited: the bind may be a docker bridge gateway IP that
+        // docker.service has not created yet (the gateway unit can start
+        // before it), and EADDRNOTAVAIL there must not hold the dashboard's
+        // own listen for two minutes. runtime.js retries every 5 s for 2 min
+        // and warns; the origin is simply off until a later start otherwise.
+        origin.startArtifactOriginWithBindRetry({ env: process.env })
+          .then((srv) => {
+            if (srv) console.log(`[gateway] artifact origin listening on ${process.env.CROW_ARTIFACT_ORIGIN_BIND || "127.0.0.1"}:${process.env.CROW_ARTIFACT_ORIGIN_PORT}`);
+          })
+          .catch((err) => console.warn(`[gateway] artifact origin NOT started: ${err.message}`));
       } catch (err) {
         console.warn(`[gateway] artifact origin NOT started: ${err.message}`);
       }

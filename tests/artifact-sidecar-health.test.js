@@ -1,9 +1,15 @@
 // The artifact sidecar node's health and serve-config audit (Crow Artifacts,
 // step 1). The sidecar is a second tailscaled with its own hostname that
-// proxies https://<instance>-artifacts.<tailnet>:443 to the loopback artifact
-// origin. An expired or logged-out node quietly breaks every artifact frame,
-// and a Funnel flag or an extra mapping would expose more than the origin, so
-// the gateway audits it and raises a Nest health signal.
+// proxies https://<instance>-artifacts.<tailnet>:443 to the artifact origin.
+// An expired or logged-out node quietly breaks every artifact frame, and a
+// Funnel flag or an extra mapping would expose more than the origin, so the
+// gateway audits it and raises a Nest health signal.
+//
+// The audit also refuses a sidecar that shares the HOST's network namespace:
+// tailscaled's userspace netstack forwards an inbound TCP connection on ANY
+// port of the node's tailnet address to 127.0.0.1 in the namespace it runs in,
+// so a loopback Serve Proxy target means every loopback port of this computer
+// answers the tailnet. That is `host-loopback`, never just `unexpected-mapping`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -11,33 +17,57 @@ import {
   sidecarHealth,
   renderServeConfig,
   createSidecarHealthReader,
+  expectedSidecarTarget,
+  parseOriginTarget,
+  isLoopbackOrWildcardHost,
+  isCgnatIpv4,
+  sidecarSharesHostLoopback,
 } from "../servers/gateway/artifact-origin/sidecar-health.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
 const HOST = "crow-artifacts.example.ts.net";
 const PORT = 3090;
+// The origin as the SIDECAR sees it: a dedicated bridge's gateway IP, i.e. its
+// own network namespace's way to the host-run origin (never loopback).
+const BRIDGE = "172.30.0.1";
+const TARGET = `http://${BRIDGE}:${PORT}`;
 
 const status = (o = {}) => ({ BackendState: "Running", ...o, Self: { DNSName: HOST + ".", Online: true, ...(o.Self || {}) } });
-const serve = (proxy = `http://127.0.0.1:${PORT}`) => ({
+const serve = (proxy = TARGET) => ({
   TCP: { 443: { HTTPS: true } },
   Web: { [`${HOST}:443`]: { Handlers: { "/": { Proxy: proxy } } } },
 });
 
-test("healthy: running, no key expiry (expiry disabled), one 443 mapping to the origin port, no Funnel", () => {
-  const r = sidecarHealth({ statusJson: status(), serveConfig: serve(), originPort: PORT, now: NOW });
+test("healthy: running, no key expiry (expiry disabled), one 443 mapping to the bridge target, no Funnel", () => {
+  const r = sidecarHealth({ statusJson: status(), serveConfig: serve(), target: TARGET, now: NOW });
   assert.deepEqual(r, { ok: true, problems: [], keyExpiry: null });
+  // The same target derived from CROW_ARTIFACT_ORIGIN_BIND (a bridge IP).
+  const derived = sidecarHealth({ statusJson: status(), serveConfig: serve(), bind: BRIDGE, originPort: PORT, now: NOW });
+  assert.deepEqual(derived, { ok: true, problems: [], keyExpiry: null });
   // An expiry far away is healthy too.
-  const far = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: new Date(NOW + 90 * DAY).toISOString() } }), serveConfig: serve(), originPort: PORT, now: NOW });
+  const far = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: new Date(NOW + 90 * DAY).toISOString() } }), serveConfig: serve(), target: TARGET, now: NOW });
   assert.equal(far.ok, true);
   // AllowFunnel present but false is not Funnel.
-  const off = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(), AllowFunnel: { [`${HOST}:443`]: false } }, originPort: PORT, now: NOW });
+  const off = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(), AllowFunnel: { [`${HOST}:443`]: false } }, target: TARGET, now: NOW });
   assert.equal(off.ok, true);
+});
+
+test("a container instance: the sidecar joins its network and proxies by container name", () => {
+  const CN = "http://crow-artifacts-household:3092";
+  const r = sidecarHealth({ statusJson: status(), serveConfig: serve(CN), target: CN, now: NOW });
+  assert.deepEqual(r, { ok: true, problems: [], keyExpiry: null });
+  // An explicit target wins over the bind (the sidecar is in the instance's
+  // network, so the gateway's own bind says nothing about what it can reach).
+  const both = sidecarHealth({ statusJson: status(), serveConfig: serve(CN), target: CN, bind: BRIDGE, originPort: 3092, now: NOW });
+  assert.equal(both.ok, true);
+  const v6 = "http://[fd00::1]:3090";
+  assert.equal(sidecarHealth({ statusJson: status(), serveConfig: serve(v6), target: v6, now: NOW }).ok, true);
 });
 
 test("logged out: any BackendState other than Running", () => {
   for (const s of ["NeedsLogin", "Stopped", "Starting", "NoState", undefined]) {
-    const r = sidecarHealth({ statusJson: { ...status(), BackendState: s }, serveConfig: serve(), originPort: PORT, now: NOW });
+    const r = sidecarHealth({ statusJson: { ...status(), BackendState: s }, serveConfig: serve(), target: TARGET, now: NOW });
     assert.equal(r.ok, false, String(s));
     assert.ok(r.problems.includes("logged-out"), String(s));
   }
@@ -45,47 +75,118 @@ test("logged out: any BackendState other than Running", () => {
 
 test("key expiry within 14 days (or already past) is reported with the date", () => {
   const soon = new Date(NOW + 13 * DAY).toISOString();
-  const r = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: soon } }), serveConfig: serve(), originPort: PORT, now: NOW });
+  const r = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: soon } }), serveConfig: serve(), target: TARGET, now: NOW });
   assert.equal(r.ok, false);
   assert.deepEqual(r.problems, ["key-expiring"]);
   assert.equal(r.keyExpiry, soon);
-  const past = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: new Date(NOW - DAY).toISOString() } }), serveConfig: serve(), originPort: PORT, now: NOW });
+  const past = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: new Date(NOW - DAY).toISOString() } }), serveConfig: serve(), target: TARGET, now: NOW });
   assert.ok(past.problems.includes("key-expiring"));
   // The zero time / unparseable values mean "no expiry known", not a problem.
   for (const v of ["0001-01-01T00:00:00Z", "garbage", null]) {
-    const z = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: v } }), serveConfig: serve(), originPort: PORT, now: NOW });
+    const z = sidecarHealth({ statusJson: status({ Self: { KeyExpiry: v } }), serveConfig: serve(), target: TARGET, now: NOW });
     assert.equal(z.ok, true, String(v));
   }
 });
 
 test("Funnel on for the artifact node is a problem (public links are not built yet)", () => {
-  const r = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(), AllowFunnel: { [`${HOST}:443`]: true } }, originPort: PORT, now: NOW });
+  const r = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(), AllowFunnel: { [`${HOST}:443`]: true } }, target: TARGET, now: NOW });
   assert.equal(r.ok, false);
   assert.ok(r.problems.includes("funnel-on"));
-  const other = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(), AllowFunnel: { [`${HOST}:8443`]: true } }, originPort: PORT, now: NOW });
+  const other = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(), AllowFunnel: { [`${HOST}:8443`]: true } }, target: TARGET, now: NOW });
   assert.ok(other.problems.includes("funnel-on"), "Funnel on any hostport counts");
 });
 
-test("any mapping other than the one 443 -> http://127.0.0.1:<origin port> proxy is unexpected", () => {
+test("a loopback Serve Proxy is host networking: `host-loopback`, not `unexpected-mapping`", () => {
+  for (const proxy of [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`, `http://[::1]:${PORT}`, `http://::1:${PORT}`]) {
+    const r = sidecarHealth({ statusJson: status(), serveConfig: serve(proxy), target: TARGET, originPort: PORT, now: NOW });
+    assert.equal(r.ok, false, proxy);
+    assert.deepEqual(r.problems, ["host-loopback"], proxy);
+  }
+  // Loopback even under another scheme, and in a second handler: the netstack
+  // would still forward the node's every port to this computer's loopback.
+  const https = sidecarHealth({ statusJson: status(), serveConfig: serve(`https://127.0.0.1:${PORT}`), target: TARGET, now: NOW });
+  assert.deepEqual(https.problems, ["host-loopback"]);
+  const second = {
+    TCP: { 443: { HTTPS: true } },
+    Web: { [`${HOST}:443`]: { Handlers: { "/": { Proxy: TARGET }, "/x": { Proxy: "http://127.0.0.1:3001" } } } },
+  };
+  assert.deepEqual(sidecarHealth({ statusJson: status(), serveConfig: second, target: TARGET, now: NOW }).problems, ["host-loopback"]);
+  // Funnel is still reported alongside it.
+  const both = sidecarHealth({ statusJson: status(), serveConfig: { ...serve(`http://127.0.0.1:${PORT}`), AllowFunnel: { [`${HOST}:443`]: true } }, target: TARGET, now: NOW });
+  assert.deepEqual(both.problems, ["funnel-on", "host-loopback"]);
+});
+
+// Review F1/F4: the old check was an exact-match set, so every other spelling a
+// dialer accepts read as ok. One helper answers for all of them.
+const LOOPBACK_SPELLINGS = [
+  "127.0.0.1", "127.0.0.2", "127.255.255.254", "127.1", "2130706433", "0x7f.1", "0177.0.0.1",
+  "localhost", "localhost.", "LocalHost", "artifacts.localhost",
+  "::1", "[::1]", "0:0:0:0:0:0:0:1", "[0:0:0:0:0:0:0:1]", "[::ffff:127.0.0.1]", "[::ffff:127.9.9.9]",
+  "0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0", "[::ffff:0.0.0.0]",
+];
+
+test("every loopback/wildcard spelling is loopback in a live Proxy value, an explicit target and a bind", () => {
+  for (const host of LOOPBACK_SPELLINGS) {
+    const bare = host.replace(/^\[|\]$/g, "");
+    const hostPart = bare.includes(":") ? `[${bare}]` : bare;
+    // 1. The live Serve Proxy target.
+    const live = sidecarHealth({ statusJson: status(), serveConfig: serve(`http://${hostPart}:${PORT}`), target: TARGET, now: NOW });
+    assert.deepEqual(live.problems, ["host-loopback"], `proxy ${host}`);
+    // 2. The explicit CROW_ARTIFACT_SIDECAR_TARGET.
+    assert.deepEqual(expectedSidecarTarget({ target: `http://${hostPart}:${PORT}` }), { target: null, problem: "host-loopback" }, `target ${host}`);
+    // 3. The derived bind.
+    assert.deepEqual(expectedSidecarTarget({ bind: host, originPort: PORT }), { target: null, problem: "host-loopback" }, `bind ${host}`);
+    // 4. And the helper itself, for the name without the URL round trip.
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+  }
+  // A scheme-less Serve target is a mapping too: tailscaled takes a bare port
+  // and `host:port`, and both mean the sidecar's own (i.e. the host's) loopback.
+  for (const proxy of [String(PORT), `localhost:${PORT}`, `127.0.0.1:${PORT}`, `0.0.0.0:${PORT}`, `127.1:${PORT}`]) {
+    assert.deepEqual(
+      sidecarHealth({ statusJson: status(), serveConfig: serve(proxy), target: TARGET, now: NOW }).problems,
+      ["host-loopback"], proxy,
+    );
+  }
+  // …while an ordinary name, a tailnet address and a bridge gateway stay ok.
+  for (const host of ["crow-artifacts", "100.64.20.7", BRIDGE, "fd00::1", "8.8.8.8", "128.0.0.1", "0.0.0.1"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), false, host);
+  }
+});
+
+test("a loopback (or wildcard, or unknown) bind means no reachable target: host-loopback", () => {
+  // The default bind is loopback, so nothing but host networking reaches the
+  // origin from a sidecar — whatever the live mapping claims.
+  const dflt = sidecarHealth({ statusJson: status(), serveConfig: serve(), originPort: PORT, now: NOW });
+  assert.deepEqual(dflt.problems, ["host-loopback"]);
+  for (const bind of ["127.0.0.1", "127.0.0.2", "127.1", "::1", "localhost", "0.0.0.0", "::", ""] ) {
+    const r = sidecarHealth({ statusJson: status(), serveConfig: serve(), bind, originPort: PORT, now: NOW });
+    assert.deepEqual(r.problems, ["host-loopback"], bind);
+  }
+  // An explicit (unparseable) target cannot be judged either: fail closed.
+  const bad = sidecarHealth({ statusJson: status(), serveConfig: serve(), target: `http://${BRIDGE}:${PORT}/x`, originPort: PORT, now: NOW });
+  assert.deepEqual(bad.problems, ["unexpected-mapping"]);
+});
+
+test("any mapping other than the one 443 -> <expected target> proxy is unexpected", () => {
   const cases = {
-    "wrong port": serve(`http://127.0.0.1:${PORT + 1}`),
-    "not loopback": serve(`http://192.0.2.5:${PORT}`),
-    "localhost name": serve(`http://localhost:${PORT}`),
-    "https backend": serve(`https://127.0.0.1:${PORT}`),
-    "trailing path": serve(`http://127.0.0.1:${PORT}/x`),
-    "second handler": { ...serve(), Web: { [`${HOST}:443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${PORT}` }, "/x": { Proxy: "http://127.0.0.1:3001" } } } } },
+    "wrong port": serve(`http://${BRIDGE}:${PORT + 1}`),
+    "another address": serve(`http://172.30.0.9:${PORT}`),
+    "container name instead": serve(`http://crow-artifacts:${PORT}`),
+    "https backend": serve(`https://172.30.0.9:${PORT}`),
+    "trailing path": serve(`http://172.30.0.9:${PORT}/x`),
+    "second handler": { ...serve(), Web: { [`${HOST}:443`]: { Handlers: { "/": { Proxy: TARGET }, "/x": { Proxy: "http://172.30.0.9:3001" } } } } },
     "path handler": { ...serve(), Web: { [`${HOST}:443`]: { Handlers: { "/": { Path: "/etc" } } } } },
     "text handler": { ...serve(), Web: { [`${HOST}:443`]: { Handlers: { "/": { Text: "hi" } } } } },
-    "second web host": { ...serve(), Web: { ...serve().Web, [`${HOST}:8443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${PORT}` } } } } },
-    "web on another port": { TCP: { 8443: { HTTPS: true } }, Web: { [`${HOST}:8443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${PORT}` } } } } },
-    "extra tcp port": { ...serve(), TCP: { 443: { HTTPS: true }, 22: { TCPForward: "127.0.0.1:22" } } },
-    "tcp forward on 443": { ...serve(), TCP: { 443: { TCPForward: "127.0.0.1:22" } } },
+    "second web host": { ...serve(), Web: { ...serve().Web, [`${HOST}:8443`]: { Handlers: { "/": { Proxy: TARGET } } } } },
+    "web on another port": { TCP: { 8443: { HTTPS: true } }, Web: { [`${HOST}:8443`]: { Handlers: { "/": { Proxy: TARGET } } } } },
+    "extra tcp port": { ...serve(), TCP: { 443: { HTTPS: true }, 22: { TCPForward: "172.30.0.9:22" } } },
+    "tcp forward on 443": { ...serve(), TCP: { 443: { TCPForward: "172.30.0.9:22" } } },
     "no mapping": { TCP: {}, Web: {} },
     "services block": { ...serve(), Services: { "svc:x": {} } },
     "not an object": "nope",
   };
   for (const [name, cfg] of Object.entries(cases)) {
-    const r = sidecarHealth({ statusJson: status(), serveConfig: cfg, originPort: PORT, now: NOW });
+    const r = sidecarHealth({ statusJson: status(), serveConfig: cfg, target: TARGET, originPort: PORT, now: NOW });
     assert.equal(r.ok, false, name);
     assert.ok(r.problems.includes("unexpected-mapping"), `${name}: ${r.problems}`);
   }
@@ -93,31 +194,104 @@ test("any mapping other than the one 443 -> http://127.0.0.1:<origin port> proxy
 
 test("unreadable status or serve config fails closed (unreachable), never ok", () => {
   for (const [s, c] of [[null, serve()], [status(), null], [undefined, undefined]]) {
-    const r = sidecarHealth({ statusJson: s, serveConfig: c, originPort: PORT, now: NOW });
+    const r = sidecarHealth({ statusJson: s, serveConfig: c, target: TARGET, now: NOW });
     assert.equal(r.ok, false);
     assert.ok(r.problems.includes("unreachable"));
   }
-  const noPort = sidecarHealth({ statusJson: status(), serveConfig: serve(), originPort: null, now: NOW });
+  const noPort = sidecarHealth({ statusJson: status(), serveConfig: serve(), target: null, originPort: null, now: NOW });
   assert.equal(noPort.ok, false, "without a known origin port no mapping can be judged correct");
   assert.ok(noPort.problems.includes("unexpected-mapping"));
+});
+
+test("expected target: explicit wins, else the bind when it is specific and not loopback, else host-loopback", () => {
+  assert.deepEqual(expectedSidecarTarget({ target: TARGET }), { target: TARGET, problem: null });
+  assert.deepEqual(expectedSidecarTarget({ target: "http://CROW-artifacts:3090" }), { target: "http://crow-artifacts:3090", problem: null });
+  assert.deepEqual(expectedSidecarTarget({ target: "http://[fd00::1]:3090" }), { target: "http://[fd00::1]:3090", problem: null });
+  assert.deepEqual(expectedSidecarTarget({ bind: BRIDGE, originPort: 3090 }), { target: TARGET, problem: null });
+  assert.deepEqual(expectedSidecarTarget({ bind: BRIDGE, originPort: "3090" }), { target: TARGET, problem: null });
+  assert.deepEqual(expectedSidecarTarget({ bind: "fd00::1", originPort: 3090 }), { target: "http://[fd00::1]:3090", problem: null });
+  // A target wins even when the bind is loopback (the container-instance case).
+  assert.deepEqual(expectedSidecarTarget({ target: TARGET, bind: "127.0.0.1", originPort: 3090 }), { target: TARGET, problem: null });
+  // …but a loopback/wildcard TARGET is the host-networking shape however it is
+  // spelled, so it never becomes the expected mapping (review F1).
+  for (const target of [`http://127.0.0.1:3090`, `http://127.0.0.2:3090`, `http://127.1:3090`, `http://localhost:3090`, `http://0.0.0.0:3090`, `http://[::1]:3090`, `http://[::ffff:127.0.0.1]:3090`]) {
+    assert.deepEqual(expectedSidecarTarget({ target }), { target: null, problem: "host-loopback" }, target);
+  }
+  for (const bind of [null, undefined, "", "127.0.0.1", "127.0.0.2", "127.1", "::1", "localhost", "localhost.", "0.0.0.0", "::", "*"]) {
+    assert.deepEqual(expectedSidecarTarget({ bind, originPort: 3090 }), { target: null, problem: "host-loopback" }, String(bind));
+  }
+  assert.deepEqual(expectedSidecarTarget({ target: "https://172.30.0.1:3090", originPort: 3090 }), { target: null, problem: "unexpected-mapping" });
+  assert.deepEqual(expectedSidecarTarget({ bind: BRIDGE, originPort: null }), { target: null, problem: "unexpected-mapping" });
+});
+
+test("parseOriginTarget accepts only http://<hostname|IPv4>:<port> (IPv6 brackets optional)", () => {
+  assert.deepEqual(parseOriginTarget("http://172.30.0.1:3090"), { host: "172.30.0.1", port: 3090, url: "http://172.30.0.1:3090" });
+  assert.equal(parseOriginTarget("http://crow-artifacts:3092")?.url, "http://crow-artifacts:3092");
+  assert.equal(parseOriginTarget("http://[fd00::1]:3090")?.url, "http://[fd00::1]:3090");
+  assert.equal(parseOriginTarget("http://fd00::1:3090")?.url, "http://[fd00::1]:3090", "IPv6 brackets are optional");
+  for (const bad of [
+    "http://172.30.0.1:3090/", "http://172.30.0.1:3090/x", "http://user@172.30.0.1:3090", "http://u:p@172.30.0.1:3090",
+    "http://172.30.0.1:3090?x=1", "http://172.30.0.1:3090#x", "https://172.30.0.1:3090", "172.30.0.1:3090",
+    "http://172.30.0.1", "http://:3090", "http://172.30.0.1:0", "http://172.30.0.1:99999", "http://172.30.0.1:3090 ",
+    " http://172.30.0.1:3090", "http://172.30.0.1:3090;rm", "http://[::1:3090", "",
+  ]) assert.equal(parseOriginTarget(bad), null, bad);
+  for (const bad of [3090, null, undefined, {}, ""]) assert.equal(parseOriginTarget(bad), null, String(bad));
+  assert.equal(isLoopbackOrWildcardHost("127.0.0.1"), true);
+  assert.equal(isLoopbackOrWildcardHost("[::1]"), true);
+  assert.equal(isLoopbackOrWildcardHost("localhost"), true);
+  assert.equal(isLoopbackOrWildcardHost("172.30.0.1"), false);
+  assert.equal(isLoopbackOrWildcardHost("crow-artifacts"), false);
 });
 
 test("the shipped serve.json.tmpl, rendered for the main instance, passes the audit (no AllowFunnel, one mapping)", () => {
   const tmpl = readFileSync(new URL("../bundles/artifacts/sidecar/serve.json.tmpl", import.meta.url), "utf8");
   assert.doesNotMatch(tmpl, /AllowFunnel/, "no Funnel key at all before public links (step 6)");
-  const rendered = renderServeConfig(tmpl, { originPort: 3090 });
+  assert.match(tmpl, /\{\{ORIGIN_TARGET\}\}/, "the template carries the target placeholder");
+  assert.doesNotMatch(tmpl, /127\.0\.0\.1|localhost/, "the shipped template never points at loopback");
+  const rendered = renderServeConfig(tmpl, { target: TARGET });
   const cfg = JSON.parse(rendered);
   // tailscaled substitutes ${TS_CERT_DOMAIN} itself; the audit sees the live
   // name. Substitute here the way the container would.
   const live = JSON.parse(rendered.replaceAll("${TS_CERT_DOMAIN}", HOST));
   assert.ok(cfg.Web["${TS_CERT_DOMAIN}:443"], "the template keeps tailscaled's own placeholder");
-  const r = sidecarHealth({ statusJson: status(), serveConfig: live, originPort: 3090, now: NOW });
+  assert.equal(cfg.Web["${TS_CERT_DOMAIN}:443"].Handlers["/"].Proxy, TARGET);
+  const r = sidecarHealth({ statusJson: status(), serveConfig: live, target: TARGET, now: NOW });
   assert.deepEqual(r, { ok: true, problems: [], keyExpiry: null });
-  // And the same template rendered for another port fails the main port's audit.
-  const wrong = JSON.parse(renderServeConfig(tmpl, { originPort: 3091 }).replaceAll("${TS_CERT_DOMAIN}", HOST));
-  assert.equal(sidecarHealth({ statusJson: status(), serveConfig: wrong, originPort: 3090, now: NOW }).ok, false);
-  assert.throws(() => renderServeConfig(tmpl, { originPort: "3090; x" }), /port/);
-  assert.throws(() => renderServeConfig(tmpl, { originPort: 0 }), /port/);
+  // And the same template rendered for another address fails this target's audit.
+  const wrong = JSON.parse(renderServeConfig(tmpl, { target: `http://172.30.0.9:${PORT}` }).replaceAll("${TS_CERT_DOMAIN}", HOST));
+  assert.equal(sidecarHealth({ statusJson: status(), serveConfig: wrong, target: TARGET, now: NOW }).ok, false);
+  // A loopback rendering is REFUSED (review F3), and a hand-written loopback
+  // config is still reported as the host-networking shape.
+  assert.throws(() => renderServeConfig(tmpl, { target: `http://127.0.0.1:${PORT}` }), /loopback|target/);
+  const loop = { ...serve(), Web: { [`${HOST}:443`]: { Handlers: { "/": { Proxy: `http://127.0.0.1:${PORT}` } } } } };
+  assert.deepEqual(sidecarHealth({ statusJson: status(), serveConfig: loop, target: TARGET, now: NOW }).problems, ["host-loopback"]);
+});
+
+test("renderServeConfig rejects a port, a path, userinfo, a query, another scheme, a loopback or wildcard host, and junk", () => {
+  const tmpl = readFileSync(new URL("../bundles/artifacts/sidecar/serve.json.tmpl", import.meta.url), "utf8");
+  for (const bad of [
+    `http://${BRIDGE}:${PORT}/x`, `http://${BRIDGE}:${PORT}/`, `http://user@${BRIDGE}:${PORT}`,
+    `http://${BRIDGE}:${PORT}?x=1`, `http://${BRIDGE}:${PORT}#x`, `https://${BRIDGE}:${PORT}`,
+    `${BRIDGE}:${PORT}`, `http://${BRIDGE}`, "http://:3090", `http://${BRIDGE}:0`,
+    `http://${BRIDGE}:3090 `, ` http://${BRIDGE}:3090`, `http://${BRIDGE}:3090;rm`, 3090,
+    // Review F3: a rendered target is never loopback or a wildcard either.
+    "http://127.0.0.1:3090", "http://127.0.0.2:3090", "http://127.1:3090", "http://localhost:3090",
+    "http://localhost.:3090", "http://0.0.0.0:3090", "http://[::1]:3090", "http://[::]:3090",
+    "http://[::ffff:127.0.0.1]:3090", "http://[::ffff:0.0.0.0]:3090",
+  ]) assert.throws(() => renderServeConfig(tmpl, { target: bad }), /target|loopback/, String(bad));
+  assert.throws(() => renderServeConfig(tmpl, {}), /target/);
+  // No backward compatibility for the old port argument: the Proxy must be a target.
+  assert.throws(() => renderServeConfig(tmpl, { originPort: PORT }), /target/);
+  // Accepted forms (IPv6 brackets optional).
+  for (const [given, url] of [
+    [TARGET, TARGET],
+    ["http://crow-artifacts:3092", "http://crow-artifacts:3092"],
+    ["http://[fd00::1]:3090", "http://[fd00::1]:3090"],
+    ["http://fd00::1:3090", "http://[fd00::1]:3090"],
+  ]) {
+    const out = JSON.parse(renderServeConfig(tmpl, { target: given }));
+    assert.equal(out.Web["${TS_CERT_DOMAIN}:443"].Handlers["/"].Proxy, url, given);
+  }
 });
 
 test("Nest health signal: own-host mode without a sidecar socket warns 'unmonitored' (review L5)", async () => {
@@ -167,7 +341,11 @@ test("reader: off without a sidecar socket; runs the CLI with --socket and no su
   assert.equal(await createSidecarHealthReader({ env: {}, exec, now: () => t })(), null, "not configured: no signal");
   assert.equal(await createSidecarHealthReader({ env: { CROW_ARTIFACT_SIDECAR_SOCKET: "/run/x.sock" }, exec, now: () => t })(), null, "no origin port: no signal");
 
-  const env = { CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock", CROW_ARTIFACT_ORIGIN_PORT: "3090" };
+  const env = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+  };
   const read = createSidecarHealthReader({ env, exec, now: () => t });
   const a = await read();
   assert.equal(a.ok, true);
@@ -186,12 +364,88 @@ test("reader: off without a sidecar socket; runs the CLI with --socket and no su
   await read();
   assert.equal(calls.length, 4, "re-read after 5 minutes");
 
+  // CROW_ARTIFACT_SIDECAR_TARGET alone is enough to know the expected mapping.
+  const byTarget = createSidecarHealthReader({ env: { ...env, CROW_ARTIFACT_ORIGIN_BIND: undefined, CROW_ARTIFACT_SIDECAR_TARGET: TARGET }, exec, now: () => t });
+  assert.equal((await byTarget()).ok, true);
+  // A default (loopback) bind is the host-networking shape, reported as such.
+  const byLoopback = createSidecarHealthReader({ env: { CROW_ARTIFACT_SIDECAR_SOCKET: env.CROW_ARTIFACT_SIDECAR_SOCKET, CROW_ARTIFACT_ORIGIN_PORT: "3090" }, exec, now: () => t });
+  const loop = await byLoopback();
+  assert.equal(loop.ok, false);
+  assert.deepEqual(loop.problems, ["host-loopback"]);
+
   const failing = createSidecarHealthReader({ env, exec: async () => { throw new Error("ENOENT"); }, now: () => t });
   const f = await failing();
   assert.equal(f.ok, false);
   assert.deepEqual(f.problems, ["unreachable"]);
   const junk = createSidecarHealthReader({ env, exec: async () => "not json", now: () => t });
   assert.deepEqual((await junk()).problems, ["unreachable"]);
+});
+
+// Review F2: a non-loopback Serve target does not PROVE the sidecar has its own
+// namespace — host networking answers a bridge-IP Proxy just as happily. The
+// probe uses the sidecar's own dialer: connect to its tailnet address on a port
+// that only this gateway's loopback answers.
+test("the active probe: a completed connect to the sidecar's tailnet address is host-loopback even with a bridge target", async () => {
+  const env = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  const withIps = (extra = {}) => JSON.stringify(status({ Self: { TailscaleIPs: ["100.64.20.7", "fd7a:115c:a1e0::7"], ...extra } }));
+  const execOf = (statusText) => async (file, args) => (args.includes("serve") ? JSON.stringify(serve()) : statusText);
+
+  // A completed connect → shared namespace, reported INSTEAD of "ok".
+  const dials = [];
+  const shared = createSidecarHealthReader({
+    env, exec: execOf(withIps()), now: () => NOW,
+    connect: async (host, port, timeoutMs) => { dials.push([host, port, timeoutMs]); },
+  });
+  const s = await shared();
+  assert.deepEqual(s.problems, ["host-loopback"]);
+  assert.deepEqual(dials, [["100.64.20.7", 3001, 2000]], "the sidecar's IPv4 on the gateway's own port, bounded");
+
+  // A refused connect → its own namespace: the bridge target is healthy.
+  for (const refuse of [
+    async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); },
+    async () => { throw new Error("timeout"); },
+    () => { throw new Error("sync throw"); },   // never allowed to escape
+  ]) {
+    const own = createSidecarHealthReader({ env, exec: execOf(withIps()), now: () => NOW, connect: refuse });
+    assert.deepEqual((await own()).problems, [], "refused/timeout/thrown → own namespace");
+  }
+
+  // Only for a Running sidecar: a logged-out node is not probed at all.
+  const notRunning = createSidecarHealthReader({
+    env, now: () => NOW, connect: async () => { throw new Error("must not dial"); },
+    exec: execOf(JSON.stringify({ ...status({ Self: { TailscaleIPs: ["100.64.20.7"] } }), BackendState: "NeedsLogin" })),
+  });
+  assert.deepEqual((await notRunning()).problems, ["logged-out"]);
+
+  // No tailnet IPv4 to dial → no probe, and the mapping is judged on its own.
+  const noIp = createSidecarHealthReader({
+    env, now: () => NOW, exec: execOf(JSON.stringify(status())),
+    connect: async () => { throw new Error("must not dial"); },
+  });
+  assert.deepEqual((await noIp()).problems, []);
+
+  // The probe result is cached with the health result (no second dial inside 5 min).
+  let t = NOW;
+  const counted = [];
+  const cached = createSidecarHealthReader({
+    env, exec: execOf(withIps()), now: () => t,
+    connect: async () => { counted.push(1); throw new Error("ECONNREFUSED"); },
+  });
+  await cached();
+  await cached();
+  assert.equal(counted.length, 1, "one probe per read window");
+
+  // The helper's own contract, without the reader around it.
+  assert.equal(await sidecarSharesHostLoopback({ statusJson: status({ Self: { TailscaleIPs: ["100.64.20.7"] } }), port: 3001, connect: async () => {} }), true);
+  assert.equal(await sidecarSharesHostLoopback({ statusJson: status({ Self: { TailscaleIPs: ["100.64.20.7"] } }), port: 3001, connect: async () => { throw new Error("refused"); } }), false);
+  assert.equal(await sidecarSharesHostLoopback({ statusJson: status(), port: 3001, connect: async () => {} }), false, "no address, nothing to prove");
+  assert.equal(await sidecarSharesHostLoopback({ statusJson: null, port: 3001, connect: async () => {} }), false);
+  assert.equal(await sidecarSharesHostLoopback({ statusJson: status({ Self: { TailscaleIPs: ["100.64.20.7"] } }), port: null, connect: async () => {} }), false);
 });
 
 test("Nest health signal: no card when not configured; ok card when healthy; one warn issue per distinct problem", async () => {
@@ -212,19 +466,22 @@ test("Nest health signal: no card when not configured; ok card when healthy; one
     assert.equal(r.issues.filter((i) => i.id.startsWith("artifact-node")).length, 0);
 
     const exp = new Date(NOW + 3 * DAY).toISOString();
-    hs._setArtifactNodeReader(async () => ({ ok: false, problems: ["logged-out", "key-expiring", "funnel-on", "unexpected-mapping"], keyExpiry: exp }));
+    hs._setArtifactNodeReader(async () => ({ ok: false, problems: ["logged-out", "key-expiring", "funnel-on", "host-loopback", "unexpected-mapping"], keyExpiry: exp }));
     for (const lang of ["en", "es"]) {
       hs.invalidateHealthCache();
       r = await hs.collectHealthSignals(null, { now: () => NOW, lang });
       assert.equal(r.details.find((d) => d.id === "artifact-node")?.state, "warn");
       const issues = r.issues.filter((i) => i.id.startsWith("artifact-node:"));
-      assert.deepEqual(issues.map((i) => i.id).sort(), ["artifact-node:funnel-on", "artifact-node:key-expiring", "artifact-node:logged-out", "artifact-node:unexpected-mapping"]);
+      assert.deepEqual(issues.map((i) => i.id).sort(), ["artifact-node:funnel-on", "artifact-node:host-loopback", "artifact-node:key-expiring", "artifact-node:logged-out", "artifact-node:unexpected-mapping"]);
       for (const i of issues) {
         assert.equal(i.severity, "warn", "warn issues are pushed as notifications by the health monitor");
         assert.ok(i.label && !/signals\.artifactNode/.test(i.label), `${lang}: translated label for ${i.id}`);
       }
       const k = issues.find((i) => i.id === "artifact-node:key-expiring");
       assert.match(k.label, /2026-10-11/, "the expiry date is shown");
+      // host-loopback has a human message in both languages, not a raw code.
+      const hl = issues.find((i) => i.id === "artifact-node:host-loopback");
+      assert.match(hl.label, lang === "es" ? /servicios privados de este equipo/ : /private services/);
       assert.equal(r.ok, false);
     }
 
@@ -243,4 +500,152 @@ test("Nest health signal: no card when not configured; ok card when healthy; one
     hs._setDiskReader(null);
     hs.invalidateHealthCache();
   }
+});
+
+// Review N4: the name set and the IPv6 spellings. `ip6-localhost` and
+// `ip6-loopback` are the /etc/hosts aliases glibc ships for `::1`, and a zone id
+// (`::1%lo`) or a percent-escape (`[::1%25lo]`) does not move the address.
+test("ip6-localhost/ip6-loopback, an IPv6 zone id and percent-escapes are this machine's loopback", () => {
+  // 1. The two /etc/hosts aliases, in any case.
+  for (const host of ["ip6-localhost", "IP6-LOCALHOST", "ip6-localhost.", "ip6-loopback", "IP6-Loopback"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+    assert.deepEqual(expectedSidecarTarget({ bind: host, originPort: PORT }), { target: null, problem: "host-loopback" }, host);
+  }
+  // 2. A zone id on the IPv6 literal: bare, bracketed, URL-escaped (`%25`).
+  for (const host of ["::1%lo", "[::1%lo]", "::1%25lo", "[::1%25lo]", "0:0:0:0:0:0:0:1%lo", "[0:0:0:0:0:0:0:1%25lo]"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+    assert.deepEqual(expectedSidecarTarget({ bind: host, originPort: PORT }), { target: null, problem: "host-loopback" }, `bind ${host}`);
+    const hostPart = host.startsWith("[") ? host : `[${host}]`;
+    assert.deepEqual(expectedSidecarTarget({ target: `http://${hostPart}:${PORT}` }), { target: null, problem: "host-loopback" }, `target ${host}`);
+  }
+  // 3. Through a live Serve Proxy target: the same finding, never unexpected-mapping.
+  for (const proxy of [`http://[::1%lo]:${PORT}`, `http://[::1%25lo]:${PORT}`, `http://[0:0:0:0:0:0:0:1%lo]:${PORT}`]) {
+    assert.deepEqual(sidecarHealth({ statusJson: status(), serveConfig: serve(proxy), target: TARGET, now: NOW }).problems, ["host-loopback"], proxy);
+  }
+  // 4. A percent-encode cannot smuggle a loopback spelling past the check…
+  for (const host of ["local%68ost", "127%2e0%2e0%2e1", "[::%31]", "0%2e0%2e0%2e0"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), true, host);
+  }
+  // …and a host that is not loopback stays not loopback.
+  for (const host of ["[fe80::1%25eth0]", "fd00::1%25eth0", "172%2e30%2e0%2e1", "crow%2dartifacts"]) {
+    assert.equal(isLoopbackOrWildcardHost(host), false, host);
+  }
+});
+
+// Review N2: the probe dials the node's OWN tailnet address, which Tailscale
+// hands out of 100.64.0.0/10. `Self.TailscaleIPs` can carry something else on
+// some hosts, and dialling that would measure a different machine.
+test("the probe dials only a CGNAT (100.64.0.0/10) tailnet address", async () => {
+  for (const [ip, want] of [
+    ["100.64.0.0", true], ["100.64.20.7", true], ["100.100.1.2", true], ["100.127.255.255", true],
+    ["100.63.255.255", false], ["100.128.0.0", false], ["99.64.0.1", false], ["192.0.2.5", false],
+    ["10.0.0.5", false], ["172.30.0.9", false], ["fd7a:115c:a1e0::7", false], ["100.64.0.256", false],
+    ["", false], [null, false], [undefined, false],
+  ]) assert.equal(isCgnatIpv4(ip), want, String(ip));
+
+  const env = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  const readerFor = (ips, dials) => createSidecarHealthReader({
+    env, now: () => NOW, connect: async (host, port) => { dials.push([host, port]); },
+    exec: async (file, args) => (args.includes("serve") ? JSON.stringify(serve()) : JSON.stringify(status({ Self: { TailscaleIPs: ips } }))),
+  });
+
+  // Nothing in range → no probe at all, and the mapping is judged on its own.
+  for (const ips of [["192.0.2.5"], ["10.0.0.5", "fd7a:115c:a1e0::7"], [], ["100.128.0.1"], ["100.63.0.9"]]) {
+    const dials = [];
+    const r = await readerFor(ips, dials)();
+    assert.deepEqual(dials, [], `no dial for ${JSON.stringify(ips)}`);
+    assert.deepEqual(r.problems, [], `not host-loopback for ${JSON.stringify(ips)}`);
+  }
+  // An in-range address next to an out-of-range one is still the node's own.
+  const dials = [];
+  assert.deepEqual((await readerFor(["192.0.2.5", "100.100.1.2"], dials)()).problems, ["host-loopback"]);
+  assert.deepEqual(dials, [["100.100.1.2", 3001]], "the CGNAT address, not the first IPv4 in the list");
+});
+
+// Review N5: the probe asks "does this gateway's LOOPBACK port answer the
+// sidecar's tailnet address". With CROW_GATEWAY_BIND on a specific non-loopback
+// address the gateway answers no loopback port, so the probe proves nothing:
+// it is skipped, and the audit says it was inconclusive rather than healthy.
+test("CROW_GATEWAY_BIND beyond loopback: the probe is skipped and reported as inconclusive", async () => {
+  const baseEnv = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  const dials = [];
+  const readerFor = (bind) => createSidecarHealthReader({
+    env: { ...baseEnv, CROW_GATEWAY_BIND: bind },
+    now: () => NOW,
+    connect: async (host, port) => { dials.push([host, port]); },
+    exec: async (file, args) => (args.includes("serve") ? JSON.stringify(serve()) : JSON.stringify(status({ Self: { TailscaleIPs: ["100.64.20.7"] } }))),
+  });
+
+  // Neither loopback nor a wildcard: no dial, no host-loopback on the probe's
+  // account, and the detail field says why the audit is inconclusive.
+  for (const bind of ["172.30.0.1", "192.168.1.10", "100.64.20.7", "fd00::1"]) {
+    assert.deepEqual(await readerFor(bind)(), { ok: true, problems: [], keyExpiry: null, probe: "skipped-gateway-bind" }, bind);
+  }
+  assert.deepEqual(dials, [], "nothing was dialled");
+
+  // A loopback or wildcard bind still answers loopback, so the probe is valid
+  // there (here it completes, which is the finding).
+  for (const bind of ["127.0.0.1", "0.0.0.0", "::", "localhost", "ip6-localhost"]) {
+    const r = await readerFor(bind)();
+    assert.deepEqual(r.problems, ["host-loopback"], bind);
+    assert.equal(r.probe, undefined, `${bind}: no skip detail when the probe ran`);
+  }
+  assert.ok(dials.length > 0, "the in-loopback binds were probed");
+
+  // The pure audit carries the detail only when it is given one, so every other
+  // result keeps its three documented fields.
+  assert.deepEqual(
+    sidecarHealth({ statusJson: status(), serveConfig: serve(), target: TARGET, probe: "skipped-gateway-bind", now: NOW }),
+    { ok: true, problems: [], keyExpiry: null, probe: "skipped-gateway-bind" },
+  );
+  assert.deepEqual(sidecarHealth({ statusJson: status(), serveConfig: serve(), target: TARGET, now: NOW }), { ok: true, problems: [], keyExpiry: null });
+});
+
+// Review N6: the Nest asks for the audit from more than one place, so two
+// concurrent first reads must share ONE run of the sidecar's CLI and one probe.
+test("reader: concurrent reads share one CLI run and one probe (in-flight dedupe)", async () => {
+  const env = {
+    CROW_ARTIFACT_SIDECAR_SOCKET: "/run/crow-artifacts/tailscaled.sock",
+    CROW_ARTIFACT_ORIGIN_PORT: "3090",
+    CROW_ARTIFACT_ORIGIN_BIND: BRIDGE,
+    PORT: "3001",
+  };
+  let statusCalls = 0, serveCalls = 0, probes = 0;
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const exec = async (file, args) => {
+    if (args.includes("serve")) { serveCalls++; await tick(); return JSON.stringify(serve()); }
+    statusCalls++; await tick();
+    return JSON.stringify(status({ Self: { TailscaleIPs: ["100.64.20.7"] } }));
+  };
+  let t = NOW;
+  const read = createSidecarHealthReader({
+    env, exec, now: () => t,
+    connect: async () => { probes++; throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" }); },
+  });
+
+  const [a, b, c] = await Promise.all([read(), read(), read()]);
+  assert.equal(statusCalls, 1, "one status run for three concurrent readers");
+  assert.equal(serveCalls, 1, "one serve run for three concurrent readers");
+  assert.equal(probes, 1, "one probe for three concurrent readers");
+  assert.deepEqual(a, b);
+  assert.deepEqual(b, c);
+
+  // The shared result is the cached one: a later read inside the window is free.
+  await read();
+  assert.equal(statusCalls, 1);
+  // …and a read after the window starts a NEW run (the dedupe did not wedge it).
+  t += 6 * 60 * 1000;
+  await read();
+  assert.equal(statusCalls, 2);
+  assert.equal(serveCalls, 2);
 });

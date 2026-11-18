@@ -61,10 +61,14 @@
  *               <time>" for as long as the file exists.
  *   artifact-node — the Crow Artifacts sidecar Tailscale node (only when
  *               CROW_ARTIFACT_SIDECAR_SOCKET is set): logged out, key expiring
- *               within 14 days, Funnel on, or an unexpected Serve mapping →
+ *               within 14 days, Funnel on, a sidecar on the HOST's network (a
+ *               Serve Proxy target that names this machine in any spelling, or
+ *               its tailnet address answering this gateway's own loopback port
+ *               — userspace netstack then answers every port of the node on
+ *               this computer's loopback), or an unexpected Serve mapping →
  *               one warn issue per problem ("artifact-node:<code>"), so each
- *               distinct problem is pushed by the health monitor. An origin
- *               URL configured WITHOUT the socket warns "unmonitored".
+ *               distinct problem is pushed by the health monitor. An origin URL
+ *               configured WITHOUT the socket warns "unmonitored".
  *   publishedPorts — the audit behind the engine fence (plan PR S5a), read from
  *               the fence's snapshot file (CROW_PUBLISH_SNAPSHOT): a publish on
  *               the wildcard/LAN/bridge/an empty host, a tailnet-address publish
@@ -714,11 +718,12 @@ export function _setArtifactNodeReader(fn) {
   _artifactNodeReader = fn || createSidecarHealthReader();
 }
 
-const ARTIFACT_NODE_PROBLEMS = ["logged-out", "key-expiring", "funnel-on", "unexpected-mapping", "unreachable"];
+const ARTIFACT_NODE_PROBLEMS = ["logged-out", "key-expiring", "funnel-on", "host-loopback", "unexpected-mapping", "unreachable"];
 const ARTIFACT_NODE_KEYS = {
   "logged-out": "signals.artifactNode.loggedOut",
   "key-expiring": "signals.artifactNode.keyExpiring",
   "funnel-on": "signals.artifactNode.funnelOn",
+  "host-loopback": "signals.artifactNode.hostLoopback",
   "unexpected-mapping": "signals.artifactNode.unexpectedMapping",
   "unreachable": "signals.artifactNode.unreachable",
 };
