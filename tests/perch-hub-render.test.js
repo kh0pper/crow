@@ -187,6 +187,62 @@ before(async () => {
 
 after(async () => { if (server) server.close(); if (chrome) await chrome.close(); });
 
+/** Navigate and wait for the document's own load event. The listener is
+ *  registered BEFORE Page.navigate, because the event can fire before a later
+ *  registration would ever see it — and a navigation that has not actually
+ *  finished is what makes an expression below run against about:blank. A real
+ *  hang fails loudly instead of silently measuring the wrong document. The
+ *  timer and the listener are released on every exit, so a failed navigation
+ *  cannot leave a pending timer or a stale handler on the socket. */
+async function navigateAndWaitForLoad(ws, send, url) {
+  let timer = null;
+  let onMsg = null;
+  const cleanup = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (onMsg) ws.off("message", onMsg);
+    onMsg = null;
+  };
+  const loaded = new Promise((resolve, reject) => {
+    onMsg = (raw) => {
+      let m;
+      try { m = JSON.parse(raw); } catch { return; }
+      if (m.method !== "Page.loadEventFired") return;
+      cleanup();
+      resolve();
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`page did not load: no Page.loadEventFired for ${url} within 30000 ms`));
+    }, 30000);
+    ws.on("message", onMsg);
+  });
+  loaded.catch(() => {});   // the await below is the handler that matters
+  try {
+    const nav = await send("Page.navigate", { url });
+    if (nav && nav.errorText) throw new Error("navigate failed: " + nav.errorText);
+    await loaded;
+  } finally {
+    cleanup();
+  }
+}
+
+/** The load event only says the document arrived; the panel root is inserted
+ *  by the page's own JS afterwards. Poll on a deadline rather than sleeping a
+ *  fixed budget that a loaded machine can overrun. */
+async function waitForPerchRoot(send) {
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const ready = await send("Runtime.evaluate",
+      { expression: "!!document.getElementById('perch-hub-root')", returnByValue: true });
+    if (ready.result && ready.result.value === true) return;
+    if (Date.now() > deadline) {
+      throw new Error("page did not render #perch-hub-root within 15000 ms");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 /** Open a tab, run one expression, return its value, close the tab. */
 async function evaluate(width, height, expression) {
   const tab = await (await fetch(CDP + "/json/new?about:blank", { method: "PUT" })).json();
@@ -209,8 +265,8 @@ async function evaluate(width, height, expression) {
     await send("Emulation.setDeviceMetricsOverride",
       { width, height, deviceScaleFactor: 2, mobile: width < 900 });
     await send("Page.enable");
-    await send("Page.navigate", { url: `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch` });
-    await new Promise((r) => setTimeout(r, 1500));
+    await navigateAndWaitForLoad(ws, send, `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch`);
+    await waitForPerchRoot(send);
     const out = await send("Runtime.evaluate", { expression, returnByValue: true });
     // Without this, an expression that threw returns undefined and the caller's
     // JSON.parse fails with "undefined is not valid JSON" — a confusing error
@@ -374,7 +430,11 @@ async function session(width, height) {
   await send("Emulation.setDeviceMetricsOverride",
     { width, height, deviceScaleFactor: 2, mobile: width < 900 });
   await send("Page.enable");
-  await send("Page.navigate", { url: `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch` });
+  await navigateAndWaitForLoad(ws, send, `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch`);
+  await waitForPerchRoot(send);
+  // Kept on purpose, AFTER the root poll: the panel root only proves the page's
+  // own JS ran. The data fetch that fills the rendered DOM has no ready signal
+  // of its own, so this is the extra hydration settle the tests below read past.
   await new Promise((r) => setTimeout(r, 1500));
   const evalIn = async (expression) => {
     const out = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
