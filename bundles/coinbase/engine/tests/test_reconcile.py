@@ -903,3 +903,302 @@ def test_get_order_failure_skips_row(store, trades_csv):
     assert store.has_fill("t-good")
     assert good_cid in [r["client_order_id"] for r in report.new_fills["b1"]]
     assert any(e["level"] == "warn" for e in events(store))
+
+
+# ---------------------------------------------------------------- status mapping
+
+
+@pytest.mark.parametrize(
+    "exchange_status,local_status",
+    [
+        ("FILLED", FILLED),
+        ("CANCELLED", CANCELLED),
+        ("EXPIRED", CANCELLED),
+        ("FAILED", FAILED),
+        ("CANCEL_QUEUED", OPEN),
+        ("PENDING", OPEN),
+        ("QUEUED", OPEN),
+        ("SOMETHING_NEW", OPEN),
+    ],
+)
+def test_status_map_table(store, trades_csv, exchange_status, local_status):
+    """A snapshot status settles a live row to the local status the table names.
+
+    Only FILLED, CANCELLED, EXPIRED and FAILED settle an order: a cancel that is
+    merely queued, a pending order and a status this module does not know all
+    leave the order resting, so nothing is settled on a reading it cannot
+    interpret.
+    """
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    exchange = FakeExchange(
+        [snap("ex-1", cid, status=exchange_status, size="10", filled_size="0")],
+        hidden=["ex-1"],
+    )
+
+    sync(store, exchange, trades_csv)
+
+    assert store.order(cid)["status"] == local_status
+
+
+def test_cancel_queued_stays_live_then_cancelled_records_final_fill(
+    store, trades_csv
+):
+    """A queued cancel leaves the order live; the real cancel records the fill."""
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    exchange = FakeExchange(
+        [
+            snap(
+                "ex-1",
+                cid,
+                status="CANCEL_QUEUED",
+                size="10",
+                filled_size="4",
+                filled_value="4.00",
+            )
+        ],
+        fills_by_order={
+            "ex-1": [trade_fill("t-1", "ex-1", size="4", price="1.0")]
+        },
+    )
+
+    queued = sync(store, exchange, trades_csv)
+    row = store.order(cid)
+    assert row["status"] == OPEN
+    assert row["filled_size"] == D("4")
+    assert cid not in [
+        r["client_order_id"] for r in queued.new_fills.get("b1", [])
+    ]
+
+    exchange.orders["ex-1"] = snap(
+        "ex-1",
+        cid,
+        status="CANCELLED",
+        size="10",
+        filled_size="9",
+        filled_value="9.00",
+    )
+    exchange.fills_by_order["ex-1"] = [
+        trade_fill("t-1", "ex-1", size="4", price="1.0"),
+        trade_fill("t-2", "ex-1", size="5", price="1.0"),
+    ]
+
+    killed = sync(store, exchange, trades_csv)
+    row = store.order(cid)
+    assert row["status"] == CANCELLED
+    assert row["filled_size"] == D("9")
+    assert bool(row["fills_ok"]) is True
+    reported = [
+        r for r in killed.new_fills["b1"] if r["client_order_id"] == cid
+    ]
+    assert len(reported) == 1
+    assert reported[0]["filled_size"] == D("9")
+    assert len(fill_rows(store)) == 2
+
+    third = sync(store, exchange, trades_csv)
+    assert third.new_fills == {}
+
+
+# ---------------------------------------------------------------- owner prefixes
+
+
+def test_adopt_prefix_collision_orphan(store, trades_csv):
+    """An id for b10 is not b1's order, however b1-prefixed it looks."""
+    new_bot(store, "b1")
+    cid = "cb-b10-B+1-0000000000bb"
+    exchange = FakeExchange([snap("ex-10", cid, size="10")])
+
+    report = sync(store, exchange, trades_csv)
+
+    row = store.order(cid)
+    assert row is not None
+    assert row["owner"] == "orphan"
+    assert row["status"] == OPEN
+    assert "adopted" in (row["note"] or "")
+    assert report.orphans == [cid]
+
+
+def test_stopped_owner_sweep_does_not_hit_prefix_neighbour(store, trades_csv):
+    """Stopping b1 sweeps b1's order and leaves b10's order resting."""
+    new_bot(store, "b1")
+    new_bot(store, "b10")
+    c1 = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    c10 = seed(store, cid_for("b10", 1), "b10", status=OPEN, order_id="ex-10")
+    exchange = FakeExchange(
+        [snap("ex-1", c1, size="10"), snap("ex-10", c10, size="10")]
+    )
+    store.set_bot_status("b1", STOPPED)
+    gateway = FakeGateway()
+
+    sync(store, exchange, trades_csv, gateway=gateway)
+
+    assert gateway.calls == [("owner", "b1")]
+
+
+def test_unparseable_cb_id_adopted_at_level_zero(store, trades_csv, tmp_path):
+    """A cb- id that is not the engine's shape still gets a row, at level 0."""
+    new_bot(store, "b1")
+    cid = "cb-b1-weird"
+    exchange = FakeExchange([snap("ex-weird", cid, side="SELL", size="10")])
+
+    sync(store, exchange, trades_csv)
+
+    row = store.order(cid)
+    assert row is not None
+    assert row["owner"] == "b1"
+    assert row["level"] == 0
+    assert row["side"] == "SELL"
+
+    # The same id with no b1 bot row: nobody owns it, so it is an orphan.
+    other = Store(tmp_path / "other.db")
+    try:
+        other_exchange = FakeExchange(
+            [snap("ex-weird", cid, side="SELL", size="10")]
+        )
+        sync(other, other_exchange, tmp_path / "other.csv")
+
+        orphan = other.order(cid)
+        assert orphan is not None
+        assert orphan["owner"] == "orphan"
+        assert orphan["level"] == 0
+        assert orphan["side"] == "SELL"
+    finally:
+        other.close()
+
+
+# ---------------------------------------------------------------- ai owner
+
+
+def test_ai_order_adopted_and_swept_only_on_halt(store, trades_csv):
+    """The ai owner's order is adopted, and only a halt sweeps it."""
+    cid = cid_for("ai", 1)
+    exchange = FakeExchange([snap("ex-ai", cid, size="5")])
+
+    quiet = FakeGateway()
+    sync(store, exchange, trades_csv, gateway=quiet)
+
+    row = store.order(cid)
+    assert row is not None
+    assert row["owner"] == "ai"
+    assert row["source"] == "ai"
+    assert row["status"] == OPEN
+    assert quiet.calls == []
+
+    halted = FakeGateway(halted=True)
+    sync(store, exchange, trades_csv, gateway=halted)
+    assert halted.calls == [("all", None)]
+
+
+# ---------------------------------------------------------------- fill guards
+
+
+def test_wrong_product_fill_left_unbooked_warned_once(store, trades_csv):
+    """A fill for another product is never booked, and is warned about once."""
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    exchange = FakeExchange(
+        [snap("ex-1", cid, size="10", filled_size="4", filled_value="4.00")],
+        fills_by_order={
+            "ex-1": [trade_fill("t-wrong", "ex-1", product="BTC-USDC", size="4")]
+        },
+    )
+
+    sync(store, exchange, trades_csv)
+
+    assert fill_rows(store) == []
+    assert csv_data_rows(trades_csv) == []
+    assert len([e for e in events(store) if e["level"] == "warn"]) == 1
+    assert bool(store.order(cid)["fills_ok"]) is False
+
+    sync(store, exchange, trades_csv)
+
+    assert fill_rows(store) == []
+    assert csv_data_rows(trades_csv) == []
+    assert len([e for e in events(store) if e["level"] == "warn"]) == 1
+    assert bool(store.order(cid)["fills_ok"]) is False
+
+
+def test_fill_with_other_order_id_skipped_with_warning(store, trades_csv):
+    """A fill naming another order id belongs elsewhere: skip it, and say so."""
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    exchange = FakeExchange(
+        [snap("ex-1", cid, size="10", filled_size="4", filled_value="4.00")],
+        fills_by_order={
+            "ex-1": [trade_fill("t-elsewhere", "ex-999", size="4")]
+        },
+    )
+
+    sync(store, exchange, trades_csv)
+
+    assert fill_rows(store, "t-elsewhere") == []
+    assert csv_rows_for(trades_csv, "t-elsewhere") == []
+    assert any(e["level"] == "warn" for e in events(store))
+
+
+@pytest.mark.parametrize("trade_id_state", ["null", "missing"])
+def test_fill_without_trade_id_warns(store, trades_csv, trade_id_state):
+    """A fill with no trade id cannot be booked, so it is warned about instead."""
+    new_bot(store)
+    cid = seed(store, cid_for("b1", 1), "b1", status=OPEN, order_id="ex-1")
+    fill = trade_fill("t-none", "ex-1", size="4", price="1.0")
+    if trade_id_state == "null":
+        fill["trade_id"] = None
+    else:
+        del fill["trade_id"]
+    exchange = FakeExchange(
+        [snap("ex-1", cid, size="10", filled_size="4", filled_value="4.00")],
+        fills_by_order={"ex-1": [fill]},
+    )
+
+    sync(store, exchange, trades_csv)
+
+    assert fill_rows(store) == []
+    assert csv_data_rows(trades_csv) == []
+    assert any(e["level"] == "warn" for e in events(store))
+
+
+# ---------------------------------------------------------------- the updated count
+
+
+def test_updated_counts_rows_once(store, trades_csv):
+    """`updated` counts a row once, however many writes settle it."""
+    new_bot(store)
+    cid = cid_for("b1", 1)
+    exchange = FakeExchange(
+        [snap("ex-1", cid, size="10", filled_size="3", filled_value="3.00")],
+        fills_by_order={
+            "ex-1": [trade_fill("t-1", "ex-1", size="3", price="1.0")]
+        },
+    )
+
+    adopted = sync(store, exchange, trades_csv)
+    row = store.order(cid)
+    assert row is not None
+    assert row["owner"] == "b1"
+    assert row["filled_size"] == D("3")
+    assert bool(row["fills_ok"]) is True
+    assert adopted.updated == 1
+
+    unchanged = sync(store, exchange, trades_csv)
+    assert unchanged.updated == 0
+    assert len(fill_rows(store)) == 1
+    assert len(csv_data_rows(trades_csv)) == 1
+
+    # The order settles at the exchange: one further row change, counted once.
+    exchange.orders["ex-1"] = snap(
+        "ex-1",
+        cid,
+        status="FILLED",
+        size="10",
+        filled_size="10",
+        filled_value="10.00",
+    )
+    exchange.fills_by_order["ex-1"].append(
+        trade_fill("t-2", "ex-1", size="7", price="1.0")
+    )
+
+    settled = sync(store, exchange, trades_csv)
+    assert settled.updated == 1
+    assert store.order(cid)["status"] == FILLED

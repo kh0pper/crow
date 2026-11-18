@@ -9,10 +9,20 @@ the list is not evidence that an order is gone.  A snapshot's `filled_size`,
 `fills_ok`, so the fills behind it are booked again, and the flag is set only
 once the recorded FILL sizes reach it.
 
+A queued cancel is not a settled order: only FILLED, CANCELLED, EXPIRED and
+FAILED settle a row, so a `CANCEL_QUEUED` order stays live and its filled
+amounts keep being recorded while the cancel is in flight.
+
 Every fill is booked once: a trade already in `fills` is skipped, the
 `trades.csv` row is written before the database row, and a `trade_type` that is
-null or absent counts as a FILL.  Ids that do not start with `cb-` are somebody
-else's orders and are never adopted or touched.
+null or absent counts as a FILL.  A fill that cannot be booked is left out and
+recorded as a warning: one with no `trade_id` (warned about every cycle, since
+there is no id to remember it by), one naming another order id, and one for
+another product (the last two once per trade id).  Ids that do not start with
+`cb-` are somebody else's orders and are never adopted or touched.
+
+The `now` passed in is epoch seconds on the same clock as `time.time()`, because
+a row's `created_at` is stamped with `time.time()` and the two are subtracted.
 
 Nothing here writes to the exchange.  A kill is the gateway's `cancel_all`, run
 after the rows are settled so their state is recorded first, and only for a halt
@@ -48,13 +58,15 @@ D = Decimal
 log = logging.getLogger("crow_coinbase.reconcile")
 
 # The local status a snapshot settles to, by the exchange's own status string.
-# Everything not named here (OPEN, PENDING, QUEUED, a status nobody knows) is a
-# resting order: the safe reading of a status this module cannot interpret.
+# Everything not named here (OPEN, PENDING, QUEUED, CANCEL_QUEUED, a status
+# nobody knows) is a resting order: the safe reading of a status this module
+# cannot interpret.  A cancel that is only queued is not a cancel yet, so the
+# row stays live and the fills landing before the cancel takes effect are still
+# booked.
 STATUS_BY_EXCHANGE = {
     "FILLED": FILLED,
     "CANCELLED": CANCELLED,
     "EXPIRED": CANCELLED,
-    "CANCEL_QUEUED": CANCELLED,
     "FAILED": FAILED,
 }
 
@@ -64,8 +76,10 @@ STATUS_BY_EXCHANGE = {
 FILLABLE_STATUSES = (OPEN, FILLED, CANCELLED)
 
 # A `cb-` row written before a send, with no order at the exchange, is given up
-# on only after this long (seconds): an answer that was lost may still land, so a
-# short window would fail an order the exchange is about to hold.
+# on only after this long (seconds, measured against the `now` the caller passes
+# in, which is on the same clock as `time.time()` that stamped `created_at`): an
+# answer that was lost may still land, so a short window would fail an order the
+# exchange is about to hold.
 PENDING_WINDOW_S = 300.0
 
 # `cb-<owner>-<B|S><+level>-<hex>`: the owner part and the shape the engine builds.
@@ -79,12 +93,12 @@ class ReconcileReport:
     """What one cycle did, for the caller to log, ring or alert on.
 
     `updated` counts the order rows inserted (an adopted stranger) or changed
-    (a settle, an expiry) this call.  `orphans` lists every `cb-` order still
-    live after the sync whose owner is `orphan`, so a bot that vanished cannot
-    leave an order resting unnoticed.  `new_fills` maps an owner to the rows that
-    went from live to terminal carrying a fill this call, each re-read after its
-    update, which is the shape a strategy needs to react to a fill it did not
-    place itself.
+    (a settle, an expiry) this call, each row once however many writes it took.
+    `orphans` lists every `cb-` order still live after the sync whose owner is
+    `orphan`, so a bot that vanished cannot leave an order resting unnoticed.
+    `new_fills` maps an owner to the rows that went from live to terminal
+    carrying a fill this call, each re-read after its update, which is the shape
+    a strategy needs to react to a fill it did not place itself.
     """
 
     updated: int
@@ -103,10 +117,12 @@ def reconcile(
 ) -> ReconcileReport:
     """Bring the store's order rows up to date with the exchange, once.
 
-    `now` is the caller's clock (epoch seconds), used only to decide that a row
-    which never reached the exchange may be given up on.  `gateway` is the kill
-    path: with none, live orders are left resting.  `trades_csv` defaults to the
-    file beside the database, and `mode` is stamped into every row written there.
+    `now` is the caller's clock: epoch seconds on the same clock as
+    `time.time()`, which is what stamps a row's `created_at`, so the two can be
+    subtracted.  It decides only whether a row which never reached the exchange
+    may be given up on.  `gateway` is the kill path: with none, live orders are
+    left resting.  `trades_csv` defaults to the file beside the database, and
+    `mode` is stamped into every row written there.
     """
     csv_path = (
         Path(trades_csv)
@@ -116,8 +132,11 @@ def reconcile(
     open_list = _open_cb_orders(exchange)
     new_fills: dict[str, list[dict]] = {}
 
-    updated = _settle_live(store, exchange, open_list, now, new_fills)
-    updated += _adopt_unknown(store, open_list, new_fills)
+    # Rows this cycle wrote, so a row adopted and then settled in the same cycle
+    # is counted once rather than once per write.
+    touched: set[str] = set()
+    _settle_live(store, exchange, open_list, now, new_fills, touched)
+    _adopt_unknown(store, open_list, new_fills, touched)
     _book_fills(store, exchange, csv_path, mode)
     if gateway is not None:
         _kill_gap(store, gateway, open_list)
@@ -126,7 +145,7 @@ def reconcile(
         row["client_order_id"]
         for row in store.orders(owner="orphan", statuses=LIVE_STATUSES)
     ]
-    return ReconcileReport(updated=updated, orphans=orphans, new_fills=new_fills)
+    return ReconcileReport(updated=len(touched), orphans=orphans, new_fills=new_fills)
 
 
 # ---------------------------------------------------------------- the book
@@ -154,16 +173,17 @@ def _settle_live(
     open_list: dict[str, dict],
     now: float,
     new_fills: dict[str, list[dict]],
-) -> int:
-    """Settle every live row from the exchange; return how many rows changed.
+    touched: set[str],
+) -> None:
+    """Settle every live row from the exchange, adding each changed row to *touched*.
 
     A row in the open list takes that snapshot.  A row the list omits is read on
     its own: with an order id it is never given up on, however old (a lost answer
     is not an order that never landed), and without one it is looked up by client
     order id, where only a row past the window with no order anywhere becomes
-    FAILED.  One row's read failing skips that row alone.
+    FAILED.  One row's read failing skips that row alone.  Each row adds at most
+    one entry, so a row settled in several places is still one changed row.
     """
-    updated = 0
     for row in store.orders(statuses=LIVE_STATUSES):
         cid = row["client_order_id"]
         snap = open_list.get(cid)
@@ -179,13 +199,13 @@ def _settle_live(
                         status=FAILED,
                         note="never reached the exchange",
                     )
-                    updated += 1
+                    touched.add(cid)
                 continue
         fresh, changed, new_fill = _apply(store, row, snap)
-        updated += 1 if changed else 0
+        if changed:
+            touched.add(cid)
         if new_fill:
             new_fills.setdefault(row["owner"], []).append(fresh)
-    return updated
 
 
 def _absent_snapshot(
@@ -302,16 +322,21 @@ def _dec(value: Any) -> Decimal:
 # ---------------------------------------------------------------- adoption
 
 
-def _adopt_unknown(store: Store, open_list: dict[str, dict], new_fills: dict) -> int:
+def _adopt_unknown(
+    store: Store,
+    open_list: dict[str, dict],
+    new_fills: dict,
+    touched: set[str],
+) -> None:
     """Give a row to every one of our open orders the store has never seen.
 
     The owner comes from the id when it is `ai` or a bot row exists; anything else
     is an orphan (the bot is gone), which the halt branch alone may sweep.  The
     row is written OPEN with the exchange's own order id and then settled from the
     same snapshot in one further step, so a stranger that is already partly
-    filled keeps its filled part.  Returns how many rows were written.
+    filled keeps its filled part.  Each adopted id is added to *touched* once,
+    however many writes its row took.
     """
-    updated = 0
     for cid, snap in open_list.items():
         if store.order(cid) is not None:
             continue
@@ -337,15 +362,15 @@ def _adopt_unknown(store: Store, open_list: dict[str, dict], new_fills: dict) ->
             order_id=snap.get("order_id"),
             note="adopted orphan" if orphan else "adopted",
         )
-        updated += 1
+        touched.add(cid)
         row = store.order(cid)
         if row is None:
             continue
         fresh, changed, new_fill = _apply(store, row, snap)
-        updated += 1 if changed else 0
+        if changed:
+            touched.add(cid)
         if new_fill:
             new_fills.setdefault(owner, []).append(fresh)
-    return updated
 
 
 def _shape_of(cid: str, snap: dict) -> tuple[str, int]:
@@ -397,25 +422,61 @@ def _book_fills(
 def _book_fill(store: Store, row: dict, fill: dict, trades_csv: Path, mode: str) -> None:
     """Book one exchange fill, unless it is already booked or belongs elsewhere.
 
-    The row's product is the product of its fills: a fill that names a different
-    one is recorded as a warning and left unbooked, because attributing it here
-    would put another order's trade in this owner's records.
+    A fill with no `trade_id` cannot be booked and cannot be remembered either,
+    so it is warned about on every cycle.  A fill whose `order_id` names a
+    different order than the row, and a fill that names a different product than
+    the row, are left unbooked — attributing either here would put another
+    order's trade in this owner's records — and each of those is warned about
+    once per trade id, so a permanent mismatch does not fill the event log every
+    cycle.  A trade already in `fills` is skipped in silence: it was booked
+    already, by the stream or by an earlier cycle.
     """
     trade_id = fill.get("trade_id")
-    if not trade_id or store.has_fill(trade_id):
-        return
-    cid = row["client_order_id"]
-    product = fill.get("product") or row["product"]
-    if product != row["product"]:
+    if not trade_id:
         message = (
-            f"fill {trade_id} is product {product!r} but order {cid} is "
-            f"{row['product']!r}; left unbooked"
+            f"fill for order {row['client_order_id']} has no trade id; "
+            "left unbooked"
         )
         log.warning(message)
         store.event("warn", message)
         return
+    if store.has_fill(trade_id):
+        return
+    cid = row["client_order_id"]
+    order_id = fill.get("order_id")
+    if order_id and order_id != row["order_id"]:
+        _warn_unbooked(
+            store,
+            trade_id,
+            f"fill {trade_id} is order {order_id} but order {cid} is "
+            f"{row['order_id']}; left unbooked",
+        )
+        return
+    product = fill.get("product") or row["product"]
+    if product != row["product"]:
+        _warn_unbooked(
+            store,
+            trade_id,
+            f"fill {trade_id} is product {product!r} but order {cid} is "
+            f"{row['product']!r}; left unbooked",
+        )
+        return
     records.append_fill(trades_csv, product, fill, cid, mode)
     store.record_fill(fill, cid)
+
+
+def _warn_unbooked(store: Store, trade_id: str, message: str) -> None:
+    """Record *message* once per trade id, then never again for that trade.
+
+    A fill that cannot be booked is read again on every cycle, so the marker in
+    the store's kv table is what keeps one permanent mismatch to one warning.
+    """
+    key = f"reconcile:unbooked:{trade_id}"
+    if store.get(key):
+        return
+    log.warning(message)
+    store.event("warn", message)
+    store.put(key, True)
 
 
 def _recorded_fill_size(store: Store, cid: str) -> Decimal:
