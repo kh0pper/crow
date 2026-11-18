@@ -40,8 +40,10 @@ test("confirm gate (glasses :186-225): first call confirms; same tool+args+affir
 });
 
 test("isDestructiveTool matches the glasses list + regex", () => {
-  for (const n of ["crow_delete_post", "crow_unpublish_post", "crow_remove_backend", "crow_dismiss_all_notifications", "crow_destroy_x"]) assert.ok(H.isDestructiveTool(n), n);
-  for (const n of ["crow_create_post", "crow_wm", "", null]) assert.ok(!H.isDestructiveTool(n), String(n));
+  for (const n of ["crow_delete_post", "crow_unpublish_post", "crow_remove_backend", "crow_dismiss_all_notifications", "crow_destroy_x",
+    // the workspace file tools are in the exact list: the regex does not reach "crow_project_file_*"
+    "crow_project_file_write", "crow_project_file_delete"]) assert.ok(H.isDestructiveTool(n), n);
+  for (const n of ["crow_create_post", "crow_wm", "crow_project_file_read", "crow_project_file_list", "", null]) assert.ok(!H.isDestructiveTool(n), String(n));
 });
 
 test("conversation store: 24-message cap, 15-min idle reset, system dropped, never starts on an orphan tool/assistant", () => {

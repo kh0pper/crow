@@ -144,7 +144,9 @@ test("recall: the things people say for each family hit its list, and plain ques
 
 // Recall against the tools themselves: the thing each tool acts on (the last word of its name) is in
 // the family's list, in the singular and the plural — or is named here as deliberately left out.
-const NOT_SPOKEN = new Set(["stats", "schema", "dir", "get", "capabilities", "member", "members", "log", "url", "settings", "theme", "diagram", "access", "status", "instance", "instances", "conflicts", "close", "memo", "react", "group", "groups", "discoverable", "relays", "relay", "attest", "verify", "revoke", "list", "transforms", "crosspost", "cancel", "published", "crossposts", "background", "backgrounds", "search", "action", "refresh", "listen", "playlist", "items", "folders", "preview", "song", "songs", "article"]);
+// The four crow_project_file_* tools end in bare verbs (list, read, write, delete): the thing they
+// act on is a "file", and none of them is offered to a voice turn.
+const NOT_SPOKEN = new Set(["stats", "schema", "dir", "get", "capabilities", "member", "members", "log", "url", "settings", "theme", "diagram", "access", "status", "instance", "instances", "conflicts", "close", "memo", "react", "group", "groups", "discoverable", "relays", "relay", "attest", "verify", "revoke", "list", "read", "write", "delete", "transforms", "crosspost", "cancel", "published", "crossposts", "background", "backgrounds", "search", "action", "refresh", "listen", "playlist", "items", "folders", "preview", "song", "songs", "article"]);
 // "source" belongs to projects; for the news hub people say feed, subscribe, podcast.
 const NOT_SPOKEN_IN = new Set(["media:source", "media:sources"]);
 test("recall against the tool names: every tool's object word is in its family's list, or is named as left out", () => {

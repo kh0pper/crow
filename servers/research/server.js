@@ -29,8 +29,9 @@ import { clearApprovalNonce } from "../shared/data-backend-approval-key.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
 import { statusLabel, UNFETCHED_LABEL } from "./fetch-labels.js";
-import { UNKNOWN, resolveCallActor, auditActor, actorLabel } from "./actor.js";
-import { makeShareGate, notFoundResult, scopePredicate } from "../shared/project-share-scope.js";
+import { UNKNOWN, resolveCallActor, auditActor, actorLabel, isPeerCall } from "./actor.js";
+import { makeShareGate, notFoundResult, refusalResult, scopePredicate, boundByBotRules } from "../shared/project-share-scope.js";
+import { createProjectFileStore, ProjectFileError, projectFileDataDir } from "../shared/project-files.js";
 import { listSharesForBot, resolveBotAccess } from "../shared/project-bot-shares.js";
 import { ensureProvenanceSchema, ensureWithdrawalSchema } from "./ensure-schema.js";
 import { fetchPage as defaultFetchPage, splitFetchedText, storedTextMaybeTruncated, PREVIEW_CHARS, FETCHED_TEXT_MAX, REFETCH_AFTER_DAYS } from "../shared/fetch-page.js";
@@ -2145,6 +2146,210 @@ export function createProjectServer(dbPath, options = {}) {
         throw err;
       }
     }
+  );
+
+  // --- Project file tools (crow_project_file_*, 2026-11-18) ---
+  //
+  // A caller holding this instance's token works on a project's files over MCP alone: list, read,
+  // write (atomic, optionally if-match) and delete. All the path safety and I/O lives in
+  // servers/shared/project-files.js, which opens each path component O_NOFOLLOW from its parent's
+  // fd and re-checks every fd's kernel path against the workspace root. These handlers add only
+  // the three things that core cannot know:
+  //
+  //   - the actor gate (the same share gate as every other project tool): list/read need the
+  //     share's `read("file")` reach, write/delete its `write("file")` reach; the owner and an
+  //     unidentified local caller keep full access.
+  //   - the member capability: a write or delete also needs `write_files` on the project — the
+  //     same check crow_upload_file makes for a project upload.
+  //   - the audit row: every write and delete appends file.write / file.delete with the path, size
+  //     and sha256 (never the content).
+  //
+  // Two more rules the core applies: a bot may not write or delete a dot-entry anywhere, or an agent
+  // instruction or config file at any depth (CLAUDE.md, AGENTS.md, GEMINI.md, opencode.json and the
+  // rest of BOT_REFUSED_NAMES — the names the operator's own runner reads as configuration, so a bot
+  // may not plant them in a workspace the operator opens), and a peer instance is refused
+  // outright in v1: workspace files are for this instance's owner and its bots, and they are not
+  // part of the project-share vocabulary.
+  //
+  // A peer reaches these tools two ways, and `isPeerCall` catches both: the bearer token the mount
+  // records in `authInfo`, and the {kind:"peer"} / remote-bot (`instance`) marker a forwarding
+  // router passes in `_meta` (forwardActorMeta → peerActorMeta). The second matters most: the
+  // router's in-process client carries no authInfo, and `resolveCallActor` would read the marker as
+  // an unidentified local caller — which keeps full access.
+  //
+  // The project must exist and not be archived, and its workspace folder must sit inside this
+  // instance's `<data>/projects` folder.
+  //
+  // Version history (servers/shared/history/workspace-history.js) records the workspace on its next
+  // snapshot, so every write and delete becomes a version the owner can restore.
+  const PEER_FILE_REFUSAL =
+    "Project files are available to this instance's owner and its bots only; a peer instance may not use them.";
+
+  // Test seams: awaited by the file tools after the workspace root is opened and before any
+  // component of the path is (the resolve-then-swap race test drives it), and after each folder
+  // component is opened and verified (the between-opens race test drives that one).
+  const fileHooks = {
+    ...(typeof options.beforeFileOpen === "function" ? { beforeOpen: options.beforeFileOpen } : {}),
+    ...(typeof options.afterFileComponentOpen === "function" ? { afterComponentOpen: options.afterFileComponentOpen } : {}),
+  };
+
+  /** Bytes as a short human figure. */
+  const fileBytes = (n) => `${Number(n).toLocaleString("en-US")} bytes`;
+
+  /**
+   * The shared body of the four file tools: peer refusal, the share gate, the live project row and
+   * (for a write) the write_files capability. `fn` gets the resolved project id, the project row,
+   * the store and the gate's actor.
+   */
+  async function withProjectFiles(tool, { project_id }, extra, { write = false }, fn) {
+    if (isPeerCall(extra)) return refusalResult(PEER_FILE_REFUSAL);
+    const gate = shareGate(tool, extra);
+    const pass = await gate.check(project_id, {});
+    if (pass.isError) return pass;
+    const projectId = pass.projectId;
+    if (projectId == null) return notFoundResult();
+    try {
+      const project = await assertProjectExists(db, projectId);
+      // An archived project is closed to its files as well: the same "active only" condition every
+      // other live-project reader uses (reachableProjects, the history helpers, the Projects panel).
+      const row = (await db.execute({
+        sql: `SELECT workspace_dir FROM project_spaces
+               WHERE id = ? AND archived_at IS NULL
+                 AND (status IS NULL OR status != 'archived')`,
+        args: [projectId],
+      })).rows[0];
+      if (!row) return refusalResult(`Project #${projectId} is archived; its files are closed.`);
+      if (write) await assertLocalCapability(db, projectId, "write_files");
+      const store = createProjectFileStore({
+        workspaceDir: row.workspace_dir,
+        dataDir: projectFileDataDir(),
+        hooks: fileHooks,
+        // A bot's write or delete may not leave a dot-entry or an agent instruction file behind: the
+        // operator's own editor and runner would read it as configuration on the next open. The
+        // shares gate above already decided the bot may touch this project at all.
+        bot: boundByBotRules(gate.actor),
+      });
+      return await fn({ projectId, project, store, actor: gate.actor });
+    } catch (err) {
+      if (err instanceof AclError) return aclErrorToToolResult(err);
+      if (err instanceof ProjectFileError) return refusalResult(err.message);
+      throw err;
+    }
+  }
+
+  server.tool(
+    "crow_project_file_list",
+    "List a project's workspace entries: folders, files and links (a link is reported as type link and never followed). Paths are relative to the workspace root, which is empty by default. Use crow_project_file_read to read one file and crow_project_file_write to change one; the workspace keeps a version history.",
+    {
+      project_id: z.number().describe("Project ID"),
+      path: z.string().max(400).optional().describe("Folder inside the workspace (default: the workspace root)"),
+      recursive: z.boolean().optional().describe("Also list sub-folders (8 levels deep at most)"),
+      limit: z.number().int().min(1).max(2000).optional().describe("Maximum entries to return (default 200, max 2000)"),
+    },
+    async ({ project_id, path, recursive, limit }, extra) =>
+      withProjectFiles("crow_project_file_list", { project_id }, extra, {}, async ({ projectId, project, store }) => {
+        const r = await store.list({ path: path ?? "", recursive: recursive === true, limit });
+        const where = r.path ? `"${r.path}"` : "the workspace root";
+        let text = `Project #${projectId} (${project.slug}), ${where}: ${r.entries.length} ${r.entries.length === 1 ? "entry" : "entries"}`;
+        if (r.entries.length === 0) text += "\n(empty)";
+        for (const entry of r.entries) {
+          text += `\n  ${entry.type.padEnd(4)}  ${entry.path}  ${fileBytes(entry.size)}  ${entry.mtime}`;
+        }
+        if (r.truncated) text += `\n(stopped at ${r.entries.length} entries: list a narrower folder for the rest)`;
+        return { content: [{ type: "text", text }] };
+      })
+  );
+
+  server.tool(
+    "crow_project_file_read",
+    "Read one file in a project's workspace. Returns UTF-8 text; a binary file is refused unless encoding is \"base64\". At most 1 MiB per call, so use offset and max_bytes for a bigger file. The workspace keeps a version history: any earlier version of a file can be restored.",
+    {
+      project_id: z.number().describe("Project ID"),
+      path: z.string().max(400).describe("File path relative to the workspace root"),
+      offset: z.number().int().min(0).optional().describe("Byte offset to start at (default 0)"),
+      max_bytes: z.number().int().min(1).max(1048576).optional().describe("Bytes to return (default and cap: 1 MiB)"),
+      encoding: z.enum(["utf8", "base64"]).optional().describe("utf8 (default), or base64 to read a binary file"),
+    },
+    async ({ project_id, path, offset, max_bytes, encoding }, extra) =>
+      withProjectFiles("crow_project_file_read", { project_id }, extra, {}, async ({ store }) => {
+        const r = await store.read({ path, offset, maxBytes: max_bytes, encoding });
+        const content = [{ type: "text", text: r.content }];
+        if (r.offset > 0 || r.truncated) {
+          const range = `bytes ${r.offset}-${r.offset + r.bytes - 1} of ${r.size}`;
+          const more = r.truncated ? `; call again with offset ${r.offset + r.bytes} for more` : "";
+          content.push({
+            type: "text",
+            text: r.encoding === "base64" ? `[base64 of ${range}]` : `[${r.path}: ${range}${more}]`,
+          });
+        }
+        return { content };
+      })
+  );
+
+  server.tool(
+    "crow_project_file_write",
+    "Write one file in a project's workspace: creates it, or replaces it atomically (no partial file is ever left behind). Content is UTF-8 text unless encoding is \"base64\"; at most 5 MiB per call. Pass if_match_sha256 with the sha256 an earlier read returned to refuse the write when the file changed meanwhile — do that whenever another editor (a bot, another session) may be working on the same file. Every write is recorded in the project's audit log and becomes a version in its file history.",
+    {
+      project_id: z.number().describe("Project ID"),
+      path: z.string().max(400).describe("File path relative to the workspace root"),
+      content: z.string().max(7000000).describe("The file's content"),
+      encoding: z.enum(["utf8", "base64"]).optional().describe("utf8 (default) or base64"),
+      create_dirs: z.boolean().optional().describe("Create missing folders in the path (default true)"),
+      if_match_sha256: z.string().max(64).optional().describe("Refuse unless the file's current sha256 is this"),
+    },
+    async ({ project_id, path, content, encoding, create_dirs, if_match_sha256 }, extra) =>
+      withProjectFiles("crow_project_file_write", { project_id }, extra, { write: true }, async ({ projectId, store, actor }) => {
+        const r = await store.write({
+          path,
+          content,
+          encoding,
+          createDirs: create_dirs !== false,
+          ifMatchSha256: if_match_sha256,
+        });
+        await appendAudit(db, {
+          project_id: projectId,
+          ...auditActor(actor),
+          action: "file.write",
+          target: `file:${r.path}`,
+          payload: { path: r.path, size: r.size, sha256: r.sha256 },
+        });
+        return {
+          content: [{
+            type: "text",
+            text: `${r.created ? "Created" : "Wrote"} ${r.path} (${fileBytes(r.size)}, sha256 ${r.sha256}).\n` +
+              "The project's file history records this on its next snapshot.",
+          }],
+        };
+      })
+  );
+
+  server.tool(
+    "crow_project_file_delete",
+    "Delete one file from a project's workspace, or one empty folder (deleting a folder recursively is not available). Pass if_match_sha256 to refuse unless the file still has that sha256. The delete is recorded in the project's audit log, and the workspace's version history keeps every earlier version of the file.",
+    {
+      project_id: z.number().describe("Project ID"),
+      path: z.string().max(400).describe("Path relative to the workspace root"),
+      if_match_sha256: z.string().max(64).optional().describe("Refuse unless the file's sha256 is this"),
+    },
+    async ({ project_id, path, if_match_sha256 }, extra) =>
+      withProjectFiles("crow_project_file_delete", { project_id }, extra, { write: true }, async ({ projectId, store, actor }) => {
+        const r = await store.remove({ path, ifMatchSha256: if_match_sha256 });
+        await appendAudit(db, {
+          project_id: projectId,
+          ...auditActor(actor),
+          action: "file.delete",
+          target: `file:${r.path}`,
+          payload: { path: r.path, size: r.size, sha256: r.sha256 },
+        });
+        return {
+          content: [{
+            type: "text",
+            text: r.type === "dir"
+              ? `Deleted the empty folder ${r.path}.`
+              : `Deleted ${r.path} (${fileBytes(r.size)}).`,
+          }],
+        };
+      })
   );
 
   server.tool(

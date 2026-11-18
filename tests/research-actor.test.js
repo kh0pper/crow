@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import {
-  OWNER, UNKNOWN, actorFromEnv, resolveCallActor, forwardActorMeta, actorLabel, auditActor,
+  OWNER, UNKNOWN, actorFromEnv, resolveCallActor, forwardActorMeta, actorLabel, auditActor, isPeerCall,
 } from "../servers/research/actor.js";
 import { createProjectServer } from "../servers/research/server.js";
 import { PROVENANCE_COLUMNS } from "../servers/research/provenance-schema.js";
@@ -145,6 +145,25 @@ test("actorLabel and auditActor", () => {
   assert.deepEqual(auditActor(OWNER), { actor_type: "local", actor_id: null });
   assert.deepEqual(auditActor({ kind: "bot", id: "b1" }), { actor_type: "bot", actor_id: "b1" });
   assert.deepEqual(auditActor(UNKNOWN), { actor_type: "local", actor_id: "unknown" });
+});
+
+test("isPeerCall answers true for both shapes a peer reaches a tool as, and never for a local call", () => {
+  // (1) the bearer token the gateway's peer mounts record
+  assert.equal(isPeerCall({ authInfo: { token: "peer-instance" } }), true);
+  // (2) the marker a forwarding router passes in _meta: the ordinary peer form and the remote-bot form
+  assert.equal(isPeerCall({ _meta: { "crow/actor": { kind: "peer" } } }), true);
+  assert.equal(isPeerCall({ _meta: { "crow/actor": { kind: "peer", instance: "abc", from: "delta" } } }), true);
+  assert.equal(isPeerCall({ _meta: { "crow/actor": { kind: "bot", id: "b@abc", instance: "abc" } } }), true,
+    "a peer's signed remote bot carries instance: the router's in-process client has no authInfo to check");
+  // Everything a local call can carry is not a peer.
+  for (const extra of [
+    {}, undefined, { authInfo: { token: "local" } },
+    { _meta: { "crow/actor": { kind: "bot", id: "hank" } } },
+    { _meta: { "crow/actor": { kind: "unknown" } } },
+    { _meta: { "crow/actor": "peer" } },
+    { _meta: {} },
+    hdr({ "x-crow-actor-kind": "bot", "x-crow-actor-id": "hank" }),
+  ]) assert.equal(isPeerCall(extra), false, JSON.stringify(extra));
 });
 
 test("the wiring passes the actor at every construction site", () => {

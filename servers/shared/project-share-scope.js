@@ -95,6 +95,13 @@ export const TOOL_CLASS = Object.freeze({
   crow_get_file_url: read("file"),
   crow_upload_file: write("file"),
   crow_delete_file: write("file"),
+  // the workspace file tools (crow_project_file_*): the same family, so a read share may list and
+  // read the shared project's files and a read_write share may write them (with the project's
+  // write_files capability on top, as an upload needs).
+  crow_project_file_list: read("file"),
+  crow_project_file_read: read("file"),
+  crow_project_file_write: write("file"),
+  crow_project_file_delete: write("file"),
   // memories
   crow_search_memories: read("memory"),
   crow_recall_by_context: read("memory"),
@@ -254,8 +261,9 @@ export function isOperatorVoice(actor) {
   );
 }
 
-/** Everything below a bot: any bot actor the bot rules bind (the voice bot is not one). */
-const boundByBotRules = (actor) => isBot(actor) && !isOperatorVoice(actor);
+/** Everything below a bot: any bot actor the bot rules bind (the voice bot is not one). Exported so a
+ *  rule outside this module (the workspace file tools' bot path rule) binds exactly the same actors. */
+export const boundByBotRules = (actor) => isBot(actor) && !isOperatorVoice(actor);
 
 const deny = (code) => {
   const refusal = new ShareRefusal(code);
