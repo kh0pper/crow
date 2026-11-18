@@ -701,12 +701,22 @@ test("nextLoopFrame answers on the recorder's clock, and says when there is no l
   // 120 bpm at 48 kHz: one beat is 24,000 frames and one bar is 96,000.
   const FRAMES_PER_BEAT = (SAMPLE_RATE * 60) / 120;
   const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4;
+  // Asked half way through the first bar of a two-bar clip below.
+  const midBar = FRAMES_PER_BAR / 2;
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
     length: Math.round(2 * SAMPLE_RATE),
     sampleRate: SAMPLE_RATE,
   });
   let engine = null;
+  let asked = null;
+  // Registered first, long before startRendering(): the suspend is recorded
+  // asynchronously, and one made right before the render starts is sometimes
+  // refused with InvalidStateError.
+  const suspended = context.suspend(midBar / SAMPLE_RATE).then(async () => {
+    asked = engine.nextLoopFrame("track-1", "clip-1");
+    await context.resume();
+  });
   let rendered = false;
   try {
     engine = await studioEngine.create(context, { assetBytes: ASSETS });
@@ -727,12 +737,6 @@ test("nextLoopFrame answers on the recorder's clock, and says when there is no l
     // pass starts on bar 2, which is far more than the arm lead away. The
     // question is posted while the render stands still and answered by the
     // processor on the context's clock, like a launch report.
-    const midBar = FRAMES_PER_BAR / 2;
-    let asked = null;
-    const suspended = context.suspend(midBar / SAMPLE_RATE).then(async () => {
-      asked = engine.nextLoopFrame("track-1", "clip-1");
-      await context.resume();
-    });
     await context.startRendering();
     rendered = true;
     await suspended;
