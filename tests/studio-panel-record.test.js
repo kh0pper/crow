@@ -5421,6 +5421,10 @@ test("R15: a Stop during the count-in writes nothing", async () => {
     listener({ track_id: AUDIO_TRACK, clip_id: CLIP, scene_id: SCENE, bar: 0, frame: 96000 }),
   );
   await ui.settle();
+  // A position report that reaches the page before the Stop names a bar the
+  // count-in has not played: a take that never went active has no stop bar to
+  // be written from, so this report invents nothing (R15 fix 8).
+  await transportOnBar(ui, 3);
 
   ui.click("[data-act=stop]");
   await ui.settle(24);
@@ -5494,4 +5498,551 @@ test("the By-hand undo note is on the page only while By hand is selected", asyn
   ui.click("[data-act=plan-mode][data-mode=hand]");
   await ui.settle();
   assert.ok(note(), "and it is back with By hand");
+});
+
+// ---- R15 review fixes: the take's own origin, its seeds and its notice ------
+//
+// A by-hand take is written from the arrangement bar the playhead stood on, but
+// the bars it HEARS are the session's: counted from play(), and carried on
+// across a pause. The two axes line up only while the take begins on session bar
+// 0. A take pressed while the transport already runs, or carried on from a
+// pause, begins on whatever loop start the engine names — so every bar it hears
+// has to be measured from that one, and the tracks that were already playing
+// (the take's own included) have to be placed from there.
+
+/** One bar of the fixture song in frames: 240 bpm, four beats, 48 kHz. */
+const BAR_FRAMES = PASS_FRAMES;
+
+/** @returns {number} the first frame of one session bar, counting from play(). */
+function frameOfBar(bar) {
+  return Math.round(Number(bar) * BAR_FRAMES);
+}
+
+/**
+ * Point the fake engine's next loop start — where a take pressed on a running
+ * transport arms — at one session bar.
+ * @param {object} ui a booted panel
+ * @param {number} bar
+ */
+function loopStartOnBar(ui, bar) {
+  ui.engine.loopBar = Math.round(Number(bar));
+  ui.engine.loopFrame = frameOfBar(bar);
+  ui.engine.looping = true;
+}
+
+/**
+ * Move the transport's reported position onto one session bar. A position
+ * report counts its bars from 1, so session bar 3 is the report's bar 4.
+ * @param {object} ui a booted panel
+ * @param {number} bar
+ */
+async function transportOnBar(ui, bar) {
+  ui.engine.position({ bar: Math.round(Number(bar)) + 1, beat: 1, sixteenth: 1 });
+  await ui.settle();
+}
+
+/**
+ * Report one launch at one session bar, the way the sequencer does when a scene
+ * or a clip takes over there.
+ * @param {object} ui a booted panel
+ * @param {number} bar
+ * @param {{track?: string, clip?: string|null, scene?: string}} [options]
+ */
+async function launchOnBar(ui, bar, options = {}) {
+  ui.engine.launches.forEach((listener) =>
+    listener({
+      track_id: options.track || AUDIO_TRACK,
+      clip_id: options.clip === undefined ? CLIP : options.clip,
+      scene_id: options.scene === undefined ? SCENE : options.scene,
+      bar: Math.round(Number(bar)),
+      frame: frameOfBar(bar),
+    }),
+  );
+  await ui.settle();
+}
+
+/**
+ * Placements in a stable order, for a comparison that does not depend on the
+ * order the page happened to group the tracks in.
+ * @param {object[]} list
+ * @returns {object[]}
+ */
+function placementsInOrder(list) {
+  return (list || []).slice(0).sort((a, b) => {
+    if (String(a.track_id) !== String(b.track_id)) return String(a.track_id) < String(b.track_id) ? -1 : 1;
+    return Number(a.start_bar) - Number(b.start_bar);
+  });
+}
+
+/**
+ * A second track in the page's song, with an audio clip in the fixture's scene,
+ * drawn the way the hub pushes one.
+ * @param {object} ui a booted panel
+ * @param {string} trackId
+ * @param {string} clipId
+ */
+async function addTrackWithClip(ui, trackId, clipId) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "track.add", { id: trackId, name: "Keys", kind: "audio" });
+  runCommand(ui.doc, "clip.add_audio", {
+    clip_id: clipId,
+    track_id: trackId,
+    scene_id: SCENE,
+    length_bars: 4,
+    name: "Keys",
+  });
+  await ui.pushState();
+}
+
+test("R15 fix 1: a take pressed while the transport runs writes its launches from the bar it began on", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  // The session is thirteen bars in when Record is pressed, and the take arms on
+  // the clip's next loop start: session bar 16.
+  await transportOnBar(ui, 13);
+  loopStartOnBar(ui, 16);
+  await pressRecord(ui);
+  await ui.settle(24);
+  const view = viewOf(ui);
+  assert.ok(view.rec, "the take is open");
+  assert.equal(view.rec.active, true, "and armed on the loop start the engine named");
+  assert.equal(view.rec.anchor, frameOfBar(16), "which is session bar 16's frame");
+  assert.equal(view.playhead, 4, "with the playhead still standing on arrangement bar 4");
+
+  // One tap plays before the take's first frame (session bar 14) and another
+  // four bars into it (session bar 20); Stop lands on session bar 24.
+  await launchOnBar(ui, 14);
+  await launchOnBar(ui, 20);
+  await transportOnBar(ui, 24);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 8, bars: 4 },
+    ],
+    "the take lands on the playhead's bar 4, and the tap at session bar 20 is four bars into it",
+  );
+});
+
+test("R15 fix 1: a take carried on from a pause writes its launches from the bar it began on, not from play()", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4, countIn: 1 });
+  await standPlayheadAt(ui, 4);
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  await transportOnBar(ui, 13);
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(viewOf(ui).paused, true, "the transport stands paused on session bar 13");
+
+  loopStartOnBar(ui, 16);
+  await pressRecord(ui);
+  // One bar of clicks from where the transport stood, then the downbeat the
+  // paused take carries on from: the loop start the engine names.
+  ui.engine.countBar(1, frameOfBar(13));
+  await ui.settle(24);
+  const view = viewOf(ui);
+  assert.ok(view.rec, "the take is open");
+  assert.equal(view.rec.active, true, "and armed after the count-in");
+  assert.equal(view.rec.anchor, frameOfBar(16), "on the loop start's own frame");
+
+  await launchOnBar(ui, 14);
+  await launchOnBar(ui, 20);
+  await transportOnBar(ui, 24);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 8, bars: 4 },
+    ],
+    "the carried-on take lands on the playhead's bar 4, not thirteen bars past it",
+  );
+});
+
+test("R15 fix 1 (pin): a take that begins on session bar 0 still writes its launches unchanged", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  await pressRecord(ui);
+  assert.equal(viewOf(ui).recTimeline.base_bar, 4, "the take writes from the playhead's bar");
+
+  // The take is armed by the launch at session bar 0, and the taps after it are
+  // measured from there: exactly what the page wrote before any of this.
+  await reportLaunch(ui);
+  await launchOnBar(ui, 2);
+  await launchOnBar(ui, 6);
+  await transportOnBar(ui, 9);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 6, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 10, bars: 3 },
+    ],
+    "each launch keeps its own bar, shifted by the playhead's bar",
+  );
+});
+
+test("R15 fix 2: a take with no taps still writes the tracks that were playing when it began", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  await addTrackWithClip(ui, "keys", "c-keys");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  // The keys are already playing when Record is pressed, and the take arms on
+  // the clip's loop start at session bar 16.
+  await launchOnBar(ui, 0, { track: "keys", clip: "c-keys" });
+  await transportOnBar(ui, 13);
+  loopStartOnBar(ui, 16);
+  await pressRecord(ui);
+  await ui.settle(24);
+  assert.ok(viewOf(ui).rec, "the take is open");
+  assert.equal(viewOf(ui).rec.active, true, "and armed on the loop start");
+
+  // No tap at all: Stop lands two passes after the take began.
+  await transportOnBar(ui, 24);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "a take that played nothing new is still one record_performance");
+  assert.deepEqual(
+    placementsInOrder(sent[0].args.placements),
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 8 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 4, bars: 8 },
+    ],
+    "the take's own clip and the clip already playing are placed from the playhead over its two passes",
+  );
+
+  // The armed track is placed with the clip the arm made, even when its slot was
+  // empty and nothing on it was playing: the take recorded it, so it lands.
+  const empty = await bootPanel();
+  await standPlayheadAt(empty, 4);
+  empty.click("[data-act=play]");
+  await empty.settle(24);
+  loopStartOnBar(empty, 16);
+  await pressRecord(empty);
+  await empty.settle(24);
+  const added = empty.sent.filter((message) => message.command === "clip.add_audio");
+  assert.equal(added.length, 1, "the empty slot got one clip when the take armed");
+  await transportOnBar(empty, 24);
+  empty.click("[data-act=stop]");
+  await empty.settle(24);
+
+  const only = performances(empty);
+  assert.equal(only.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    only[0].args.placements,
+    [{ track_id: AUDIO_TRACK, clip_id: added[0].args.clip_id, start_bar: 4, bars: 8 }],
+    "placed from the playhead over its passes, under the clip the arm made",
+  );
+});
+
+test("R15 fix 3: a scene tapped just before Record that plays before the anchor seeds one placement at the anchor", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  await transportOnBar(ui, 13);
+  loopStartOnBar(ui, 16);
+  await pressRecord(ui);
+  await ui.settle(24);
+  assert.ok(viewOf(ui).rec, "the take is open");
+  assert.equal(viewOf(ui).rec.active, true, "and armed on session bar 16's loop start");
+
+  // A scene tapped a moment before Record fires on the next bar, session bar 14:
+  // it is what plays when the take begins, so it seeds a placement AT the anchor
+  // and never one of its own before it.
+  await launchOnBar(ui, 14);
+  await launchOnBar(ui, 20);
+  await transportOnBar(ui, 24);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 8, bars: 4 },
+    ],
+    "the scene that was playing starts at the playhead's bar, not four bars before it",
+  );
+  assert.equal(
+    sent[0].args.placements.some((placement) => Number(placement.start_bar) === 18),
+    false,
+    "session bar 14 is not written as a placement of its own",
+  );
+});
+
+test("R15 fix 3 (pin): launches the toggle collected before the press keep their own bars", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await addTrackWithClip(ui, "keys", "c-keys");
+  // An engine behind a transport that stands still: what a launch is reported
+  // through, without a run of its own.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.click("[data-act=pause]");
+  await ui.settle();
+  assert.equal(viewOf(ui).paused, true, "the transport stands paused");
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  assert.equal(viewOf(ui).recTimeline.on, true, "the operator turned the toggle on");
+
+  // The keys were heard at session bar 0 while the toggle was on, before any
+  // take existed: that launch belongs to the toggle's own collection, and its
+  // frame is far below the anchor a take is armed on.
+  await launchOnBar(ui, 0, { track: "keys", clip: "c-keys" });
+  assert.equal(viewOf(ui).recTimeline.launches.length, 1, "the toggle collected it");
+
+  await pressRecord(ui);
+  await reportLaunch(ui);
+  // A tap on the keys after the take armed, and Stop two bars later.
+  await launchOnBar(ui, 4, { track: "keys", clip: "c-keys" });
+  await transportOnBar(ui, 6);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "the take is one record_performance");
+  const keys = placementsInOrder(
+    sent[0].args.placements.filter((placement) => placement.track_id === "keys"),
+  );
+  assert.deepEqual(
+    keys,
+    [
+      { track_id: "keys", clip_id: "c-keys", start_bar: 0, bars: 4 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 4, bars: 2 },
+    ],
+    "the launch collected before the press keeps its own bar, and the take's floor does not drop it",
+  );
+});
+
+test("R15 fix 4: a take cancelled while the transport runs leaves the operator's own collection whole", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  ui.click("[data-act=rec-timeline]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  await launchOnBar(ui, 0);
+  await launchOnBar(ui, 4);
+  assert.equal(viewOf(ui).recTimeline.launches.length, 2, "the toggle collected the two launches");
+
+  // The recorder cannot be built: the take is cancelled, and the transport it
+  // was pressed against keeps running.
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.engine.createRecorder = async () => {
+    throw new Error("The input could not be opened.");
+  };
+  loopStartOnBar(ui, 16);
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  assert.equal(viewOf(ui).rec, null, "the take was cancelled");
+  assert.equal(viewOf(ui).playing, true, "and the transport keeps running");
+
+  await transportOnBar(ui, 6);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "Stop still writes the launches the toggle had collected");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 0, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
+    ],
+    "the two launches made before the press keep their own bars",
+  );
+});
+
+test("R15 fix 6: a performance the wire could not carry is held, and Place what fits sends it once it is back", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  await pressRecord(ui);
+  await reportLaunch(ui);
+  await launchOnBar(ui, 2);
+  await transportOnBar(ui, 4);
+
+  // The socket is gone when Stop is pressed.
+  await ui.dropSocket();
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const held = viewOf(ui).performance;
+  assert.ok(held, "the performance is kept on the page");
+  assert.equal(held.message, "Not sent: the connection dropped.", "with what went wrong");
+  const notice = ui.document.querySelector("[data-role=performance-notice]");
+  assert.equal(notice.hidden, false, "and the notice stays up with it");
+  assert.ok(
+    String(notice.textContent).includes("Not sent: the connection dropped."),
+    "saying the performance was not sent",
+  );
+
+  // The wire comes back: the held performance can still be placed.
+  await ui.rejoin();
+  ui.click("[data-act=performance-fit]");
+  await ui.settle(24);
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "Place what fits sends it once the socket is back");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 2 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 6, bars: 2 },
+    ],
+    "every placement of it, nothing on the timeline being in the way",
+  );
+});
+
+test("R15 fix 7: a page torn down or unloaded mid-take still writes one record_performance", async () => {
+  /** @returns {Promise<object>} a page with a by-hand take running, one tap in. */
+  const started = async () => {
+    const ui = await bootPanel({ clip: true, lengthBars: 4 });
+    await standPlayheadAt(ui, 4);
+    await pressRecord(ui);
+    await reportLaunch(ui);
+    await launchOnBar(ui, 2);
+    await transportOnBar(ui, 4);
+    assert.equal(viewOf(ui).rec.active, true, "the take is recording");
+    return ui;
+  };
+
+  // Turbo caches the page (or a visit starts) with the take still running.
+  const leaving = await started();
+  leaving.document.dispatchEvent(new leaving.document.defaultView.Event("turbo:before-cache"));
+  await leaving.settle();
+  leaving.engine.recorders[0].done({ segments: [] });
+  await leaving.settle(24);
+  assert.equal(performances(leaving).length, 1, "the take's launches are written once, on the way out");
+
+  // The browser's own leave-page path.
+  const unloading = await started();
+  unloading.fireWindow("beforeunload", unloading.event("beforeunload", {}));
+  await unloading.settle();
+  unloading.engine.recorders[0].done({ segments: [] });
+  await unloading.settle(24);
+  assert.equal(performances(unloading).length, 1, "and once from onBeforeUnload");
+});
+
+test("R15 fix 9: Place what fits keeps only what the timeline can take and says how many it placed", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  await addTrackWithClip(ui, "keys", "c-keys");
+  // A third track whose clip the song does not hold: a launch can name one the
+  // snapshot has never had.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "track.add", { id: "pad", name: "Pad", kind: "audio" });
+  await ui.pushState();
+
+  await pressRecord(ui);
+  await reportLaunch(ui);
+  await launchOnBar(ui, 6, { track: "keys", clip: "c-keys" });
+  await launchOnBar(ui, 6, { track: "pad", clip: "c-pad" });
+  // A placement that ends past bar 999, and the same take's plain one.
+  await launchOnBar(ui, 994);
+  await launchOnBar(ui, 998);
+  await launchOnBar(ui, 1000);
+  await transportOnBar(ui, 9);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const first = performances(ui);
+  assert.equal(first.length, 1, "the take is one record_performance");
+  assert.deepEqual(
+    placementsInOrder(first[0].args.placements),
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 994 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 998, bars: 4 },
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 1002, bars: 2 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 10, bars: 3 },
+      { track_id: "pad", clip_id: "c-pad", start_bar: 10, bars: 3 },
+    ],
+    "the performance holds the placements past bar 999 and the one whose clip is gone",
+  );
+
+  // The hub refuses the whole performance for the bar it would end past.
+  ui.frame({
+    type: "result",
+    cmd_id: first[0].cmd_id,
+    ok: false,
+    error: "Placement at bar 998 would end past bar 999.",
+  });
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector("[data-role=performance-notice]").hidden,
+    false,
+    "the refusal is held on the page",
+  );
+
+  ui.click("[data-act=performance-fit]");
+  await ui.settle(24);
+  const again = performances(ui);
+  assert.equal(again.length, 2, "Place what fits is one more record_performance");
+  assert.deepEqual(
+    placementsInOrder(again[1].args.placements),
+    [
+      { track_id: AUDIO_TRACK, clip_id: CLIP, start_bar: 4, bars: 994 },
+      { track_id: "keys", clip_id: "c-keys", start_bar: 10, bars: 3 },
+    ],
+    "only the placements inside the arrangement whose clip the song holds",
+  );
+  assert.ok(
+    toastText(ui).includes("Placed 2 of 5"),
+    `the page says how much of it landed (got: ${toastText(ui)})`,
+  );
+});
+
+test("R15 fix 10: the performance notice is hidden until a refusal gives it a reason", async () => {
+  const ui = await bootPanel({ clip: true, lengthBars: 4 });
+  await standPlayheadAt(ui, 4);
+  await pressRecord(ui);
+  await reportLaunch(ui);
+  await transportOnBar(ui, 2);
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  const sent = performances(ui);
+  assert.equal(sent.length, 1, "Stop sent the performance");
+  // Nothing has come back yet: the page has no reason to give, so it says
+  // nothing rather than "The performance was not placed: ".
+  const notice = ui.document.querySelector("[data-role=performance-notice]");
+  assert.equal(notice.hidden, true, "the notice is not up before the hub answers");
+  assert.equal(
+    String(notice.textContent).includes("The performance was not placed: "),
+    false,
+    "and it carries no refusal without a reason",
+  );
+
+  // The hub refuses it: now the notice is up, with the server's own words.
+  ui.frame({
+    type: "result",
+    cmd_id: sent[0].cmd_id,
+    ok: false,
+    error: "Placement at bar 4 overlaps the one there.",
+  });
+  await ui.settle();
+  assert.equal(notice.hidden, false, "a refusal puts the notice up");
+  assert.ok(
+    String(notice.textContent).includes("Placement at bar 4 overlaps the one there."),
+    "with the reason it gave",
+  );
 });
