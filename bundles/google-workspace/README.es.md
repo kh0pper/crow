@@ -64,10 +64,12 @@ cuenta» más abajo.
    `GOOGLE_TOKEN_FILE` (el token que escribió la autorización).
 
 Los dos son obligatorios y ninguno tiene valor por defecto, a propósito (ver la
-sección del muro). Opcionales: `GMAIL_SEND_TO_SELF_ALLOWLIST` (separada por
-comas; vacía mantiene el envío apagado), `GOOGLE_BIGQUERY_PROJECT`,
-`GDOCS_DEFAULT_FONT`, `GWS_FORMS_SHIM_SCRIPT_ID`, `GWS_OAUTH_SCOPES`,
-`GWS_CALENDAR_NO_INVITES`, `GWS_OUTBOUND_GUARD`, `GWS_OUTBOUND_ALLOWLIST`.
+sección del muro). Opcionales: `GWS_FILES_DIR` (la carpeta que pueden usar las
+herramientas que leen o escriben un archivo local — ver «Archivos locales»),
+`GMAIL_SEND_TO_SELF_ALLOWLIST` (separada por comas; vacía mantiene el envío
+apagado), `GOOGLE_BIGQUERY_PROJECT`, `GDOCS_DEFAULT_FONT`,
+`GWS_FORMS_SHIM_SCRIPT_ID`, `GWS_OAUTH_SCOPES`, `GWS_CALENDAR_NO_INVITES`,
+`GWS_OUTBOUND_GUARD`, `GWS_OUTBOUND_ALLOWLIST`.
 
 ## Qué sale de la cuenta
 
@@ -190,10 +192,52 @@ emitió, así que quitar un permiso aquí no se lo quita a la concesión de Goog
 —para eso revoca el acceso de la aplicación en tu cuenta de Google y vuelve a
 autorizar.
 
+## Archivos locales: la carpeta de archivos
+
+Seis herramientas reciben una **ruta local**: `gdrive_upload_file` y
+`gdrive_upload_new_version` (leer un archivo para subirlo), `gdrive_download_file`,
+`gdrive_export` y `gslides_export` (escribir un archivo), y `gdocs_insert_image`
+cuando `image` es un archivo local y no un id de Drive. Una ruta que llega de
+quien llama es una capacidad —a un asistente que además lee correo no confiable
+se le puede convencer de subir `~/.config/google-workspace-mcp/token.json` a
+Drive y compartirlo—, así que se decide en un solo sitio (`local_paths.py`) y en
+ningún otro.
+
+**`GWS_FILES_DIR`** es la única carpeta tuya que esas herramientas pueden usar:
+
+- si la defines, toda ruta tiene que quedar **estrictamente dentro** de ella
+  tras resolver los enlaces simbólicos; una ruta relativa lo es respecto a ella y
+  un `~` inicial es tu carpeta personal. `..`, una ruta absoluta en otro sitio y un
+  enlace simbólico que apunte fuera se rechazan;
+- si la dejas vacía, decide el tope de salida: con `GWS_OUTBOUND_GUARD` encendido
+  se rechaza **toda** ruta local («define una carpeta de archivos»); con el tope
+  apagado, una instalación que se actualiza sigue comportándose como antes
+  —cualquier ruta que reciba—, así que nada se rompe hasta que nombres una
+  carpeta;
+- las descargas y exportaciones se **crean**, nunca se sobrescriben: un destino
+  que ya existe, o que es un enlace simbólico, se rechaza (da otro nombre); los
+  archivos se crean con modo 0600. El nombre por defecto se arma con el id de
+  Google sustituyendo todo carácter fuera de `[A-Za-z0-9._-]`, así que un id nunca
+  puede colar un separador de ruta. La ubicación por defecto es la carpeta de
+  archivos cuando existe, y `/tmp` solo para una instalación sin carpeta y sin
+  tope;
+- una imagen local para `gdocs_insert_image` tiene que ser de verdad PNG, JPEG,
+GIF o WebP (se revisan sus primeros bytes), no un archivo con nombre de imagen.
+
+**Siempre rechazado, digas lo que digas** —con tope o sin él, con carpeta o sin
+ella—: cualquier cosa dentro de la **carpeta de inicio de sesión de Google** (las
+carpetas que contienen `GOOGLE_TOKEN_FILE` y `GOOGLE_CREDENTIALS_FILE`, y
+cualquier hermana `~/.config/google-workspace-mcp*`), el propio token y las
+credenciales, `~/.ssh` y `~/.gnupg`. La comparación es sobre la ruta real, así que
+un enlace simbólico que apunte ahí también se rechaza, y si esas carpetas no se
+pueden resolver no se permite nada local (falla cerrado). Una llamada rechazada
+no hace ninguna petición a Google: la ruta se decide antes de crear cualquier
+cliente.
+
 ## Dentro del muro de complementos de Crow
 
 El manifiesto declara `"sandbox": { "network": "internet", "files": {
-"oauthDir": "env:GOOGLE_TOKEN_FILE" } }`:
+"write": ["env:GWS_FILES_DIR"], "oauthDir": "env:GOOGLE_TOKEN_FILE" } }`:
 
 - **red `internet`** — HTTPS hacia las APIs públicas de Google y nada más, sin
   contenedor y sin puerto en el equipo;
@@ -201,7 +245,12 @@ El manifiesto declara `"sandbox": { "network": "internet", "files": {
   con lectura y escritura. Una renovación de OAuth escribe un archivo temporal y
   lo renombra, así que el servidor necesita escribir en su propia carpeta. Esa
   carpeta es el permiso revisado de primera parte de Crow (`ADDON_TOKEN_DIRS` en
-  `servers/shared/addon-doors.js`) y aplica solo a este complemento.
+  `servers/shared/addon-doors.js`) y aplica solo a este complemento;
+- **la carpeta de archivos** — `GWS_FILES_DIR`, si la defines, también se monta
+  con lectura y escritura, para leer de ella lo que se sube y escribir en ella
+  descargas y exportaciones. Sin definir no se monta ninguna: con el tope apagado
+  las herramientas de ruta local siguen aceptando cualquier ruta que reciban (como
+  antes de la 1.2.0), y con el tope encendido se rechaza toda ruta local.
 
 Mantén `credentials.json` en la misma carpeta que el token para que el servidor
 pueda leerlo, y apunta las dos rutas a `~/.config/google-workspace-mcp/` en vez

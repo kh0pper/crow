@@ -214,6 +214,7 @@ test("what DOES change is the gateway-env passthrough for the keys the entry dec
     GOOGLE_BIGQUERY_PROJECT: "scratch-project",
     GDOCS_DEFAULT_FONT: "Scratch Font",
     GWS_FORMS_SHIM_SCRIPT_ID: "scratch-script-id",
+    GWS_FILES_DIR: "/home/alex/files",
     GOOGLE_OAUTH_LOCAL_PORT: "8090",
     SCRATCH_UNDECLARED_KEY: "never",
   };
@@ -221,6 +222,9 @@ test("what DOES change is the gateway-env passthrough for the keys the entry dec
   assert.equal(childEnv.GOOGLE_BIGQUERY_PROJECT, "scratch-project", "a declared key reaches the child from the gateway's env");
   assert.equal(childEnv.GDOCS_DEFAULT_FONT, "Scratch Font");
   assert.equal(childEnv.GWS_FORMS_SHIM_SCRIPT_ID, "scratch-script-id");
+  // GWS_FILES_DIR is the folder the local-path tools are confined to (1.2.0): the
+  // owner's value reaches the child like any other declared key.
+  assert.equal(childEnv.GWS_FILES_DIR, "/home/alex/files");
   // Undeclared names are not a passthrough, whatever the gateway holds.
   assert.equal(childEnv.SCRATCH_UNDECLARED_KEY, undefined, "only the entry's declared keys pass through");
   // GOOGLE_OAUTH_LOCAL_PORT is deliberately not declared: only the one-time

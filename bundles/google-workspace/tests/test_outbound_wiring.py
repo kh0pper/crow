@@ -40,6 +40,9 @@ GUARD_VARS = (
     "GWS_OUTBOUND_ALLOWLIST",
     "GWS_CALENDAR_NO_INVITES",
     "GWS_FORMS_SHIM_SCRIPT_ID",
+    # The local path rules' folder: pinned empty so a file a test writes is only
+    # reachable when that test hands the tool the folder it lives in.
+    "GWS_FILES_DIR",
 )
 
 GUEST = "someone@example.com"
@@ -55,6 +58,22 @@ def gws_env(**values):
     with mock.patch.dict(os.environ, {k: "" for k in GUARD_VARS}):
         os.environ.update({k: v for k, v in values.items() if v is not None})
         yield
+
+
+@contextlib.contextmanager
+def files_folder():
+    """A temporary GWS_FILES_DIR with a local file in it: ``(folder, file)``.
+
+    A tool that reads a local file may only read one inside the files folder
+    (local_paths), and a bare TemporaryDirectory is not inside any folder — so the
+    fixture file has to live in the folder handed to the tool, or the refusal under
+    test would be the path rule's rather than the guard's.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        local = os.path.join(folder, "note.txt")
+        with open(local, "w", encoding="utf-8") as fh:
+            fh.write("v2")
+        yield folder, local
 
 
 # --- Calendar -------------------------------------------------------------
@@ -650,9 +669,11 @@ class DriveFolderGuardTests(unittest.TestCase):
     def test_every_tool_that_writes_into_a_folder_is_refused_first(self):
         # A refusal happens before the tool builds its own client, so the folder
         # guard's service is the only one that has to exist here: it proves the
-        # write itself (and every read on the way to it) never runs.
-        with tempfile.TemporaryDirectory() as tmp:
-            local = os.path.join(tmp, "note.txt")
+        # write itself (and every read on the way to it) never runs. The local file
+        # lives inside GWS_FILES_DIR, so the local path rules pass it and the
+        # refusal asserted below is the folder guard's own.
+        with tempfile.TemporaryDirectory() as folder:
+            local = os.path.join(folder, "note.txt")
             with open(local, "w", encoding="utf-8") as fh:
                 fh.write("x")
             runners = {
@@ -675,7 +696,9 @@ class DriveFolderGuardTests(unittest.TestCase):
                     folder_guard.reset_cache()
                     service = folder_service(folder_metadata(shared=[STRANGER]))
                     with gws_env(
-                        GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER
+                        GWS_OUTBOUND_GUARD="1",
+                        GWS_OUTBOUND_ALLOWLIST=OWNER,
+                        GWS_FILES_DIR=folder,
                     ), mock.patch.object(
                         folder_guard, "get_drive_service", return_value=service
                     ):
@@ -701,17 +724,14 @@ class DriveNewVersionGuardTests(unittest.TestCase):
         ), mock.patch.object(folder_guard, "get_drive_service", return_value=service):
             return asyncio.run(drive.gdrive_upload_new_version("file-1", local))
 
-    def write_local(self, tmp):
-        local = os.path.join(tmp, "note.txt")
-        with open(local, "w", encoding="utf-8") as fh:
-            fh.write("v2")
-        return local
-
     def test_a_file_shared_with_a_stranger_is_refused_and_nothing_is_uploaded(self):
         service = folder_service(folder_metadata(shared=[STRANGER]))
-        with tempfile.TemporaryDirectory() as tmp:
-            local = self.write_local(tmp)
-            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+        with files_folder() as (folder, local):
+            with gws_env(
+                GWS_OUTBOUND_GUARD="1",
+                GWS_OUTBOUND_ALLOWLIST=OWNER,
+                GWS_FILES_DIR=folder,
+            ):
                 result = self.run_upload(service, local)
         self.assertFalse(result["success"])
         self.assertIn(STRANGER, result["error"])
@@ -721,9 +741,12 @@ class DriveNewVersionGuardTests(unittest.TestCase):
 
     def test_the_target_file_is_what_gets_checked(self):
         service = folder_service(folder_metadata(shared=[STRANGER]))
-        with tempfile.TemporaryDirectory() as tmp:
-            local = self.write_local(tmp)
-            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+        with files_folder() as (folder, local):
+            with gws_env(
+                GWS_OUTBOUND_GUARD="1",
+                GWS_OUTBOUND_ALLOWLIST=OWNER,
+                GWS_FILES_DIR=folder,
+            ):
                 self.run_upload(service, local)
         kwargs = service.files().get.call_args.kwargs
         self.assertEqual(kwargs["fileId"], "file-1")
@@ -733,18 +756,21 @@ class DriveNewVersionGuardTests(unittest.TestCase):
 
     def test_your_own_file_is_allowed(self):
         service = folder_service(folder_metadata())
-        with tempfile.TemporaryDirectory() as tmp:
-            local = self.write_local(tmp)
-            with gws_env(GWS_OUTBOUND_GUARD="1"):  # the account's own address only
+        with files_folder() as (folder, local):
+            # the account's own address only
+            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_FILES_DIR=folder):
                 result = self.run_upload(service, local)
         self.assertTrue(result["success"])
         service.files().update.assert_called_once()
 
     def test_a_file_whose_sharing_cannot_be_read_is_refused(self):
         service = folder_service(error=RuntimeError("boom"))
-        with tempfile.TemporaryDirectory() as tmp:
-            local = self.write_local(tmp)
-            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_OUTBOUND_ALLOWLIST=OWNER):
+        with files_folder() as (folder, local):
+            with gws_env(
+                GWS_OUTBOUND_GUARD="1",
+                GWS_OUTBOUND_ALLOWLIST=OWNER,
+                GWS_FILES_DIR=folder,
+            ):
                 result = self.run_upload(service, local)
         self.assertFalse(result["success"])
         self.assertIn("could not be read", result["error"])
@@ -752,9 +778,8 @@ class DriveNewVersionGuardTests(unittest.TestCase):
 
     def test_guard_off_uploads_without_reading_the_file(self):
         service = folder_service(error=RuntimeError("must not be read"))
-        with tempfile.TemporaryDirectory() as tmp:
-            local = self.write_local(tmp)
-            with gws_env():
+        with files_folder() as (folder, local):
+            with gws_env(GWS_FILES_DIR=folder):
                 result = self.run_upload(service, local)
         self.assertTrue(result["success"])
         service.files().get.assert_not_called()
@@ -819,11 +844,13 @@ class DocsImageGuardTests(unittest.TestCase):
 
     def test_a_local_image_is_refused_under_the_guard_and_nothing_is_uploaded(self):
         docs_svc, drive_svc = docs_image_mocks()
-        with tempfile.TemporaryDirectory() as tmp:
-            local = os.path.join(tmp, "shot.png")
+        with tempfile.TemporaryDirectory() as folder:
+            local = os.path.join(folder, "shot.png")
             with open(local, "wb") as fh:
                 fh.write(png_bytes())
-            with gws_env(GWS_OUTBOUND_GUARD="1"):
+            # The image is inside GWS_FILES_DIR, so the local path rules allow it:
+            # the refusal asserted here is the guard's, not the path rule's.
+            with gws_env(GWS_OUTBOUND_GUARD="1", GWS_FILES_DIR=folder):
                 result = self.run_insert(docs_svc, drive_svc, local)
         self.assertFalse(result["success"])
         self.assertIn("LOCAL image", result["error"])
@@ -835,11 +862,11 @@ class DocsImageGuardTests(unittest.TestCase):
 
     def test_a_local_image_still_works_with_the_guard_off(self):
         docs_svc, drive_svc = docs_image_mocks()
-        with tempfile.TemporaryDirectory() as tmp:
-            local = os.path.join(tmp, "shot.png")
+        with tempfile.TemporaryDirectory() as folder:
+            local = os.path.join(folder, "shot.png")
             with open(local, "wb") as fh:
                 fh.write(png_bytes())
-            with gws_env():
+            with gws_env(GWS_FILES_DIR=folder):
                 result = self.run_insert(docs_svc, drive_svc, local)
         self.assertTrue(result["success"])
         drive_svc.files.return_value.create.assert_called_once()

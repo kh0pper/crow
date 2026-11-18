@@ -45,7 +45,7 @@ class UploadConvertTests(unittest.TestCase):
 
     def run_upload(self, service, **kwargs):
         with mock.patch.object(drive, "get_drive_service", return_value=service), \
-                mock.patch.object(drive, "MediaFileUpload"):
+                mock.patch.object(drive, "MediaIoBaseUpload"):
             return asyncio.run(
                 drive.gdrive_upload_file(self.path, FOLDER, name="deck", **kwargs)
             )
@@ -92,7 +92,7 @@ class UploadConvertTests(unittest.TestCase):
         ):
             with self.subTest(convert_to=bad):
                 service = drive_service()
-                with mock.patch.object(drive, "MediaFileUpload") as media:
+                with mock.patch.object(drive, "MediaIoBaseUpload") as media:
                     result = self.run_upload(service, convert_to=bad)
                 self.assertFalse(result["success"])
                 self.assertIn(bad, result["error"])

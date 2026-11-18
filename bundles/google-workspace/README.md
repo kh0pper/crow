@@ -61,10 +61,11 @@ else are guarded too; see "What leaves the account" below.
    (the token the authorize step wrote).
 
 Both are required and neither has a default, on purpose (see the wall section).
-Optional knobs: `GMAIL_SEND_TO_SELF_ALLOWLIST` (comma-separated; empty keeps
-sending off), `GOOGLE_BIGQUERY_PROJECT`, `GDOCS_DEFAULT_FONT`,
-`GWS_FORMS_SHIM_SCRIPT_ID`, `GWS_OAUTH_SCOPES`, `GWS_CALENDAR_NO_INVITES`,
-`GWS_OUTBOUND_GUARD`, `GWS_OUTBOUND_ALLOWLIST`.
+Optional knobs: `GWS_FILES_DIR` (the folder the tools that read or write a local
+file may use — see "Local files" below), `GMAIL_SEND_TO_SELF_ALLOWLIST`
+(comma-separated; empty keeps sending off), `GOOGLE_BIGQUERY_PROJECT`,
+`GDOCS_DEFAULT_FONT`, `GWS_FORMS_SHIM_SCRIPT_ID`, `GWS_OAUTH_SCOPES`,
+`GWS_CALENDAR_NO_INVITES`, `GWS_OUTBOUND_GUARD`, `GWS_OUTBOUND_ALLOWLIST`.
 
 ## What leaves the account
 
@@ -179,10 +180,47 @@ disk keeps the full grant it was issued with, so removing a scope here does not
 take the permission away from Google's grant — revoke the app's access in your
 Google account for that, then authorize again.
 
+## Local files: the files folder
+
+Six tools take a **local path**: `gdrive_upload_file` and
+`gdrive_upload_new_version` (reading a file to upload), `gdrive_download_file`,
+`gdrive_export` and `gslides_export` (writing a file out), and
+`gdocs_insert_image` when `image` is a local file rather than a Drive id. A path
+from a caller is a capability — an assistant that also reads untrusted mail can
+be talked into uploading `~/.config/google-workspace-mcp/token.json` to Drive and
+sharing it — so it is decided in one place (`local_paths.py`) and nowhere else.
+
+**`GWS_FILES_DIR`** is the one folder of yours those tools may use:
+
+- set it, and every path must land **strictly inside** it after symlinks are
+  resolved; a relative path is relative to it, a leading `~` is your home. `..`,
+  an absolute path elsewhere and a symlink pointing out are all refused;
+- leave it empty and the outbound guard decides: with `GWS_OUTBOUND_GUARD` on,
+  **every** local path is refused ("set a files folder"); with the guard off, an
+  install that upgrades keeps behaving as it did — any path it is handed — so
+  nothing breaks until you name a folder;
+- downloads and exports are **created**, never overwritten: a target that
+  already exists, or is a symlink, is refused (give a new name); files are created
+  at mode 0600. A default name is built from the Google id with every character
+  outside `[A-Za-z0-9._-]` replaced, so an id can never smuggle in a path
+  separator. The default location is the files folder when it is set, and `/tmp`
+  only for an install with neither a folder nor the guard;
+- a local image for `gdocs_insert_image` must really be a PNG, JPEG, GIF or WebP
+  (its first bytes are checked), not just a file with an image-looking name.
+
+**Refused always, whatever else is set** — guard on or off, folder set or not:
+anything inside the **Google sign-in folder** (the folders holding
+`GOOGLE_TOKEN_FILE` and `GOOGLE_CREDENTIALS_FILE`, and any
+`~/.config/google-workspace-mcp*` sibling), the token and credentials files
+themselves, `~/.ssh` and `~/.gnupg`. The comparison is on the real path, so a
+symlink pointing into them is refused too, and if those folders cannot be
+resolved nothing local is allowed at all (it fails closed). A refused call makes
+no Google request: the path is decided before any client is built.
+
 ## Inside Crow's add-on wall
 
 The bundle declares `"sandbox": { "network": "internet", "files": {
-"oauthDir": "env:GOOGLE_TOKEN_FILE" } }`:
+"write": ["env:GWS_FILES_DIR"], "oauthDir": "env:GOOGLE_TOKEN_FILE" } }`:
 
 - **network `internet`** — HTTPS to Google's public APIs and nothing else, no
   container, no host port;
@@ -190,7 +228,12 @@ The bundle declares `"sandbox": { "network": "internet", "files": {
   An OAuth refresh writes a temp file and renames it, so the server needs its
   own folder writable. That folder is Crow's reviewed first-party grant
   (`ADDON_TOKEN_DIRS` in `servers/shared/addon-doors.js`) and applies to this
-  add-on only.
+  add-on only;
+- **the files folder** — `GWS_FILES_DIR`, when you name one, is bound read-write
+  as well, so uploads can be read from it and downloads and exports written into
+  it. Unset, no files folder is bound: with the guard off the local-path tools
+  still accept any path they are handed (how they behaved before 1.2.0), and with
+  the guard on every local path is refused.
 
 Keep `credentials.json` in the same folder as the token so the server can read
 it, and point both paths at `~/.config/google-workspace-mcp/` rather than at

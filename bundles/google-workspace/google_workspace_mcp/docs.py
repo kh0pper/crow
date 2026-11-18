@@ -11,7 +11,7 @@ import os
 import struct
 from typing import Optional, cast
 
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload
 
 from .auth import get_docs_service, get_drive_service
 from .docs_formatting import (
@@ -23,7 +23,7 @@ from .docs_formatting import (
     split_markdown_segments,
 )
 from .guardrails import handle_google_errors
-from . import folder_guard, outbound_guard
+from . import folder_guard, local_paths, outbound_guard
 
 logger = logging.getLogger(__name__)
 
@@ -96,19 +96,12 @@ def _find_text_ranges(doc: dict, text: str) -> list:
     return ranges
 
 
-def _png_size_px(path: str):
-    """(width, height) in px for a PNG/GIF/JPEG, or None if not determinable."""
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(26)
-        if head[:8] == b"\x89PNG\r\n\x1a\n":
-            return int.from_bytes(head[16:20], "big"), int.from_bytes(
-                head[20:24], "big"
-            )
-        if head[:6] in (b"GIF87a", b"GIF89a"):
-            return struct.unpack("<HH", head[6:10])
-    except Exception:
-        pass
+def _png_size_from_head(head: bytes):
+    """(width, height) in px from a PNG/GIF header, or None for anything else."""
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return struct.unpack("<HH", head[6:10])
     return None
 
 
@@ -1133,6 +1126,10 @@ async def gdocs_insert_image(
     returned; if that revoke fails the call is reported as a FAILURE naming the
     still-public file (it is never reported as a success).
 
+    A LOCAL image must be inside the files folder (GWS_FILES_DIR) this server may use
+    and its first bytes must really be a PNG, JPEG, GIF or WebP (see local_paths);
+    the sign-in folder is never one, guard or no guard.
+
     That window is why a LOCAL image is refused outright while GWS_OUTBOUND_GUARD
     is on: the guard will not publish a file, however briefly. A Drive-hosted image
     works only if it is ALREADY shared anyone-with-the-link — this tool never adds
@@ -1153,24 +1150,58 @@ async def gdocs_insert_image(
                 "intend, and pass its Drive file id as `image` instead."
             ),
         }
-    docs = get_docs_service()
-    drive = get_drive_service()
-
-    # 1. resolve `image` -> a Drive file id (upload if it's a local path)
+    # 1. a LOCAL image is a capability: the files folder (GWS_FILES_DIR) decides
+    # whether it may be read at all, and its first bytes must really be an image —
+    # the sign-in folder, or the token file under another name, never goes up. All of
+    # that is decided before any client is built, so a refused image touches nothing.
     temp_id = None
+    image_size = None
+    handle = None
     if is_local:
-        media = MediaFileUpload(image, resumable=False)
-        up = await asyncio.to_thread(
-            lambda: (
-                drive.files()
-                .create(
-                    body={"name": os.path.basename(image)},
-                    media_body=media,
-                    fields="id",
-                )
-                .execute()
+        try:
+            image_path, handle = local_paths.open_read(
+                image, what="inserting a local image"
             )
-        )
+            head = local_paths.check_image(
+                handle, "inserting a local image", shown=image
+            )
+        except local_paths.PathRefused as refusal:
+            if handle is not None:
+                handle.close()
+            return {"success": False, "error": str(refusal)}
+        image_size = _png_size_from_head(head)
+
+    try:
+        docs = get_docs_service()
+        drive = get_drive_service()
+    except Exception:
+        if handle is not None:
+            handle.close()
+        raise
+
+    # 2. resolve `image` -> a Drive file id (upload if it's a local path)
+    if is_local:
+        try:
+            # MediaIoBaseUpload reads the OPEN handle local_paths checked (the
+            # library's MediaFileUpload would want a filename and re-open it).
+            media = MediaIoBaseUpload(
+                handle,
+                mimetype=local_paths.guess_mime_type(None, image_path),
+                resumable=False,
+            )
+            up = await asyncio.to_thread(
+                lambda: (
+                    drive.files()
+                    .create(
+                        body={"name": os.path.basename(image)},
+                        media_body=media,
+                        fields="id",
+                    )
+                    .execute()
+                )
+            )
+        finally:
+            handle.close()
         file_id = up["id"]
         temp_id = file_id
     else:
@@ -1244,17 +1275,15 @@ async def gdocs_insert_image(
 
         # 3. compute object size from the image header (cap to max_width_pt)
         size_req = {}
-        if is_local:
-            wh = _png_size_px(image)
-            if wh and wh[0] and wh[1]:
-                w_px, h_px = wh
-                width_pt = min(float(max_width_pt), w_px * 72.0 / 96.0)
-                size_req = {
-                    "objectSize": {
-                        "width": {"magnitude": width_pt, "unit": "PT"},
-                        "height": {"magnitude": width_pt * h_px / w_px, "unit": "PT"},
-                    }
+        if is_local and image_size and image_size[0] and image_size[1]:
+            w_px, h_px = image_size
+            width_pt = min(float(max_width_pt), w_px * 72.0 / 96.0)
+            size_req = {
+                "objectSize": {
+                    "width": {"magnitude": width_pt, "unit": "PT"},
+                    "height": {"magnitude": width_pt * h_px / w_px, "unit": "PT"},
                 }
+            }
 
         # 4. resolve the insertion index
         requests = []

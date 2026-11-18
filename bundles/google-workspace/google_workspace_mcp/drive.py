@@ -8,11 +8,11 @@ import logging
 import os
 from typing import Optional
 
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload
 
 from .auth import get_drive_service
 from .guardrails import handle_google_errors
-from . import folder_guard, outbound_guard
+from . import folder_guard, local_paths, outbound_guard
 
 logger = logging.getLogger(__name__)
 
@@ -672,7 +672,16 @@ async def gdrive_download_file(file_id: str, local_path: str) -> dict:
 
     For uploaded files only (PDF, images, docx, zip, ...). Google-native files
     (Docs/Sheets/Slides) have no raw bytes; use gdrive_export for those.
+
+    `local_path` must be inside the files folder (GWS_FILES_DIR) this server may
+    use — see local_paths. The file is CREATED, never overwritten: pass a name that
+    is not taken yet.
     """
+    # Decided before any client is built, so a refused path makes no Google call.
+    try:
+        local_paths.resolve(local_path, local_paths.WRITE, "downloading a Drive file")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
     drive = get_drive_service()
     meta = await asyncio.to_thread(
         lambda: drive.files().get(
@@ -691,15 +700,23 @@ async def gdrive_download_file(file_id: str, local_path: str) -> dict:
     data = await asyncio.to_thread(
         lambda: drive.files().get_media(fileId=file_id).execute()
     )
-    with open(local_path, "wb") as f:
-        f.write(data)
+    try:
+        written, handle = local_paths.open_write(
+            local_path, "downloading a Drive file"
+        )
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
+    try:
+        handle.write(data)
+    finally:
+        handle.close()
     return {
         "success": True,
         "data": {
             "file_id": file_id,
             "name": meta.get("name"),
             "mime_type": mime,
-            "local_path": local_path,
+            "local_path": written,
             "bytes_written": len(data),
         },
     }
@@ -716,7 +733,15 @@ async def gdrive_export(
     Sheets -> application/vnd.openxmlformats-officedocument.spreadsheetml.sheet (xlsx) or text/csv;
     Slides -> application/pdf. The Drive export API caps output at 10 MB.
     Non-native files have no export path; use gdrive_download_file for those.
+
+    `local_path` must be inside the files folder (GWS_FILES_DIR) this server may
+    use, and is CREATED, never overwritten (see local_paths).
     """
+    # Decided before any client is built, so a refused path makes no Google call.
+    try:
+        local_paths.resolve(local_path, local_paths.WRITE, "exporting a Google file")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
     drive = get_drive_service()
     meta = await asyncio.to_thread(
         lambda: drive.files().get(
@@ -736,8 +761,16 @@ async def gdrive_export(
     data = await asyncio.to_thread(
         lambda: drive.files().export(fileId=file_id, mimeType=export_mime).execute()
     )
-    with open(local_path, "wb") as f:
-        f.write(data)
+    try:
+        written, handle = local_paths.open_write(
+            local_path, "exporting a Google file"
+        )
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
+    try:
+        handle.write(data)
+    finally:
+        handle.close()
     return {
         "success": True,
         "data": {
@@ -745,7 +778,7 @@ async def gdrive_export(
             "name": meta.get("name"),
             "source_mime_type": mime,
             "export_mime_type": export_mime,
-            "local_path": local_path,
+            "local_path": written,
             "bytes_written": len(data),
         },
     }
@@ -773,7 +806,15 @@ async def gdrive_upload_file(
 
     With GWS_OUTBOUND_GUARD on, the destination folder is checked first (see
     folder_guard): the upload is readable by whoever reads that folder.
+
+    `local_path` must be inside the files folder (GWS_FILES_DIR) this server may use
+    — see local_paths. A path outside it (the sign-in folder above all) is refused
+    before any Google call.
     """
+    try:
+        local_paths.resolve(local_path, local_paths.READ, "uploading a local file")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
     refusal = await folder_guard.check_destination(
         folder_id, "uploading a file into a Drive folder"
     )
@@ -793,21 +834,34 @@ async def gdrive_upload_file(
                     f"'{requested}'. Omit convert_to to upload the file as-is."
                 ),
             }
-    if not os.path.isfile(local_path):
-        return {"success": False, "error": f"Local file not found: {local_path}"}
+    try:
+        source, handle = local_paths.open_read(local_path, "uploading a local file")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
     drive = get_drive_service()
-    media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
-    body = {"name": name or os.path.basename(local_path), "parents": [folder_id]}
-    if target_mime:
-        body["mimeType"] = target_mime
-    created = await asyncio.to_thread(
-        lambda: drive.files().create(
-            body=body,
-            media_body=media,
-            fields="id, name, mimeType, size, webViewLink, parents",
-            supportsAllDrives=True,
-        ).execute()
-    )
+    try:
+        # The handle (opened O_NOFOLLOW on the checked path) is what the uploader
+        # reads, so the bytes that go up are the bytes that were allowed.
+        # MediaIoBaseUpload takes that open file object; MediaFileUpload would want
+        # a filename and re-open it, so the bytes read would not be the checked ones.
+        media = MediaIoBaseUpload(
+            handle,
+            mimetype=local_paths.guess_mime_type(mime_type, source),
+            resumable=True,
+        )
+        body = {"name": name or os.path.basename(local_path), "parents": [folder_id]}
+        if target_mime:
+            body["mimeType"] = target_mime
+        created = await asyncio.to_thread(
+            lambda: drive.files().create(
+                body=body,
+                media_body=media,
+                fields="id, name, mimeType, size, webViewLink, parents",
+                supportsAllDrives=True,
+            ).execute()
+        )
+    finally:
+        handle.close()
     return {"success": True, "data": created}
 
 
@@ -830,22 +884,38 @@ async def gdrive_upload_new_version(
     anything is uploaded. A file whose sharing cannot be read, or that is open to
     anyone/its whole domain/someone not on GWS_OUTBOUND_ALLOWLIST, is refused and
     nothing is uploaded.
+
+    `local_path` must be inside the files folder (GWS_FILES_DIR) this server may use
+    — see local_paths.
     """
+    try:
+        local_paths.resolve(local_path, local_paths.READ, "uploading a local file")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
     refusal = await folder_guard.check_file_sharing(
         file_id, "uploading a new version of a Drive file"
     )
     if refusal:
         return {"success": False, "error": refusal}
-    if not os.path.isfile(local_path):
-        return {"success": False, "error": f"Local file not found: {local_path}"}
+    try:
+        source, handle = local_paths.open_read(local_path, "uploading a local file")
+    except local_paths.PathRefused as refusal:
+        return {"success": False, "error": str(refusal)}
     drive = get_drive_service()
-    media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
-    updated = await asyncio.to_thread(
-        lambda: drive.files().update(
-            fileId=file_id,
-            media_body=media,
-            fields="id, name, mimeType, size, version, modifiedTime, webViewLink",
-            supportsAllDrives=True,
-        ).execute()
-    )
+    try:
+        media = MediaIoBaseUpload(
+            handle,
+            mimetype=local_paths.guess_mime_type(mime_type, source),
+            resumable=True,
+        )
+        updated = await asyncio.to_thread(
+            lambda: drive.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields="id, name, mimeType, size, version, modifiedTime, webViewLink",
+                supportsAllDrives=True,
+            ).execute()
+        )
+    finally:
+        handle.close()
     return {"success": True, "data": updated}
