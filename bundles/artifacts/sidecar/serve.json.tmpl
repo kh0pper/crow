@@ -5,7 +5,7 @@
   "Web": {
     "${TS_CERT_DOMAIN}:443": {
       "Handlers": {
-        "/": { "Proxy": "http://127.0.0.1:{{ORIGIN_PORT}}" }
+        "/": { "Proxy": "{{ORIGIN_TARGET}}" }
       }
     }
   }

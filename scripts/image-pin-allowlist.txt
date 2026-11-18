@@ -8,3 +8,8 @@ bundles/companion/docker-compose.yml  crow-companion  # built locally from bundl
 bundles/sdxl/docker-compose.yml  crow-sdxl  # built locally from bundles/sdxl
 bundles/scratch-offline/docker-compose.yml  crow-scratch-offline:latest  # built locally; its :latest IS the local build tag
 servers/gateway/preview/container/compose.yml  ${CROW_PREVIEW_IMAGE}  # built locally per instance; the tag is minted at boot
+
+# SAMPLE-ONLY: a file an operator copies and fills in. Its digest is the literal
+# placeholder `<pin>`, so there is no pin here to check; the operator replaces it
+# with the real digest before the node ever starts. Crow never installs this file.
+bundles/artifacts/sidecar/compose.sample.yml  tailscale/tailscale@sha256:<pin>  # sample; digest placeholder, filled in by the operator

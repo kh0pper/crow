@@ -52,9 +52,10 @@ The sandbox never includes `allow-same-origin`, `allow-top-navigation`, `allow-p
 
 | Variable | Meaning |
 |---|---|
-| `CROW_ARTIFACT_ORIGIN_PORT` | Loopback port of this instance's origin. Unset: nothing listens and artifact viewing is off. |
+| `CROW_ARTIFACT_ORIGIN_PORT` | Port of this instance's origin, printed in its Serve Proxy target (`CROW_ARTIFACT_SIDECAR_TARGET`). Unset: nothing listens and artifact viewing is off. |
 | `CROW_ARTIFACT_ORIGIN_URL` | The origin browsers use, on its **own** hostname, e.g. `https://<instance>-artifacts.<tailnet>.ts.net`. Scheme, host and optional port only. Unset: the loopback fallback below. |
-| `CROW_ARTIFACT_ORIGIN_BIND` | Bind address, default `127.0.0.1`. A container instance binds inside its namespace and publishes on host loopback. |
+| `CROW_ARTIFACT_ORIGIN_BIND` | Bind address, default `127.0.0.1`. With a sidecar node this is **normally not loopback**: a host-run gateway binds the dedicated bridge's gateway IP (e.g. `172.30.0.1`) and the sidecar reaches it from its own network namespace. A container instance binds inside its namespace and publishes on host loopback. |
+| `CROW_ARTIFACT_SIDECAR_TARGET` | The exact Serve Proxy target this instance's sidecar should map `https://<instance>-artifacts.<tailnet>:443` to: `http://<hostname or IPv4>:<port>` only, with no path, userinfo or query (IPv6 brackets optional) — e.g. `http://172.30.0.1:3090` or `http://<container-name>:3090`. Unset: the health check derives it from `CROW_ARTIFACT_ORIGIN_BIND` when that is a specific non-loopback address, and reports `host-loopback` when the bind is loopback. |
 | `CROW_ARTIFACT_SIDECAR_SOCKET` | The sidecar node's tailscaled socket, for the health check. Unset while `CROW_ARTIFACT_ORIGIN_URL` is set: the node is **not monitored** and the Nest raises a warn (`artifact-node:unmonitored`). |
 
 Registered ports (see [port allocation](../developers/port-allocation.md)): `CROW_ARTIFACT_ORIGIN_PORT=3090` for the main instance, `CROW_ARTIFACT_ORIGIN_PORT=3091` for a second co-hosted instance, `CROW_ARTIFACT_ORIGIN_PORT=3092` for a household container instance. 3093 is reserved for the later public-link listener.
@@ -63,27 +64,37 @@ Registered ports (see [port allocation](../developers/port-allocation.md)): `CRO
 
 ## Hostname: a sidecar Tailscale node
 
-The origin needs its own hostname so the dashboard's host-only cookies are never sent to it. Crow uses a **sidecar node**: a second `tailscaled` with its own state, MagicDNS name and certificate, running in userspace networking mode (no `NET_ADMIN`, no `/dev/net/tun`) with host networking so its Serve proxy can reach host loopback.
+The origin needs its own hostname so the dashboard's host-only cookies are never sent to it. Crow uses a **sidecar node**: a second `tailscaled` with its own state, MagicDNS name and certificate, running in userspace networking mode (no `NET_ADMIN`, no `/dev/net/tun`).
+
+### Its own network namespace, never `network_mode: host`
+
+tailscaled's userspace netstack forwards an inbound TCP connection on **any** port of the node's tailnet address to `127.0.0.1:<the same port>` and dials it with a plain Go dialer **inside the network namespace the sidecar runs in**. With host networking that `127.0.0.1` is this computer's loopback, so every loopback port here — the dashboard, an admin API, a database — would answer the tailnet. The sidecar must therefore run in its own namespace (`bundles/artifacts/sidecar/compose.sample.yml` does: a dedicated bridge, no `network_mode: host`, no `ports:`), the Serve Proxy target is never loopback (see `host-loopback` below), and the origin is bound where only the sidecar can reach it:
+
+- **Host-run gateway.** Give the sidecar a dedicated docker bridge — an EXTERNAL network created once, so its subnet and gateway survive `compose down`/`up` — and bind the origin to that bridge's **gateway IP** (`CROW_ARTIFACT_ORIGIN_BIND=172.30.0.1`; a bridge IP is normal here, not a mistake). The sidecar then reaches `http://172.30.0.1:<origin port>` from its own namespace. Allow it in exactly one place: a `ufw` rule scoped to that bridge, that sidecar IP and that port (`ufw allow in on <bridge> from <sidecar IP> to <bridge gateway> port <origin port> proto tcp`), so nothing else on the host's networks reaches the origin. Optionally add a DOCKER-USER rule that drops the private ranges from that bridge subnet outright.
+- **Household container instance.** The sidecar joins the instance's own compose network and proxies by container name (`http://<container-name>:3092`). The sidecar can be part of that compose file, and no host publish is needed.
 
 Tailscale Services were not chosen: they require the host to be a tagged node, need admin approval, and cannot carry Funnel.
 
-The sidecar's Serve config is shipped as a template, `bundles/artifacts/sidecar/serve.json.tmpl`. It maps only `https://${TS_CERT_DOMAIN}:443` to `http://127.0.0.1:{{ORIGIN_PORT}}`, with no Funnel. tailscaled fills in `${TS_CERT_DOMAIN}` itself; `renderServeConfig()` fills in the port.
+The sidecar's Serve config is shipped as a template, `bundles/artifacts/sidecar/serve.json.tmpl`. It maps only `https://${TS_CERT_DOMAIN}:443` to `{{ORIGIN_TARGET}}`, with no Funnel. tailscaled fills in `${TS_CERT_DOMAIN}` itself; `renderServeConfig(tmpl, { target })` fills in the target, and accepts only `http://<hostname or IPv4>:<port>`: a path, userinfo, query or another scheme throws.
 
 Operator notes:
 - Use a **single-use** auth key, and delete it once the node appears. The node key then lives only in the sidecar's state volume.
 - Decide key expiry explicitly. An expired node quietly breaks every artifact frame. Turning expiry off for this node is recommended, and the health check below warns either way.
-- Pin the sidecar image by digest.
+- Pin the sidecar image by digest, and never publish a port from it or give it `network_mode: host`.
+- **Tag the node and grant it as little as possible.** Give it a tag (`tag:<name>`, from the auth key's ACL) and a grant that allows only `tcp:443` to it. Under an allow-all policy (`"action": "accept"` with no ports) that grant is useless — every device on the tailnet already reaches every port the node's netstack answers — so the tag only pays off once the policy is narrower.
+- **Capabilities.** Drop `ALL` and add back only `DAC_OVERRIDE`: the sidecar needs no `NET_ADMIN` and no `/dev/net/tun`, but containerboot has to create and chown its state and socket directories inside a bind mount owned by the host user.
 
 ### Health check
 
-`sidecar-health.js` audits the sidecar every 5 minutes (cached), when `CROW_ARTIFACT_SIDECAR_SOCKET` and `CROW_ARTIFACT_ORIGIN_PORT` are both set. It runs `tailscale --socket <socket> status --json` and `serve status -json`, without sudo. It reports:
+`sidecar-health.js` audits the sidecar every 5 minutes (cached), when `CROW_ARTIFACT_SIDECAR_SOCKET` and `CROW_ARTIFACT_ORIGIN_PORT` are both set. It runs `tailscale --socket <socket> status --json` and `serve status -json`, without sudo. The mapping it expects is `CROW_ARTIFACT_SIDECAR_TARGET`, else `http://<CROW_ARTIFACT_ORIGIN_BIND>:<port>` when that bind is a specific non-loopback address. It reports:
 
 | Problem | Meaning |
 |---|---|
 | `logged-out` | `BackendState` is not `Running`. |
 | `key-expiring` | The node key expires within 14 days (or already has). |
 | `funnel-on` | Any `AllowFunnel` entry is true. |
-| `unexpected-mapping` | Anything other than the one 443 → `http://127.0.0.1:<origin port>` proxy. |
+| `host-loopback` | The live Serve Proxy host is `127.0.0.1`, `::1` or `localhost` — or `CROW_ARTIFACT_ORIGIN_BIND` is loopback, so no non-loopback target exists. The sidecar is on the host's network, and userspace netstack answers **every** port of its tailnet address on this computer's loopback. Reported instead of `unexpected-mapping`. Move the sidecar to its own network. |
+| `unexpected-mapping` | Anything other than the one 443 → `<CROW_ARTIFACT_SIDECAR_TARGET>` (or the `<bind>:<port>` derived from the environment) proxy. |
 | `unreachable` | The CLI failed or returned something unreadable. This is never treated as healthy. |
 
 Each problem becomes its own warn issue in the Nest health panel (`artifact-node:<problem>`), so the health monitor pushes a notification for each new one. A problem code the panel does not know fails closed as `unreachable`. When `CROW_ARTIFACT_ORIGIN_URL` is set but `CROW_ARTIFACT_SIDECAR_SOCKET` is not, nothing can be checked at all — that raises `artifact-node:unmonitored` (warn) instead of passing silently.

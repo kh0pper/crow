@@ -1,0 +1,84 @@
+# Crow Artifacts — the sidecar Tailscale node. SAMPLE ONLY: copy this file,
+# fill in the placeholders, then `docker compose -f compose.sample.yml up -d`.
+#
+# The artifact origin gets its own hostname from this second Tailscale node: a
+# tailscaled in userspace-networking mode (no NET_ADMIN, no /dev/net/tun in
+# play) whose Serve config proxies https://${TS_CERT_DOMAIN}:443 to the origin.
+#
+# IT MUST RUN IN ITS OWN NETWORK NAMESPACE. tailscaled's userspace netstack
+# forwards an inbound TCP connection on ANY port of the node's tailnet address
+# to 127.0.0.1:<same port> and dials it with a plain Go dialer in the namespace
+# the sidecar runs in. Under `network_mode: host` that 127.0.0.1 is THIS
+# COMPUTER's loopback, so every loopback port here — the dashboard, an admin
+# API, a database — would answer the tailnet. So: never add
+# `network_mode: host`, and never publish a port (this file has neither, and
+# the sidecar needs neither). The bridge below gives it a namespace of its own,
+# and its only way to the origin is the bridge gateway IP.
+#
+# Before the first start:
+#   1. Create the EXTERNAL bridge once (compose only attaches to it):
+#        docker network create --driver bridge \
+#          --subnet 172.30.0.0/24 --gateway 172.30.0.1 \
+#          crow-artifacts-sidecar
+#      Pick a subnet that collides with neither your LAN nor another Crow
+#      instance on this machine.
+#   2. Bind the origin to that bridge gateway IP —
+#      CROW_ARTIFACT_ORIGIN_BIND=172.30.0.1 — and render
+#      bundles/artifacts/sidecar/serve.json.tmpl into ./serve.json beside this
+#      file with renderServeConfig(tmpl, { target: "http://172.30.0.1:3090" })
+#      (3090 is CROW_ARTIFACT_ORIGIN_PORT here). Host firewall: ONE rule,
+#      scoped to the bridge's own interface (`docker network inspect
+#      crow-artifacts-sidecar` names it, br-…), the sidecar IP and that port:
+#        ufw allow in on <bridge interface> from 172.30.0.2 to 172.30.0.1 \
+#          port 3090 proto tcp
+#      Optionally add a DOCKER-USER rule dropping the private ranges from
+#      172.30.0.0/24. See docs/architecture/artifacts.md.
+#   3. Replace the <pin> below with the real digest
+#      (`docker buildx imagetools inspect tailscale/tailscale:<version>`).
+#   4. Put TS_AUTHKEY (a SINGLE-USE auth key) in a .env file beside this one.
+#
+# A household CONTAINER instance needs none of steps 1-2: its sidecar joins that
+# instance's compose network and proxies to the origin by container name.
+name: crow-artifacts-sidecar
+
+services:
+  sidecar:
+    # Pinned by digest: a tag would silently upgrade the node on every restart.
+    image: tailscale/tailscale@sha256:<pin>
+    container_name: crow-artifacts-sidecar
+    # The explicit hostname is the node's name; TS_HOSTNAME makes it the
+    # MagicDNS name Serve's certificate is issued for.
+    hostname: crow-artifacts
+    restart: unless-stopped
+    environment:
+      TS_USERSPACE_NETWORKING: "true"
+      TS_HOSTNAME: crow-artifacts
+      # Log in once; the node key then lives only in the state volume below.
+      TS_AUTH_ONCE: "true"
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /var/lib/tailscale/tailscaled.sock
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env (a single-use key)}
+    volumes:
+      # The state directory is a bind mount so the gateway's health check can
+      # read the same LocalAPI socket: CROW_ARTIFACT_SIDECAR_SOCKET=./state/tailscaled.sock
+      - ./state:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+    # Userspace networking needs nothing beyond this: drop every capability,
+    # then give back only DAC_OVERRIDE, which containerboot needs to create and
+    # chown its state and socket directories inside a bind mount owned by the
+    # host user (the container runs as root there).
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      artifacts-sidecar:
+        ipv4_address: 172.30.0.2
+
+networks:
+  artifacts-sidecar:
+    # EXTERNAL: created once with the command above, never by compose, so its
+    # fixed subnet and gateway stay put across `compose down`/`up`.
+    external: true
+    name: crow-artifacts-sidecar
