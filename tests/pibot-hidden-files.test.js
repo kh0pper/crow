@@ -6,12 +6,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { symlinkSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync,
-  existsSync, linkSync, statSync } from "node:fs";
+  existsSync, linkSync, lstatSync, statSync, readdirSync, renameSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
-  GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal,
+  SSH_DIR_REL, GNUPG_DIR_REL, GCLOUD_DIR_REL, HIDDEN_SECRET_DIRS, HIDDEN_SECRET_FILES, HIDDEN_DIR_STATE_PREFIX,
+  HIDDEN_DIR_RESET_COMMAND, GNUPG_NOT_HIDDEN_REFUSAL, SSH_LINK_REFUSAL, GNUPG_LINK_REFUSAL,
+  GCLOUD_NOT_HIDDEN_REFUSAL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal, secretDirNotHiddenRefusal,
+  secretNotHiddenRefusal, secretLinkRefusal, resolveHiddenSecretPath, resolveHiddenSecretFile,
+  resolveHiddenSecretDir, readHiddenDirMemory, hiddenDirStatePath, resetHiddenDirIdentity,
+  reConfirmRefusal, hiddenDirStateRefusal,
   BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName } from "../scripts/pi-bots/hidden_files.mjs";
+import { OPERATOR_SECRET_PATHS, OPERATOR_SECRET_DIRS, OPERATOR_SECRET_FILES,
+  operatorSecretKind, operatorSecretPath, operatorSecretPaths } from "../servers/shared/operator-secret-paths.js";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-files-"));
@@ -159,6 +167,238 @@ test("secretFilesFor: no appRoot and a missing bundles dir -> no bundle entries,
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+// ---- resolveHiddenSecretDir: one walk, one identity memory (no bubblewrap) ----
+//
+// ~/.ssh, ~/.gnupg and ~/.config/gcloud are resolved by ONE helper, exercised
+// here directly: every component below HOME is lstat'ed (a symlinked ~/.config
+// is a refusal, not a mask on a decoy), a folder seen for the first time is
+// remembered by (dev, ino), and one remembered and then missing or replaced
+// refuses the spawn until the operator re-confirms.
+
+/** A scratch home, its empty secrets dir and the identity record's path. */
+function homeRig() {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-resolve-"));
+  const home = join(root, "home");
+  const secrets = join(root, "crow", "secrets");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  const real = realpathSync(home);
+  return { root, home: real, crowHome: join(root, "crow"), statePath: hiddenDirStatePath(join(root, "crow"), real) };
+}
+
+test("resolveHiddenSecretDir: the first sight records dev:ino 0600, and the next spawn accepts the same folder", () => {
+  const rig = homeRig();
+  const gcloud = join(rig.home, ".config", "gcloud");
+  mkdirSync(gcloud, { recursive: true });
+  try {
+    const first = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(first.refusal, null);
+    assert.equal(first.dir, gcloud, "the resolved folder");
+    assert.equal(first.absent, false);
+    assert.equal(first.remembered, false, "the first sight is new");
+    assert.ok(existsSync(rig.statePath), "the first sight is recorded");
+    assert.equal(statSync(rig.statePath).mode & 0o777, 0o600, "0600");
+    assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs[GCLOUD_DIR_REL], { dev: first.dev, ino: first.ino });
+    assert.deepEqual(readdirSync(join(rig.root, "crow", "secrets")), [rig.statePath.slice(join(rig.root, "crow", "secrets").length + 1)],
+      "one record and no temp file left behind");
+    assert.ok(readdirSync(join(rig.root, "crow", "secrets"))[0].startsWith(HIDDEN_DIR_STATE_PREFIX), "the per-home record name");
+    const second = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(second.refusal, null, "an unchanged folder starts");
+    assert.equal(second.remembered, true);
+    assert.equal(second.ino, first.ino);
+    assert.deepEqual(resolveHiddenSecretDir(rig.home, SSH_DIR_REL, { statePath: rig.statePath }),
+      { rel: SSH_DIR_REL, label: "~/.ssh", kind: "dir", dir: null, path: null, absent: true, remembered: false, refusal: null, cause: null },
+      "an absent folder that was never seen is nothing to hide, and is not recorded");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: a symlinked ~/.config refuses the gcloud folder (the mask would land on a decoy)", () => {
+  const rig = homeRig();
+  const decoy = join(rig.root, "decoy");
+  mkdirSync(join(decoy, "gcloud"), { recursive: true });
+  symlinkSync(decoy, join(rig.home, ".config"));
+  try {
+    const r = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(r.refusal, GCLOUD_LINK_REFUSAL, "one fixed sentence for the folder");
+    assert.equal(r.dir, null, "no folder is handed to the mask");
+    assert.equal(r.remembered, false);
+    assert.ok(!r.refusal.includes(rig.root), "no path in the sentence (never the decoy)");
+    assert.ok(!r.refusal.includes("gcloud/"));
+    assert.equal(r.refusal, resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL).refusal,
+      "the same sentence with no record at all");
+    assert.equal(existsSync(rig.statePath), false, "a refused folder is never recorded");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: a symlinked ~/.ssh and ~/.gnupg refuse with their own sentence, and a component that is a file refuses too", () => {
+  const rig = homeRig();
+  const real = join(rig.root, "real-dir");
+  mkdirSync(real, { recursive: true });
+  try {
+    symlinkSync(real, join(rig.home, SSH_DIR_REL));
+    assert.equal(resolveHiddenSecretDir(rig.home, SSH_DIR_REL, { statePath: rig.statePath }).refusal, SSH_LINK_REFUSAL);
+    symlinkSync(real, join(rig.home, GNUPG_DIR_REL));
+    assert.equal(resolveHiddenSecretDir(rig.home, GNUPG_DIR_REL, { statePath: rig.statePath }).refusal, GNUPG_LINK_REFUSAL);
+    // ~/.config is a plain FILE: the folder cannot be there, and it is not the
+    // shape Crow will mask either way.
+    writeFileSync(join(rig.home, ".config"), "not a folder\n");
+    assert.equal(resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath }).refusal, GCLOUD_LINK_REFUSAL);
+    assert.equal(existsSync(rig.statePath), false, "nothing was recorded");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: a remembered folder that is gone refuses, names the re-confirm remedy, and the reset clears it", () => {
+  const rig = homeRig();
+  const gcloud = join(rig.home, ".config", "gcloud");
+  mkdirSync(gcloud, { recursive: true });
+  try {
+    assert.equal(resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath }).refusal, null);
+    rmSync(gcloud, { recursive: true });
+    const gone = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(gone.refusal, reConfirmRefusal(GCLOUD_DIR_REL, "missing", rig.statePath));
+    assert.match(gone.refusal, /is gone now/);
+    assert.match(gone.refusal, /--reset/, "the operator is told the remedy");
+    assert.match(gone.refusal, new RegExp(rig.statePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "and the file to delete");
+    assert.ok(!gone.refusal.includes("device"), "no internals in the sentence");
+    assert.equal(resetHiddenDirIdentity(rig.statePath), true, "the operator's re-confirm removes the record");
+    const after = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(after.refusal, null, "an absent folder with no record is nothing to hide again");
+    assert.equal(after.absent, true);
+    mkdirSync(gcloud, { recursive: true });
+    const again = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(again.refusal, null, "the re-confirmed folder starts again");
+    assert.equal(again.remembered, false, "and is recorded fresh");
+    assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs[GCLOUD_DIR_REL], { dev: again.dev, ino: again.ino });
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: a replaced folder (a new inode at the same path) refuses; the reset accepts the new folder", () => {
+  const rig = homeRig();
+  const gcloud = join(rig.home, ".config", "gcloud");
+  mkdirSync(gcloud, { recursive: true });
+  try {
+    const first = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(first.refusal, null);
+    rmSync(gcloud, { recursive: true });
+    // The filesystem may hand the freed inode number to the next mkdir, so the
+    // decoy is grown behind a filler until it really is a different inode.
+    let now = null;
+    for (let i = 0; i < 5; i++) {
+      mkdirSync(join(rig.home, ".config", "filler-" + i));
+      mkdirSync(gcloud);
+      now = statSync(gcloud);
+      if (now.ino !== first.ino) break;
+      rmSync(gcloud, { recursive: true });
+    }
+    assert.notEqual(now.ino, first.ino, "precondition: a different folder really is at the path");
+    const replaced = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(replaced.refusal, reConfirmRefusal(GCLOUD_DIR_REL, "replaced", rig.statePath));
+    assert.match(replaced.refusal, /it was replaced/);
+    assert.equal(replaced.dir, null);
+    assert.equal(resetHiddenDirIdentity(rig.statePath), true);
+    const after = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(after.refusal, null, "the re-confirmed folder starts");
+    assert.equal(after.remembered, false, "and is recorded fresh");
+    assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs[GCLOUD_DIR_REL], { dev: now.dev, ino: now.ino });
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: an absent folder that was never seen is nothing to hide and is never created", () => {
+  const rig = homeRig();
+  try {
+    for (const rel of HIDDEN_SECRET_DIRS) {
+      const r = resolveHiddenSecretDir(rig.home, rel, { statePath: rig.statePath });
+      assert.equal(r.absent, true, rel);
+      assert.equal(r.refusal, null, rel);
+      assert.equal(r.dir, null, rel);
+    }
+    assert.equal(existsSync(join(rig.home, ".config")), false, "nothing was created on the way");
+    assert.equal(existsSync(join(rig.home, GCLOUD_DIR_REL)), false);
+    assert.equal(existsSync(rig.statePath), false, "and nothing was recorded");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: an unreadable or corrupt record refuses (fail closed), and the reset clears it", () => {
+  const rig = homeRig();
+  mkdirSync(join(rig.home, GNUPG_DIR_REL), { recursive: true });
+  const corrupt = [
+    "{not json",
+    "[]",
+    '"a string"',
+    '{"version":1}',
+    '{"version":99,"dirs":{}}',
+    '{"version":1,"dirs":[]}',
+    '{"version":1,"dirs":{".gnupg":{"dev":1}}}',
+    '{"version":1,"dirs":{".gnupg":{"dev":"1","ino":2}}}',
+  ];
+  try {
+    for (const body of corrupt) {
+      writeFileSync(rig.statePath, body, { mode: 0o600 });
+      const r = resolveHiddenSecretDir(rig.home, GNUPG_DIR_REL, { statePath: rig.statePath });
+      assert.equal(r.refusal, hiddenDirStateRefusal(rig.statePath, "unreadable"), body);
+      assert.match(r.refusal, /--reset/, "the same remedy");
+      assert.equal(r.dir, null, "never handed to the mask");
+    }
+    // A DIRECTORY where the record belongs cannot be read either.
+    rmSync(rig.statePath, { force: true });
+    mkdirSync(rig.statePath);
+    assert.equal(resolveHiddenSecretDir(rig.home, GNUPG_DIR_REL, { statePath: rig.statePath }).refusal,
+      hiddenDirStateRefusal(rig.statePath, "unreadable"));
+    rmSync(rig.statePath, { recursive: true, force: true });
+    const after = resolveHiddenSecretDir(rig.home, GNUPG_DIR_REL, { statePath: rig.statePath });
+    assert.equal(after.refusal, null, "a deleted record is a fresh start");
+    assert.equal(after.remembered, false);
+    assert.ok(existsSync(rig.statePath), "and the folder is recorded again");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("resolveHiddenSecretDir: HOME may itself be a symlink: it is resolved once as the anchor, and both spellings agree", () => {
+  const rig = homeRig();
+  const realHome = join(rig.root, "real-home");
+  mkdirSync(join(realHome, SSH_DIR_REL), { recursive: true });
+  symlinkSync(realHome, join(rig.root, "linked-home"));
+  try {
+    const viaLink = resolveHiddenSecretDir(join(rig.root, "linked-home"), SSH_DIR_REL, { statePath: rig.statePath });
+    assert.equal(viaLink.refusal, null, "a link ABOVE the home is not the attack");
+    assert.equal(viaLink.dir, join(realpathSync(realHome), SSH_DIR_REL), "masked at the resolved path");
+    const viaReal = resolveHiddenSecretDir(realHome, SSH_DIR_REL, { statePath: rig.statePath });
+    assert.equal(viaReal.refusal, null);
+    assert.equal(viaReal.remembered, true, "one folder, one record: the anchor is resolved the same way");
+    assert.equal(viaReal.ino, viaLink.ino);
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("hidden-dir-memory CLI: --list shows what is recorded, --reset forgets it, and a corrupt record exits non-zero", () => {
+  const rig = homeRig();
+  const crowHome = rig.crowHome;
+  const statePath = rig.statePath;
+  const script = join(import.meta.dirname, "..", "scripts", "pi-bots", "hidden-dir-memory.mjs");
+  const run = (...args) => spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8", env: { ...process.env, CROW_HOME: crowHome },
+  });
+  try {
+    mkdirSync(join(rig.home, GCLOUD_DIR_REL), { recursive: true });
+    const recorded = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath });
+    assert.equal(recorded.refusal, null);
+    const listed = run("--list");
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /~\/\.config\/gcloud/);
+    assert.match(listed.stdout, new RegExp(String(recorded.ino)));
+    const reset = run("--reset");
+    assert.equal(reset.status, 0, reset.stderr);
+    assert.equal(existsSync(statePath), false, "the record is gone");
+    assert.equal(run("--reset").status, 0, "a second reset is quiet");
+    writeFileSync(statePath, "{broken", { mode: 0o600 });
+    const bad = run("--list");
+    assert.equal(bad.status, 1, "a corrupt record is reported, never guessed at");
+    assert.match(bad.stderr, /--reset/);
+    assert.equal(run("--nonsense").status, 2);
+    assert.equal(run("--help").status, 0);
+    assert.equal(HIDDEN_DIR_RESET_COMMAND, "node scripts/pi-bots/hidden-dir-memory.mjs --reset");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
 // ---- bridge level: what a spawn really masks ----
 
 for (const k of Object.keys(process.env)) if (/^(PI_|PIBOT_)/.test(k)) delete process.env[k];
@@ -171,6 +411,13 @@ process.env.CROW_DATA_DIR = join(CROW, "data");
 delete process.env.CROW_DB_PATH;
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
 const REAL_CROW = realpathSync(CROW);
+/** The record the bridge keeps of the operator's secret folders for THIS scratch
+ *  instance, and the operator's re-confirm. A test that removes or replaces one
+ *  of the three folders (~/.ssh, ~/.gnupg, ~/.config/gcloud) forgets it, so the
+ *  next spawn records again — exactly what an operator does (the bridge reads
+ *  and writes it through the anchored secrets dir: the same file). */
+const HIDDEN_DIR_MEMORY = hiddenDirStatePath(CROW, USER_HOME);
+function forgetHiddenDirs() { rmSync(HIDDEN_DIR_MEMORY, { force: true }); }
 // The co-host scan must not read the HOST's /etc (a dev box with a declared
 // extra Crow home would change these spawns): point its /etc half at scratch,
 // empty dirs. $HOME is the scratch home above, so the per-user unit dir stays.
@@ -181,7 +428,7 @@ mkdirSync(SCAN_ENV, { recursive: true });
 const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
 _setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
-const { PiRpc, homeMatchesResolved, logUnhideableOnce, _resetUnhideableLogForTest } = await import("../scripts/pi-bots/bridge.mjs");
+const { PiRpc, homeMatchesResolved, logUnhideableOnce, _resetUnhideableLogForTest, CROW_DB } = await import("../scripts/pi-bots/bridge.mjs");
 const { probePiSandbox, _resetPiSandboxForTest } = await import("../scripts/pi-bots/pi_sandbox.mjs");
 
 _resetPiSandboxForTest();
@@ -464,11 +711,13 @@ test("unmaskableRefusal: one plain sentence per cause (hard link, outside, hidde
   assert.equal(unmaskableRefusal(".env", undefined), unmaskableRefusal(".env", "link-inside"),
     "an unknown cause falls back to the plain link sentence");
   assert.equal(SSH_NOT_HIDDEN_REFUSAL, "A bot could not start: Crow could not hide ~/.ssh.");
-  // The bridge throws that exported sentence rather than a copy of its own
-  // (the ~/.ssh refusal is not reachable in a unit test: forcing bwrap to fail
-  // one mask needs a host that has bwrap).
+  assert.equal(SSH_NOT_HIDDEN_REFUSAL, secretNotHiddenRefusal(SSH_DIR_REL), "one sentence per entry, built from its name");
+  // The bridge asks the shared rule for every entry of the list and throws what
+  // it answers, rather than a copy of any sentence (the refusal is not reachable
+  // in a unit test: forcing bwrap to fail one mask needs a host that has bwrap).
   const bridge = readFileSync(join(import.meta.dirname, "..", "scripts", "pi-bots", "bridge.mjs"), "utf8");
-  assert.ok(bridge.includes("new Error(SSH_NOT_HIDDEN_REFUSAL)"), "the bridge throws the shared sentence");
+  assert.ok(bridge.includes("secretDirNotHiddenRefusal({ dir: secret.dir, refusal: secretNotHiddenRefusal(secret.rel), masked: launch.masked })"),
+    "the bridge asks the shared rule with its launch's mask list, for every entry of the list");
   assert.ok(!bridge.includes("Crow could not hide ~/.ssh."), "and holds no copy of it");
 });
 
@@ -485,14 +734,27 @@ test("GCLOUD_NOT_HIDDEN_REFUSAL: the shared sentence, decided by gcloudNotHidden
   assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: ["/h/.config/gcloud", "/x"] }), null, "masked: the spawn runs");
   assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: ["/x"] }), GCLOUD_NOT_HIDDEN_REFUSAL, "found but not masked: refused");
   assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: undefined }), GCLOUD_NOT_HIDDEN_REFUSAL, "a launch that reports nothing is not trusted");
+  // ~/.gnupg is hidden whole on the default tier too, and gets the same
+  // hidden-or-refuse rule (one generic function, two named sentences).
+  assert.equal(GNUPG_NOT_HIDDEN_REFUSAL, "A bot could not start: Crow could not hide ~/.gnupg.");
+  assert.equal(secretDirNotHiddenRefusal({ dir: null, refusal: GNUPG_NOT_HIDDEN_REFUSAL, masked: [] }), null, "no gpg on this host: nothing to refuse");
+  assert.equal(secretDirNotHiddenRefusal({ dir: "/h/.gnupg", refusal: GNUPG_NOT_HIDDEN_REFUSAL, masked: ["/h/.gnupg"] }), null, "masked: the spawn runs");
+  assert.equal(secretDirNotHiddenRefusal({ dir: "/h/.gnupg", refusal: GNUPG_NOT_HIDDEN_REFUSAL, masked: [] }), GNUPG_NOT_HIDDEN_REFUSAL, "found but not masked: refused");
+  assert.equal(secretDirNotHiddenRefusal({ dir: "/h/.gnupg", refusal: GNUPG_NOT_HIDDEN_REFUSAL, masked: undefined }), GNUPG_NOT_HIDDEN_REFUSAL, "a launch that reports nothing is not trusted");
+  assert.equal(gcloudNotHiddenRefusal({ gcloudDir: "/h/.config/gcloud", masked: [] }),
+    secretDirNotHiddenRefusal({ dir: "/h/.config/gcloud", refusal: GCLOUD_NOT_HIDDEN_REFUSAL, masked: [] }), "gcloud is the same rule");
   // Wiring only, and the one thing the helper cannot prove: the bridge asks the
   // shared rule with THIS launch's own mask list (forcing bwrap to fail a single
   // mask needs a real bwrap host, so the end-to-end refusal stays the
-  // orchestrator's to run; the two spawn tests below cover the other half — the
+  // orchestrator's to run; the spawn tests below cover the other half — the
   // folder hidden when it exists, and never created when it does not).
   const bridge = readFileSync(join(import.meta.dirname, "..", "scripts", "pi-bots", "bridge.mjs"), "utf8");
-  assert.ok(bridge.includes("gcloudNotHiddenRefusal({ gcloudDir: hiddenCandidates.gcloudDir, masked: launch.masked })"),
+  assert.ok(bridge.includes("secretDirNotHiddenRefusal({ dir: secret.dir, refusal: secretNotHiddenRefusal(secret.rel), masked: launch.masked })"),
     "the bridge asks the shared rule with its launch's mask list");
+  assert.ok(bridge.includes("HIDDEN_SECRET_DIRS.map(resolveSecretDir)"), "every folder of the list is resolved, not a hand-written three");
+  assert.ok(bridge.includes("HIDDEN_SECRET_FILES.map((rel) => resolveSecretPath(rel, \"file\"))"),
+    "and every file of the list too");
+  assert.ok(!bridge.includes("Crow could not hide ~/.gnupg."), "and holds no copy of that sentence");
   assert.ok(!bridge.includes("Crow could not hide ~/.config/gcloud."), "and holds no copy of the sentence");
   assert.ok(!/mkdirSync\([^)]*gcloud/.test(bridge), "Crow never creates ~/.config/gcloud");
 });
@@ -604,7 +866,9 @@ async function spawnReport({ files = {}, dirs = {} } = {}) {
       nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
     const r = await pi.waitFor((m) => m.type === "report", 10000, "report");
     await pi.exited;
-    return { report: r, masked: pi.sandboxMaskedFiles };
+    // `masked` is every path the launch masked (a folder by tmpfs included),
+    // `maskedFiles` only the --dev-bind /dev/null ones.
+    return { report: r, masked: pi.sandboxMasked, maskedFiles: pi.sandboxMaskedFiles };
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
     rmSync(dir, { recursive: true, force: true });
@@ -643,10 +907,15 @@ test("a bundle link resolving inside the Crow home is not refused, and the resol
 test("~/.ssh is created 0700 when it is missing and lists empty inside", { skip: noSandbox }, async () => {
   const sshDir = join(USER_HOME, ".ssh");
   rmSync(sshDir, { recursive: true, force: true });
-  const { report } = await spawnReport({ dirs: { ssh: sshDir } });
-  assert.ok(existsSync(sshDir), "the bridge created the folder before the spawn");
-  assert.equal(statSync(sshDir).mode & 0o777, 0o700, "0700");
-  assert.deepEqual(report.list.ssh, [], "empty inside");
+  forgetHiddenDirs(); // an operator removing ~/.ssh on purpose re-confirms first
+  try {
+    const { report } = await spawnReport({ dirs: { ssh: sshDir } });
+    assert.ok(existsSync(sshDir), "the bridge created the folder before the spawn");
+    assert.equal(statSync(sshDir).mode & 0o777, 0o700, "0700");
+    assert.deepEqual(report.list.ssh, [], "empty inside");
+    assert.deepEqual(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[SSH_DIR_REL],
+      { dev: statSync(sshDir).dev, ino: statSync(sshDir).ino }, "the folder it created is recorded");
+  } finally { forgetHiddenDirs(); }
 });
 
 test("~/.config/gcloud is hidden whole when it exists: the gcloud credentials are unreadable inside", { skip: noSandbox }, async () => {
@@ -659,25 +928,34 @@ test("~/.config/gcloud is hidden whole when it exists: the gcloud credentials ar
     assert.deepEqual(report.list.gcloud, [], "~/.config/gcloud is an empty tmpfs inside");
     assert.equal(report.len.adc, "ENOENT", "a bot cannot read application_default_credentials.json inside");
     assert.equal(readFileSync(adc, "utf8").includes("application-default-credentials"), true, "the file on disk keeps its content");
-  } finally { rmSync(gcloudDir, { recursive: true, force: true }); }
+    assert.deepEqual(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[GCLOUD_DIR_REL],
+      { dev: statSync(gcloudDir).dev, ino: statSync(gcloudDir).ino }, "the folder's identity was recorded");
+  } finally {
+    rmSync(gcloudDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
 });
 
 test("~/.config/gcloud is never created when it is missing, and the spawn still starts", { skip: noSandbox }, async () => {
   const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
   rmSync(gcloudDir, { recursive: true, force: true });
+  forgetHiddenDirs();
   try {
     const { report } = await spawnReport({ dirs: { gcloud: gcloudDir } });
     assert.equal(report.list.gcloud, "ENOENT", "nothing is there inside either");
     assert.equal(existsSync(gcloudDir), false, "Crow did not create it (no gcloud CLI on this host)");
-  } finally { rmSync(gcloudDir, { recursive: true, force: true }); }
+    assert.equal(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[GCLOUD_DIR_REL], undefined,
+      "and an absent folder is not recorded");
+  } finally { rmSync(gcloudDir, { recursive: true, force: true }); forgetHiddenDirs(); }
 });
 
 test("~/.config/gcloud that is a SYMLINK refuses the spawn: the mask follows the link, and a bot could re-point it", { skip: noSandbox }, async () => {
-  assert.equal(GCLOUD_LINK_REFUSAL, "A bot could not start: ~/.config/gcloud is a symbolic link, so Crow can't hide the credentials it leads to. Replace the link with the real folder.");
+  assert.equal(GCLOUD_LINK_REFUSAL, "A bot could not start: ~/.config/gcloud is a link, or sits behind one, so Crow can't hide the credentials in it. Replace it with a real folder.");
   const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
   const realDir = join(USER_HOME, "real-gcloud");
   rmSync(gcloudDir, { recursive: true, force: true });
   rmSync(realDir, { recursive: true, force: true });
+  forgetHiddenDirs();
   mkdirSync(join(USER_HOME, ".config"), { recursive: true });
   mkdirSync(realDir, { recursive: true });
   const adc = join(realDir, "application_default_credentials.json");
@@ -688,7 +966,165 @@ test("~/.config/gcloud that is a SYMLINK refuses the spawn: the mask follows the
     assert.ok(e, "the spawn is refused");
     assert.equal(e.message, GCLOUD_LINK_REFUSAL, "one fixed sentence, so the fix is obvious");
     assert.ok(!e.message.includes("application-default-credentials"), "no content in the message");
-  } finally { rmSync(gcloudDir, { force: true }); rmSync(realDir, { recursive: true, force: true }); }
+  } finally {
+    rmSync(gcloudDir, { force: true });
+    rmSync(realDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("a symlinked ~/.config refuses the spawn: the gcloud mask would land on a decoy the bot could plant", async () => {
+  // ~/.config is writable inside the default sandbox, so a bot can swap it for
+  // a link to a folder of its own. The old check lstat'ed only the LAST
+  // component (~/.config/gcloud), so this shape was masked at the decoy and the
+  // real credentials folder stayed readable on the host.
+  const decoy = mkdtempSync(join(tmpdir(), "crow-hidden-configdecoy-"));
+  mkdirSync(join(decoy, "gcloud"), { recursive: true });
+  const adc = join(decoy, "gcloud", "application_default_credentials.json");
+  writeFileSync(adc, '{"fake":"application-default-credentials"}\n', { mode: 0o600 });
+  const configDir = join(USER_HOME, ".config");
+  rmSync(configDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  symlinkSync(decoy, configDir);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, GCLOUD_LINK_REFUSAL, "the gcloud sentence, whatever link it is behind");
+    assert.ok(!e.message.includes(decoy), "no decoy path in the sentence");
+    assert.ok(!e.message.includes("application-default-credentials"), "no content in the sentence");
+    assert.equal(lstatSync(configDir).isSymbolicLink(), true, "and nothing was created over the link");
+  } finally {
+    rmSync(configDir, { force: true });
+    rmSync(decoy, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("a symlinked ~/.ssh refuses the spawn instead of being mkdir'ed over", async () => {
+  assert.equal(SSH_LINK_REFUSAL, "A bot could not start: ~/.ssh is a link, or sits behind one, so Crow can't hide the keys in it. Replace it with a real folder.");
+  const sshDir = join(USER_HOME, SSH_DIR_REL);
+  const realDir = mkdtempSync(join(tmpdir(), "crow-hidden-sshlink-"));
+  writeFileSync(join(realDir, "id_fake"), "fake-ssh-key\n", { mode: 0o600 });
+  rmSync(sshDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  symlinkSync(realDir, sshDir);
+  try {
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, SSH_LINK_REFUSAL);
+    assert.ok(!e.message.includes("fake-ssh-key"), "no content in the sentence");
+    assert.equal(lstatSync(sshDir).isSymbolicLink(), true, "the link is untouched (an EEXIST mkdir proved nothing before)");
+  } finally {
+    rmSync(sshDir, { force: true });
+    rmSync(realDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("a gcloud folder Crow remembered is refused once it is gone, until the operator re-confirms", async () => {
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  rmSync(gcloudDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  mkdirSync(gcloudDir, { recursive: true });
+  writeFileSync(join(gcloudDir, "application_default_credentials.json"), '{"fake":"adc"}\n', { mode: 0o600 });
+  try {
+    assert.equal(await spawnOutcome(), null, "the first sight starts and records");
+    assert.ok(existsSync(HIDDEN_DIR_MEMORY), "the identity record exists");
+    assert.equal(statSync(HIDDEN_DIR_MEMORY).mode & 0o777, 0o600, "0600");
+    assert.deepEqual(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[GCLOUD_DIR_REL],
+      { dev: statSync(gcloudDir).dev, ino: statSync(gcloudDir).ino }, "recorded by dev:ino");
+    // The folder goes missing (or is renamed away) after Crow hid it once.
+    rmSync(gcloudDir, { recursive: true });
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused: a hidden folder disappearing is the tamper signal");
+    assert.equal(e.message, reConfirmRefusal(GCLOUD_DIR_REL, "missing", HIDDEN_DIR_MEMORY));
+    assert.match(e.message, /is gone now/);
+    assert.match(e.message, /--reset/, "the operator is told the remedy");
+    // The remedy: forget the record; the next spawn records whatever is there.
+    assert.equal(resetHiddenDirIdentity(HIDDEN_DIR_MEMORY), true);
+    assert.equal(await spawnOutcome(), null, "after the re-confirm the spawn starts again");
+    assert.equal(existsSync(gcloudDir), false, "and gcloud is still never created");
+    assert.equal(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[GCLOUD_DIR_REL], undefined,
+      "an absent folder is not recorded");
+  } finally {
+    rmSync(gcloudDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("a gcloud folder REPLACED by another folder (a new inode) is refused, until the operator re-confirms", async () => {
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  rmSync(gcloudDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  mkdirSync(gcloudDir, { recursive: true });
+  try {
+    assert.equal(await spawnOutcome(), null, "the first sight starts and records");
+    const recorded = readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[GCLOUD_DIR_REL];
+    assert.deepEqual(recorded, { dev: statSync(gcloudDir).dev, ino: statSync(gcloudDir).ino });
+    // rm + mkdir at the same path. The freed inode number may be handed to the
+    // next mkdir, so grow a filler first until the folder really is a new one.
+    rmSync(gcloudDir, { recursive: true });
+    let now = null;
+    for (let i = 0; i < 5; i++) {
+      mkdirSync(join(USER_HOME, ".config", "filler-" + i));
+      mkdirSync(gcloudDir);
+      now = statSync(gcloudDir);
+      if (now.ino !== recorded.ino) break;
+      rmSync(gcloudDir, { recursive: true });
+    }
+    assert.notEqual(now.ino, recorded.ino, "precondition: a different folder is at the path");
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    assert.equal(e.message, reConfirmRefusal(GCLOUD_DIR_REL, "replaced", HIDDEN_DIR_MEMORY));
+    assert.match(e.message, /it was replaced/);
+    assert.equal(resetHiddenDirIdentity(HIDDEN_DIR_MEMORY), true);
+    assert.equal(await spawnOutcome(), null, "the re-confirmed folder starts");
+    assert.deepEqual(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[GCLOUD_DIR_REL],
+      { dev: now.dev, ino: now.ino }, "and the new folder is recorded");
+  } finally {
+    rmSync(gcloudDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("an unreadable identity record refuses the spawn (fail closed) with the same remedy", async () => {
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  rmSync(gcloudDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  try {
+    for (const body of ["{not json", '{"version":1,"dirs":[]}', '{"version":7,"dirs":{}}']) {
+      writeFileSync(HIDDEN_DIR_MEMORY, body, { mode: 0o600 });
+      const e = await spawnOutcome();
+      assert.ok(e, "the spawn is refused: " + body);
+      assert.equal(e.message, hiddenDirStateRefusal(HIDDEN_DIR_MEMORY, "unreadable"));
+      assert.match(e.message, /--reset/, "the same remedy");
+    }
+    rmSync(HIDDEN_DIR_MEMORY, { force: true });
+    assert.equal(await spawnOutcome(), null, "a deleted record is a fresh start");
+  } finally {
+    rmSync(gcloudDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("~/.gnupg is hidden whole when it exists, and never created when it does not", { skip: noSandbox }, async () => {
+  const gnupgDir = join(USER_HOME, GNUPG_DIR_REL);
+  rmSync(gnupgDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  try {
+    const absent = await spawnReport({ dirs: { gnupg: gnupgDir } });
+    assert.equal(absent.report.list.gnupg, "ENOENT", "nothing there, nothing inside either");
+    assert.equal(existsSync(gnupgDir), false, "Crow did not create it (no gpg on this host)");
+    mkdirSync(join(gnupgDir, "private-keys-v1.d"), { recursive: true });
+    const key = join(gnupgDir, "private-keys-v1.d", "fake.key");
+    writeFileSync(key, "fake-gpg-key-material\n", { mode: 0o600 });
+    const hidden = await spawnReport({ dirs: { gnupg: gnupgDir }, files: { key } });
+    assert.deepEqual(hidden.report.list.gnupg, [], "~/.gnupg is an empty tmpfs inside");
+    assert.equal(hidden.report.len.key, "ENOENT", "a bot cannot read a gpg private key inside");
+  } finally {
+    rmSync(gnupgDir, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
 });
 
 test("the instance env/ and android-keystore/ folders list empty inside", { skip: noSandbox }, async () => {
@@ -810,4 +1246,483 @@ test("secretFilesFor: a symlinked .env is masked at its real path, skipped behin
     assert.ok(!files.some((f) => f.includes("dangling")));
     assert.ok(files.includes(join(crowHome, "bundles", "leaves", ".env")), "listed by its own name, so the spawn is refused");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- ONE list of operator credential locations, folders and files ----------
+//
+// OPERATOR_SECRET_PATHS (servers/shared/operator-secret-paths.js) is the only
+// place these paths are named. Everything below is table-driven over it, so a
+// new entry is covered here the moment it is added — folders (hidden whole,
+// like ~/.config/gcloud) and files (masked with an empty one) alike.
+
+/** A stable key for a rel, for the spawn stub's report. */
+const keyOf = (rel) => rel.replace(/[^a-z0-9]+/gi, "_");
+
+/** The path of one entry below `home`. */
+const entryPath = (home, rel) => join(home, ...rel.split("/"));
+
+test("the one list: both kinds come from OPERATOR_SECRET_PATHS, and the helpers make one path per entry", () => {
+  assert.deepEqual(HIDDEN_SECRET_DIRS, OPERATOR_SECRET_DIRS, "the bot helper hides exactly the list's folders");
+  assert.deepEqual(HIDDEN_SECRET_FILES, OPERATOR_SECRET_FILES, "and masks exactly its files");
+  for (const rel of [SSH_DIR_REL, GNUPG_DIR_REL, GCLOUD_DIR_REL]) {
+    assert.ok(HIDDEN_SECRET_DIRS.includes(rel), "the folders that shipped first are still in it: " + rel);
+    assert.equal(operatorSecretKind(rel), "dir", rel);
+  }
+  for (const rel of [".aws", ".azure", ".kube", ".config/gh", ".terraform.d"]) {
+    assert.ok(HIDDEN_SECRET_DIRS.includes(rel), "a folder hidden whole: " + rel);
+  }
+  for (const rel of [".docker/config.json", ".netrc", ".npmrc", ".pgpass", ".config/containers/auth.json"]) {
+    assert.ok(HIDDEN_SECRET_FILES.includes(rel), "a file masked with an empty one: " + rel);
+    assert.equal(operatorSecretKind(rel), "file", rel);
+  }
+  assert.equal(operatorSecretKind(".not-on-the-list"), null);
+  assert.deepEqual(operatorSecretPaths("/h"), OPERATOR_SECRET_PATHS.map(({ rel }) => join("/h", rel)));
+  assert.equal(operatorSecretPath("/h/", ".netrc"), join("/h", ".netrc"), "one separator, never two");
+  assert.ok(Object.isFrozen(OPERATOR_SECRET_PATHS), "nobody appends to the list at run time");
+  // The sentences are built from the entry's name, so a new entry needs no new
+  // sentence, and the three that shipped first keep the exact wording.
+  assert.equal(secretNotHiddenRefusal(GCLOUD_DIR_REL), GCLOUD_NOT_HIDDEN_REFUSAL);
+  assert.equal(secretNotHiddenRefusal(GNUPG_DIR_REL), GNUPG_NOT_HIDDEN_REFUSAL);
+  assert.equal(secretLinkRefusal(SSH_DIR_REL, "dir"), SSH_LINK_REFUSAL, "the keys sentence for ~/.ssh");
+  assert.equal(secretLinkRefusal(GCLOUD_DIR_REL, "dir"), GCLOUD_LINK_REFUSAL, "the credentials sentence for a folder");
+  assert.equal(secretLinkRefusal(".netrc", "file"),
+    "A bot could not start: ~/.netrc is a link, or sits behind one, so Crow can't hide the credentials in it. Replace it with a real file.");
+  assert.equal(secretLinkRefusal(".aws", "dir"),
+    "A bot could not start: ~/.aws is a link, or sits behind one, so Crow can't hide the credentials in it. Replace it with a real folder.");
+});
+
+test("every entry of the list: present is returned, absent is never created, and only a FOLDER is remembered — a file rewrite is no re-confirm", () => {
+  for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+    const rig = homeRig();
+    const target = entryPath(rig.home, rel);
+    const resolve = () => (kind === "file" ? resolveHiddenSecretFile : resolveHiddenSecretDir)(rig.home, rel, { statePath: rig.statePath });
+    try {
+      // Absent: nothing is there, nothing is created, nothing is recorded.
+      const absent = resolve();
+      assert.equal(absent.absent, true, rel);
+      assert.equal(absent.refusal, null, rel);
+      assert.equal(absent.path, null, rel);
+      assert.equal(existsSync(target), false, "an absent entry is never created: " + rel);
+      assert.equal(existsSync(rig.statePath), false, "and never recorded: " + rel);
+      // Present: the folder, or the file itself.
+      mkdirSync(dirname(target), { recursive: true });
+      if (kind === "dir") mkdirSync(target); else writeFileSync(target, "fake-credential\n", { mode: 0o600 });
+      const present = resolve();
+      assert.equal(present.refusal, null, rel);
+      assert.equal(present.path, target, rel);
+      assert.equal(present.dir, kind === "dir" ? target : null, "a file is not a folder: " + rel);
+      assert.equal(present.kind, kind, rel);
+      assert.equal(present.remembered, false, rel);
+      if (kind === "dir") {
+        assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs[rel], { dev: present.dev, ino: present.ino },
+          "a FOLDER is recorded by dev:ino, 0600, in the instance's record: " + rel);
+      } else {
+        // A FILE carries no identity memory: `npm config set` / `docker login`
+        // rename a new inode over it every day, and that must not stop every bot.
+        assert.equal(readHiddenDirMemory(rig.statePath).dirs[rel], undefined,
+          "a FILE is never recorded (an ordinary rewrite would become a refusal): " + rel);
+        assert.equal(existsSync(rig.statePath), false, "and writing nothing means no record file at all: " + rel);
+      }
+      // Gone.
+      rmSync(target, { recursive: kind === "dir" });
+      const gone = resolve();
+      if (kind === "dir") {
+        // The tamper signal, with the re-confirm remedy.
+        assert.equal(gone.refusal, reConfirmRefusal(rel, "missing", rig.statePath, kind), rel);
+        assert.equal(gone.cause, "missing", rel);
+        assert.match(gone.refusal, /--reset/, rel);
+        assert.equal(resetHiddenDirIdentity(rig.statePath), true, rel);
+        assert.equal(resolve().refusal, null, "after the re-confirm an absent entry is nothing to hide: " + rel);
+      } else {
+        assert.equal(gone.refusal, null, "a credential FILE that is gone is nothing to mask: " + rel);
+        assert.equal(gone.absent, true, rel);
+        assert.equal(gone.cause, null, rel);
+      }
+    } finally { rmSync(rig.root, { recursive: true, force: true }); }
+  }
+});
+
+test("a FILE rewritten under a new inode (npm config set, docker login) is masked on the next spawn, never refused", () => {
+  // The availability rule: an ordinary operator rewrite must not stop every bot.
+  // The name is kept, the inode changes — exactly what an atomic rename does.
+  const rig = homeRig();
+  const rels = HIDDEN_SECRET_FILES;
+  const before = {};
+  const resolve = (rel) => resolveHiddenSecretFile(rig.home, rel, { statePath: rig.statePath });
+  try {
+    for (const rel of rels) {
+      const p = entryPath(rig.home, rel);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, "fake-old-token\n", { mode: 0o600 });
+      const first = resolve(rel);
+      assert.equal(first.refusal, null, rel);
+      before[rel] = first.ino;
+    }
+    for (const rel of rels) {
+      const p = entryPath(rig.home, rel);
+      // The rename shape: write a temp file in the same folder, then rename it
+      // over the old name (a new inode at the same path).
+      const tmp = p + ".tmp-1234";
+      writeFileSync(tmp, "fake-new-token\n", { mode: 0o600 });
+      renameSync(tmp, p);
+      const again = resolve(rel);
+      assert.equal(again.refusal, null, "a rewritten credential file never needs a re-confirm: " + rel);
+      assert.equal(again.path, p, rel);
+      assert.notEqual(again.ino, before[rel], "precondition: a new inode is at the path: " + rel);
+      assert.equal(readHiddenDirMemory(rig.statePath).dirs[rel], undefined, "and still nothing is recorded: " + rel);
+    }
+    // A legacy record that still holds a file entry (written by an older build)
+    // cannot refuse one either: the entry is dropped when the record is read.
+    writeFileSync(rig.statePath, JSON.stringify({ version: 1, home: rig.home,
+      dirs: { [rels[0]]: { dev: 1, ino: 1 } } }, null, 2), { mode: 0o600 });
+    assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs, {}, "an old file entry is forgotten, not compared");
+    assert.equal(resolve(rels[0]).refusal, null, "so the spawn is not refused for it");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("a FOLDER keeps its identity through an ordinary tool flow: files written inside it (gcloud auth login) change nothing it remembers", () => {
+  // Only the folder's OWN dev:ino is remembered — never contents, sizes or
+  // mtimes — so `gcloud auth login` writing files INSIDE ~/.config/gcloud must
+  // not trip the re-confirm. (The folder's inode is unchanged by that.)
+  const rig = homeRig();
+  const dir = entryPath(rig.home, GCLOUD_DIR_REL);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const first = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(first.refusal, null);
+    assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs[GCLOUD_DIR_REL], { dev: first.dev, ino: first.ino },
+      "the record holds the folder's identity and nothing else");
+    // A login: new files, subfolders and mtimes inside the folder.
+    writeFileSync(join(dir, "credentials.db"), "fake-gcloud-db\n", { mode: 0o600 });
+    mkdirSync(join(dir, "legacy_credentials"));
+    writeFileSync(join(dir, "legacy_credentials", "fake.json"), '{"fake":"adc"}\n', { mode: 0o600 });
+    writeFileSync(join(dir, "application_default_credentials.json"), '{"fake":"adc"}\n', { mode: 0o600 });
+    const again = resolveHiddenSecretDir(rig.home, GCLOUD_DIR_REL, { statePath: rig.statePath });
+    assert.equal(again.refusal, null, "a normal token refresh inside the folder is not a tamper signal");
+    assert.equal(again.remembered, true, "the folder is still the remembered one");
+    assert.equal(again.ino, first.ino, "the same folder, so the same inode");
+    assert.deepEqual(readHiddenDirMemory(rig.statePath).dirs[GCLOUD_DIR_REL], { dev: first.dev, ino: first.ino },
+      "and the record did not change");
+  } finally { rmSync(rig.root, { recursive: true, force: true }); }
+});
+
+test("every entry of the list: a symlinked leaf or a symlinked component refuses the spawn, in one fixed sentence, with nothing recorded", () => {
+  for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+    // A symlinked LEAF (the last component alone).
+    const rig = homeRig();
+    const target = entryPath(rig.home, rel);
+    const decoy = join(rig.root, "decoy-" + keyOf(rel));
+    try {
+      mkdirSync(decoy, { recursive: true });
+      if (kind === "dir") { mkdirSync(decoy, { recursive: true }); } else { writeFileSync(join(decoy, "x"), "fake\n"); }
+      mkdirSync(dirname(target), { recursive: true });
+      symlinkSync(kind === "dir" ? decoy : join(decoy, "x"), target);
+      const r = resolveHiddenSecretPath(rig.home, rel, { kind, statePath: rig.statePath });
+      assert.equal(r.refusal, secretLinkRefusal(rel, kind), "one sentence, whatever the link points at: " + rel);
+      assert.equal(r.path, null, "no path is handed to the mask: " + rel);
+      assert.ok(!r.refusal.includes(rig.root), "no decoy path in the sentence: " + rel);
+      assert.equal(existsSync(rig.statePath), false, "a refused entry is never recorded: " + rel);
+      assert.equal(lstatSync(target).isSymbolicLink(), true, "and nothing is created over the link: " + rel);
+    } finally { rmSync(rig.root, { recursive: true, force: true }); }
+  }
+  // A symlinked COMPONENT: ~/.config itself (or ~/.docker) is a link, so the
+  // mask would land on a decoy a bot could plant and re-point.
+  for (const { rel, kind } of OPERATOR_SECRET_PATHS.filter((p) => p.rel.includes("/"))) {
+    const rig = homeRig();
+    const decoy = join(rig.root, "decoy-component-" + keyOf(rel));
+    const top = join(rig.home, rel.split("/")[0]);
+    try {
+      const inner = entryPath(decoy, rel.split("/").slice(1).join("/"));
+      mkdirSync(dirname(inner), { recursive: true });
+      if (kind === "dir") mkdirSync(inner); else writeFileSync(inner, "fake-credential\n");
+      symlinkSync(decoy, top);
+      const r = resolveHiddenSecretPath(rig.home, rel, { kind, statePath: rig.statePath });
+      assert.equal(r.refusal, secretLinkRefusal(rel, kind), "a link anywhere on the way refuses: " + rel);
+      assert.equal(r.path, null, rel);
+      assert.equal(existsSync(rig.statePath), false, rel);
+    } finally { rmSync(rig.root, { recursive: true, force: true }); }
+  }
+});
+
+test("every entry of the list is unreachable inside a sandboxed spawn: folders list empty, files read empty, and the disk keeps its content", { skip: noSandbox }, async () => {
+  const files = {};
+  const dirs = {};
+  const created = [];
+  for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+    const p = entryPath(USER_HOME, rel);
+    mkdirSync(dirname(p), { recursive: true });
+    if (kind === "dir") { mkdirSync(p, { recursive: true }); writeFileSync(join(p, "fake-credential"), "fake-credential\n", { mode: 0o600 }); }
+    else writeFileSync(p, "fake-credential\n", { mode: 0o600 });
+    created.push(p);
+    if (kind === "dir") {
+      dirs[keyOf(rel)] = p;
+      // A FILE inside the folder too: an empty listing alone would not prove the
+      // folder is hidden (an empty folder lists empty as well), a read of the
+      // content that was really written does.
+      files[keyOf(rel) + "_inner"] = join(p, "fake-credential");
+    } else files[keyOf(rel)] = p;
+  }
+  forgetHiddenDirs();
+  try {
+    // `masked` is the launch's FULL mask list (folders by tmpfs, files by
+    // --dev-bind /dev/null); `maskedFiles` holds the file masks alone, so a
+    // folder is never in it.
+    const { report, masked, maskedFiles } = await spawnReport({ files, dirs });
+    for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+      const key = keyOf(rel);
+      const p = entryPath(USER_HOME, rel);
+      if (kind === "dir") {
+        assert.deepEqual(report.list[key], [], "a folder hidden whole lists empty inside: " + rel);
+        assert.equal(report.len[key + "_inner"], "ENOENT", "and a file inside it cannot be read inside: " + rel);
+        assert.ok(masked.includes(realpathSync(p)), "and the launch reports it masked: " + rel);
+        assert.equal(maskedFiles.includes(realpathSync(p)), false, "a folder is masked by a tmpfs, not as a file: " + rel);
+      } else {
+        assert.equal(report.len[key], 0, "a file reads empty inside: " + rel);
+        assert.ok(masked.includes(realpathSync(p)), "and the launch reports it masked: " + rel);
+        assert.ok(maskedFiles.includes(realpathSync(p)), "a file mask is in the file-mask list too: " + rel);
+        assert.equal(readFileSync(p, "utf8"), "fake-credential\n", "the operator's file keeps its content: " + rel);
+      }
+    }
+    assert.deepEqual(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[SSH_DIR_REL],
+      { dev: statSync(join(USER_HOME, SSH_DIR_REL)).dev, ino: statSync(join(USER_HOME, SSH_DIR_REL)).ino },
+      "the FOLDER it hid is recorded (a file entry never is)");
+    for (const rel of HIDDEN_SECRET_FILES) {
+      assert.equal(readHiddenDirMemory(HIDDEN_DIR_MEMORY).dirs[rel], undefined,
+        "no file entry in the record: " + rel);
+    }
+  } finally {
+    for (const p of created) rmSync(p, { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("every entry of the list is never created when absent, and the spawn still starts (~/.ssh is the one exception)", { skip: noSandbox }, async () => {
+  for (const { rel } of OPERATOR_SECRET_PATHS) rmSync(entryPath(USER_HOME, rel), { recursive: true, force: true });
+  forgetHiddenDirs();
+  try {
+    const files = {};
+    const dirs = {};
+    for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+      if (kind === "dir") dirs[keyOf(rel)] = entryPath(USER_HOME, rel); else files[keyOf(rel)] = entryPath(USER_HOME, rel);
+    }
+    const { report } = await spawnReport({ files, dirs });
+    for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+      const key = keyOf(rel);
+      const p = entryPath(USER_HOME, rel);
+      if (rel === SSH_DIR_REL) {
+        assert.equal(existsSync(p), true, "~/.ssh is created empty: its mask must always apply");
+        assert.equal(statSync(p).mode & 0o777, 0o700, "0700");
+        continue;
+      }
+      assert.equal(kind === "dir" ? report.list[key] : report.len[key], "ENOENT", "nothing there, inside either: " + rel);
+      assert.equal(existsSync(p), false, "Crow did not create it: " + rel);
+    }
+  } finally {
+    for (const { rel } of OPERATOR_SECRET_PATHS) rmSync(entryPath(USER_HOME, rel), { recursive: true, force: true });
+    forgetHiddenDirs();
+  }
+});
+
+test("the Python guard mirrors the operator list (parsed from local_paths.py)", () => {
+  // The google-workspace add-on's guard runs in another language, inside its own
+  // bundle, and must refuse a path even when it is not walled — so it keeps its
+  // own copy. This parses that copy out and holds the two in step, in both
+  // directions: a path only one layer knows about is the dangerous direction.
+  const py = readFileSync(join(import.meta.dirname, "..", "bundles", "google-workspace",
+    "google_workspace_mcp", "local_paths.py"), "utf8");
+  const block = py.match(/_PRIVATE_PATTERNS = \(([\s\S]*?)\n\)/);
+  assert.ok(block, "_PRIVATE_PATTERNS is where the Python guard keeps its list");
+  const mirrored = [...block[1].matchAll(/\("~([^"*]+)",/g)].map((m) => m[1].replace(/^\//, ""));
+  assert.ok(mirrored.length >= OPERATOR_SECRET_PATHS.length, "parsed " + mirrored.length + " Python entries");
+  assert.deepEqual([...mirrored].sort(), OPERATOR_SECRET_PATHS.map((p) => p.rel).sort(),
+    "the Python guard and OPERATOR_SECRET_PATHS name the same paths");
+  // The one Python-only entry is the glob for a second account's sign-in folder.
+  assert.ok(block[1].includes("google-workspace-mcp*"), "the sign-in sibling glob stays Python-only");
+});
+
+// ---- the operator bell a refused spawn raises --------------------------------
+//
+// A refusal stops EVERY bot on the instance, and the operator does not read a
+// channel bot's failed turn. So the same refusal rings the in-app bell: one
+// `notifications` row (hidden-dir-alert.mjs), deduped per entry per 24 h, and —
+// when the store cannot be used at all — a file in the DB-free alert spool the
+// gateway drains into the same bell.
+
+const { bellHiddenDirRefusal, spoolHiddenDirRefusal, notifyHiddenDirRefusal, hiddenDirAlertText,
+  HIDDEN_DIR_ALERT_SOURCE, HIDDEN_DIR_ALERT_COOLDOWN_MS, HIDDEN_DIR_ALERT_ACTION_URL } =
+  await import("../scripts/pi-bots/hidden-dir-alert.mjs");
+const { _setAlertsRootForTest, alertsDirs } = await import("../servers/shared/alert-spool.js");
+const Database = (await import("better-sqlite3")).default;
+
+/** A scratch crow.db with just the two tables the bell touches. */
+function bellStore(dir = null) {
+  const root = dir || mkdtempSync(join(tmpdir(), "crow-hidden-bell-"));
+  mkdirSync(root, { recursive: true });
+  const dbPath = join(root, "crow.db");
+  const conn = new Database(dbPath);
+  conn.exec(`
+    CREATE TABLE notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL DEFAULT 'system', source TEXT, title TEXT NOT NULL, body TEXT,
+      priority TEXT DEFAULT 'normal', action_url TEXT, metadata TEXT,
+      is_read INTEGER DEFAULT 0, is_dismissed INTEGER DEFAULT 0, snoozed_until TEXT,
+      schedule_id INTEGER, expires_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+  `);
+  conn.close();
+  return {
+    root, dbPath,
+    rows() { const c = new Database(dbPath, { readonly: true }); try { return c.prepare("SELECT * FROM notifications ORDER BY id").all(); } finally { c.close(); } },
+    setPrefs(json) { const c = new Database(dbPath); try { c.prepare("INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES ('notification_prefs', ?)").run(json); } finally { c.close(); } },
+  };
+}
+
+test("hiddenDirAlertText: names the entry ~-relative and the exact reset command, and never a path", () => {
+  for (const cause of ["missing", "replaced", "link", "unmasked", "record"]) {
+    const { title, body } = hiddenDirAlertText({ rel: GCLOUD_DIR_REL, kind: "dir", cause });
+    assert.match(title, /^A bot could not start: ~\/\.config\/gcloud$/, cause);
+    assert.ok(body.includes(HIDDEN_DIR_RESET_COMMAND), "the operator gets the exact command: " + cause);
+    assert.ok(!/\/(home|Users|root)\//.test(body), "no absolute path in the bell: " + cause);
+    assert.ok(!body.includes(USER_HOME), "not even the scratch home: " + cause);
+    if (cause === "link") assert.match(body, /Replace it with a real folder/, "the link's own remedy");
+    if (cause === "missing") assert.match(body, /is gone now/);
+    if (cause === "replaced") assert.match(body, /it was replaced/);
+  }
+  const file = hiddenDirAlertText({ rel: ".netrc", kind: "file", cause: "replaced" });
+  assert.match(file.body, /is not the file Crow hid the last time/, "a file entry keeps its noun");
+});
+
+test("bellHiddenDirRefusal: one high-priority system bell per entry per 24 h, a second entry gets its own", () => {
+  const store = bellStore();
+  const t0 = Date.parse("2026-03-01T12:00:00.000Z");
+  try {
+    const first = bellHiddenDirRefusal({ dbPath: store.dbPath, rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 });
+    assert.equal(first.written, true);
+    const rows = store.rows();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].type, "system");
+    assert.equal(rows[0].priority, "high");
+    assert.equal(rows[0].source, HIDDEN_DIR_ALERT_SOURCE);
+    assert.equal(rows[0].action_url, HIDDEN_DIR_ALERT_ACTION_URL);
+    assert.equal(rows[0].title, "A bot could not start: ~/" + GCLOUD_DIR_REL);
+    const meta = JSON.parse(rows[0].metadata);
+    assert.equal(meta.hidden_rel, GCLOUD_DIR_REL);
+    assert.equal(meta.cause, "missing");
+    // The same entry again inside the window: no second bell.
+    const again = bellHiddenDirRefusal({ dbPath: store.dbPath, rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 + 60_000 });
+    assert.equal(again.written, false);
+    assert.equal(again.reason, "deduped");
+    assert.equal(store.rows().length, 1, "still one row");
+    // A DIFFERENT entry has its own window.
+    assert.equal(bellHiddenDirRefusal({ dbPath: store.dbPath, rel: SSH_DIR_REL, kind: "dir", cause: "link", nowMs: t0 + 60_001 }).written, true);
+    assert.equal(store.rows().length, 2);
+    // Past the 24 h window the same entry rings again (the condition is still there).
+    assert.equal(bellHiddenDirRefusal({ dbPath: store.dbPath, rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 + HIDDEN_DIR_ALERT_COOLDOWN_MS + 60_000 }).written, true);
+    assert.equal(store.rows().length, 3);
+  } finally { rmSync(store.root, { recursive: true, force: true }); }
+});
+
+test("bellHiddenDirRefusal: the operator's 'system' preference silences it, and a missing store is reported, never created", () => {
+  const store = bellStore();
+  try {
+    store.setPrefs(JSON.stringify({ types_enabled: ["attention"] }));
+    const off = bellHiddenDirRefusal({ dbPath: store.dbPath, rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing" });
+    assert.equal(off.written, false);
+    assert.equal(off.reason, "disabled", "a silenced type is a choice, not a failure");
+    assert.equal(store.rows().length, 0);
+    // No store file at all: the refusal must not CREATE one.
+    const missing = join(store.root, "nope", "crow.db");
+    const none = bellHiddenDirRefusal({ dbPath: missing, rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing" });
+    assert.equal(none.written, false);
+    assert.equal(none.reason, "error");
+    assert.equal(existsSync(missing), false, "a refused spawn never creates crow.db");
+    assert.equal(bellHiddenDirRefusal({ rel: GCLOUD_DIR_REL }).reason, "no-store", "no path, no store");
+  } finally { rmSync(store.root, { recursive: true, force: true }); }
+});
+
+test("notifyHiddenDirRefusal: the spool is the fallback only, one file per entry per 24 h, and never a duplicate bell", () => {
+  const store = bellStore();
+  const alerts = mkdtempSync(join(tmpdir(), "crow-hidden-bell-spool-"));
+  _setAlertsRootForTest(join(alerts, "alerts"));
+  const t0 = Date.parse("2026-03-01T12:00:00.000Z");
+  try {
+    // With a usable store: a row, and no spool file (one event, one bell).
+    const bell = notifyHiddenDirRefusal({ dbPath: store.dbPath, rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 });
+    assert.equal(bell.written, true);
+    assert.equal(bell.spooled, false);
+    assert.equal(existsSync(alertsDirs().pending), false, "no spool file when the bell was written");
+    // With no store: the DB-free spool, once per entry per window.
+    const spooled = notifyHiddenDirRefusal({ dbPath: join(store.root, "absent", "crow.db"), rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 });
+    assert.equal(spooled.written, false);
+    assert.equal(spooled.spooled, true);
+    const pending = readdirSync(alertsDirs().pending).sort();
+    assert.equal(pending.length, 1, "one spool file: " + JSON.stringify(pending));
+    const record = JSON.parse(readFileSync(join(alertsDirs().pending, pending[0]), "utf8"));
+    assert.match(record.title, /A bot could not start: ~\/\.config\/gcloud/);
+    assert.match(record.body, /--reset/);
+    assert.ok(!record.body.includes(store.root), "no absolute path in the spooled bell");
+    // A refusal loop inside the window rewrites the same file.
+    notifyHiddenDirRefusal({ dbPath: join(store.root, "absent", "crow.db"), rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 + 60_000 });
+    assert.equal(readdirSync(alertsDirs().pending).length, 1, "the loop does not flood the spool");
+    // A different entry, and the next window, each get a file of their own.
+    assert.ok(spoolHiddenDirRefusal({ rel: SSH_DIR_REL, kind: "dir", cause: "link", nowMs: t0 }));
+    assert.ok(spoolHiddenDirRefusal({ rel: GCLOUD_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 + HIDDEN_DIR_ALERT_COOLDOWN_MS + 60_000 }));
+    assert.equal(readdirSync(alertsDirs().pending).length, 3);
+    // A silenced preference does not spool either (it would bell anyway).
+    store.setPrefs(JSON.stringify({ types_enabled: ["attention"] }));
+    const off = notifyHiddenDirRefusal({ dbPath: store.dbPath, rel: GNUPG_DIR_REL, kind: "dir", cause: "missing", nowMs: t0 });
+    assert.equal(off.reason, "disabled");
+    assert.equal(off.spooled, false);
+    assert.equal(readdirSync(alertsDirs().pending).length, 3);
+  } finally {
+    _setAlertsRootForTest(null);
+    rmSync(alerts, { recursive: true, force: true });
+    rmSync(store.root, { recursive: true, force: true });
+  }
+});
+
+test("a refused spawn rings the bell, naming the entry and the reset command, once per entry", async () => {
+  // End to end through the bridge: a remembered gcloud folder disappears, the
+  // next spawn is refused, and the operator's bell gets a row for it.
+  const store = bellStore(dirname(CROW_DB));
+  const gcloudDir = join(USER_HOME, GCLOUD_DIR_REL);
+  const gnupgDir = join(USER_HOME, GNUPG_DIR_REL);
+  rmSync(gcloudDir, { recursive: true, force: true });
+  forgetHiddenDirs();
+  mkdirSync(gcloudDir, { recursive: true });
+  try {
+    assert.equal(await spawnOutcome(), null, "the first sight starts and records");
+    assert.deepEqual(store.rows(), [], "a good spawn rings nothing");
+    rmSync(gcloudDir, { recursive: true });
+    const e = await spawnOutcome();
+    assert.ok(e, "the spawn is refused");
+    const rows = store.rows();
+    assert.equal(rows.length, 1, "the operator sees it in the bell: " + JSON.stringify(rows));
+    assert.equal(rows[0].source, HIDDEN_DIR_ALERT_SOURCE);
+    assert.equal(rows[0].priority, "high");
+    assert.equal(rows[0].title, "A bot could not start: ~/" + GCLOUD_DIR_REL);
+    assert.ok(rows[0].body.includes(HIDDEN_DIR_RESET_COMMAND), "with the exact reset command");
+    assert.ok(!rows[0].body.includes(CROW), "and no absolute path");
+    assert.equal(JSON.parse(rows[0].metadata).hidden_rel, GCLOUD_DIR_REL);
+    assert.equal(JSON.parse(rows[0].metadata).cause, "missing");
+    // Every turn of every bot refuses while the folder stays gone: one bell.
+    assert.ok(await spawnOutcome(), "still refused");
+    assert.equal(store.rows().length, 1, "deduped per entry per 24 h");
+    // A DIFFERENT entry gets its own bell. (The dedupe is per folder, so a link
+    // appearing where the same folder used to be stays inside that folder's
+    // window — the operator already has its bell.)
+    rmSync(gnupgDir, { recursive: true, force: true });
+    symlinkSync(join(USER_HOME, "decoy-gnupg"), gnupgDir);
+    assert.ok(await spawnOutcome(), "a symlinked folder is refused");
+    assert.equal(store.rows().length, 2, "a second entry has its own window");
+    assert.equal(JSON.parse(store.rows()[1].metadata).hidden_rel, GNUPG_DIR_REL);
+    assert.equal(JSON.parse(store.rows()[1].metadata).cause, "link");
+    assert.match(store.rows()[1].body, /Replace it with a real folder/);
+  } finally {
+    rmSync(gcloudDir, { recursive: true, force: true });
+    rmSync(gnupgDir, { force: true });
+    rmSync(store.dbPath, { force: true });
+    forgetHiddenDirs();
+  }
 });

@@ -10,14 +10,25 @@
  *
  *   credentials and local misfiles   `.env`, `.env.*`, `.mcp.json`, `.netrc`,
  *                                    `.npmrc`, `.pypirc`, `.git-credentials`,
- *                                    `credentials.json`, `*.kdbx`, and the
- *                                    folders `.ssh`, `.aws`, `.gnupg`, `.kube`,
- *                                    `gcloud` (the Google Cloud CLI's folder,
+ *                                    `.pgpass`, `credentials.json`, `*.kdbx`, and
+ *                                    the folders `.ssh`, `.aws`, `.azure`,
+ *                                    `.gnupg`, `.kube`, `.terraform.d`, `gcloud`
+ *                                    (the Google Cloud CLI's folder,
  *                                    `.config/gcloud` in a home), and
  *                                    `.docker/config.json`; a copied-out
  *                                    `application_default_credentials.json` or
  *                                    `legacy_credentials/` folder is denied by
- *                                    name too (its `*.db` stores already are)
+ *                                    name too (its `*.db` stores already are).
+ *                                    The operator's own credential entries come
+ *                                    from ONE list,
+ *                                    servers/shared/operator-secret-paths.js: a
+ *                                    top-level entry (no `/`) is denied by NAME
+ *                                    at any depth, a nested one
+ *                                    (`.config/gh`, `.docker/config.json`,
+ *                                    `.config/containers/auth.json`) by its
+ *                                    workspace-relative PATH — a bare
+ *                                    `config.json` or `auth.json` is ordinary
+ *                                    content and stays recorded.
  *   keys                             `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`,
  *                                    `id_ecdsa*`, `*.p12`, `*.pfx`
  *   a bot's own private world        `.pi` (pi session files)
@@ -38,6 +49,7 @@
  * here): a project workspace can hold a video or a model, and history is not a
  * second copy of it.
  */
+import { OPERATOR_SECRET_PATHS } from "../operator-secret-paths.js";
 
 /** The largest file the history records, in bytes. */
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
@@ -46,7 +58,7 @@ export const MAX_FILE_BYTES = 25 * 1024 * 1024;
  * Denied names, whatever the entry's type (a file or a folder with one of these
  * names is skipped, and a folder is not descended into).
  */
-export const DENIED_ANY_NAME = Object.freeze([
+const DENIED_ANY_NAME_BASE = [
   ".mcp.json",
   ".pi",
   ".env",
@@ -74,7 +86,32 @@ export const DENIED_ANY_NAME = Object.freeze([
   "legacy_credentials",
   "credentials.json",
   "*.kdbx",
+];
+
+/**
+ * The operator's credential entries that live directly in the home (no `/` in
+ * their `rel`): denied by NAME at any depth, whatever their type, because that
+ * name is the credential's own (`~/.pgpass`, `~/.terraform.d`, …). From the one
+ * list in servers/shared/operator-secret-paths.js; a nested entry is handled by
+ * DENIED_REL_PATH below, since its leaf name (`config.json`, `auth.json`, `gh`)
+ * is ordinary content on its own.
+ */
+const OPERATOR_HOME_NAMES = OPERATOR_SECRET_PATHS.filter((p) => !p.rel.includes("/")).map((p) => p.rel.toLowerCase());
+
+/** Denied names: the hand-written rules above plus every home-level entry of the operator list. */
+export const DENIED_ANY_NAME = Object.freeze([
+  ...DENIED_ANY_NAME_BASE,
+  ...OPERATOR_HOME_NAMES.filter((n) => !DENIED_ANY_NAME_BASE.includes(n)),
 ]);
+
+/**
+ * Denied workspace-relative PATHS (lowercased), for the list's nested entries:
+ * `home/.config/gh/`, `.docker/config.json`, `.config/containers/auth.json`. The
+ * entry is denied when the path is the rel itself or ends with `/<rel>`, and
+ * only for the kind it is (`dir` only as a folder, `file` only as a file).
+ */
+export const DENIED_REL_PATH = Object.freeze(OPERATOR_SECRET_PATHS.filter((p) => p.rel.includes("/"))
+  .map((p) => ({ rel: p.rel.toLowerCase(), isDir: p.kind === "dir" })));
 
 /** Denied FOLDER names (a file of the same name is ordinary content). */
 export const DENIED_DIR_NAME = Object.freeze([
@@ -121,10 +158,12 @@ function baseName(relPath) {
 export function isDeniedEntry(relPath, isDir) {
   const name = baseName(relPath).toLowerCase();
   if (name === "") return false;
-  // Docker's registry credentials: only this one file of `.docker` is a secret.
-  if (!isDir) {
-    const lowered = String(relPath == null ? "" : relPath).toLowerCase();
-    if (lowered === ".docker/config.json" || lowered.endsWith("/.docker/config.json")) return true;
+  // The operational list's nested entries: only in that exact path, and only for
+  // the kind it is (a bare `gh/` or `config.json` is ordinary content).
+  const rel = String(relPath == null ? "" : relPath).replace(/^\/+|\/+$/g, "").toLowerCase();
+  for (const rule of DENIED_REL_PATH) {
+    if (rule.isDir !== !!isDir) continue;
+    if (rel === rule.rel || rel.endsWith("/" + rule.rel)) return true;
   }
   for (const pattern of DENIED_ANY_NAME) {
     if (nameMatches(pattern, name)) return true;

@@ -103,7 +103,7 @@ Extensions form.
 | `GWS_OAUTH_SCOPES` | Narrows what the server asks Google for (e.g. `gmail.compose,drive.file`); unset asks for the full set. Changing it means authorizing again. |
 | `GWS_OUTBOUND_GUARD` | Off unless set. On: every action that makes Google contact someone is refused unless its address is on `GWS_OUTBOUND_ALLOWLIST` (see below). |
 | `GWS_OUTBOUND_ALLOWLIST` | Addresses and domains that may be written to, e.g. `you@example.com,example.org`; read only while the guard is on, and empty then sends nothing. |
-| `GWS_FILES_DIR` | The one folder the tools that read or write a local file may use; empty accepts any path except the sign-in folder, `~/.ssh`, `~/.gnupg` and `~/.config/gcloud` — unless the guard is on, which then refuses every local file. |
+| `GWS_FILES_DIR` | The one folder the tools that read or write a local file may use; empty accepts any path except the sign-in folder and the operator's credential folders and files (`~/.ssh`, `~/.gnupg`, `~/.config/gcloud`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.config/gh`, `~/.terraform.d`, and the files `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pgpass`, `~/.config/containers/auth.json`) — unless the guard is on, which then refuses every local file. |
 
 ## Inside the add-on wall
 

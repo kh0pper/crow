@@ -1,10 +1,19 @@
 /**
- * The secret FILES a bot's default-tier sandbox masks with --ro-bind /dev/null
- * (pi_sandbox.mjs hideFiles). Built here, per spawn, from the instance's Crow
- * home and the repo checkout.
+ * The secret FILES and FOLDERS a bot's sandbox hides: the files with --ro-bind
+ * /dev/null (pi_sandbox.mjs hideFiles), and the operator's credential folders
+ * (~/.ssh, ~/.gnupg, ~/.config/gcloud, ~/.aws, …) whole, behind a tmpfs. Built
+ * here, per spawn, from the instance's Crow home, the repo checkout and the
+ * operator's home.
+ *
+ * WHICH folders and files are the operator's secrets is ONE list,
+ * OPERATOR_SECRET_PATHS in servers/shared/operator-secret-paths.js: this module
+ * turns it into masks, the contain tier and the add-on wall into a refuse list,
+ * and the isolation report and the file history read the same entries.
  */
-import { readdirSync, lstatSync, realpathSync } from "node:fs";
+import { readdirSync, lstatSync, realpathSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { OPERATOR_SECRET_DIRS, OPERATOR_SECRET_FILES } from "../../servers/shared/operator-secret-paths.js";
 
 /**
  * Bundles whose tool servers read their OWN .env inside the bot's sandbox at
@@ -225,46 +234,364 @@ export function unmaskableRefusal(rel, cause, extra = {}) {
   return start + " is a link or sits behind one, so Crow can't hide it. Remove the link.";
 }
 
-/** The refusal when ~/.ssh could not be masked at all (it is hidden whole on
- *  every default-tier spawn). */
-export const SSH_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hide ~/.ssh.";
+/** The refusal when one entry of the list exists but was not masked at all:
+ *  hidden-or-refuse, so a bot never runs with an operator credential reachable.
+ *  Never used for an entry that does not exist. */
+export function secretNotHiddenRefusal(rel) {
+  return "A bot could not start: Crow could not hide ~/" + rel + ".";
+}
+/** ~/.ssh could not be masked (it is hidden whole on every default-tier spawn,
+ *  and created empty when it is missing, so this is a real failure). */
+export const SSH_NOT_HIDDEN_REFUSAL = secretNotHiddenRefusal(".ssh");
 
 /**
- * The Google Cloud CLI's credential folder, relative to the operator's home:
- * application_default_credentials.json, credentials.db, access_tokens.db and
- * legacy_credentials/ all live inside it. No Crow code reads it, so a bot
- * sandbox hides it WHOLE, like ~/.ssh — except that it is never created: a
- * host without the gcloud CLI is left exactly as it is, and the folder is
- * hidden (or the spawn refused) only when it really exists.
+ * The operator's secret FOLDERS, relative to the operator's home — one list,
+ * `OPERATOR_SECRET_PATHS` in servers/shared/operator-secret-paths.js. Each is
+ * hidden WHOLE (a tmpfs) and each is resolved by resolveHiddenSecretPath below:
+ * one walk, one refusal sentence per entry, and (folders only) one identity
+ * memory — see the block below for why a FILE has none.
+ *
+ *  - `~/.ssh`: the operator's ssh keys. Hidden on every default-tier spawn and
+ *    created empty (0700) when it is absent, so a bot can never plant
+ *    `authorized_keys` under it.
+ *  - `~/.gnupg`: gpg's private keys and trust db (and an agent socket).
+ *  - `~/.config/gcloud`: the Google Cloud CLI's credential folder.
+ *  - `~/.aws`, `~/.azure`, `~/.kube`, `~/.config/gh`, `~/.terraform.d`: the
+ *    cloud and provider CLIs' credential and cluster config.
+ * A host without one of these tools is left exactly as it is: an absent folder
+ * is never created (except `~/.ssh`, which the mask needs) and, when it was
+ * never seen, there is simply nothing to hide.
  */
+export const SSH_DIR_REL = ".ssh";
+export const GNUPG_DIR_REL = ".gnupg";
 export const GCLOUD_DIR_REL = ".config/gcloud";
+/** Every folder this module hides whole, in the order the bridge asks: the
+ *  shared list, never a copy of it. */
+export const HIDDEN_SECRET_DIRS = OPERATOR_SECRET_DIRS;
+/** The operator's credential FILES from the same list: masked with an empty
+ *  file (a read-only /dev/null), never created, and — unlike a folder — never
+ *  remembered by (dev, ino): an ordinary rewrite is a new inode at the same
+ *  path, and the mask is rebuilt from the path on every spawn. */
+export const HIDDEN_SECRET_FILES = OPERATOR_SECRET_FILES;
 
-/** The refusal when an existing ~/.config/gcloud could not be masked at all.
- *  Hidden-or-refuse: a bot never runs with the operator's gcloud credentials
- *  reachable. Never used for a folder that does not exist. */
-export const GCLOUD_NOT_HIDDEN_REFUSAL = "A bot could not start: Crow could not hide ~/.config/gcloud.";
+/** The refusal when an existing ~/.config/gcloud could not be masked at all
+ *  (the same rule every entry of the list gets). Never used for a folder that
+ *  does not exist. */
+export const GCLOUD_NOT_HIDDEN_REFUSAL = secretNotHiddenRefusal(".config/gcloud");
+/** The same rule for ~/.gnupg: hidden whole, or the spawn is refused. */
+export const GNUPG_NOT_HIDDEN_REFUSAL = secretNotHiddenRefusal(".gnupg");
 
 /**
- * The refusal when the folder exists and the launch's own mask list does not
- * report it hidden, or null when there is nothing to refuse (a host with no
- * gcloud CLI starts exactly as before). Hidden-or-refuse, decided in ONE place
- * so the rule can be exercised without a bwrap host: `gcloudDir` is the folder
- * the spawn found, `masked` the dirs wrapPiSpawn says it really masked. A
- * launch that reports nothing at all is not trusted (masked undefined refuses).
+ * The refusal when ONE of the secret folders exists and the launch's own mask
+ * list does not report it hidden, or null when there is nothing to refuse (an
+ * absent folder — a host with no gcloud CLI or no gpg — starts exactly as
+ * before). Hidden-or-refuse, decided in ONE place so the rule can be exercised
+ * without a bwrap host: `dir` is the folder the spawn found, `refusal` the
+ * sentence for it, `masked` the dirs wrapPiSpawn says it really masked. A launch
+ * that reports nothing at all is not trusted (masked undefined refuses).
  */
+export function secretDirNotHiddenRefusal({ dir, refusal, masked } = {}) {
+  if (!dir) return null;
+  return (masked || []).includes(dir) ? null : refusal;
+}
+
+/** The same rule for ~/.config/gcloud, kept as its own named entry point. */
 export function gcloudNotHiddenRefusal({ gcloudDir, masked } = {}) {
-  if (!gcloudDir) return null;
-  return (masked || []).includes(gcloudDir) ? null : GCLOUD_NOT_HIDDEN_REFUSAL;
+  return secretDirNotHiddenRefusal({ dir: gcloudDir, refusal: GCLOUD_NOT_HIDDEN_REFUSAL, masked });
 }
 
 /**
- * The refusal when ~/.config/gcloud is itself a symbolic link. The mask follows
- * the link and hides its target, but a bot can re-point the link (~/.config is
- * writable inside the sandbox), so the NEXT spawn would resolve and mask a decoy
- * and leave the real credential folder on the host unmasked. A link is refused
- * outright instead: one fixed sentence, the same shape as the others.
+ * The refusal when a secret folder or file is a link, sits behind one, or a
+ * component on the way is not the kind of entry it must be. The mask would
+ * follow the link and hide its target, but a bot can re-point a link (its parent
+ * is writable inside the sandbox), so the NEXT spawn would mask a decoy and
+ * leave the real credential on the host readable. A link is refused outright
+ * instead: one fixed sentence per entry, no paths in it (so it can never name a
+ * decoy or a target), built from the entry's own name.
  */
-export const GCLOUD_LINK_REFUSAL = "A bot could not start: ~/.config/gcloud is a symbolic link, so Crow can't hide the credentials it leads to. Replace the link with the real folder.";
+export function secretLinkRefusal(rel, kind = "dir") {
+  const what = kind === "file" ? "file" : "folder";
+  const inside = kind !== "file" && (rel === SSH_DIR_REL || rel === GNUPG_DIR_REL) ? "the keys in it" : "the credentials in it";
+  return "A bot could not start: ~/" + rel + " is a link, or sits behind one, so Crow can't hide " + inside +
+    ". Replace it with a real " + what + ".";
+}
+export const SSH_LINK_REFUSAL = secretLinkRefusal(SSH_DIR_REL, "dir");
+export const GNUPG_LINK_REFUSAL = secretLinkRefusal(GNUPG_DIR_REL, "dir");
+export const GCLOUD_LINK_REFUSAL = secretLinkRefusal(GCLOUD_DIR_REL, "dir");
+
+// ---- the identity memory ----------------------------------------------------
+
+/**
+ * The record of WHICH entry each secret FOLDER was (dev:ino), kept inside the
+ * instance's secrets dir: that dir is hidden from every bot (a tmpfs in the
+ * default tier, never bound in the contain tier), written 0600, and reached
+ * through the boot-anchored fd by the bridge. It is the second half of the link
+ * rule above: a folder that was hidden before and then goes missing, or is
+ * replaced by another one at the same path, is how a re-pointed ancestor or a
+ * swapped-in decoy shows up AFTER the fact, and it refuses the spawn until the
+ * operator re-confirms (see HIDDEN_DIR_RESET_COMMAND).
+ *
+ * FOLDERS ONLY, deliberately. A FILE gets no identity memory (its own section in
+ * resolveHiddenSecretPath): `npm config set` and `docker login` rewrite
+ * `~/.npmrc` / `~/.docker/config.json` by writing a temp file and renaming it
+ * over the old one, which is a NEW inode at the same path — an ordinary operator
+ * action that would then refuse every bot until a manual reset, on a host with
+ * no tampering at all. The mask itself needs no memory: each spawn lstat's the
+ * leaf and every component again (a link refuses) and masks whatever file is at
+ * that path (`--dev-bind /dev/null`), and the mount is a target a bot inside
+ * cannot unlink or rename over (EBUSY), so it cannot swap the masked file for a
+ * decoy within its own turn. Folders keep the memory because a folder CAN be
+ * swapped between spawns — renamed away and replaced by a decoy at the same
+ * path, or replaced by a re-created folder — and because a normal tool flow does
+ * NOT change a folder's identity: `gcloud auth login` writes files INSIDE
+ * `~/.config/gcloud`, leaving that folder's dev:ino alone (only the folder's own
+ * dev:ino is recorded — never its contents or mtime).
+ *
+ * One file PER HOME (`hidden-secret-dirs-<id>.json`): the folders belong to the
+ * operator's home, and several homes can share one instance's secrets dir (a
+ * co-hosted test or a moved home), so a record is only ever compared with the
+ * home it was written for.
+ */
+export const HIDDEN_DIR_STATE_PREFIX = "hidden-secret-dirs-";
+export const HIDDEN_DIR_STATE_SUFFIX = ".json";
+export const HIDDEN_DIR_STATE_VERSION = 1;
+/** The operator action that forgets every remembered folder (an alternative to
+ *  deleting the record). The next spawn records them all again. Also the remedy
+ *  named in the bell that a refused spawn raises. */
+export const HIDDEN_DIR_RESET_COMMAND = "node scripts/pi-bots/hidden-dir-memory.mjs --reset";
+
+/** The record's file name for one home: its resolved path hashed, so a moved
+ *  home spelling (a symlinked $HOME) and a symlinked `/tmp` do not split it. */
+export function hiddenDirStateFile(home) {
+  let key = String(home || "");
+  try { key = realpathSync(home); } catch { /* no home: hash the spelling */ }
+  return HIDDEN_DIR_STATE_PREFIX + createHash("sha256").update(key).digest("hex").slice(0, 16) + HIDDEN_DIR_STATE_SUFFIX;
+}
+
+/** Where the identity memory lives for one Crow home and one operator home. */
+export function hiddenDirStatePath(crowHome, home) {
+  return join(crowHome, "secrets", hiddenDirStateFile(home));
+}
+
+/** Every identity record in one Crow home's secrets dir (the CLI's `--list` and
+ *  `--reset`; there is one per operator home). */
+export function hiddenDirStateFiles(crowHome) {
+  const dir = join(crowHome, "secrets");
+  let names = [];
+  try { names = readdirSync(dir); } catch { return []; }
+  return names.filter((n) => n.startsWith(HIDDEN_DIR_STATE_PREFIX) && n.endsWith(HIDDEN_DIR_STATE_SUFFIX))
+    .map((n) => join(dir, n));
+}
+
+/**
+ * Read the identity memory: `{dirs: {rel: {dev, ino}}}` (and the home it was
+ * written for, informational). A missing file is an empty memory (the first
+ * spawn on this instance). Anything unreadable, or not exactly this shape,
+ * comes back `ok:false`: the caller refuses the spawn (fail closed) rather than
+ * treat a folder it cannot verify as "new".
+ *
+ * An entry for a FILE of the list is dropped here: files carry no identity
+ * memory any more (see the block above), so a record written by an older build
+ * keeps working — its file entries are simply forgotten — without an operator
+ * reset. Files that are no longer on the list are untouched (the caller never
+ * looks them up, and a hand-written record keeps whatever it holds).
+ */
+export function readHiddenDirMemory(statePath) {
+  const bad = { ok: false, reason: "unreadable", dirs: {}, home: null };
+  let raw;
+  try { raw = readFileSync(statePath, "utf8"); } catch (e) {
+    if (e && e.code === "ENOENT") return { ok: true, dirs: {}, home: null };
+    return bad;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return bad; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return bad;
+  if (parsed.version !== HIDDEN_DIR_STATE_VERSION) return bad;
+  const dirs = parsed.dirs;
+  if (!dirs || typeof dirs !== "object" || Array.isArray(dirs)) return bad;
+  const out = {};
+  for (const [rel, id] of Object.entries(dirs)) {
+    if (!id || typeof id !== "object" || Array.isArray(id)) return bad;
+    if (!Number.isInteger(id.dev) || id.dev < 0 || !Number.isInteger(id.ino) || id.ino < 0) return bad;
+    if (HIDDEN_SECRET_FILES.includes(rel)) continue; // files have no identity memory
+    out[rel] = { dev: id.dev, ino: id.ino };
+  }
+  const home = typeof parsed.home === "string" ? parsed.home : null;
+  return { ok: true, dirs: out, home };
+}
+
+/**
+ * Write the identity memory 0600, through a temp file in the same dir and a
+ * rename, so a reader never sees half a record. Throws on failure: the caller
+ * refuses the spawn then (a folder it cannot remember is a folder it cannot
+ * re-check).
+ */
+export function writeHiddenDirMemory(statePath, dirs, home = null) {
+  const tmp = statePath + ".tmp-" + process.pid;
+  writeFileSync(tmp, JSON.stringify({ version: HIDDEN_DIR_STATE_VERSION, home, dirs }, null, 2) + "\n", { mode: 0o600 });
+  try { renameSync(tmp, statePath); } finally { try { unlinkSync(tmp); } catch { /* renamed */ } }
+}
+
+/** Forget every remembered folder for one home (the operator's re-confirm).
+ *  True when a file was there. */
+export function resetHiddenDirIdentity(statePath) {
+  try { unlinkSync(statePath); return true; } catch (e) { if (e && e.code === "ENOENT") return false; throw e; }
+}
+
+/** Forget every home's record in one Crow home (the CLI's `--reset`), a
+ *  half-written temp file included. Returns the files it removed. */
+export function resetAllHiddenDirIdentity(crowHome) {
+  const dir = join(crowHome, "secrets");
+  let names = [];
+  try { names = readdirSync(dir); } catch { return []; }
+  const gone = [];
+  for (const n of names) {
+    if (!n.startsWith(HIDDEN_DIR_STATE_PREFIX)) continue;
+    try { unlinkSync(join(dir, n)); gone.push(join(dir, n)); } catch { /* next */ }
+  }
+  return gone;
+}
+
+/** The refusal for a record the spawn cannot use: unreadable/corrupt (fail
+ *  closed — an entry that cannot be checked is never assumed new), or one it
+ *  could not write. */
+export function hiddenDirStateRefusal(statePath, why = "unreadable") {
+  return "A bot could not start: Crow's record of the secret folders and files it hides is " + why +
+    ", so it can't tell whether one moved or was replaced. Run " + HIDDEN_DIR_RESET_COMMAND +
+    " (or delete " + statePath + ") and start the bot again.";
+}
+
+/**
+ * The refusal for an entry that was hidden before and is now gone (`missing`),
+ * or is a different entry at the same path (`replaced`). It names the entry (one
+ * the operator already knows) and the two ways to re-confirm; no path of a
+ * decoy, and never any content. `pathKind` only picks the noun in the replaced
+ * sentence (a folder or a file).
+ */
+export function reConfirmRefusal(rel, kind, statePath, pathKind = "dir") {
+  const what = kind === "missing"
+    ? "was there the last time a bot ran and is gone now"
+    : "is not the " + (pathKind === "file" ? "file" : "folder") + " Crow hid the last time (it was replaced)";
+  return "A bot could not start: ~/" + rel + " " + what + ", so Crow won't run a bot until you re-confirm. " +
+    "If that was you, run " + HIDDEN_DIR_RESET_COMMAND + " (or delete " + statePath + ") and start the bot again.";
+}
+
+/**
+ * Resolve ONE operator secret folder or file below `home` (HOME), and (folders
+ * only) remember it.
+ *
+ * `home` itself may be a symlink (a home on another disk): it is resolved ONCE
+ * with realpath as the anchor, and every component below that anchor is walked
+ * with lstat — a link anywhere on the way (a symlinked `~/.config`, say, not
+ * just a symlinked leaf) refuses the spawn, because the mask would otherwise be
+ * redirected to a decoy the bot could plant and re-point. A component that is
+ * not the kind of entry it must be refuses it too (a file where a folder
+ * belongs, a folder or a device where a credential file belongs). A missing
+ * component is NOT created: the entry simply is not there. These checks run for
+ * a FILE as well as for a folder.
+ *
+ * The identity memory is for FOLDERS only. The first time a folder really is
+ * there its `{dev, ino}` is recorded in `statePath`; on a later spawn a
+ * remembered folder that is gone, or that is a different entry, refuses the
+ * spawn until the operator re-confirms, and an unusable record refuses it too
+ * (fail closed). A FILE is never recorded and never compared: an ordinary tool
+ * rewrite renames a new inode over it (see the identity-memory block above), so
+ * a missing or replaced credential FILE is simply nothing to mask on that
+ * spawn, while an existing one is masked at whatever inode holds that name.
+ *
+ * @param {string} home        the operator's home (HOME; may be a symlink)
+ * @param {string} rel         one of OPERATOR_SECRET_PATHS
+ * @param {{kind?:"dir"|"file", statePath?:string, displayPath?:string}} [opts]
+ *   `kind` says whether the entry is hidden whole (a folder) or masked with an
+ *   empty file (a file). `displayPath` is what a refusal sentence names (the
+ *   bridge reads/writes the record through the anchored secrets dir, whose
+ *   /proc/self/fd path nobody should have to read).
+ * @returns {{rel:string, label:string, kind:"dir"|"file", dir:string|null,
+ *            path:string|null, dev?:number, ino?:number, absent:boolean,
+ *            remembered:boolean, refusal:string|null, cause:string|null}}
+ *   `dir` is the resolved folder (null for a file entry and for every refusal);
+ *   `path` is the resolved folder OR file. `cause` is set exactly when `refusal`
+ *   is, and says which rule fired — `"link"`, `"missing"`, `"replaced"` or
+ *   `"record"` — so a caller can describe it without parsing the sentence (the
+ *   operator bell in the bridge does).
+ */
+export function resolveHiddenSecretPath(home, rel, { kind = "dir", statePath = null, displayPath = null } = {}) {
+  const label = "~/" + rel;
+  const shown = displayPath || statePath;
+  const k = kind === "file" ? "file" : "dir";
+  const result = { rel, label, kind: k, dir: null, path: null, absent: false, remembered: false, refusal: null, cause: null };
+  const linkRefusal = secretLinkRefusal(rel, k);
+  // The record is read FIRST: a corrupt one refuses before anything else is
+  // measured, and a state file that cannot be read is never read as "empty".
+  const memory = statePath ? readHiddenDirMemory(statePath) : { ok: true, dirs: {} };
+  if (!memory.ok) return { ...result, refusal: hiddenDirStateRefusal(shown, memory.reason), cause: "record" };
+  // Files are never remembered (the identity-memory block above): their entries
+  // are not even looked up, so an old record cannot refuse an ordinary rewrite.
+  const remembered = k === "file" ? null : (memory.dirs[rel] || null);
+  result.remembered = !!remembered;
+  let anchor = null;
+  try { anchor = realpathSync(home); } catch { anchor = null; } // no home: nothing can be there
+  let found = { absent: true };
+  if (anchor) {
+    const parts = rel.split("/").filter(Boolean);
+    let cur = anchor;
+    for (let i = 0; i < parts.length; i++) {
+      cur = join(cur, parts[i]);
+      let st;
+      try { st = lstatSync(cur); } catch (e) {
+        found = (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) ? { absent: true } : { refusal: linkRefusal };
+        break;
+      }
+      const last = i === parts.length - 1;
+      const wanted = last && k === "file" ? st.isFile() : st.isDirectory();
+      if (st.isSymbolicLink() || !wanted) { found = { refusal: linkRefusal }; break; }
+      found = { path: cur, st };
+    }
+  }
+  if (found.refusal) return { ...result, refusal: found.refusal, cause: "link" };
+  if (found.absent) {
+    // Absent: never created here, and nothing is hidden for it. A FOLDER Crow hid
+    // before and that is gone now is the tamper signal — refuse, and let the
+    // operator re-confirm. A FILE that is gone is just nothing to mask: the
+    // operator's tool moved it (or deleted it), and there is no held-open handle
+    // to worry about because the mask is remade from whatever is at the path on
+    // every spawn.
+    result.absent = true;
+    if (remembered) { result.refusal = reConfirmRefusal(rel, "missing", shown, k); result.cause = "missing"; }
+    return result;
+  }
+  const { path: resolved, st } = found;
+  result.path = resolved;
+  if (k === "dir") result.dir = resolved;
+  result.dev = st.dev;
+  result.ino = st.ino;
+  if (remembered && (remembered.dev !== st.dev || remembered.ino !== st.ino)) {
+    result.dir = null;
+    result.path = null;
+    result.refusal = reConfirmRefusal(rel, "replaced", shown, k);
+    result.cause = "replaced";
+    return result;
+  }
+  if (k === "dir" && !remembered && statePath) {
+    // Only the folder's OWN dev:ino — never its contents, an mtime or a size: a
+    // tool that writes files inside it (`gcloud auth login`) changes none of them.
+    try { writeHiddenDirMemory(statePath, { ...memory.dirs, [rel]: { dev: st.dev, ino: st.ino } }, anchor); }
+    catch { return { ...result, dir: null, path: null, refusal: hiddenDirStateRefusal(shown, "not writable"), cause: "record" }; }
+  }
+  return result;
+}
+
+/** One operator secret FOLDER (hidden whole). Same rules as the file one below. */
+export function resolveHiddenSecretDir(home, rel, opts = {}) {
+  return resolveHiddenSecretPath(home, rel, { ...opts, kind: "dir" });
+}
+
+/** One operator secret FILE (masked with an empty file). No identity memory:
+ *  the link checks run, an absent file is nothing to mask (never created), and
+ *  whatever file holds the name is masked. */
+export function resolveHiddenSecretFile(home, rel, opts = {}) {
+  return resolveHiddenSecretPath(home, rel, { ...opts, kind: "file" });
+}
 
 function bundleIds(root, readdir) {
   try { return readdir(join(root, "bundles")); } catch { return []; }

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { canOpen, probeForeignProc, processFacts, secretEnvNames, formatIsolationLine, formatSecretsAncestorsLine, defaultSensitivePaths } from "../servers/shared/isolation-check.js";
+import { OPERATOR_SECRET_PATHS } from "../servers/shared/operator-secret-paths.js";
 import { checkSecretsAncestors } from "../servers/shared/secrets-ancestors.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-iso-")));
@@ -81,13 +82,20 @@ test("the secrets dir ancestors boot line: ok, a finding count, and refused once
   assert.equal(formatSecretsAncestorsLine(null), "[isolation] secrets dir ancestors: ok", "never throws on no report");
 });
 
-test("defaultSensitivePaths: the operator's key dirs and the Google Cloud CLI's credentials are in the boot report list", () => {
+test("defaultSensitivePaths: every operator credential folder and file of the one list is in the boot report list", () => {
   const home = join(scratch, "iso-home");
   mkdirSync(join(home, ".crow", "data"), { recursive: true });
   const paths = defaultSensitivePaths({ home, crowHome: join(home, ".crow") });
   for (const rel of [[".ssh"], [".gnupg"], [".config", "gcloud"]]) {
     assert.ok(paths.includes(join(home, ...rel)), "sensitive path listed: " + join(...rel));
   }
+  // The list is servers/shared/operator-secret-paths.js: folders (the cloud and
+  // provider CLIs) and files (registry, http, npm and database passwords).
+  for (const { rel } of OPERATOR_SECRET_PATHS) {
+    assert.ok(paths.includes(join(home, rel)), "sensitive path listed: ~/" + rel);
+  }
+  assert.ok(paths.includes(join(home, ".netrc")) && paths.includes(join(home, ".aws")), "a file and a folder both");
+  assert.equal(new Set(paths).size, paths.length, "deduped");
   assert.ok(!paths.includes(join(home, ".crow")), "never this instance's own home");
 });
 

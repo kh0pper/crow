@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
 import { ContainRefused, neverBound } from "../scripts/pi-bots/pi_contain.mjs";
+import { OPERATOR_SECRET_PATHS } from "../servers/shared/operator-secret-paths.js";
 import { buildAddonPlan } from "../scripts/addon-sandbox/plan.mjs";
 import { deriveProfile } from "../scripts/addon-sandbox/profile.mjs";
 import { ADDON_TOKEN_DIRS } from "../servers/shared/addon-doors.js";
@@ -82,6 +83,23 @@ writeFileSync(SSH_KEY, "k");
 const GCLOUD_DIR = mk(HOME, ".config", "gcloud");
 const GCLOUD_ADC = join(GCLOUD_DIR, "application_default_credentials.json");
 writeFileSync(GCLOUD_ADC, "{}");
+// Every OTHER entry of the operator credential list
+// (servers/shared/operator-secret-paths.js): the cloud/provider CLI folders and
+// the files that hold registry, http, npm and database passwords. One fixture
+// path per entry, so the wall's refuse list can be exercised over the list.
+const OPERATOR_ENTRY_IN = {};
+for (const { rel, kind } of OPERATOR_SECRET_PATHS) {
+  const p = join(HOME, rel);
+  mkdirSync(dirname(p), { recursive: true });
+  if (kind === "dir") {
+    mkdirSync(p, { recursive: true });
+    OPERATOR_ENTRY_IN[rel] = join(p, "fake-credential");
+    writeFileSync(OPERATOR_ENTRY_IN[rel], "{}");
+  } else {
+    writeFileSync(p, "{}");
+    OPERATOR_ENTRY_IN[rel] = p;
+  }
+}
 // A folder the owner chose for a sign-in file: visible (and below a visible
 // folder, not a direct child of the home), so it is writable.
 const SIGNIN = mk(HOME, "signin", "acme");
@@ -409,6 +427,35 @@ test("neverBound(home) never appears as a bind source, including through a symli
     assert.ok(never.includes(GCLOUD_DIR), "~/.config/gcloud is in the never-bound list");
     assert.ok(refusedPaths.includes(GCLOUD_ADC), "a gcloud credential file is refused");
     assert.ok(refusedPaths.includes(GCLOUD_DIR), "the gcloud folder is refused");
+  } finally { closePlan(plan); }
+});
+
+test("every entry of the operator credential list is refused as an owner-set file or folder, read and write, and is never a bind source", () => {
+  // The wall refuses through neverBound (scripts/pi-bots/pi_contain.mjs), which
+  // takes every path from ONE list — servers/shared/operator-secret-paths.js —
+  // so the folders (~/.aws, …) and the files (~/.netrc, …) are denied here too.
+  const entries = OPERATOR_SECRET_PATHS.map(({ rel }) => ({ rel, entry: join(HOME, rel), inside: OPERATOR_ENTRY_IN[rel] }));
+  const never = neverBound(HOME);
+  for (const { rel, entry } of entries) assert.ok(never.includes(entry), "~/" + rel + " is in the never-bound list");
+  const plan = planOf({
+    profile: profileOf({
+      files: {
+        read: entries.map(({ inside }, i) => ({ from: "OPR" + i, path: inside, source: "owner" })),
+        write: entries.map(({ inside }, i) => ({ from: "OPW" + i, path: inside, source: "owner" })),
+        oauthDir: null,
+        state: [],
+      },
+    }),
+  });
+  try {
+    const refusedPaths = plan.refused.map((r) => r.path);
+    for (const { rel, inside } of entries) {
+      assert.ok(refusedPaths.includes(inside), rel + " is refused");
+      assert.ok(unbound(plan.args, inside), rel + " is never a bind source or destination");
+      const hit = plan.refused.find((r) => r.path === inside);
+      assert.match(hit.reason, /^a protected path \(/,
+        rel + " is refused as a protected path (the list is why, not a missing path)");
+    }
   } finally { closePlan(plan); }
 });
 

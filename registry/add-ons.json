@@ -2315,7 +2315,7 @@
     {
       "id": "google-workspace",
       "name": "Google Workspace",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "type": "bundle",
       "description": "Google Workspace tools for the assistant — Drive, Docs, Sheets, Slides, Gmail, Calendar, Apps Script, Forms, BigQuery and Looker Studio — using your own Google sign-in.",
       "author": "Crow",
@@ -2386,7 +2386,7 @@
         },
         {
           "name": "GWS_FILES_DIR",
-          "description": "Optional: the one folder this add-on may read and write local files in. Uploads and local-image inserts must name a file inside it; downloads and exports are written into it, and a relative path is relative to it. Anything else is refused, and the Google sign-in folder, ~/.ssh, ~/.gnupg and ~/.config/gcloud are refused whatever you set. Empty (the default) accepts any path but those, unless GWS_OUTBOUND_GUARD is on — then an empty files folder refuses every local file.",
+          "description": "Optional: the one folder this add-on may read and write local files in. Uploads and local-image inserts must name a file inside it; downloads and exports are written into it, and a relative path is relative to it. Anything else is refused, and the Google sign-in folder; the folders ~/.ssh, ~/.gnupg, ~/.config/gcloud, ~/.aws, ~/.azure, ~/.kube, ~/.config/gh and ~/.terraform.d; and the files ~/.docker/config.json, ~/.netrc, ~/.npmrc, ~/.pgpass and ~/.config/containers/auth.json are refused whatever you set. Empty (the default) accepts any path but those, unless GWS_OUTBOUND_GUARD is on — then an empty files folder refuses every local file.",
           "required": false,
           "path": true
         },
@@ -2470,7 +2470,7 @@
       },
       "ports": [],
       "webUI": null,
-      "notes": "No ports and no container: a stdio MCP server on this computer, run with uv from the installed copy. Inside the add-on wall it gets the internet (Google's APIs) and exactly one folder of yours, read-write — the folder holding the token file, because the OAuth token is rewritten there when it refreshes; name a files folder (GWS_FILES_DIR) and it gets that one too, read-write, and every local path a tool takes must land inside it. Point both GOOGLE_CREDENTIALS_FILE and GOOGLE_TOKEN_FILE at ~/.config/google-workspace-mcp/ and it finds both. Sending mail is off until GMAIL_SEND_TO_SELF_ALLOWLIST names your own address; everything else drafts. The actions that make Google write to someone else (calendar guests, invite replies, share notifications, ownership transfers, Gmail filter forwards) are sorted out before they leave: GWS_CALENDAR_NO_INVITES drops invitations entirely, and GWS_OUTBOUND_GUARD (off by default) refuses any recipient not on GWS_OUTBOUND_ALLOWLIST. The tools that take a LOCAL path (drive upload/download/export, slides export, a local image for a doc) never touch the sign-in folder, ~/.ssh, ~/.gnupg or ~/.config/gcloud, whatever else is set.",
+      "notes": "No ports and no container: a stdio MCP server on this computer, run with uv from the installed copy. Inside the add-on wall it gets the internet (Google's APIs) and exactly one folder of yours, read-write — the folder holding the token file, because the OAuth token is rewritten there when it refreshes; name a files folder (GWS_FILES_DIR) and it gets that one too, read-write, and every local path a tool takes must land inside it. Point both GOOGLE_CREDENTIALS_FILE and GOOGLE_TOKEN_FILE at ~/.config/google-workspace-mcp/ and it finds both. Sending mail is off until GMAIL_SEND_TO_SELF_ALLOWLIST names your own address; everything else drafts. The actions that make Google write to someone else (calendar guests, invite replies, share notifications, ownership transfers, Gmail filter forwards) are sorted out before they leave: GWS_CALENDAR_NO_INVITES drops invitations entirely, and GWS_OUTBOUND_GUARD (off by default) refuses any recipient not on GWS_OUTBOUND_ALLOWLIST. The tools that take a LOCAL path (drive upload/download/export, slides export, a local image for a doc) never touch the sign-in folder or the operator's credential folders and files (~/.ssh, ~/.gnupg, ~/.config/gcloud, ~/.aws, ~/.azure, ~/.kube, ~/.config/gh, ~/.terraform.d as folders; ~/.docker/config.json, ~/.netrc, ~/.npmrc, ~/.pgpass and ~/.config/containers/auth.json as files), whatever else is set.",
       "official": true
     },
     {

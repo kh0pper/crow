@@ -14,10 +14,14 @@ Three rules, in the order they are checked:
 
 1. **The sign-in folder is never a local path.** Always — guard on or off, files
    folder set or not. The real and the named parent folders of
-   ``GOOGLE_TOKEN_FILE`` and ``GOOGLE_CREDENTIALS_FILE``, ``~/.ssh``, ``~/.gnupg``,
-   ``~/.config/gcloud`` (the Google Cloud CLI's credentials) and any
-   ``~/.config/google-workspace-mcp*`` sibling are refused, and so are the
-   token and credentials files themselves (they are inside those folders). Every
+   ``GOOGLE_TOKEN_FILE`` and ``GOOGLE_CREDENTIALS_FILE``, the operator's own
+   credential folders and files (``~/.ssh``, ``~/.gnupg``, ``~/.config/gcloud``,
+   ``~/.aws``, ``~/.azure``, ``~/.kube``, ``~/.config/gh``, ``~/.terraform.d`` and
+   ``~/.docker/config.json``, ``~/.netrc``, ``~/.npmrc``, ``~/.pgpass``,
+   ``~/.config/containers/auth.json`` — the same set Crow's bot sandbox and add-on
+   wall use) and any ``~/.config/google-workspace-mcp*`` sibling are refused, and
+   so are the token and credentials files themselves (they are inside those
+   folders). Every
    one of them is compared after ``os.path.realpath``, so a symlink pointing into
    them is refused too, and a file opened for reading is compared by
    ``(st_dev, st_ino)`` with both files, so a hard link to the token is refused as
@@ -33,7 +37,8 @@ Three rules, in the order they are checked:
    existing file, a default output name is unique (repeated exports create new
    files), a missing parent folder is refused, a non-regular file is refused for
    reading, a local image's first bytes must really be an image, and the sign-in
-   folder, ``~/.ssh``, ``~/.gnupg`` and ``~/.config/gcloud`` are refused always.
+   folder and every one of the operator's own credential folders and files are
+   refused always.
 
 3. **With a files folder set**, a path must land *strictly inside* it after
    ``os.path.realpath`` — never on the folder itself. A relative path is relative
@@ -96,22 +101,48 @@ _DEFAULT_SIGNIN_FILES = {
     "GOOGLE_CREDENTIALS_FILE": "credentials.json",
 }
 
-# Folders that are never a files folder, whatever else is configured. The pattern
-# covers a sibling sign-in directory (`google-workspace-mcp-old`, a second
+# Folders and FILES that are never a local path, whatever else is configured. The
+# pattern covers a sibling sign-in directory (`google-workspace-mcp-old`, a second
 # account's copy) as well as the one the defaults name. `~/.config/gcloud` is the
 # Google Cloud CLI's credential folder (`application_default_credentials.json`,
 # `credentials.db`, `access_tokens.db`, `legacy_credentials/`): a service-account
 # key and an application-default credential both live there, so a tool call must
 # never be handed a path inside it.
+#
+# This tuple MIRRORS Crow's own list, OPERATOR_SECRET_PATHS in
+# servers/shared/operator-secret-paths.js (the bot sandbox, the contain tier, the
+# add-on wall, the file history and the isolation report all read that one). It is
+# repeated here because this server runs in another language, inside its own
+# bundle, and must refuse a path even when it is not walled. A JS test parses these
+# entries and holds the two lists in step (tests/pibot-hidden-files.test.js, "the
+# Python guard mirrors the operator list"), so add an entry in BOTH places, and
+# bump this bundle's `version` when you do.
+#
+# A folder (`~/.ssh`, `~/.aws`, …) protects everything below it; a file (`~/.netrc`,
+# …) protects exactly itself.
 _PRIVATE_PATTERNS = (
     ("~/.ssh", "~/.ssh"),
     ("~/.gnupg", "~/.gnupg"),
     ("~/.config/gcloud", "~/.config/gcloud"),
+    ("~/.aws", "~/.aws"),
+    ("~/.azure", "~/.azure"),
+    ("~/.kube", "~/.kube"),
+    ("~/.config/gh", "~/.config/gh"),
+    ("~/.terraform.d", "~/.terraform.d"),
+    ("~/.docker/config.json", "~/.docker/config.json"),
+    ("~/.netrc", "~/.netrc"),
+    ("~/.npmrc", "~/.npmrc"),
+    ("~/.pgpass", "~/.pgpass"),
+    ("~/.config/containers/auth.json", "~/.config/containers/auth.json"),
     ("~/.config/google-workspace-mcp*", "~/.config/google-workspace-mcp* (a sign-in folder)"),
 )
 
 #: What every refusal about a protected folder calls it.
 _SIGNIN_LABEL = "the Google sign-in folder (the OAuth token and credentials live there)"
+
+#: How the "cannot be resolved" refusals summarise the protected set.
+_PROTECTED_SUMMARY = ("the Google sign-in folder, ~/.ssh, ~/.gnupg, ~/.config/gcloud "
+                      "and the operator's other credential folders and files")
 
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -279,9 +310,8 @@ def _protected(env: Mapping[str, str], home: str
         real_file = _resolved(given)
         if real_file is None:
             raise PathRefused(
-                f"This tool call is refused — the folders this server protects (the "
-                f"Google sign-in folder, ~/.ssh, ~/.gnupg, ~/.config/gcloud) cannot "
-                f"be resolved right now, so no local path is allowed. Fix the "
+                f"This tool call is refused — the folders this server protects ({_PROTECTED_SUMMARY}) "
+                f"cannot be resolved right now, so no local path is allowed. Fix the "
                 f"filesystem (a broken symbolic link can cause this) and try again."
             )
         files.append((real_file, _SIGNIN_LABEL))
@@ -306,9 +336,8 @@ def _protected(env: Mapping[str, str], home: str
         real = _resolved(path)
         if real is None:
             raise PathRefused(
-                f"This tool call is refused — the folders this server protects (the "
-                f"Google sign-in folder, ~/.ssh, ~/.gnupg, ~/.config/gcloud) cannot "
-                f"be resolved right now, so no local path is allowed. Fix the "
+                f"This tool call is refused — the folders this server protects ({_PROTECTED_SUMMARY}) "
+                f"cannot be resolved right now, so no local path is allowed. Fix the "
                 f"filesystem (a broken symbolic link can cause this) and try again."
             )
         if (real, label) in seen:

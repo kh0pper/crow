@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { auditUnits, defaultSensitivePaths, auditInstanceFiles } from "../scripts/ops/isolation-audit.mjs";
+import { OPERATOR_SECRET_PATHS } from "../servers/shared/operator-secret-paths.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-audit-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -45,8 +46,12 @@ test("defaultSensitivePaths: other .crow* homes beside this one, plus key dirs; 
   assert.ok(!p.includes(join(home, ".crowbar")) && !p.includes(join(home, "crow")));
   assert.ok(!p.includes(join(home, ".crow-backups")), "a .crow-* dir that is not an instance home is skipped");
   assert.ok(p.includes(join(home, ".ssh")) && p.includes(join(home, ".gnupg")));
-  // The Google Cloud CLI's credential folder is operator secret material too.
+  // The Google Cloud CLI's credential folder is operator secret material too,
+  // and so is every other entry of the one list the audit reports against.
   assert.ok(p.includes(join(home, ".config", "gcloud")), "~/.config/gcloud is reported as sensitive");
+  for (const { rel } of OPERATOR_SECRET_PATHS) {
+    assert.ok(p.includes(join(home, rel)), "reported as sensitive: ~/" + rel);
+  }
 });
 
 test("auditInstanceFiles: modes of the instance's own secret files, existing ones only", () => {

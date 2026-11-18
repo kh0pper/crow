@@ -86,6 +86,27 @@ export async function createNotification(db, opts) {
   return { id: Number(result.lastInsertRowid), delivery };
 }
 
+/**
+ * The notification_prefs type gate, as a PURE predicate over the stored
+ * `notification_prefs` value (the JSON text, or a row/undefined): true when a
+ * notification of `type` may be created. A missing/unreadable/invalid preference
+ * blob allows every type — the same rule the async gate below has always had,
+ * kept here once so a synchronous writer (the bot bridge's refusal bell, which
+ * is a better-sqlite3 process) asks the same question as createNotification.
+ */
+export function notificationTypeEnabled(prefsValue, type) {
+  try {
+    const value = prefsValue && typeof prefsValue === "object" && Object.hasOwn(prefsValue, "value") ? prefsValue.value : prefsValue;
+    if (typeof value !== "string" || !value.trim()) return true;
+    const prefs = JSON.parse(value);
+    if (!prefs || typeof prefs !== "object") return true;
+    if (prefs.types_enabled && !prefs.types_enabled.includes(type)) return false;
+  } catch {
+    // No prefs set (or unreadable) — allow all types
+  }
+  return true;
+}
+
 /** The notification_prefs type gate: false when this type is switched off. */
 async function typeEnabled(db, type) {
   try {
@@ -93,10 +114,7 @@ async function typeEnabled(db, type) {
       sql: "SELECT value FROM dashboard_settings WHERE key = 'notification_prefs'",
       args: [],
     });
-    if (rows.length > 0) {
-      const prefs = JSON.parse(rows[0].value);
-      if (prefs.types_enabled && !prefs.types_enabled.includes(type)) return false;
-    }
+    if (rows.length > 0) return notificationTypeEnabled(rows[0].value, type);
   } catch {
     // No prefs set — allow all types
   }
