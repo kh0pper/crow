@@ -260,6 +260,15 @@ const RECORD_VIEW_SCRIPT = await loadPanelScript("record-view.js", "RECORD_VIEW_
 const PUNCH_SCRIPT = await loadPanelScript("punch.js", "PUNCH_SCRIPT");
 
 /**
+ * The scene plan's rules, loaded once: the plan a song's sections and placements
+ * make, the block a bar falls in and the block that follows it. They reach the
+ * page before the client, which draws the scene plan widget's strip and the
+ * recording lanes' bands from the very same blocks; a page served without the
+ * script draws no blocks instead of failing (see panel/scene-plan.js).
+ */
+const SCENE_PLAN_SCRIPT = await loadPanelScript("scene-plan.js", "SCENE_PLAN_SCRIPT");
+
+/**
  * The shell's layout model, loaded once: which widget is on the page, in what
  * order and at which size is this device's own view state, and the model that
  * decides it comes BEFORE the shell that reads it and before the client, which
@@ -1135,10 +1144,23 @@ const STYLES = `
   }
   .studio .st-rec-ruler .st-rec-side { border-bottom: 1px solid var(--st-line); }
   .studio .st-rec-ruler-body {
-    position: relative; height: 52px; background: var(--st-head);
+    position: relative; height: 62px; background: var(--st-head);
     border-bottom: 1px solid var(--st-line);
   }
   .studio .st-rec-sections { position: absolute; top: 4px; left: 0; right: 0; height: 20px; }
+  /* The plan's own blocks under the ruler (C2): the rows the scene plan widget
+     lists, drawn as thin bands on the arrangement's bar axis, so a section and a
+     scene sit under the bars they cover. A band is a picture, so a press goes
+     through it to the ruler under it. */
+  .studio .st-rec-plan {
+    position: absolute; top: 25px; left: 0; right: 0; height: 18px; pointer-events: none;
+  }
+  .studio .st-lane-band {
+    position: absolute; top: 0; height: 18px; box-sizing: border-box; padding: 0 6px;
+    border-radius: 4px; border: 1px solid var(--st-edge); background: #202529;
+    color: var(--st-muted); font-size: 10px; line-height: 16px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .studio .st-rec-section {
     position: absolute; top: 0; height: 20px; box-sizing: border-box; padding: 0 6px;
     border-radius: 4px; border: 1px solid var(--st-edge); background: #2C3136; color: var(--st-text);
@@ -1278,6 +1300,32 @@ const STYLES = `
      (or on the row around it) is a press, never a text selection. The row
      wraps, so it fits a phone's one-widget page as well as a column. */
   .studio .st-scene-plan { display: block; min-width: 0; }
+  /* The plan's blocks (C2), above the options row: one row that scrolls sideways
+     when the plan is longer than the widget, each block a 44 px target, the one
+     the transport is in outlined in the page's accent and the one after it (and
+     the scene a tap queued for the next bar) dashed. A block never shrinks and a
+     press on one is a press, never a text selection. */
+  .studio .st-plan-strip {
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 6px;
+    overflow-x: auto; padding: 10px 12px 0; min-width: 0;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  .studio .st-plan-block {
+    flex: 0 0 auto; box-sizing: border-box;
+    min-width: 44px; min-height: 44px; padding: 0 12px;
+    border: 1px solid var(--st-edge); border-radius: 6px; background: #24282D;
+    color: var(--st-text); font-size: 12px; white-space: nowrap;
+  }
+  .studio .st-plan-block-current { outline: 2px solid var(--st-accent, #E8A33D); outline-offset: -2px; }
+  .studio .st-plan-block-next { border-style: dashed; }
+  .studio .st-plan-block-queued { border-style: dashed; }
+  /* A block that plays nothing right now (a section, or a scene while the plan
+     is what plays) still says what it covers, and says it quietly. */
+  .studio .st-plan-block[aria-disabled="true"] { color: var(--st-muted); cursor: default; }
+  .studio .st-plan-empty { margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted); }
+  .studio .st-plan-mode { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-plan-mode .st-btn { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
+  .studio .st-plan-mode-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted); }
   .studio .st-plan-options {
     display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
     padding: 10px 12px; min-width: 0;
@@ -1927,6 +1975,7 @@ function studioPage({ songId, render, res }) {
 ${PAD_INPUT_SCRIPT}
 ${RECORD_VIEW_SCRIPT}
 ${PUNCH_SCRIPT}
+${SCENE_PLAN_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${SHELL_LAYOUT_SCRIPT}

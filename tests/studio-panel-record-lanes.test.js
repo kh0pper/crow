@@ -31,6 +31,7 @@ import assert from "node:assert/strict";
 import { SHELL_SCRIPT } from "../bundles/studio/panel/shell.js";
 import { SHELL_LAYOUT_SCRIPT } from "../bundles/studio/panel/shell-layout.js";
 import { PUNCH_SCRIPT } from "../bundles/studio/panel/punch.js";
+import { SCENE_PLAN_SCRIPT } from "../bundles/studio/panel/scene-plan.js";
 
 /** The note track, whose lane shows a placement and cannot be armed. */
 const NOTE_TRACK = "bass";
@@ -633,7 +634,11 @@ async function bootLanes(options = {}) {
   // rules come beside them, and the client asks them whether a range fits.
   new Function("window", RECORD_VIEW_SCRIPT)(windowStub);
   new Function("window", PUNCH_SCRIPT)(windowStub);
-  assert.ok(windowStub.StudioPunch, "the punch rules are evaluated");
+  assert.equal(typeof windowStub.StudioPunch, "object", "the punch rules are evaluated");
+  // The plan's rules are emitted before the client in the page, so the lanes'
+  // ruler can draw the plan's blocks beside the sections' own bands.
+  new Function("window", SCENE_PLAN_SCRIPT)(windowStub);
+  assert.equal(typeof windowStub.StudioScenePlan, "object", "the plan's rules are evaluated");
   new Function("window", "navigator", TAKE_STORE_SCRIPT)(windowStub, fakeNavigator());
   windowStub.StudioTakeStore = store;
 
@@ -910,6 +915,49 @@ test("the ruler shows section bands and the playhead", async () => {
     "26.563%",
     "a redrawn ruler keeps the playhead on the transport's bar",
   );
+});
+
+test("Plan UI: the plan bands sit where their blocks start on the ruler's bar scale", async () => {
+  // A placement outside both sections: bars 9 and 10 carry the verse's scene, so
+  // the plan row has a block of its own beside the two section bands.
+  const doc = await lanesDoc();
+  const runCommand = await commands();
+  runCommand(doc, "scene.rename", { scene_id: SCENE, name: "Intro" });
+  runCommand(doc, "arrangement.place", {
+    id: "p-late",
+    track_id: AUDIO_TRACK,
+    clip_id: AUDIO_CLIP,
+    start_bar: 8,
+    bars: 2,
+  });
+  const ui = await bootLanes({ doc });
+
+  // The ruler's bar axis in percent, written the way the page writes it.
+  const bars = ui.view().recLanesBars;
+  const percent = (bar) => String(Math.round(((Number(bar) / bars) * 100) * 1000) / 1000) + "%";
+
+  const bands = [...ui.document.querySelectorAll("[data-role=rec-lanes] .st-lane-band")];
+  assert.equal(bands.length, 1, "the plan row carries the one block outside the sections");
+  assert.equal(bands[0].textContent, "Intro", "labelled by the scene the placed clip plays");
+  assert.equal(bands[0].style.left, percent(8), "the band starts on its block's own first bar");
+  assert.equal(bands[0].style.width, percent(2), "and spans the bars the placement covers");
+
+  // The section row is on the very same scale, so one bar and one block read the
+  // same way on both rows of the ruler.
+  const sections = [...ui.document.querySelectorAll("[data-role=rec-lanes] [data-role=rec-section]")];
+  assert.deepEqual(sections.map((node) => node.textContent), ["Verse", "Chorus"], "both sections are drawn");
+  assert.equal(sections[0].style.left, percent(0), "the first section starts on the first bar");
+  assert.equal(sections[0].style.width, percent(4), "and spans its four bars");
+  assert.equal(sections[1].style.left, percent(4), "the second starts where the first ends");
+
+  // No width is in the arithmetic: every band is a share of the ruler's own
+  // width, so a phone's narrower lane draws the same block at the same place.
+  for (const node of [...sections, ...bands]) {
+    assert.ok(String(node.style.left).endsWith("%"), "a band's start is a percentage of the ruler");
+    assert.ok(String(node.style.width).endsWith("%"), "and so is its span");
+    assert.equal(/px/.test(String(node.style.left) + String(node.style.width)), false,
+      "no pixel width is in a band's geometry");
+  }
 });
 
 test("a session-only song (scenes, no placements) shows empty lanes and the arrangement note", async () => {

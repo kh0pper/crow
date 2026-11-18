@@ -643,6 +643,79 @@ test("record_performance is one undo step", (t) => {
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
+test("R15: one undo removes the placements only; the clip and the takes remain (record_performance is one history step, take.add and clip.add_audio are their own)", (t) => {
+  const s = studio(t);
+  const track = runCommand(s.doc, "track.add", { name: "Guitar", kind: "audio" }).args.id;
+  const scene = addScene(s.doc);
+  const firstTake = "0a1b2c3d-0000-4000-8000-0000000000c1";
+  const secondTake = "0a1b2c3d-0000-4000-8000-0000000000c2";
+
+  /**
+   * One recorded pass of the take's clip, as the upload's own take.add writes it.
+   * @param {string} id
+   */
+  const addTake = (id) =>
+    s.run("take.add", {
+      clip_id: "c-hand",
+      take: {
+        id,
+        storage_key: `studio/song-1/takes/${id}.wav`,
+        rate: 48000,
+        channels: 2,
+        frames: 96000,
+        offset_frames: 0,
+        compensated: true,
+        bpm: 120,
+        recorded_at: "2026-03-01T10:00:00.000Z",
+        author_label: "You",
+        discarded: false,
+      },
+    });
+
+  // A by-hand take reaches the song in the order it was played: the clip the
+  // empty slot got, the take the first pass made, the performance Stop wrote
+  // from the launches it heard, and then the second pass's take as its upload
+  // finished behind them.
+  s.run("clip.add_audio", {
+    clip_id: "c-hand",
+    track_id: track,
+    scene_id: scene,
+    length_bars: 2,
+    name: "Guitar",
+  });
+  addTake(firstTake);
+  const performed = s.run("arrangement.record_performance", {
+    placements: [{ id: "perf-hand", track_id: track, clip_id: "c-hand", start_bar: 4, bars: 2 }],
+  });
+  addTake(secondTake);
+  assert.deepEqual(Object.keys(placementsOf(s.doc)), ["perf-hand"], "the performance placed the clip");
+
+  // Undoing THAT history step — found by the id it was recorded under — takes
+  // the placements back and nothing else: the clip and both passes' takes are
+  // steps of their own, still waiting for their own undos.
+  const performanceEntry = s.entries.find((entry) => entry.id === performed.entry.id);
+  assert.ok(performanceEntry, "the performance's own step is in the song's history");
+  const undone = s.undo(performanceEntry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.deepEqual(placementsOf(s.doc), {}, "the placements are gone");
+
+  const after = snapshot(s.doc);
+  assert.ok(after.clips["c-hand"], "the clip stays");
+  assert.equal(after.clips["c-hand"].kind, "audio", "still the audio clip it was");
+  assert.deepEqual(
+    Object.keys(after.takes).sort(),
+    [firstTake, secondTake].sort(),
+    "and both passes' takes stay",
+  );
+  assert.deepEqual(
+    after.clips["c-hand"].comp,
+    [{ take_id: firstTake, from_beat: 0, to_beat: 8 }],
+    "with the whole-clip comp the first take made when it landed",
+  );
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
 test("placement past bar 999 refused naming the limit", (t) => {
   const s = studio(t);
   const { track, clip } = placeable(s.doc);
