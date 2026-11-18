@@ -31,6 +31,12 @@ REBUY_SIZINGS = (REBUY_PROCEEDS, REBUY_FIXED)
 # An order in one of these statuses still holds its level (it may yet land).
 LIVE_STATUSES = ("PENDING_SUBMIT", "OPEN")
 
+# The pause reason for a poll window that carries no low/high at all.
+NO_RANGE_DATA = "no range data"
+
+# The only sides a fill row may carry.
+FILL_SIDES = (money.BUY, money.SELL)
+
 _REQUIRED = (
     "center",
     "step_pct",
@@ -72,13 +78,17 @@ def _dec_or_none(value) -> Optional[D]:
 
 
 def _count(value, field: str) -> int:
-    """A whole count (levels below/above); a float or a numeric str is accepted."""
+    """A whole count (levels below/above): `3`, `3.0` and `"3"` all mean three,
+    while a fractional value is refused instead of quietly truncated."""
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a whole number, got {value!r}")
     try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
+        out = D(str(value))
+    except (ArithmeticError, ValueError, TypeError):
         raise ValueError(f"{field} must be a whole number, got {value!r}") from None
+    if not out.is_finite() or out != out.to_integral_value():
+        raise ValueError(f"{field} must be a whole number, got {value!r}")
+    return int(out)
 
 
 def _num(value: D) -> str:
@@ -142,11 +152,17 @@ def _levels(p: dict, spec: ProductSpec) -> dict[int, D]:
 # ---------------------------------------------------------------- fill rows
 
 
-def _fill_id(row: dict) -> str:
-    """The id that retires this fill: its own `id` when it has one, else the cid."""
-    if row.get("id") is not None:
-        return str(row["id"])
-    return str(row.get("client_order_id"))
+def _fill_id(row: dict) -> Optional[str]:
+    """The id that retires this fill: always its `client_order_id`.
+
+    A row with no client order id (missing, None or empty) has no id anything
+    could retire, so it yields None and is ignored.
+    """
+    cid = row.get("client_order_id")
+    if cid is None:
+        return None
+    cid = str(cid)
+    return cid or None
 
 
 def _row_level(row: dict) -> Optional[int]:
@@ -184,9 +200,22 @@ class GridStrategy:
     name = "grid"
 
     # ------------------------------------------------ params
-    def validate(self, params: dict) -> None:
-        """Raise `ValueError` unless *params* can build a grid."""
-        _parse(params)
+    def validate(self, params: dict, spec: Optional[ProductSpec] = None) -> None:
+        """Raise `ValueError` unless *params* can build a grid.
+
+        With a *spec* the levels are also built against the product's price
+        tick, so a step that collapses the levels is refused here rather than
+        mid-tick.
+        """
+        p = _parse(params)
+        if spec is None:
+            return
+        try:
+            _levels(p, spec)
+        except ValueError as exc:
+            raise ValueError(
+                f"grid params do not fit {spec.product_id}: {exc}"
+            ) from None
 
     def fee_guard(self, params: dict, maker_fee_pct: D) -> Optional[str]:
         """Why this step cannot pay the maker fee twice, or None when it can."""
@@ -216,8 +245,17 @@ class GridStrategy:
         """The initial grid: buys nearest-first from the quote budget, sells from
         the base allocation.  A level the sizing cannot fund is simply left out."""
         p = _parse(view.params)
+        lv = _levels(p, view.spec)
+
+        # The first book is laid down around the top of book, so it only makes
+        # sense while that mid sits inside the grid's own band.
+        mid = (D(snap.bid) + D(snap.ask)) / 2
+        why = money.out_of_range(mid, mid, money.range_bounds(lv, p["step_pct"]))
+        if why:
+            return Decision([], pause_reason=why)
+
         planned, _skipped = money.plan_initial(
-            _levels(p, view.spec),
+            lv,
             p["quote_per_buy"],
             usdc_budget=view.holding.available_quote,
             xrp_allocation=view.holding.available_base,
@@ -245,14 +283,18 @@ class GridStrategy:
         p = _parse(view.params)
         lv = _levels(p, view.spec)
 
-        # 1. A poll window outside the band pauses the whole bot: nothing is
+        # 1. Without a poll window there is no telling whether the price left
+        #    the grid, so nothing is placed blind.
+        if snap.low is None or snap.high is None:
+            return Decision([], pause_reason=NO_RANGE_DATA)
+
+        #    A poll window outside the band pauses the whole bot: nothing is
         #    placed for any fill, so the book is left exactly as it is.
-        if snap.low is not None and snap.high is not None:
-            why = money.out_of_range(
-                snap.low, snap.high, money.range_bounds(lv, p["step_pct"])
-            )
-            if why:
-                return Decision([], pause_reason=why)
+        why = money.out_of_range(
+            snap.low, snap.high, money.range_bounds(lv, p["step_pct"])
+        )
+        if why:
+            return Decision([], pause_reason=why)
 
         # 2. Every fill still awaiting its opposite order, in the order given.
         held = _occupied_levels(view.open_orders)
@@ -261,7 +303,17 @@ class GridStrategy:
         skipped: list[str] = []
 
         for row in view.pending_fills or ():
+            # Only a client order id can retire a fill: a row without one is
+            # left alone, there is nothing to retire.
             fill_id = _fill_id(row)
+            if fill_id is None:
+                continue
+
+            side = str(row.get("side") or "").strip().upper()
+            if side not in FILL_SIDES:
+                skipped.append(fill_id)
+                continue
+
             level = _row_level(row)
             size = _dec_or_none(row.get("filled_size"))
             value = _dec_or_none(row.get("filled_value"))
@@ -271,7 +323,7 @@ class GridStrategy:
                 continue
 
             plan, _why = money.opposite_order(
-                str(row.get("side") or "").upper(),
+                side,
                 level,
                 size,
                 value - (D(0) if fees is None else fees),

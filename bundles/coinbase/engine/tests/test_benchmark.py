@@ -88,6 +88,70 @@ def test_value_unstarted_raises_keyerror(store):
     assert store.get("benchmark:nobody") is None
 
 
+BAD_START_VALUES = [
+    ("base_nan", D("NaN"), BASE, PRICE),
+    ("quote_nan", BASE, D("NaN"), PRICE),
+    ("price_nan", BASE, QUOTE, D("NaN")),
+    ("base_nan_str", "nan", BASE, PRICE),
+    ("base_infinity", D("Infinity"), BASE, PRICE),
+    ("quote_infinity", BASE, "Infinity", PRICE),
+    ("price_neg_infinity", BASE, QUOTE, "-Infinity"),
+    ("base_negative", "-1", BASE, PRICE),
+    ("quote_negative", BASE, "-0.0001", PRICE),
+    ("price_negative", BASE, QUOTE, "-0.9645"),
+    ("base_unparseable", "abc", BASE, PRICE),
+    ("quote_unparseable", BASE, "not-a-number", PRICE),
+    ("price_unparseable", BASE, QUOTE, ""),
+]
+
+
+@pytest.mark.parametrize(
+    "case,base,quote,price",
+    BAD_START_VALUES,
+    ids=[c[0] for c in BAD_START_VALUES],
+)
+def test_start_rejects_bad_values_and_writes_nothing(store, case, base, quote, price):
+    b = Benchmark(store)
+
+    with pytest.raises(ValueError):
+        b.start(OWNER, base, quote, price)
+
+    # The refused start stored nothing: the owner is still unstarted.
+    assert store.get("benchmark:b1") is None
+    with pytest.raises(KeyError):
+        b.value(OWNER, PRICE)
+
+    # A refused start does not block a later, valid one.
+    b.start(OWNER, BASE, QUOTE, PRICE)
+    assert b.value(OWNER, PRICE) == BASE * PRICE + QUOTE
+
+
+ZERO_MIXES = [
+    ("all_zero", D("0"), D("0"), D("0")),
+    ("zero_base", D("0"), QUOTE, PRICE),
+    ("zero_quote", BASE, D("0"), PRICE),
+    ("zero_price", BASE, QUOTE, D("0")),
+]
+
+
+@pytest.mark.parametrize(
+    "case,base,quote,price", ZERO_MIXES, ids=[c[0] for c in ZERO_MIXES]
+)
+def test_start_allows_zero(store, case, base, quote, price):
+    b = Benchmark(store)
+
+    b.start(OWNER, base, quote, price)
+
+    record = store.get("benchmark:b1")
+    assert record is not None
+    assert D(record["base"]) == D(base)
+    assert D(record["quote"]) == D(quote)
+    assert D(record["price"]) == D(price)
+
+    assert b.value(OWNER, PRICE) == D(base) * PRICE + D(quote)
+    assert b.vs_hold(OWNER, D("5"), PRICE) == D("5") - (D(base) * PRICE + D(quote))
+
+
 def test_benchmark_persists_across_store_reopen(tmp_path):
     path = tmp_path / "s.db"
 

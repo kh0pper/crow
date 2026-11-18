@@ -170,6 +170,71 @@ def test_init_respects_budget():
     assert empty.intents == []
 
 
+def test_init_sizes_from_available_not_totals():
+    lv = levels()
+    # Totals are larger than what is free: the resting orders already hold 30
+    # USDC and 45 XRP of them.
+    h = holding(quote="45", base="60", reserved_quote="30", reserved_base="45")
+    assert h.available_quote == D("15")
+    assert h.available_base == D("15")
+
+    d = GridStrategy().init_intents(snap(), view(hold=h))
+
+    buys = [i for i in d.intents if i.side == money.BUY]
+    sells = [i for i in d.intents if i.side == money.SELL]
+
+    # 15 free USDC is one level of quote_per_buy, not the three the total allows.
+    assert [i.level for i in buys] == [-1]
+    assert buys[0].limit_price == lv[-1]
+    assert buys[0].size == money.buy_size_for_quote(D("15"), lv[-1], FEE, SPEC)
+    assert sum(money.buy_cost(i.size, i.limit_price, FEE) for i in buys) <= D("15")
+
+    # The 15 free XRP is split across the three sell levels, not the total 60.
+    assert [i.level for i in sells] == [1, 2, 3]
+    assert [i.size for i in sells] == [D("5"), D("5"), D("5")]
+    assert sum(i.size for i in sells) <= D("15")
+    assert d.pause_reason is None
+    assert d.skipped_fills == []
+
+
+def test_init_pauses_when_mid_is_out_of_range():
+    lv = levels()
+    lo, hi = money.range_bounds(lv, D("2.5"))
+
+    # The mid of the top of book, far below the lower bound: pause, no book.
+    below = snap(bid=lo - D("0.0500"), ask=lo - D("0.0490"))
+    d = GridStrategy().init_intents(below, view(hold=holding("45", "60")))
+    assert d.intents == []
+    assert d.pause_reason is not None and "lower" in d.pause_reason
+    assert d.skipped_fills == []
+
+    # Far above the upper bound: the same pause, named the other way.
+    above = snap(bid=hi + D("0.0490"), ask=hi + D("0.0500"))
+    d2 = GridStrategy().init_intents(above, view(hold=holding("45", "60")))
+    assert d2.intents == []
+    assert d2.pause_reason is not None and "upper" in d2.pause_reason
+    assert d2.skipped_fills == []
+
+    # A mid just inside the band is not a pause: the book is laid down.
+    inside = snap(bid=lo + D("0.0001"), ask=lo + D("0.0002"))
+    d3 = GridStrategy().init_intents(inside, view(hold=holding("45", "60")))
+    assert d3.pause_reason is None
+    assert len(d3.intents) == 6
+
+    # The default 0.9640/0.9650 top of book sits inside the band: six orders.
+    d4 = GridStrategy().init_intents(snap(), view(hold=holding("45", "60")))
+    assert d4.pause_reason is None
+    assert len(d4.intents) == 6
+    assert [(i.side, i.level) for i in d4.intents] == [
+        (money.BUY, -1),
+        (money.BUY, -2),
+        (money.BUY, -3),
+        (money.SELL, 1),
+        (money.SELL, 2),
+        (money.SELL, 3),
+    ]
+
+
 # ---------------------------------------------------------------- buy fills
 
 
@@ -212,12 +277,80 @@ def test_follow_up_carries_consumes_fill():
 
     d = GridStrategy().decide(snap(), view(pending=[f]))
     assert d.intents[0].consumes_fill == cid
+    assert cid in d.intents[0].reason
 
-    # When the row carries its own `id`, that is the fill id.
-    row = dict(f)
+
+def test_fill_id_is_always_the_client_order_id():
+    lv = levels()
+    cid = "cb-b1-B--1-000000000030"
+    f = filled_at(lv, cid, money.BUY, -1, D("10"))
+
+    # A row that also carries its own `id` is retired by its client order id.
+    row = dict(f, id="fill-9f2c", order_id="o-4")
+    d = GridStrategy().decide(snap(), view(pending=[row]))
+
+    assert [i.consumes_fill for i in d.intents] == [cid]
+    assert cid in d.intents[0].reason
+    assert "fill-9f2c" not in d.intents[0].reason
+    assert "fill-9f2c" not in d.skipped_fills
+    assert d.skipped_fills == []
+
+
+def test_row_without_client_order_id_is_ignored():
+    lv = levels()
+
+    keyless = filled_at(lv, "cb-b1-B--2-000000000031", money.BUY, -2, D("10"))
+    keyless.pop("client_order_id")
+    null_cid = dict(filled_at(lv, "cb-b1-B--2-000000000032", money.BUY, -2, D("10")))
+    null_cid["client_order_id"] = None
+    empty_cid = dict(filled_at(lv, "cb-b1-B--2-000000000033", money.BUY, -2, D("10")))
+    empty_cid["client_order_id"] = ""
+
+    for row in (keyless, null_cid, empty_cid):
+        d = GridStrategy().decide(snap(), view(pending=[row]))
+        assert d.intents == []
+        assert d.skipped_fills == []
+        assert d.pause_reason is None
+
+    # A keyless row does not stop a later fill from being answered.
+    good = filled_at(lv, "cb-b1-B--1-000000000034", money.BUY, -1, D("10"))
+    both = GridStrategy().decide(snap(), view(pending=[keyless, good]))
+    assert [i.consumes_fill for i in both.intents] == [good["client_order_id"]]
+    assert both.skipped_fills == []
+
+
+def test_follow_up_is_retired_by_client_order_id_even_when_skipped():
+    # A row with an id but no level is skipped, and it is retired by its
+    # client order id, never by the id column.
+    row = fill("cb-b1-B--1-000000000035", money.BUY, -1, D("10"), D("9.4100"))
+    row.pop("level")
     row["id"] = "fill-9f2c"
-    d2 = GridStrategy().decide(snap(), view(pending=[row]))
-    assert d2.intents[0].consumes_fill == "fill-9f2c"
+
+    d = GridStrategy().decide(snap(), view(pending=[row]))
+
+    assert d.intents == []
+    assert d.skipped_fills == ["cb-b1-B--1-000000000035"]
+
+
+def test_two_independent_fills_are_both_answered():
+    lv = levels()
+    first = filled_at(lv, "cb-b1-B--1-000000000036", money.BUY, -1, D("10"))
+    second = filled_at(lv, "cb-b1-B--2-000000000037", money.BUY, -2, D("10"))
+
+    d = GridStrategy().decide(snap(), view(pending=[first, second]))
+
+    assert d.pause_reason is None
+    assert d.skipped_fills == []
+    assert [(i.side, i.level) for i in d.intents] == [
+        (money.SELL, 0),
+        (money.SELL, -1),
+    ]
+    assert [i.consumes_fill for i in d.intents] == [
+        first["client_order_id"],
+        second["client_order_id"],
+    ]
+    assert [i.limit_price for i in d.intents] == [lv[0], lv[-1]]
+    assert [i.size for i in d.intents] == [D("10"), D("10")]
 
 
 def test_partial_then_cancel_opposite_for_filled_part():
@@ -262,6 +395,33 @@ def test_sell_fill_rebuys_one_level_down_with_proceeds():
     assert i.consumes_fill == f["client_order_id"]
 
 
+def test_partial_sell_then_cancel_rebuys_from_the_filled_part():
+    lv = levels()
+    f = filled_at(lv, "cb-b1-S-1-000000000038", money.SELL, 1, D("6"), fees="0.02")
+    # 6 of the 10 XRP sold; the rest of the order was cancelled, so only the
+    # filled sixth produced proceeds to buy back with.
+    row = dict(f, status="CANCELLED", size=D("10"), order_id="o-18")
+    net = row["filled_value"] - row["fees"]
+
+    d = GridStrategy().decide(snap(), view(pending=[row]))
+
+    assert d.pause_reason is None
+    assert d.skipped_fills == []
+    assert len(d.intents) == 1
+    i = d.intents[0]
+    assert i.side == money.BUY
+    assert i.level == 0
+    assert i.limit_price == lv[0]
+    assert i.size == money.buy_size_for_quote(net, lv[0], FEE, SPEC)
+    assert money.buy_cost(i.size, i.limit_price, FEE) <= net
+    assert i.consumes_fill == row["client_order_id"]
+    # The part that never filled buys nothing: the size is smaller than what the
+    # whole 10 XRP order would have bought back.
+    assert i.size < money.buy_size_for_quote(
+        money.sell_net(D("10"), lv[1], FEE), lv[0], FEE, SPEC
+    )
+
+
 def test_fixed_rebuy_uses_quote_per_buy():
     p = params(rebuy_sizing="fixed")
     lv = levels(p)
@@ -304,6 +464,55 @@ def test_range_exit_pause():
     inside = GridStrategy().decide(snap(), view(pending=[f]))
     assert inside.pause_reason is None
     assert [i.level for i in inside.intents] == [0]
+
+
+def test_missing_range_data_pauses():
+    lv = levels()
+    f = filled_at(lv, "cb-b1-B--1-000000000039", money.BUY, -1, D("10"))
+
+    for low, high in ((None, D("0.9900")), (D("0.9400"), None), (None, None)):
+        s = MarketSnapshot(
+            product=PRODUCT,
+            bid=D("0.9640"),
+            ask=D("0.9650"),
+            low=low,
+            high=high,
+            ts=TS,
+        )
+        d = GridStrategy().decide(s, view(pending=[f]))
+        assert d.intents == []
+        assert d.pause_reason == "no range data"
+        assert d.skipped_fills == []
+
+
+def test_unknown_side_is_skipped_not_raised():
+    lv = levels()
+    bogus = filled_at(lv, "cb-b1-B--1-000000000040", money.BUY, -1, D("10"))
+    bogus["side"] = "HOLD"
+
+    d = GridStrategy().decide(snap(), view(pending=[bogus]))
+    assert d.intents == []
+    assert d.skipped_fills == [bogus["client_order_id"]]
+
+    # A row with no side at all is the same case, and never raises.
+    missing = filled_at(lv, "cb-b1-B--1-000000000041", money.BUY, -1, D("10"))
+    missing.pop("side")
+    d2 = GridStrategy().decide(snap(), view(pending=[missing]))
+    assert d2.intents == []
+    assert d2.skipped_fills == [missing["client_order_id"]]
+
+    # A skipped side does not stop a later fill from being answered.
+    good = filled_at(lv, "cb-b1-B--2-000000000042", money.BUY, -2, D("10"))
+    both = GridStrategy().decide(snap(), view(pending=[bogus, good]))
+    assert [i.consumes_fill for i in both.intents] == [good["client_order_id"]]
+    assert both.skipped_fills == [bogus["client_order_id"]]
+
+    # The side is read upper-cased, so a lowercase row is answered normally.
+    lower = filled_at(lv, "cb-b1-B--1-000000000043", money.BUY, -1, D("10"))
+    lower["side"] = "buy"
+    d3 = GridStrategy().decide(snap(), view(pending=[lower]))
+    assert [(i.side, i.level) for i in d3.intents] == [(money.SELL, 0)]
+    assert d3.skipped_fills == []
 
 
 def test_occupied_level_waits_not_skipped():
@@ -445,6 +654,54 @@ def test_validate_rejects_bad_params(case, p, raises):
             strat.validate(p)
     else:
         strat.validate(p)  # accepted: no exception
+
+
+def test_validate_with_spec_refuses_levels_that_collapse():
+    strat = GridStrategy()
+    tiny = params(center="0.001")
+
+    # On its own the config is well formed; against the price tick of the real
+    # product its 2.5% step is smaller than one tick near 0.001.
+    strat.validate(tiny)
+    with pytest.raises(ValueError):
+        strat.validate(tiny, SPEC)
+
+    # A center whose step straddles many ticks is fine against the same spec.
+    strat.validate(params(), SPEC)
+
+
+LEVEL_COUNT_CASES = [
+    ("int", 3, False),
+    ("float_integral", 3.0, False),
+    ("numeric_str", "3", False),
+    ("decimal_integral", D("3"), False),
+    ("float_fraction", 2.7, True),
+    ("numeric_str_fraction", "2.7", True),
+    ("bool_true", True, True),
+    ("bool_false", False, True),
+    ("unparseable", "abc", True),
+    ("missing", None, True),
+]
+
+
+@pytest.mark.parametrize(
+    "field", ["levels_below", "levels_above"], ids=["levels_below", "levels_above"]
+)
+@pytest.mark.parametrize(
+    "case,value,raises", LEVEL_COUNT_CASES, ids=[c[0] for c in LEVEL_COUNT_CASES]
+)
+def test_validate_level_counts_must_be_whole(field, case, value, raises):
+    strat = GridStrategy()
+    p = params(**{field: value})
+
+    if raises:
+        with pytest.raises(ValueError):
+            strat.validate(p)
+        with pytest.raises(ValueError):
+            strat.validate(p, SPEC)
+    else:
+        strat.validate(p)
+        strat.validate(p, SPEC)
 
 
 def test_recenter_returns_new_params():

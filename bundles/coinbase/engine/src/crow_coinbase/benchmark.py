@@ -20,9 +20,26 @@ D = Decimal
 KEY_PREFIX = "benchmark:"
 
 
-def _dec(value) -> D:
-    """`Decimal(str(value))`: params and rows arrive from JSON, not as Decimals."""
-    return D(str(value))
+def _dec(value, field: str = "value") -> D:
+    """`Decimal(str(value))`, with a `ValueError` instead of a decimal error.
+
+    Params and rows arrive from JSON, so a number may be a str, int, float or
+    Decimal; anything unparseable is a `ValueError`.
+    """
+    try:
+        return D(str(value))
+    except (ArithmeticError, ValueError, TypeError):
+        raise ValueError(f"{field} must be a number, got {value!r}") from None
+
+
+def _mix_value(value, field: str) -> D:
+    """A finite, non-negative amount of the starting mix (zero is allowed)."""
+    out = _dec(value, field)
+    if not out.is_finite():
+        raise ValueError(f"{field} must be a finite number, got {value!r}")
+    if out < 0:
+        raise ValueError(f"{field} must be >= 0, got {value!r}")
+    return out
 
 
 class Benchmark:
@@ -45,24 +62,34 @@ class Benchmark:
 
     # ------------------------------------------------ public API
     def start(self, owner: str, base: Any, quote: Any, price: Any) -> None:
-        """Record the mix once; a later call for the same owner changes nothing."""
+        """Record the mix once; a later call for the same owner changes nothing.
+
+        Every value is read and checked before anything is written, so a refused
+        start leaves the owner unstarted.
+        """
+        mix_base = _mix_value(base, "base")
+        mix_quote = _mix_value(quote, "quote")
+        mix_price = _mix_value(price, "price")
+
         key = self._key(owner)
         if self.store.get(key) is not None:
             return
         self.store.put(
             key,
             {
-                "base": str(_dec(base)),
-                "quote": str(_dec(quote)),
-                "price": str(_dec(price)),
+                "base": str(mix_base),
+                "quote": str(mix_quote),
+                "price": str(mix_price),
             },
         )
 
     def value(self, owner: str, price: Any) -> D:
         """What the starting mix is worth at *price*."""
         mix = self._mix(owner)
-        return _dec(mix["base"]) * _dec(price) + _dec(mix["quote"])
+        return _dec(mix["base"], "base") * _dec(price, "price") + _dec(
+            mix["quote"], "quote"
+        )
 
     def vs_hold(self, owner: str, equity: Any, price: Any) -> D:
         """The owner's equity minus the hold-the-mix shadow (positive is ahead)."""
-        return _dec(equity) - self.value(owner, price)
+        return _dec(equity, "equity") - self.value(owner, price)
