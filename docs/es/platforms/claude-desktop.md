@@ -11,7 +11,7 @@ Conecta Crow a Claude Desktop usando el transporte stdio local. Esto ejecuta los
 
 1. Ejecuta el generador de configuración:
    ```bash
-   cd crow
+   cd grajo
    npm run desktop-config
    ```
 

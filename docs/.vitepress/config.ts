@@ -435,7 +435,7 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/kh0pper/crow' },
+      { icon: 'github', link: 'https://github.com/maestro-press/grajo' },
     ],
 
     search: {
@@ -443,7 +443,7 @@ export default defineConfig({
     },
 
     footer: {
-      message: 'Released under the MIT License.',
+      message: 'Released under the Apache License 2.0.',
     },
   },
 })

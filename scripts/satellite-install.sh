@@ -31,7 +31,7 @@
 # Test hooks (read-only): SAT_OS_RELEASE and SAT_MEMINFO point the preflight at other files.
 set -euo pipefail
 
-SATELLITE_REPO="kh0pper/crow"
+SATELLITE_REPO="maestro-press/grajo"
 REPO_URL="https://github.com/${SATELLITE_REPO}.git"
 AGENT_PORT=3014
 GUARD_EXIT=78

@@ -98,5 +98,5 @@ Los skills son markdown — no hay paso de build. Para probar:
 
 ## Enviar
 
-1. Abre un issue de [Propuesta de Skill](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md)
+1. Abre un issue de [Propuesta de Skill](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md)
 2. Haz un fork del repo, agrega tu archivo de skill y envía un PR

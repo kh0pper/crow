@@ -2,7 +2,7 @@
   "name": "crow-design-kit-renderer",
   "private": true,
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "mermaid": "11.17.2",
     "puppeteer-core": "25.12.0",

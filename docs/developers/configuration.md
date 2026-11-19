@@ -144,7 +144,7 @@ These are intentionally **not** in `.env.example` — set them only if you know 
 
 ## Integration API keys
 
-Third-party integration keys (GitHub, Slack, Notion, Google Workspace, Discord, Trello, Canvas, Zotero, …) are documented inline in [`.env.example`](https://github.com/kh0pper/crow/blob/main/.env.example) with per-service setup links, and on each [integration page](/integrations/). Add one at a time; every one is optional.
+Third-party integration keys (GitHub, Slack, Notion, Google Workspace, Discord, Trello, Canvas, Zotero, …) are documented inline in [`.env.example`](https://github.com/maestro-press/grajo/blob/main/.env.example) with per-service setup links, and on each [integration page](/integrations/). Add one at a time; every one is optional.
 
 ## Bundle variables
 

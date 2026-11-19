@@ -98,5 +98,5 @@ Skills are markdown — there's no build step. To test:
 
 ## Submit
 
-1. Open a [Skill Proposal](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md) issue
+1. Open a [Skill Proposal](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md) issue
 2. Fork the repo, add your skill file, and submit a PR

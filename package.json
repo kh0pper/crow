@@ -3,6 +3,15 @@
   "version": "1.0.0",
   "description": "Self-hosted AI platform with persistent memory, encrypted P2P sharing, and 20+ integrations — works with Claude, ChatGPT, Gemini, and any MCP client",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maestro-press/grajo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maestro-press/grajo/issues"
+  },
+  "homepage": "https://github.com/maestro-press/grajo#readme",
   "scripts": {
     "test": "node scripts/run-suite.mjs",
     "setup": "node scripts/setup.js",

@@ -1,6 +1,6 @@
 # Crow
 
-[![Tests](https://github.com/kh0pper/crow/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/kh0pper/crow/actions/workflows/test.yml)
+[![Tests](https://github.com/maestro-press/grajo/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/maestro-press/grajo/actions/workflows/test.yml)
 
 Crow is a modular, agentic framework and MCP platform that integrates with the services and AI tools you already use — run on hardware you own, with local or cloud models. It brings persistent memory, research, agents, P2P sharing, and a full self-hosted app ecosystem into one private interface that your AI clients can reach natively.
 
@@ -119,7 +119,7 @@ A permanent free server that never sleeps, with local SQLite and no external dat
 ### Desktop (Claude Desktop)
 
 ```bash
-git clone https://github.com/kh0pper/crow.git && cd crow
+git clone https://github.com/maestro-press/grajo.git && cd grajo
 npm run setup
 npm run desktop-config  # Copy output to Claude Desktop config
 ```
@@ -129,7 +129,7 @@ npm run desktop-config  # Copy output to Claude Desktop config
 ### Developer (Claude Code)
 
 ```bash
-cd crow
+cd grajo
 npm run setup
 claude  # Loads .mcp.json + CLAUDE.md automatically
 ```
@@ -139,11 +139,11 @@ claude  # Loads .mcp.json + CLAUDE.md automatically
 ### Raspberry Pi / Self-Hosted (Crow OS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh | bash
 crow status
 ```
 
-Installs Crow v1.1.0 as a persistent service with the `crow` CLI for managing bundles and updates. Supports Raspberry Pi, Debian, and Ubuntu. To read the script before running it, download it first: `curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh`, then `less crow-install.sh`, then `bash crow-install.sh`. After install, Crow keeps itself up to date from the main branch. To stay on v1.1.0, turn off Crow's automatic code updates: in the Crow's Nest dashboard under Settings, Updates, or by setting `CROW_AUTO_UPDATE=0` in `~/.crow/.env` and restarting Crow. (`--no-auto-updates` is a different option: it only skips the operating system's automatic security updates.)
+Installs Crow v1.1.0 as a persistent service with the `crow` CLI for managing bundles and updates. Supports Raspberry Pi, Debian, and Ubuntu. To read the script before running it, download it first: `curl -fsSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh -o crow-install.sh`, then `less crow-install.sh`, then `bash crow-install.sh`. After install, Crow keeps itself up to date from the main branch. To stay on v1.1.0, turn off Crow's automatic code updates: in the Crow's Nest dashboard under Settings, Updates, or by setting `CROW_AUTO_UPDATE=0` in `~/.crow/.env` and restarting Crow. (`--no-auto-updates` is a different option: it only skips the operating system's automatic security updates.)
 
 → **[Full setup guide](https://maestro.press/software/crow/getting-started/full-setup)**
 
@@ -195,4 +195,4 @@ Full documentation at **[maestro.press/software/crow](https://maestro.press/soft
 
 ## License
 
-MIT
+Apache-2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). Releases before this change were published under the MIT License.

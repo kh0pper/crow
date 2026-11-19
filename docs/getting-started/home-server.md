@@ -24,7 +24,7 @@ Common choices:
 One command installs Crow and all dependencies:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh | bash
 ```
 
 ::: warning Supported platforms
@@ -33,7 +33,7 @@ The install script supports **Debian/Ubuntu family systems only** (Debian, Ubunt
 
 ::: tip Prefer to inspect the script first?
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh
+curl -fsSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh -o crow-install.sh
 less crow-install.sh   # Review the script
 bash crow-install.sh   # Run it
 ```
@@ -86,7 +86,7 @@ A home server is private by default — you don't need to do anything extra for 
 - **Everything sensitive requires auth.** The dashboard has a password (with optional two-factor authentication in Settings → Two-Factor Auth, plus automatic lockout after repeated failures); remote AI clients authenticate with OAuth; local clients use a token you generate from the dashboard's Connect panel.
 - **Keep auto-update on** (it's on by default) so security fixes arrive without you thinking about them.
 
-For the full picture — what's public by default, how keys are stored, what to do if something leaks — see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
+For the full picture — what's public by default, how keys are stored, what to do if something leaks — see the [Security Guide](https://github.com/maestro-press/grajo/blob/main/SECURITY.md).
 
 ## Connect Your AI Platform
 

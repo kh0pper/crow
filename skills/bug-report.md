@@ -44,7 +44,7 @@ Keep the conversation natural. Don't dump all questions at once — ask follow-u
 2. If duplicate found: Show the existing issue and ask if it's the same problem
 3. If no duplicate: Create the issue
 
-**For Crow repository** (`kh0pper/crow`): Use the bug-report template format:
+**For Crow repository** (`maestro-press/grajo`): Use the bug-report template format:
 ```markdown
 ## Description
 [User's description]

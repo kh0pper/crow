@@ -8,14 +8,14 @@ Integraciones, skills y bundles aportados por la comunidad para Crow.
 |------|--------|-------------|---------|--------|
 | **Obsidian** | Crow | Búsqueda en el vault de Obsidian, lectura de notas, sincronización de proyectos | `OBSIDIAN_VAULT_PATH` en `.env` | Oficial |
 | **Home Assistant** | Crow | Control de dispositivos del hogar inteligente con puntos de control de seguridad | `HA_URL` + `HA_TOKEN` en `.env` | Oficial |
-| *Tu integración aquí* | — | [Envía una integración →](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) | — | — |
+| *Tu integración aquí* | — | [Envía una integración →](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md) | — | — |
 
 ## Skills
 
 | Nombre | Autor | Descripción | Disparadores | Estado |
 |------|--------|-------------|----------|--------|
 | **bug-report** | Crow | Reporte de bugs y solicitudes de funcionalidades — funciona con o sin GitHub | "report bug", "feature request", "found a bug" | Oficial |
-| *Tu skill aquí* | — | [Propón un skill →](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md) | — | — |
+| *Tu skill aquí* | — | [Propón un skill →](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md) | — | — |
 
 ## Bundles
 
@@ -30,8 +30,8 @@ Integraciones, skills y bundles aportados por la comunidad para Crow.
 
 ## Envía tu contribución
 
-1. **Integraciones** — [Abre una solicitud de integración](https://github.com/kh0pper/crow/issues/new?template=integration-request.md)
-2. **Skills** — [Abre una propuesta de skill](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md)
+1. **Integraciones** — [Abre una solicitud de integración](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md)
+2. **Skills** — [Abre una propuesta de skill](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md)
 3. **Bundles** — Sigue la [guía de bundles](./bundles) y luego envía un PR
 
 Después de que tu PR se fusione, tu contribución aparecerá listada aquí.

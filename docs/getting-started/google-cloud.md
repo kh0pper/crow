@@ -60,7 +60,7 @@ curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt-get install -y nodejs git
 
 # Clone and set up Crow
-git clone https://github.com/kh0pper/crow.git ~/crow
+git clone https://github.com/maestro-press/grajo.git ~/crow
 cd ~/crow
 npm install
 npm run setup

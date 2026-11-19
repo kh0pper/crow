@@ -8,14 +8,14 @@ Community-contributed integrations, skills, and bundles for Crow.
 |------|--------|-------------|---------|--------|
 | **Obsidian** | Crow | Obsidian vault search, note reading, project sync | `OBSIDIAN_VAULT_PATH` in `.env` | Official |
 | **Home Assistant** | Crow | Smart home device control with safety checkpoints | `HA_URL` + `HA_TOKEN` in `.env` | Official |
-| *Your integration here* | — | [Submit an integration →](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) | — | — |
+| *Your integration here* | — | [Submit an integration →](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md) | — | — |
 
 ## Skills
 
 | Name | Author | Description | Triggers | Status |
 |------|--------|-------------|----------|--------|
 | **bug-report** | Crow | Bug/feature reporting — works with or without GitHub | "report bug", "feature request", "found a bug" | Official |
-| *Your skill here* | — | [Propose a skill →](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md) | — | — |
+| *Your skill here* | — | [Propose a skill →](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md) | — | — |
 
 ## Bundles
 
@@ -30,8 +30,8 @@ Community-contributed integrations, skills, and bundles for Crow.
 
 ## Submit Your Contribution
 
-1. **Integrations** — [Open an integration request](https://github.com/kh0pper/crow/issues/new?template=integration-request.md)
-2. **Skills** — [Open a skill proposal](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md)
+1. **Integrations** — [Open an integration request](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md)
+2. **Skills** — [Open a skill proposal](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md)
 3. **Bundles** — Follow the [bundles guide](./bundles), then submit a PR
 
 After your PR is merged, your contribution will be listed here.

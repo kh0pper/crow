@@ -14,7 +14,7 @@ const { isPublicEgressIp } = await appImport("servers/shared/ip-classify.js");
 const { guardedRequest } = await appImport("servers/shared/fetch-page.js");
 
 const FETCH_TIMEOUT_MS = 20000;
-const USER_AGENT = "Mozilla/5.0 (compatible; Crow-Reader/1.0; +https://github.com/kh0pper/crow)";
+const USER_AGENT = "Mozilla/5.0 (compatible; Crow-Reader/1.0; +https://github.com/maestro-press/grajo)";
 
 const MIME_BY_EXT = {
   ".pdf": "application/pdf", ".html": "text/html", ".htm": "text/html",

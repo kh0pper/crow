@@ -26,8 +26,8 @@ La instalación completa inicia todos los servicios de Crow juntos: el gateway M
 ## Paso 1: Clonar y Configurar
 
 ```bash
-git clone https://github.com/kh0pper/crow.git
-cd crow
+git clone https://github.com/maestro-press/grajo.git
+cd grajo
 cp .env.example .env
 cp .env.garage.example .env.garage
 ```

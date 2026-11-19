@@ -41,8 +41,8 @@ Crea configuraciones de Docker Compose con conjuntos curados de integraciones pa
 ## Inicio rápido
 
 ```bash
-git clone https://github.com/kh0pper/crow.git
-cd crow
+git clone https://github.com/maestro-press/grajo.git
+cd grajo
 npm run setup
 ```
 
@@ -62,6 +62,6 @@ Explora las contribuciones existentes de la comunidad y envía las tuyas.
 
 ## Recursos
 
-- [CONTRIBUTING.md](https://github.com/kh0pper/crow/blob/main/CONTRIBUTING.md) — Lineamientos completos para contribuidores
-- [GitHub Issues](https://github.com/kh0pper/crow/issues) — Reporta errores y propone ideas
+- [CONTRIBUTING.md](https://github.com/maestro-press/grajo/blob/main/CONTRIBUTING.md) — Lineamientos completos para contribuidores
+- [GitHub Issues](https://github.com/maestro-press/grajo/issues) — Reporta errores y propone ideas
 - [Documentación de arquitectura](../architecture/) — Diseño del sistema y APIs de los servidores

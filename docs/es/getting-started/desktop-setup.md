@@ -11,8 +11,8 @@ Ejecuta Crow localmente con Claude Desktop usando transporte stdio. No necesitas
 ## Paso 1: Clona e Instala
 
 ```bash
-git clone https://github.com/kh0pper/crow.git
-cd crow
+git clone https://github.com/maestro-press/grajo.git
+cd grajo
 npm run setup
 ```
 
@@ -28,7 +28,7 @@ cp .env.example .env
 
 Edita `.env` y agrega claves para los servicios que quieras. Todos los servidores principales (memoria, investigación, compartición, blog) funcionan sin ninguna clave de API — solo el almacenamiento (Garage, la extensión File Storage) y las integraciones externas necesitan claves.
 
-> **Nota de seguridad**: Tu archivo `.env` contiene claves de API que funcionan como contraseñas. Nunca lo compartas, lo subas a GitHub ni publiques su contenido en ningún lugar. El archivo ya está incluido en `.gitignore` para que git no lo rastree, pero siempre verifica antes de hacer push de tu código. Consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md) para más información sobre cómo mantener tus claves seguras.
+> **Nota de seguridad**: Tu archivo `.env` contiene claves de API que funcionan como contraseñas. Nunca lo compartas, lo subas a GitHub ni publiques su contenido en ningún lugar. El archivo ya está incluido en `.gitignore` para que git no lo rastree, pero siempre verifica antes de hacer push de tu código. Consulta la [Guía de Seguridad](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) para más información sobre cómo mantener tus claves seguras.
 
 ## Paso 3: Genera la Configuración de Claude Desktop
 

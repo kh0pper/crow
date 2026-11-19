@@ -22,7 +22,7 @@ Cada clave de API solo otorga acceso a ese único servicio — una clave de GitH
 - **Nunca compartas claves** en capturas de pantalla, mensajes o repositorios públicos
 - **Si una clave se filtra**, revócala de inmediato en el sitio web del servicio y crea una nueva
 
-Para una guía de seguridad completa y amigable para principiantes, consulta [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
+Para una guía de seguridad completa y amigable para principiantes, consulta [SECURITY.md](https://github.com/maestro-press/grajo/blob/main/SECURITY.md).
 
 ## Integraciones externas
 

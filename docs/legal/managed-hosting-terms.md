@@ -57,7 +57,7 @@ You may not use the service for:
 
 ## 8. Intellectual Property
 
-- **Crow is open source** — Crow is released under the MIT License. You may self-host it at any time.
+- **Crow is open source** — Crow is released under the Apache License 2.0. You may self-host it at any time.
 - **Your data is yours** — Maestro Press claims no ownership of your memories, research, blog posts, files, or any other data stored in your instance.
 
 ## 9. Limitation of Liability

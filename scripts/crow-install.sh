@@ -9,10 +9,10 @@
 # follow the manual path in docs/getting-started/ instead.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh | bash
 #
 # Or download and inspect first:
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh -o crow-install.sh
+#   curl -sSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh -o crow-install.sh
 #   less crow-install.sh
 #   bash crow-install.sh
 #
@@ -23,17 +23,19 @@
 # Environment:
 #   CROW_INSTALL_REF   release tag, branch, or commit to install (default v1.1.0;
 #                      CROW_INSTALL_REF=main installs the tip of main)
+#   CROW_INSTALL_SHA   optional expected commit sha (40 hex) of the release; the
+#                      install stops if the checked-out commit differs
 #
 # The one-liner above feeds the script to bash on stdin, so an option has to go
 # to bash itself and not after the URL:
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | bash -s -- --no-auto-updates
-#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/v1.1.0/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
+#   curl -sSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh | bash -s -- --no-auto-updates
+#   curl -sSL https://raw.githubusercontent.com/maestro-press/grajo/v1.1.0/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
 
 set -euo pipefail
 
 # The release this script installs. The release checklist bumps it together with the README and the guide pages.
 CROW_INSTALL_REF="${CROW_INSTALL_REF:-v1.1.0}"
-CROW_REPO_URL="${CROW_REPO_URL:-https://github.com/kh0pper/crow.git}"
+CROW_REPO_URL="${CROW_REPO_URL:-https://github.com/maestro-press/grajo.git}"
 
 CROW_HOME="$HOME/.crow"
 CROW_APP="$CROW_HOME/app"
@@ -75,6 +77,24 @@ case "$CROW_INSTALL_REF" in
     exit 1
     ;;
 esac
+
+# CROW_INSTALL_SHA is optional. When it is set it must be the FULL 40-character
+# lowercase hex commit sha the checkout has to land on: anything else can never
+# match a real commit, so it is refused here instead of after a clone.
+if [ -n "${CROW_INSTALL_SHA:-}" ]; then
+  case "$CROW_INSTALL_SHA" in
+    *[!0-9a-f]*)
+      error "Invalid CROW_INSTALL_SHA: $CROW_INSTALL_SHA"
+      error "Use the full 40-character lowercase hex commit sha of the release."
+      exit 1
+      ;;
+  esac
+  if [ "${#CROW_INSTALL_SHA}" -ne 40 ]; then
+    error "Invalid CROW_INSTALL_SHA: $CROW_INSTALL_SHA"
+    error "Use the full 40-character lowercase hex commit sha of the release."
+    exit 1
+  fi
+fi
 
 # ─── Prompt helpers (F-INSTALL-5/-7) ──────────────────────
 # The documented `curl … | bash` one-liner has no usable stdin (the script
@@ -1457,6 +1477,24 @@ add_crow_to_path() {
   log "Added 'crow' command to PATH (restart shell or run: source ~/.bashrc)"
 }
 
+# verify_crow_install_sha <dest> — the optional integrity pin (CROW_INSTALL_SHA).
+# Nothing happens when it is unset. When it is set, the checkout must BE that
+# commit: a release that moved, or a clone that landed elsewhere, ends the
+# install (fail closed) and removes the half-made checkout, so a rerun cannot
+# take the "already cloned" path and keep the wrong tree. Called at BOTH exits of
+# clone_crow_release, so the comparison exists once.
+verify_crow_install_sha() { # <dest>
+  local dest="$1" actual=""
+  [ -n "${CROW_INSTALL_SHA:-}" ] || return 0
+  actual="$(git -C "$dest" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$actual" != "$CROW_INSTALL_SHA" ]; then
+    error "CROW_INSTALL_SHA mismatch: expected $CROW_INSTALL_SHA, but the checkout at $dest is ${actual:-unknown}"
+    rm -rf "$dest"
+    exit 1
+  fi
+  log "Release commit verified ($actual)"
+}
+
 # clone_crow_release <dest> — clone Crow and leave the checkout on a LOCAL
 # branch named main, at the release this script pins (CROW_INSTALL_REF).
 # The gateway's auto-updater only pulls when HEAD is the branch `main`
@@ -1473,6 +1511,7 @@ clone_crow_release() {
   local dest="$1"
   git clone "$CROW_REPO_URL" "$dest"
   if [ "$CROW_INSTALL_REF" = "main" ]; then
+    verify_crow_install_sha "$dest"
     return 0
   fi
   # A plain clone already has origin/main (the remote's default branch); fetch
@@ -1498,6 +1537,7 @@ clone_crow_release() {
     exit 1
   fi
   git -C "$dest" branch --set-upstream-to=origin/main main
+  verify_crow_install_sha "$dest"
 }
 
 # Test seam: tests source the helpers without executing the install.
@@ -1514,7 +1554,7 @@ if ! check_platform; then
   error "Unsupported platform: this installer supports Debian/Ubuntu family systems only"
   error "(Debian, Ubuntu, Raspberry Pi OS, and derivatives — it installs via apt)."
   error "For macOS, Windows, or other Linux distributions, follow the manual setup"
-  error "path in docs/getting-started/ (https://github.com/kh0pper/crow/tree/main/docs/getting-started)."
+  error "path in docs/getting-started/ (https://github.com/maestro-press/grajo/tree/main/docs/getting-started)."
   exit 1
 fi
 

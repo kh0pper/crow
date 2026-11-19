@@ -151,7 +151,7 @@ No requiere autenticación — no expone secretos.
 - La **Content Security Policy** restringe la carga de recursos — permite Google Fonts (dashboard), scripts del mismo origen y fuentes de media de podcasts
 - El **endpoint `/crow.md`** está protegido por OAuth cuando la autenticación está habilitada, ya que expone contexto de comportamiento
 
-Para el modelo completo de acceso público/privado, consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
+Para el modelo completo de acceso público/privado, consulta la [Guía de Seguridad](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default).
 
 ## Modo router
 

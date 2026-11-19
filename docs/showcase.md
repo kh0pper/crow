@@ -58,4 +58,4 @@ Build a searchable personal knowledge base over time. Store facts, decisions, pr
 
 ## Submit Your Use Case
 
-Using Crow in an interesting way? Open an issue on [GitHub](https://github.com/kh0pper/crow) with the **Showcase Submission** label and describe your setup. We will add it here.
+Using Crow in an interesting way? Open an issue on [GitHub](https://github.com/maestro-press/grajo) with the **Showcase Submission** label and describe your setup. We will add it here.

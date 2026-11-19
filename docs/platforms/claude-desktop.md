@@ -11,7 +11,7 @@ Connect Crow to Claude Desktop using local stdio transport. This runs the MCP se
 
 1. Run the config generator:
    ```bash
-   cd crow
+   cd grajo
    npm run desktop-config
    ```
 

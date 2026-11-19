@@ -7,7 +7,7 @@ Conecta Crow a Grok de xAI usando su soporte de Remote MCP Tools.
 - Gateway de Crow desplegado y funcionando ([guía de Primeros pasos](/es/getting-started/))
 - Una cuenta de API de xAI
 
-Cualquiera de las dos rutas requiere que tu gateway de Crow sea accesible desde la internet pública (los servidores de xAI lo llaman directamente) — un gateway accesible solo por Tailscale no funcionará con Grok. Recuerda las [reglas de exposición de red](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) antes de exponer endpoints MCP públicamente.
+Cualquiera de las dos rutas requiere que tu gateway de Crow sea accesible desde la internet pública (los servidores de xAI lo llaman directamente) — un gateway accesible solo por Tailscale no funcionará con Grok. Recuerda las [reglas de exposición de red](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default) antes de exponer endpoints MCP públicamente.
 
 ## Opción A: Connectors de grok.com (interfaz de consumidor)
 

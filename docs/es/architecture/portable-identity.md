@@ -80,7 +80,7 @@ scp crow-backup.tar.gz newmachine:~/
 
 # En la nueva máquina
 tar xzf crow-backup.tar.gz -C ~/
-git clone https://github.com/kh0pper/crow.git ~/.crow/app  # o actualizar el existente
+git clone https://github.com/maestro-press/grajo.git ~/.crow/app  # o actualizar el existente
 cd ~/.crow/app && npm run setup
 ```
 

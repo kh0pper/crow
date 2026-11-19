@@ -12,7 +12,7 @@ Access Crow from your Android device with the native app or as a Progressive Web
 
 Download the latest Crow Android app:
 
-[Download Crow for Android (v1.5.0)](https://github.com/kh0pper/crow/releases/download/android-v1.5.0/app-release.apk)
+[Download Crow for Android (v1.5.0)](https://github.com/maestro-press/grajo/releases/download/android-v1.5.0/app-release.apk)
 
 This version works on the newest Android phones (Android 15 and the 16 KB memory layout).
 
@@ -20,7 +20,7 @@ This version works on the newest Android phones (Android 15 and the 16 KB memory
 This update changes the app's signature, so Android won't install it on top of an older Crow app. **Uninstall your existing Crow app first, then install this one.** You'll re-pair your glasses and re-enter your gateway address once — a one-time step.
 :::
 
-Looking for an older build? See the [Releases page](https://github.com/kh0pper/crow/releases).
+Looking for an older build? See the [Releases page](https://github.com/maestro-press/grajo/releases).
 
 ### Step 2: Enable unknown sources
 

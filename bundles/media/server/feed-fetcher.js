@@ -6,7 +6,7 @@
  */
 
 const FETCH_TIMEOUT = 10000;
-const USER_AGENT = "Crow/1.0 (RSS Reader; +https://github.com/kh0pper/crow)";
+const USER_AGENT = "Crow/1.0 (RSS Reader; +https://github.com/maestro-press/grajo)";
 
 /**
  * Fetch a feed URL and return the raw XML text.

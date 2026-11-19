@@ -48,8 +48,8 @@ git --version
 ## Install Crow
 
 ```bash
-git clone https://github.com/kh0pper/crow.git
-cd crow
+git clone https://github.com/maestro-press/grajo.git
+cd grajo
 npm run setup
 ```
 
@@ -84,7 +84,7 @@ Restart Claude Desktop. Look for the MCP server icons in the input area.
 Claude Code automatically reads `.mcp.json` from your project:
 
 ```bash
-cd crow
+cd grajo
 claude
 ```
 

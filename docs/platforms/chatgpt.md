@@ -6,7 +6,7 @@ ChatGPT connects to MCP servers **from OpenAI's cloud**, so it can only reach a 
 **Use instead:** any of the local MCP clients on the [platforms index](./index) — they run on your machine and reach your private Crow directly.
 :::
 
-The instructions below apply **only** to the unsupported, advanced case where you have made your gateway publicly reachable yourself (your own domain and reverse proxy — read [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md) first). Tailscale Funnel is **not** such a path: Crow's gateway rejects funneled requests to MCP and OAuth routes by design.
+The instructions below apply **only** to the unsupported, advanced case where you have made your gateway publicly reachable yourself (your own domain and reverse proxy — read [SECURITY.md](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) first). Tailscale Funnel is **not** such a path: Crow's gateway rejects funneled requests to MCP and OAuth routes by design.
 
 ## Prerequisites
 

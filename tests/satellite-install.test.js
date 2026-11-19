@@ -125,7 +125,7 @@ test("clean box: dry-run passes preflight, prints the plan, changes nothing", ()
   const r = dryRun(box);
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, /preflight passed/);
-  assert.match(r.out, /plan: .*git clone https:\/\/github\.com\/kh0pper\/crow\.git/);
+  assert.match(r.out, /plan: .*git clone https:\/\/github\.com\/maestro-press\/grajo\.git/);
   assert.match(r.out, new RegExp(`plan: .*checkout .*${SHA}`));
   assert.match(r.out, /plan: .*systemd-run --user --scope -p MemoryMax=600M nice .*npm ci --omit=dev/);
   assert.match(r.out, /plan: .*loginctl enable-linger alex/);

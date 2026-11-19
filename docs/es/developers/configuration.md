@@ -114,7 +114,7 @@ Estas, de forma intencional, **no** están en `.env.example` — defínelas solo
 
 ## Claves de API de integraciones
 
-Las claves de integraciones de terceros (GitHub, Slack, Notion, Google Workspace, Discord, Trello, Canvas, Zotero, …) están documentadas en línea en [`.env.example`](https://github.com/kh0pper/crow/blob/main/.env.example) con enlaces de configuración por servicio, y en cada [página de integración](/es/integrations/). Agrégalas de una en una; todas son opcionales.
+Las claves de integraciones de terceros (GitHub, Slack, Notion, Google Workspace, Discord, Trello, Canvas, Zotero, …) están documentadas en línea en [`.env.example`](https://github.com/maestro-press/grajo/blob/main/.env.example) con enlaces de configuración por servicio, y en cada [página de integración](/es/integrations/). Agrégalas de una en una; todas son opcionales.
 
 ## Variables de bundles
 

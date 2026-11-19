@@ -9,7 +9,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 
 const FETCH_TIMEOUT = 15000;
-const USER_AGENT = "Mozilla/5.0 (compatible; Crow/1.0; +https://github.com/kh0pper/crow)";
+const USER_AGENT = "Mozilla/5.0 (compatible; Crow/1.0; +https://github.com/maestro-press/grajo)";
 const WORDS_PER_MINUTE = 200;
 
 /** Returns true if this image URL is a generic Google/platform logo, not article-specific */

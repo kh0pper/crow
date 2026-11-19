@@ -20,7 +20,7 @@ import urllib.request
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 MAX_PER_PAGE = 25
 ABSTRACT_CAP = 1500
-USER_AGENT = "rookery-bundle/1.0 (research-mcp; +https://github.com/kh0pper/crow)"
+USER_AGENT = "rookery-bundle/1.0 (research-mcp; +https://github.com/maestro-press/grajo)"
 
 
 def reconstruct_abstract(inverted_index, cap=ABSTRACT_CAP):

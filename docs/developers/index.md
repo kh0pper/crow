@@ -41,8 +41,8 @@ Create Docker Compose configurations with curated integration sets for specific 
 ## Quick Start
 
 ```bash
-git clone https://github.com/kh0pper/crow.git
-cd crow
+git clone https://github.com/maestro-press/grajo.git
+cd grajo
 npm run setup
 ```
 
@@ -62,6 +62,6 @@ Browse existing community contributions and submit your own.
 
 ## Resources
 
-- [CONTRIBUTING.md](https://github.com/kh0pper/crow/blob/main/CONTRIBUTING.md) — Full contributor guidelines
-- [GitHub Issues](https://github.com/kh0pper/crow/issues) — Report bugs and propose ideas
+- [CONTRIBUTING.md](https://github.com/maestro-press/grajo/blob/main/CONTRIBUTING.md) — Full contributor guidelines
+- [GitHub Issues](https://github.com/maestro-press/grajo/issues) — Report bugs and propose ideas
 - [Architecture Docs](../architecture/) — System design and server APIs

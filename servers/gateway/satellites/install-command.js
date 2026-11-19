@@ -12,7 +12,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getBootSha } from "../convergence.js";
 
-export const SATELLITE_REPO = "kh0pper/crow";
+export const SATELLITE_REPO = "maestro-press/grajo";
 export const INSTALL_SCRIPT_PATH = "scripts/satellite-install.sh";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");

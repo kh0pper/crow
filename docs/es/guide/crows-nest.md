@@ -237,7 +237,7 @@ Si tu proxy inverso corre en la misma máquina, normalmente no necesitas `CROW_D
 
 Para acceso remoto sin abrir el Crow's Nest públicamente, usa [Tailscale](/es/getting-started/tailscale-setup). Las IPs de Tailscale caen dentro del rango `100.64.0.0/10` en el que el Crow's Nest ya confía.
 
-Para el panorama completo de qué es público y qué es privado en Crow, consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
+Para el panorama completo de qué es público y qué es privado en Crow, consulta la [Guía de Seguridad](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default).
 
 ## Lanzador de aplicaciones
 

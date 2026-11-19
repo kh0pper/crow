@@ -8,8 +8,8 @@ Conecta Crow a [Windsurf](https://devin.ai/desktop) — el IDE impulsado por IA 
 
 1. Clona y configura Crow:
    ```bash
-   git clone https://github.com/kh0pper/crow.git
-   cd crow
+   git clone https://github.com/maestro-press/grajo.git
+   cd grajo
    npm run setup
    ```
 

@@ -20,7 +20,7 @@ hero:
       link: /es/guide/sharing
     - theme: alt
       text: Ver en GitHub
-      link: https://github.com/kh0pper/crow
+      link: https://github.com/maestro-press/grajo
 
 features:
   - icon:

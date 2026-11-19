@@ -146,7 +146,7 @@ A summary of the technical measures protecting your data across all deployment m
 If you find a security vulnerability in Crow:
 
 - **Do not** post it publicly as a GitHub issue
-- Instead, use [GitHub Security Advisories](https://github.com/kh0pper/crow/security/advisories/new) to report it privately
+- Instead, use [GitHub Security Advisories](https://github.com/maestro-press/grajo/security/advisories/new) to report it privately
 - Include steps to reproduce the issue if possible
 
 We take security reports seriously and will respond as quickly as we can.

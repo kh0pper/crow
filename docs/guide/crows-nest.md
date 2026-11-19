@@ -236,7 +236,7 @@ If your reverse proxy runs on the same machine, you usually don't need `CROW_DAS
 
 For remote access without opening the Crow's Nest publicly, use [Tailscale](/getting-started/tailscale-setup). Tailscale IPs fall within the `100.64.0.0/10` range that the Crow's Nest already trusts.
 
-For the full picture of what's public and what's private across Crow, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
+For the full picture of what's public and what's private across Crow, see the [Security Guide](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default).
 
 ## App Launcher
 

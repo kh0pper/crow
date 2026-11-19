@@ -128,5 +128,5 @@ Esto genera los fragmentos de código para todos los archivos anteriores — sol
 
 ## Envíala
 
-1. Abre un issue de [solicitud de integración](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) para discutir tu idea
+1. Abre un issue de [solicitud de integración](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md) para discutir tu idea
 2. Haz un fork del repo, implementa la integración y envía un PR

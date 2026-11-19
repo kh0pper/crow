@@ -103,7 +103,7 @@ to fill embeddings.
 ### Schedule it
 
 Run the sync on a timer. A macOS launchd template is provided at
-[`examples/notion-sync/com.crow.notion-sync.plist.example`](https://github.com/kh0pper/crow/blob/main/examples/notion-sync/com.crow.notion-sync.plist.example)
+[`examples/notion-sync/com.crow.notion-sync.plist.example`](https://github.com/maestro-press/grajo/blob/main/examples/notion-sync/com.crow.notion-sync.plist.example)
 (fill in the placeholder paths, copy to `~/Library/LaunchAgents/`, `launchctl load`).
 
 ::: tip Why not crow_create_schedule?

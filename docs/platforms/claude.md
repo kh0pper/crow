@@ -6,7 +6,7 @@ claude.ai and the Claude mobile app connect to MCP servers **from Anthropic's cl
 **Use instead:** [Claude Desktop](./claude-desktop) or [Claude Code](./claude-code) — both run on your own machine, reach your private Crow directly, and share the same memories.
 :::
 
-The instructions below apply **only** to the unsupported, advanced case where you have made your gateway publicly reachable yourself (your own domain and reverse proxy — read [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md) first). Tailscale Funnel is **not** such a path: Crow's gateway rejects funneled requests to MCP and OAuth routes by design.
+The instructions below apply **only** to the unsupported, advanced case where you have made your gateway publicly reachable yourself (your own domain and reverse proxy — read [SECURITY.md](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) first). Tailscale Funnel is **not** such a path: Crow's gateway rejects funneled requests to MCP and OAuth routes by design.
 
 ## Prerequisites
 

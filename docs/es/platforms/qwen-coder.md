@@ -16,8 +16,8 @@ Ideal para desarrollo — ejecuta los servidores de Crow directamente en tu máq
 
 1. Clona y configura Crow:
    ```bash
-   git clone https://github.com/kh0pper/crow.git
-   cd crow
+   git clone https://github.com/maestro-press/grajo.git
+   cd grajo
    npm run setup
    ```
 

@@ -26,11 +26,11 @@ For a free server that avoids all of these issues, use [Oracle Cloud](./oracle-c
 3. Copy your **Database URL** (starts with `libsql://`)
 4. Create an auth token and copy it
 
-> **Security note**: Your Turso credentials (database URL and auth token) grant full access to your Crow database. Treat them like passwords — never share them publicly or commit them to code. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for more details.
+> **Security note**: Your Turso credentials (database URL and auth token) grant full access to your Crow database. Treat them like passwords — never share them publicly or commit them to code. See the [Security Guide](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) for more details.
 
 ### Step 2: Deploy to Render
 
-1. Fork the [Crow repository](https://github.com/kh0pper/crow) on GitHub
+1. Fork the [Crow repository](https://github.com/maestro-press/grajo) on GitHub
 2. Go to [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**
 3. Connect your forked repo — Render will detect the `render.yaml`
 4. Set the required environment variables:
@@ -69,7 +69,7 @@ Then follow the platform-specific guide:
 
 ### Step 5: Add Integrations (Optional)
 
-> **Security note**: API keys are like passwords — each one grants access to a service on your behalf. Only add keys for services you actually need, and never share them. If a key is ever exposed, revoke it immediately at the service's website and create a new one. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for step-by-step instructions.
+> **Security note**: API keys are like passwords — each one grants access to a service on your behalf. Only add keys for services you actually need, and never share them. If a key is ever exposed, revoke it immediately at the service's website and create a new one. See the [Security Guide](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) for step-by-step instructions.
 
 Add API keys for external services in your Render dashboard under **Environment**:
 
@@ -93,7 +93,7 @@ When deployed to Render, your instance is on the public internet. Here's what th
 - **MCP endpoints** — Protected by OAuth 2.1. Only authorized AI clients can access your tools
 - **Setup page** (`/setup`) — Shows connection status but never exposes API keys
 
-Nothing personal is visible unless you publish it. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for details.
+Nothing personal is visible unless you publish it. See the [Security Guide](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default) for details.
 :::
 
 ### Verify

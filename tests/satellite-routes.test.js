@@ -165,7 +165,7 @@ test("not migrated: list is empty, writers answer 503 not_migrated", async () =>
 });
 
 test("install command: built from the one repo constant, crow's boot sha and the script's sha256", async () => {
-  assert.equal(SATELLITE_REPO, "kh0pper/crow");
+  assert.equal(SATELLITE_REPO, "maestro-press/grajo");
   const db = await freshDb();
   const sum = createHash("sha256").update(SCRIPT).digest("hex");
   let asked = null;

@@ -128,5 +128,5 @@ This outputs the code snippets for all the files above — just copy them in.
 
 ## Submit
 
-1. Open an [Integration Request](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) issue to discuss your idea
+1. Open an [Integration Request](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md) issue to discuss your idea
 2. Fork the repo, implement the integration, and submit a PR

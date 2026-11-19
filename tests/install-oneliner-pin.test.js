@@ -13,7 +13,7 @@ const ROOT = resolve(import.meta.dirname, "..");
 const INSTALLER = join(ROOT, "scripts", "crow-install.sh");
 
 // The documented one-liner URL, capturing the ref segment.
-const ONE_LINER = /raw\.githubusercontent\.com\/kh0pper\/crow\/([^\s/]+)\/scripts\/crow-install\.sh/g;
+const ONE_LINER = /raw\.githubusercontent\.com\/maestro-press\/grajo\/([^\s/]+)\/scripts\/crow-install\.sh/g;
 
 const PINNED_FILES = [
   "README.md",

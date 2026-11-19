@@ -22,7 +22,7 @@ Each API key only grants access to that one service — a leaked GitHub key can'
 - **Never share keys** in screenshots, messages, or public repositories
 - **If a key leaks**, revoke it immediately at the service's website and create a new one
 
-For a complete, beginner-friendly security guide, see [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
+For a complete, beginner-friendly security guide, see [SECURITY.md](https://github.com/maestro-press/grajo/blob/main/SECURITY.md).
 
 ## External Integrations
 

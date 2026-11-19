@@ -133,7 +133,7 @@ const MAX_TTL_SECONDS = 31536000; // one year
  * a privacy improvement, not just a CSP workaround.
  */
 const DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-const TILE_UA = "crow-ramble/0.1 (+https://github.com/kh0pper/crow)";
+const TILE_UA = "crow-ramble/0.1 (+https://github.com/maestro-press/grajo)";
 const TILE_TIMEOUT_MS = 8000;
 const TILE_CACHE_MAX = 500;
 const MAX_TILE_ZOOM = 19;

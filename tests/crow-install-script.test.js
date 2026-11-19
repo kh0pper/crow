@@ -2238,3 +2238,94 @@ test("N1c-19: the installer summary carries the WSL note only on WSL", () => {
   assert.doesNotMatch(s, /ask_yn[^\n]*WSL|WSL[^\n]*ask_yn/, "no prompt about WSL");
   assert.doesNotMatch(s, /wslconfig|portproxy|NetFirewallHyperV/, "the installer changes no Windows setting");
 });
+
+// ─── The optional integrity pin (CROW_INSTALL_SHA) ───────────────────────────
+// clone_crow_release must install exactly the commit CROW_INSTALL_SHA names, and
+// stop — removing the checkout — when the release moved. Everything here runs
+// against a local scratch repository: no network, no clone of the real project.
+
+/** git with an identity and a branch name supplied by -c flags, so the suite's
+ *  own ~/.gitconfig can never decide the branch name or fail a commit. */
+function gitIn(cwd, ...args) {
+  return execFileSync("git", [
+    "-c", "user.name=Crow Test",
+    "-c", "user.email=crow-test@example.invalid",
+    "-c", "init.defaultBranch=main",
+    "-c", "commit.gpgsign=false",
+    "-c", "tag.gpgsign=false",
+    "-C", cwd,
+    ...args,
+  ], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** A bare "remote" whose main is two commits ahead of its v9.9.9 tag:
+ *  A (tagged v9.9.9) → B (tip of main). Returns the commit ids A and B. */
+function shaPinFixture() {
+  const root = mkdtempSync(join(tmpdir(), "crow-sha-pin-"));
+  const work = join(root, "work");
+  const bare = join(root, "crow.git");
+
+  gitIn(root, "init", "-q", "work");
+  gitIn(work, "commit", "-q", "--allow-empty", "-m", "A");
+  gitIn(work, "tag", "v9.9.9");
+  const a = gitIn(work, "rev-parse", "HEAD").trim();
+
+  writeFileSync(join(work, "marker.txt"), "B\n");
+  gitIn(work, "add", "marker.txt");
+  gitIn(work, "commit", "-q", "-m", "B");
+  const b = gitIn(work, "rev-parse", "HEAD").trim();
+
+  gitIn(root, "init", "-q", "--bare", "crow.git");
+  gitIn(work, "remote", "add", "origin", bare);
+  gitIn(work, "push", "-q", "origin", "main");
+  gitIn(work, "push", "-q", "origin", "v9.9.9");
+
+  return { root, bare, a, b };
+}
+
+test("CROW_INSTALL_SHA: a matching commit sha installs the release", () => {
+  const { root, bare, a } = shaPinFixture();
+  const dest = join(root, "app");
+
+  const r = runWithHelpers(`clone_crow_release "${dest}"`, {
+    CROW_REPO_URL: bare,
+    CROW_INSTALL_REF: "v9.9.9",
+    CROW_INSTALL_SHA: a,
+    HOME: root,
+  });
+  assert.equal(r.status, 0, `clone_crow_release failed:\n${r.stdout}\n${r.stderr}`);
+  assert.equal(gitIn(dest, "rev-parse", "HEAD").trim(), a, "HEAD must be the pinned commit");
+  assert.equal(gitIn(dest, "symbolic-ref", "--short", "HEAD").trim(), "main");
+});
+
+test("CROW_INSTALL_SHA: a different (valid) sha fails closed and leaves no checkout", () => {
+  const { root, bare, b } = shaPinFixture();
+  const dest = join(root, "app");
+
+  const r = runWithHelpers(`clone_crow_release "${dest}"`, {
+    CROW_REPO_URL: bare,
+    CROW_INSTALL_REF: "v9.9.9",
+    CROW_INSTALL_SHA: b,
+    HOME: root,
+  });
+  assert.notEqual(r.status, 0, `a mismatched sha must fail:\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout + r.stderr, /CROW_INSTALL_SHA mismatch/, "the error must name the mismatch");
+  assert.equal(existsSync(dest), false, "the checkout must be removed so a rerun cannot keep the wrong tree");
+});
+
+test("CROW_INSTALL_SHA: a value that is not a full 40-hex sha is rejected", () => {
+  const { root, bare } = shaPinFixture();
+  const dest = join(root, "app");
+
+  for (const bad of ["abc", "a".repeat(39), "a".repeat(41), "Z".repeat(40)]) {
+    const r = runWithHelpers(`clone_crow_release "${dest}"`, {
+      CROW_REPO_URL: bare,
+      CROW_INSTALL_REF: "v9.9.9",
+      CROW_INSTALL_SHA: bad,
+      HOME: root,
+    });
+    assert.notEqual(r.status, 0, `CROW_INSTALL_SHA=${JSON.stringify(bad)} must be rejected`);
+    assert.match(r.stdout + r.stderr, /Invalid CROW_INSTALL_SHA/, `expected an error for ${JSON.stringify(bad)}`);
+    assert.equal(existsSync(dest), false, "nothing may be cloned for an invalid pin");
+  }
+});

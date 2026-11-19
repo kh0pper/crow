@@ -8,8 +8,8 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
 
 1. Clone and set up Crow:
    ```bash
-   git clone https://github.com/kh0pper/crow.git
-   cd crow
+   git clone https://github.com/maestro-press/grajo.git
+   cd grajo
    npm run setup
    ```
 

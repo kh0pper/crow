@@ -26,11 +26,11 @@ Para un servidor gratuito que evita todos estos problemas, usa [Oracle Cloud](./
 3. Copia tu **Database URL** (empieza con `libsql://`)
 4. Crea un token de autenticación y cópialo
 
-> **Nota de seguridad**: Tus credenciales de Turso (URL de la base de datos y token de autenticación) otorgan acceso completo a tu base de datos de Crow. Trátalas como contraseñas — nunca las compartas públicamente ni las subas en tu código. Consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md) para más detalles.
+> **Nota de seguridad**: Tus credenciales de Turso (URL de la base de datos y token de autenticación) otorgan acceso completo a tu base de datos de Crow. Trátalas como contraseñas — nunca las compartas públicamente ni las subas en tu código. Consulta la [Guía de Seguridad](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) para más detalles.
 
 ### Paso 2: Despliega en Render
 
-1. Haz un fork del [repositorio de Crow](https://github.com/kh0pper/crow) en GitHub
+1. Haz un fork del [repositorio de Crow](https://github.com/maestro-press/grajo) en GitHub
 2. Ve al [panel de Render](https://dashboard.render.com) → **New** → **Blueprint**
 3. Conecta tu repositorio bifurcado — Render detectará el `render.yaml`
 4. Configura las variables de entorno requeridas:
@@ -69,7 +69,7 @@ Luego sigue la guía específica de tu plataforma:
 
 ### Paso 5: Agrega Integraciones (Opcional)
 
-> **Nota de seguridad**: Las claves de API son como contraseñas — cada una otorga acceso a un servicio en tu nombre. Agrega solo las claves de los servicios que realmente necesitas, y nunca las compartas. Si una clave llega a exponerse, revócala de inmediato en el sitio web del servicio y crea una nueva. Consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md) para instrucciones paso a paso.
+> **Nota de seguridad**: Las claves de API son como contraseñas — cada una otorga acceso a un servicio en tu nombre. Agrega solo las claves de los servicios que realmente necesitas, y nunca las compartas. Si una clave llega a exponerse, revócala de inmediato en el sitio web del servicio y crea una nueva. Consulta la [Guía de Seguridad](https://github.com/maestro-press/grajo/blob/main/SECURITY.md) para instrucciones paso a paso.
 
 Agrega claves de API para servicios externos en tu panel de Render, bajo **Environment**:
 
@@ -93,7 +93,7 @@ Cuando se despliega en Render, tu instancia está en la internet pública. Esto 
 - **Endpoints MCP** — Protegidos por OAuth 2.1. Solo los clientes de IA autorizados pueden acceder a tus herramientas
 - **Página de configuración** (`/setup`) — Muestra el estado de las conexiones pero nunca expone claves de API
 
-Nada personal es visible a menos que lo publiques. Consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) para más detalles.
+Nada personal es visible a menos que lo publiques. Consulta la [Guía de Seguridad](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default) para más detalles.
 :::
 
 ### Verifica

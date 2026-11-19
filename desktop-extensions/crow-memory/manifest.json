@@ -17,5 +17,5 @@
     "node": ">=18.0.0"
   },
   "repository": "https://github.com/YOUR_USER/crow",
-  "license": "MIT"
+  "license": "Apache-2.0"
 }

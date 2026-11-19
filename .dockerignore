@@ -26,9 +26,10 @@
 !vendor
 !package.json
 !package-lock.json
-# The MIT notice has to ship with the image, and LICENSE is a plain file the
+# The license and notice files have to ship with the image, and LICENSE is a plain file the
 # blanket `*` above would otherwise keep out.
 !LICENSE
+!NOTICE
 !.env.example
 !.env.garage.example
 !models.example.json

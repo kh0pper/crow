@@ -39,8 +39,8 @@ Create Docker Compose configurations with curated integration sets or self-hosti
 ## Development Setup
 
 ```bash
-git clone https://github.com/kh0pper/crow.git
-cd crow
+git clone https://github.com/maestro-press/grajo.git
+cd grajo
 npm run setup          # Install dependencies + initialize database
 ```
 
@@ -81,10 +81,10 @@ npm run init-db
 ## Submitting Ideas
 
 Not ready to code? Open an issue:
-- [Add-on Submission](https://github.com/kh0pper/crow/issues/new?template=addon-submission.md)
-- [Integration Request](https://github.com/kh0pper/crow/issues/new?template=integration-request.md)
-- [Skill Proposal](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md)
-- [Bug Report](https://github.com/kh0pper/crow/issues/new?template=bug-report.md)
+- [Add-on Submission](https://github.com/maestro-press/grajo/issues/new?template=addon-submission.md)
+- [Integration Request](https://github.com/maestro-press/grajo/issues/new?template=integration-request.md)
+- [Skill Proposal](https://github.com/maestro-press/grajo/issues/new?template=skill-proposal.md)
+- [Bug Report](https://github.com/maestro-press/grajo/issues/new?template=bug-report.md)
 
 ## Community
 

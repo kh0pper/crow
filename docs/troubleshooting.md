@@ -88,6 +88,6 @@ The FTS5 virtual tables and sync triggers are created by `init-db`. If search re
 
 ## Getting Help
 
-- Check the [GitHub Issues](https://github.com/kh0pper/crow/issues) for known problems
+- Check the [GitHub Issues](https://github.com/maestro-press/grajo/issues) for known problems
 - Open a new issue with your gateway logs and the error message
 - Include which platform and transport you're using

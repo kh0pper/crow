@@ -67,7 +67,7 @@ Crow is modular — start with memory and the dashboard, then add features as yo
 - **Self-hosting add-ons** — install Ollama, Nextcloud, Immich, Obsidian, and Home Assistant from the Extensions panel
 - **Auto-updates** — opt-in automatic updates from GitHub
 
-**What's public?** Your blog is the only thing visible to the outside world, and only posts you explicitly publish with `public` visibility appear there. Your Crow's Nest, data, and MCP endpoints are private by default. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for the full breakdown.
+**What's public?** Your blog is the only thing visible to the outside world, and only posts you explicitly publish with `public` visibility appear there. Your Crow's Nest, data, and MCP endpoints are private by default. See the [Security Guide](https://github.com/maestro-press/grajo/blob/main/SECURITY.md#whats-public-by-default) for the full breakdown.
 
 ::: tip Running many integrations?
 See the [Context & Performance guide](/guide/context-performance) for ways to optimize tool loading and reduce context window usage.
