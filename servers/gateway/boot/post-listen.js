@@ -36,6 +36,36 @@ export function shouldRunHealthMonitor({ env, noAuth }) {
 }
 
 /**
+ * The reports scheduler hook this process started, if any (`startReportsAtBoot` registered one).
+ *
+ * It is held here so the gateway's clean shutdown can stop it: `hook.stop()` unregisters the tick hook
+ * AND releases the reports lease, so the next gateway start does not have to wait for this process's
+ * pid to go away before it may run reports. Started fire-and-forget from the listen callback, so it
+ * may still be null when shutdown runs.
+ */
+let reportsHook = null;
+
+/**
+ * Stop the reports scheduler hook and release its lease, the way index.js's shutdown stops the
+ * scheduler. A process that never started one (a --no-auth gateway, a boot where the hook failed)
+ * does nothing and never throws.
+ *
+ * @returns {Promise<boolean>} whether a hook was stopped
+ */
+export async function stopReportsHook() {
+  const hook = reportsHook;
+  reportsHook = null;
+  if (!hook || typeof hook.stop !== "function") return false;
+  try {
+    await hook.stop();
+    return true;
+  } catch (err) {
+    console.warn("[reports] the scheduler hook could not be stopped cleanly:", err?.message || err);
+    return false;
+  }
+}
+
+/**
  * Run one cross_host_calls audit-retention cycle: prune rows older than the
  * default 14-day window, then best-effort WAL-checkpoint. Opens a fresh db
  * client via the injected factory (defaults to createDbClient) and always
@@ -913,6 +943,44 @@ export async function runPostListenSetup(server, app, deps) {
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
   });
+
+  // Crow Recurring Reports' scheduler hook. It runs beside the scheduler (registered as the `reports`
+  // tick hook, so each 60 s tick claims and dispatches runs and never waits for one) and it owns its
+  // own db client for the life of the hook. Only the PRIMARY gateway runs reports: a --no-auth
+  // gateway is a loopback companion sharing crow.db, so it registers nothing, sweeps nothing and
+  // takes no lease (startReportsAtBoot refuses on `noAuth` alone, not on any sync setting).
+  //
+  // Delivery arrives in PR 5: until then `deliverNotWired` gives every live run an honest seam that
+  // records its result and sends nothing. The approvals deps come from `buildApprovalsDeps`, so the
+  // hook's model-change sentence resolves the bot's real model instead of saying "unavailable".
+  //
+  // The hook handle is KEPT (`reportsHook`): the lease is let go on a clean stop only, so the gateway's
+  // shutdown path calls `stopReportsHook()` beside `stopScheduler()`.
+  if (!noAuth) {
+    setImmediate(async () => {
+      let db = null;
+      try {
+        const [{ startReportsAtBoot, deliverNotWired }, { buildApprovalsDeps }] = await Promise.all([
+          import("../reports/schedule-hook.js"),
+          import("../reports/approvals-deps.js"),
+        ]);
+        db = createDbClient();
+        const started = await startReportsAtBoot({
+          noAuth,
+          db,
+          deps: {
+            deliver: deliverNotWired,
+            approvals: buildApprovalsDeps(),
+          },
+        });
+        if (started.started && started.hook) reportsHook = started.hook;
+        else { try { db?.close?.(); } catch {} db = null; }
+      } catch (err) {
+        console.warn("[reports] scheduler hook not started:", err?.message || err);
+        try { db?.close?.(); } catch {}
+      }
+    });
+  }
 
   // Crow Mail's sync supervisor: gated on CROW_MAIL=1, a real (auth) dashboard gateway and
   // CROW_DISABLE_MAIL_SYNC, all decided inside mail-boot.js, which builds no adapter and no

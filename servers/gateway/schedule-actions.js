@@ -5,7 +5,8 @@
  *
  * Every write re-reads the row first and decides from its CURRENT task, so a stale page can never
  * act on a row whose type changed under it. The briefing row belongs to News (every control is a
- * link there), and a `pipeline:` row that is not a bot routine never runs.
+ * link there), a report's row belongs to the report page (both refuse here with `owned` /
+ * `report-owned`), and a `pipeline:` row that is not a bot routine never runs.
  */
 import { ONCE, REMINDER_PREFIX, BOTCRON_PREFIX, scheduleKind, zoneFor, hostZone, cronNext, cadenceMinutes } from "../shared/schedule-core.js";
 import { instanceZone, hasRunsTable, hasTzColumn } from "../shared/schedule-store.js";
@@ -74,12 +75,13 @@ export async function createReminder(db, { text, when, cron, tz, lang, now = Dat
   return { ok: true, id: Number(r.lastInsertRowid), words };
 }
 
-/** Pause. Not for the briefing (News owns it). */
+/** Pause. Not for the briefing (News owns it) and not for a report's row (the report page owns it). */
 export async function pauseSchedule(db, id) {
   const row = await rowOf(db, id);
   if (!row) return { ok: false, code: "not-found" };
   const kind = scheduleKind(row.task);
   if (kind === "briefing") return { ok: false, code: "owned" };
+  if (kind === "report") return { ok: false, code: "report-owned" };
   await db.execute({ sql: "UPDATE schedules SET enabled = 0, updated_at = datetime('now') WHERE id = ? AND task = ?", args: [id, row.task] });
   return { ok: true, row };
 }
@@ -94,6 +96,7 @@ export async function resumeSchedule(db, id, { now = Date.now() } = {}) {
   if (!row) return { ok: false, code: "not-found" };
   const kind = scheduleKind(row.task);
   if (kind === "briefing") return { ok: false, code: "owned" };
+  if (kind === "report") return { ok: false, code: "report-owned" };
   if (kind === "system") return { ok: false, code: "not-runnable" };
   let next;
   if (row.cron_expression === ONCE) {
@@ -121,6 +124,7 @@ export async function runScheduleNow(db, id, { now = Date.now(), botReady = asyn
   if (!row) return { ok: false, code: "not-found" };
   const kind = scheduleKind(row.task);
   if (kind === "briefing") return { ok: false, code: "owned" };
+  if (kind === "report") return { ok: false, code: "report-owned" };
   if (kind === "system") return { ok: false, code: "not-runnable" };
   if (kind === "reminder") {
     const r = await runNow(db, row);
@@ -172,6 +176,7 @@ export async function deleteScheduleRow(db, id) {
   if (!row) return { ok: false, code: "not-found" };
   const kind = scheduleKind(row.task);
   if (kind === "briefing") return { ok: false, code: "owned" };
+  if (kind === "report") return { ok: false, code: "report-owned" };
   const guard = kind === "bot_routine" ? " AND task LIKE 'pipeline:botcron:%'" : "";
   const ours = `EXISTS (SELECT 1 FROM schedules WHERE id = ? AND task = ?${guard})`;
   const stmts = [];

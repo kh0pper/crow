@@ -53,7 +53,8 @@ const DONE = {
   "already-done": "schedule.toast.alreadyDone",
 };
 const ERRORS = {
-  "not-found": "schedule.err.notFound", owned: "schedule.err.owned", "not-runnable": "schedule.err.notRunnable", "once-passed": "schedule.err.oncePassed",
+  "not-found": "schedule.err.notFound", owned: "schedule.err.owned", "report-owned": "schedule.err.reportOwned",
+  "not-runnable": "schedule.err.notRunnable", "once-passed": "schedule.err.oncePassed",
   "bad-cron": "schedule.err.badCron", "cant-run": "schedule.err.cantRun", "delivery-failed": "schedule.err.deliveryFailed", "bad-request": "schedule.err.badRequest",
 };
 
@@ -172,7 +173,8 @@ export default {
       toast: done && !model.detail ? done : null,
       notice: model.detail ? notice : null,
       pageNotice: !model.detail ? (errKey ? notice : null) : null,
-      confirmDelete: !!model.detail && one(query.confirm) === "delete" && !model.detail.item.owned,
+      confirmDelete: !!model.detail && one(query.confirm) === "delete" && !model.detail.item.owned
+        && model.detail.item.kind !== "report",
       create,
       createOpen: one(query.new) === "1",
       mediaInstalled: !!getPanel("media"),

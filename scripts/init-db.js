@@ -13,7 +13,7 @@ import {
 } from "../servers/shared/project-services-schema.js";
 import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
-import { REPORTS_DDL } from "../servers/shared/reports-schema.js";
+import { REPORTS_DDL, REPORTS_RUNS_DDL } from "../servers/shared/reports-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -3116,6 +3116,16 @@ await initTable("mail draft tables", MAIL_DRAFTS_DDL);
 // REPORTS_DDL in servers/shared/reports-schema.js, which scripts/migrations/0031-reports-core.mjs also
 // runs — one shape, two rails; additive, no SCHEMA_GENERATION bump.
 await initTable("reports tables", REPORTS_DDL);
+
+// reports runs tables: one row per attempt at running a report (who asked, the scheduled window, the
+// run engine's status, the small block log, the redacted error text) and the queue a bot tool inserts
+// a preview or a run now into (servers/gateway/reports/run.js and run-requests.js). Epoch-ms times;
+// trigger, status and kind are validated in the run engine (no CHECK, no FK). LOCAL ONLY (instance-sync
+// LOCAL_ONLY_TABLES): a run names the owner's sources. Same DDL as REPORTS_RUNS_DDL in
+// servers/shared/reports-schema.js, which scripts/migrations/0032-reports-runs.mjs also runs — one
+// shape, two rails; additive, no SCHEMA_GENERATION bump. REPORTS_DDL is untouched, because 0031
+// executes it.
+await initTable("reports runs tables", REPORTS_RUNS_DDL);
 
 // staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
 // servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the

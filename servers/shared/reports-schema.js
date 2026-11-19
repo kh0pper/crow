@@ -21,6 +21,12 @@
  * can offer Apply without a fresh go-live. reports.live_seal / live_nonce hold the go-live approval
  * seal over the live set (servers/gateway/reports/seal.js); both are NULL whenever the report is not
  * live, and a refusal or revocation nulls them so an old seal can never re-approve the row.
+ *
+ * REPORTS_RUNS_DDL is the runs half, kept apart because 0031 already shipped REPORTS_DDL exactly as it
+ * is: `report_runs` is one attempt at running a report (queued, running, then ok, empty or failed), and
+ * `report_run_requests` is the tiny queue a bot tool inserts into when it wants a preview or a run now
+ * (it never starts a run itself). A scheduled run's window is unique per report, so a missed window
+ * cannot run twice. `trigger` is an SQL keyword, so it is quoted everywhere in SQL.
  */
 export const REPORTS_DDL = `
   CREATE TABLE IF NOT EXISTS reports (
@@ -103,3 +109,58 @@ export const REPORTS_TABLES = Object.freeze([
   "report_usage",
   "report_approvals_audit",
 ]);
+
+/**
+ * The runs: one row per attempt, and the request queue a bot tool writes to.
+ *
+ * Every run names the trigger that made it (`schedule`, `manual`, `preview`) and who asked for it
+ * (`owner`, `schedule`, a `bot:<id>`). `gateway_run_id` is the id of the gateway process that claimed
+ * the run (servers/gateway/run-id.js): a boot sweep fails every queued or running row whose id is not
+ * this process's, so a restart never leaves a run stuck in `running`. `block_log_json` is a small
+ * summary (how many items, which sources failed), never the items themselves; `error_text` is the
+ * redacted one-line reason a run failed. Epoch-ms times; statuses are validated in the run engine
+ * (servers/gateway/reports/run.js), never by a CHECK. No foreign keys.
+ *
+ * The run tables are LOCAL ONLY too (instance-sync LOCAL_ONLY_TABLES): a run's error text and block
+ * log name the owner's sources, and a report never leaves its instance.
+ */
+export const REPORTS_RUNS_DDL = `
+  CREATE TABLE IF NOT EXISTS report_runs (
+    id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL,
+    "trigger" TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    scheduled_for INTEGER,
+    late INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER,
+    ended_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'queued',
+    recipe_rev INTEGER,
+    artifact_version INTEGER,
+    block_log_json TEXT,
+    error_text TEXT,
+    gateway_run_id TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_report_runs_schedule_window
+    ON report_runs(report_id, scheduled_for) WHERE "trigger" = 'schedule';
+
+  CREATE INDEX IF NOT EXISTS idx_report_runs_report ON report_runs(report_id, created_at);
+
+  CREATE INDEX IF NOT EXISTS idx_report_runs_status ON report_runs(status);
+
+  CREATE TABLE IF NOT EXISTS report_run_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    claimed_at INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_report_run_requests_claimed
+    ON report_run_requests(claimed_at);
+`;
+
+export const REPORTS_RUNS_TABLES = Object.freeze(["report_runs", "report_run_requests"]);

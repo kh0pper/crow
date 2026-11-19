@@ -295,9 +295,10 @@ async function botModelKey(db, botId) {
  * key every gateway panel reads), `resolveRole` (model-roles-store.js, for a `role:` key),
  * `resolveProviderConfig` (ai/resolve-profile.js, the same resolver /llm/v1 uses) and
  * `isLocallyOrchestratable` (shared/locality.js). There is no single bot-model accessor in the
- * gateway; if this chain is not what the operator wants sealed, PR 1b can inject `resolveModelRef`.
+ * gateway; a caller that wants a different chain injects `resolveModelRef`, and the production
+ * callers take this one through `buildApprovalsDeps` (reports/approvals-deps.js).
  */
-async function defaultResolveModelRef(db, report) {
+export async function defaultResolveModelRef(db, report) {
   const key = await botModelKey(db, report?.bot_id);
   if (!key) return null;
   const { providerId, model } = splitKey(key);

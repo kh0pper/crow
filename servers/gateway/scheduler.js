@@ -9,14 +9,17 @@
  *   system       any other "pipeline:"             → inert; never touched here
  *   briefing     an owner task ("media:briefing")  → its bundle runs it; here only next_run
  *                                                    advances, in the owner's zone
+ *   report       "report:rpt-<16 hex>"             → the reports hook's; never delivered here
+ *                                                    (next_run is still computed for it). Any other
+ *                                                    text beginning "report:" is a reminder.
  *
  * Doctrine: every claim is a guarded UPDATE and runs BEFORE delivery, in the same transaction as
  * the run record. A crash in between can drop one delivery or one notice but never double it.
  */
 
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
-import { runSchedulerHooks } from "./scheduler-hooks.js";
-import { ONCE, scheduleKind, reminderText, settleDue, graceMs, cronNext, zoneFor, missedRunInsert, ALIVE_SLACK_MS, BOTCRON_PREFIX } from "../shared/schedule-core.js";
+import { getSchedulerHook, runSchedulerHooks } from "./scheduler-hooks.js";
+import { ONCE, scheduleKind, reminderText, settleDue, graceMs, cronNext, zoneFor, missedRunInsert, ALIVE_SLACK_MS, BOTCRON_PREFIX, REPORT_TASK_GLOB } from "../shared/schedule-core.js";
 import { instanceZone, instanceLang, ownerZone, hasRunsTable, hasTzColumn } from "../shared/schedule-store.js";
 import { fmt } from "../shared/relative-dates.js";
 import { withWriteContext, systemWriteContext } from "../shared/history/write-context.js";
@@ -143,6 +146,22 @@ async function runNowAsSystem(database, schedule, { runId = null } = {}) {
   };
   if (!schedule) return { ok: false, error: "deleted", runId: await finish("failed", JSON.stringify({ error: "deleted" })) };
   const kind = scheduleKind(schedule.task);
+  // A report's row is run by the reports hook (its own run queue, its own run table), never here.
+  if (kind === "report") {
+    const hook = getSchedulerHook("reports");
+    if (typeof hook?.runNow !== "function") {
+      if (runId) await finish("failed", JSON.stringify({ error: "reports-not-running" }));
+      return { ok: false, error: "reports are not running here" };
+    }
+    const answer = await hook.runNow(db, schedule);
+    // A run id was handed to us by drainRequests: the row it names is settled here, so a request is
+    // never left 'running' by a report run that came back with an answer.
+    if (runId) {
+      const ok = answer?.ok === true;
+      await finish(ok ? "ok" : "failed", ok ? null : JSON.stringify({ error: answer?.error }));
+    }
+    return { ok: answer?.ok === true, error: answer?.error };
+  }
   if (kind !== "reminder") {
     const error = kind === "briefing" ? "owned by its app" : kind === "bot_routine" ? "bot routines run from Bot Builder" : "not runnable";
     if (runId) await finish("failed", JSON.stringify({ error }));
@@ -329,11 +348,16 @@ async function settlePass() {
   // Exclude `pipeline:` rows in SQL, whatever the type function says: they belong to an external
   // runner (today the pi-bot cron scheduler's `pipeline:botcron:` rows, bot_scheduler.mjs) that
   // must see them as still due when it polls; advancing them here would lose the run (the
-  // 2026-04-22 MPA briefing miss).
+  // 2026-04-22 MPA briefing miss). A report row is excluded for the same kind of reason: the reports
+  // hook (servers/gateway/reports/schedule-hook.js) claims those rows itself, and this pass must never
+  // deliver one as a reminder. The excluded shape is REPORT_TASK_GLOB, the SQL twin of the
+  // REPORT_TASK_RE that schedule-core's scheduleKind accepts (`report:rpt-` and sixteen hex, so
+  // `report:rpt-foo` is NOT a report row). Any other text beginning `report:` is a reminder and stays
+  // here.
   const { rows } = await db.execute({
     sql: `SELECT id, cron_expression, task, next_run, ${tz} FROM schedules
-          WHERE enabled = 1 AND next_run IS NOT NULL AND julianday(next_run) <= julianday(?) AND task NOT LIKE 'pipeline:%'`,
-    args: [iso(now)],
+          WHERE enabled = 1 AND next_run IS NOT NULL AND julianday(next_run) <= julianday(?) AND task NOT LIKE 'pipeline:%' AND NOT (task GLOB ? AND length(task) = 27)`,
+    args: [iso(now), REPORT_TASK_GLOB],
   });
   for (const row of rows) {
     try {

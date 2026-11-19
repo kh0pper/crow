@@ -16,6 +16,9 @@ export function registerSchedulerHook(id, hook) {
 
 export function unregisterSchedulerHook(id) { hooks.delete(id); }
 
+/** The hook registered under `id`, or undefined when this process registered none. */
+export function getSchedulerHook(id) { return hooks.get(id); }
+
 /** Call one kind of hook on every registered bundle. A failing hook is logged and never stops the others. */
 export async function runSchedulerHooks(kind, ...args) {
   for (const [id, hook] of hooks) {

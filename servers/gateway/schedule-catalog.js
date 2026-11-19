@@ -3,7 +3,9 @@
  * schedule once, at its next run), the problems strip (each problem with its fixes) and the one
  * open detail (next 3 runs, last 10 runs).
  *
- * Crow-owned sources (reminders, bot routines, the News briefing) are editable. The read-only
+ * Crow-owned sources (reminders, bot routines, the News briefing, the reports' own schedule rows) are
+ * editable, except the owned ones: a briefing row is changed in News and a report row on the report
+ * page, so both carry `owned` and the controls there are links. The read-only
  * sources (the box hold, the box ledger's windows, the machines' timers) come from
  * schedule-sources/ and carry `src` + `readOnly`. No strings here: problems and runs carry codes
  * the renderer (dashboard/panels/schedule/html.js) words in en or es.
@@ -13,7 +15,7 @@
  * no zone until bot routines learn zones. Agenda days are the instance zone's.
  */
 import {
-  ONCE, BOTCRON_PREFIX, scheduleKind, reminderText, zoneFor, hostZone,
+  ONCE, BOTCRON_PREFIX, REPORT_PREFIX, scheduleKind, reminderText, zoneFor, hostZone,
   cronNext, cadenceMinutes, graceMs,
 } from "../shared/schedule-core.js";
 import { instanceZone, ownerZone, hasRunsTable, hasTzColumn } from "../shared/schedule-store.js";
@@ -59,18 +61,21 @@ export function botSpec(row) {
   return spec && typeof spec === "object" ? spec : {};
 }
 
-/** A schedule row as one agenda item. `bots` maps bot_id → {display_name, enabled}. */
-function toItem(row, { now, zone, briefingZone, bots, lang }) {
+/** A schedule row as one agenda item. `bots` maps bot_id → {display_name, enabled};
+ *  `reportTitles` maps a report id → its title. */
+function toItem(row, { now, zone, briefingZone, bots, lang, reportTitles = new Map() }) {
   const kind = scheduleKind(row.task);
   const once = row.cron_expression === ONCE;
   const z = kind === "briefing" ? briefingZone : kind === "bot_routine" ? hostZone() : zoneFor(row.tz, zone);
   const botId = kind === "bot_routine" ? String(row.task).trim().slice(BOTCRON_PREFIX.length) : null;
   const spec = kind === "bot_routine" ? botSpec(row) : null;
   const bot = botId ? bots.get(botId) || null : null;
+  const reportId = kind === "report" ? String(row.task).trim().slice(REPORT_PREFIX.length) : null;
   let title;
   if (kind === "reminder") title = reminderText(row.task);
   else if (kind === "bot_routine") title = (spec.label && String(spec.label)) || (bot && bot.display_name) || botId;
   else if (kind === "briefing") title = null; // the renderer words it ("Daily briefing")
+  else if (kind === "report") title = reportTitles.get(reportId) || String(row.task);
   else title = String(row.task);
   const nextRun = parseMs(row.next_run);
   const cadence = once ? null : cadenceMinutes(row.cron_expression, z, now);
@@ -95,8 +100,11 @@ function toItem(row, { now, zone, briefingZone, bots, lang }) {
     bot,
     goal: spec ? (spec.goal ? String(spec.goal) : null) : null,
     readOnly: kind === "system",
-    // News owns its row: every control is a link to News → Briefings.
-    owned: kind === "briefing",
+    // News owns the briefing's row and the report page owns a report's row: every control there is a
+    // link to that app, and the Schedule page's writes refuse the row.
+    owned: kind === "briefing" || kind === "report",
+    // The app that owns a row nobody edits here (the report page owns its own schedule row).
+    app: kind === "report" ? "Reports" : null,
   };
 }
 
@@ -256,8 +264,11 @@ export function problemsFor(items, { now, runsBy = new Map(), jobsBy = new Map()
           fixes: [...(runnable(it) ? [{ act: "run-now", settles: true }] : []), { act: "ack-run" }] });
       } else if (r.status === "paused" && r.source === "upgrade") {
         const fixes = [];
-        if (!it.enabled && it.kind !== "system") fixes.push({ act: "resume", settles: true });
-        fixes.push({ act: "delete" }, { act: "ack-run" });
+        // An owned row (News's briefing, a report's row) is paused and deleted in its own app, so
+        // no control here would do anything but be refused.
+        if (!it.enabled && it.kind !== "system" && !it.owned) fixes.push({ act: "resume", settles: true });
+        if (!it.owned) fixes.push({ act: "delete" });
+        fixes.push({ act: "ack-run" });
         out.push({ code: "paused-upgrade", severity: "warning", scheduleId: id, runId: Number(r.id), item: it, run: r, fixes });
       } else if (idx === 0 && (r.status === "failed" || r.job_status === "failed")) {
         // The LATEST run failed (an older failure followed by a good run is not a problem).
@@ -297,7 +308,7 @@ export function problemsFor(items, { now, runsBy = new Map(), jobsBy = new Map()
     }
   }
   for (const it of enabled) {
-    if (it.once || it.kind === "system" || it.kind === "briefing") continue;
+    if (it.once || it.kind === "system" || it.kind === "briefing" || it.kind === "report") continue;
     const unparseable = cronNext(it.cron, it.zone, now) === null;
     if (unparseable || (it.nextRun === null && (it.updatedAt === null || now - it.updatedAt > NO_NEXT_AFTER_MS))) {
       if (!out.some((p) => p.code === "cant-run" && p.scheduleId === it.id)) {
@@ -317,6 +328,24 @@ async function notifTypesOf(db) {
   } catch { return DEFAULT_TYPES; }
 }
 
+/** The titles of the reports a schedule set names (`report:<id>` tasks), by report id. */
+async function loadReportTitles(db, rows) {
+  const out = new Map();
+  const ids = [];
+  for (const row of rows) {
+    if (scheduleKind(row.task) !== "report") continue;
+    const id = String(row.task).trim().slice(REPORT_PREFIX.length);
+    if (id) ids.push(id);
+  }
+  if (!ids.length || !(await tableExists(db, "reports"))) return out;
+  const marks = ids.map(() => "?").join(",");
+  const found = await safeRows(db, `SELECT id, title FROM reports WHERE id IN (${marks})`, ids);
+  for (const report of found) {
+    if (typeof report.title === "string" && report.title) out.set(report.id, report.title);
+  }
+  return out;
+}
+
 /**
  * Everything the page shows.
  * @param {object} db
@@ -331,7 +360,8 @@ export async function buildScheduleModel(db, { now = Date.now(), lang = "en", se
   const botDefsTable = await tableExists(db, "pi_bot_defs");
   const bots = new Map();
   if (botDefsTable) for (const b of await safeRows(db, "SELECT bot_id, display_name, enabled FROM pi_bot_defs")) bots.set(String(b.bot_id), b);
-  const items = rows.map((r) => toItem(r, { now, zone, briefingZone, bots, lang }));
+  const reportTitles = await loadReportTitles(db, rows);
+  const items = rows.map((r) => toItem(r, { now, zone, briefingZone, bots, lang, reportTitles }));
   const ids = items.map((it) => it.id);
   const runsBy = await loadRuns(db, ids);
   const botIds = items.filter((it) => it.kind === "bot_routine").map((it) => it.id);

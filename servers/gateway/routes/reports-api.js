@@ -34,7 +34,10 @@ import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import {
   approveGoLive, isLive, ownerSaveRecipe, pauseReport, resumeReport, updateSettings,
 } from "../reports/approvals.js";
-import { senderReady } from "../reports/sender-ready.js";
+import { buildApprovalsDeps } from "../reports/approvals-deps.js";
+import { listRuns } from "../reports/run.js";
+import { requestRun } from "../reports/run-requests.js";
+import { kickReportsHook } from "../reports/schedule-hook.js";
 import { createReport, getReport, listReports } from "../reports/store.js";
 
 /** The mount point. */
@@ -152,10 +155,11 @@ async function reportView(db, approvalsDeps, report) {
  * @param {Function} dashboardAuth the dashboard's auth middleware
  * @param {{openDb?: Function, ownerCheck?: Function, approvalsDeps?: object}} [deps]
  *   `openDb` mints the request's crow.db client; `ownerCheck` defaults to `isLocalPasswordSessionOn`;
- *   `approvalsDeps` is handed to the approvals module unchanged (its `getRun`, `getSchedule`,
- *   `loadSeed`, `resolveModelRef`, `senderReady` and `registry` seams), except for `senderReady`: when
- *   the caller injects none, the real Crow Mail reader (reports/sender-ready.js) is used, because
- *   approvals.js imports nothing under `mail/` and the default there is a fail-closed false.
+ *   `approvalsDeps` is handed to the approvals module through `buildApprovalsDeps` (reports/
+ *   approvals-deps.js): the real sender reader (reports/sender-ready.js), the real run reader
+ *   (reports/run.js's `getRunForApproval`) and the real model resolver are the base, because
+ *   approvals.js imports nothing under `mail/` and its own defaults fail closed. A member the caller
+ *   injects (`loadSeed`, `now`, `getSchedule`, `registry`, or any of those three) wins over the base.
  * @returns {import("express").Router}
  */
 export function reportsApiRouter(dashboardAuth, deps = {}) {
@@ -163,9 +167,7 @@ export function reportsApiRouter(dashboardAuth, deps = {}) {
   const openDb = typeof deps.openDb === "function" ? deps.openDb : () => createDbClient();
   const ownerCheck = typeof deps.ownerCheck === "function" ? deps.ownerCheck : isLocalPasswordSessionOn;
   const givenDeps = deps.approvalsDeps == null ? {} : deps.approvalsDeps;
-  const approvalsDeps = typeof givenDeps.senderReady === "function"
-    ? givenDeps
-    : { ...givenDeps, senderReady };
+  const approvalsDeps = buildApprovalsDeps(givenDeps);
   const jsonParser = jsonParserOf({ limit: JSON_LIMIT });
 
   /** One client per request, closed in `finally`; a handler that throws answers its own code. */
@@ -358,6 +360,45 @@ export function reportsApiRouter(dashboardAuth, deps = {}) {
     if (!id) return;
     const row = await resumeReport(db, approvalsDeps, { reportId: id, actor: { kind: "owner" } });
     res.json({ report: await reportView(db, approvalsDeps, row) });
+  }));
+
+  /* -------------------------------------------------------------------------- runs */
+
+  // POST /:id/preview — ask the scheduler hook for a preview run. A preview runs whatever the
+  // report's status is (a draft is exactly what go-live needs to see), so nothing about the live set
+  // is checked here; the request queue is the one path a run is ever asked for, and the hook queues it.
+  router.post(`${REPORTS_API_PREFIX}/:id/preview`, route("POST /:id/preview", async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    if (!(await getReport(db, id))) return sendError(res, 404, "not_found");
+    await requestRun(db, { reportId: id, kind: "preview", requestedBy: "owner" });
+    kickReportsHook();
+    res.status(202).json({ requested: true });
+  }));
+
+  // POST /:id/run-now — ask for a full run now. Only a live report whose approval still verifies
+  // may run, and that is decided here as well as in the run engine: a 409 says to go live again.
+  router.post(`${REPORTS_API_PREFIX}/:id/run-now`, route("POST /:id/run-now", async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    const row = await getReport(db, id);
+    if (!row) return sendError(res, 404, "not_found");
+    if (row.status !== "live" || !(await isLive(db, approvalsDeps, row))) {
+      return sendError(res, 409, "go_live_needed");
+    }
+    await requestRun(db, { reportId: id, kind: "run_now", requestedBy: "owner" });
+    kickReportsHook();
+    res.status(202).json({ requested: true });
+  }));
+
+  // GET /:id/runs — this report's runs, newest first. A list row carries no gateway run id (that is
+  // the boot sweep's own bookkeeping).
+  router.get(`${REPORTS_API_PREFIX}/:id/runs`, route("GET /:id/runs", async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    if (!(await getReport(db, id))) return sendError(res, 404, "not_found");
+    const runs = await listRuns(db, id);
+    res.json({ runs });
   }));
 
   return router;

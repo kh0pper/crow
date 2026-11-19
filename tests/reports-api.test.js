@@ -240,6 +240,9 @@ test("a non-owner session is 403 owner_only on every route, with no data", async
     ["POST", `${reportPath(id)}/go-live`, { previewRunId: "prv-1" }],
     ["POST", `${reportPath(id)}/pause`, { reason: "stop" }],
     ["POST", `${reportPath(id)}/resume`, {}],
+    ["POST", `${reportPath(id)}/preview`, {}],
+    ["POST", `${reportPath(id)}/run-now`, {}],
+    ["GET", `${reportPath(id)}/runs`, undefined],
   ];
   for (const [label, opts] of [
     ["a peer's single-sign-on session", { token: SSO }],
@@ -261,6 +264,8 @@ test("a non-owner session is 403 owner_only on every route, with no data", async
   assert.equal(Number(rows.recipe_rev), report.rev);
   const { rows: all } = await world.db.execute({ sql: "SELECT COUNT(*) AS n FROM reports", args: [] });
   assert.equal(Number(all[0].n), 1, "no second report");
+  const { rows: requests } = await world.db.execute({ sql: "SELECT COUNT(*) AS n FROM report_run_requests", args: [] });
+  assert.equal(Number(requests[0].n), 0, "and no run was asked for");
 });
 
 test("an owner check that throws is a 403 with no data, never a 500", async () => {
@@ -401,6 +406,77 @@ test("pause then resume on an unchanged report goes back to live", async () => {
   assert.equal(resumed.json.report.pause_reason, null);
 });
 
+/* ---------------------------------------------------------------------- the runs */
+
+test("preview asks for a preview run, run-now needs a live report, and the list carries no gateway id", async () => {
+  const world = await setup();
+  const report = await prepareReport(world.db);
+
+  const preview = await post(`${reportPath(report.id)}/preview`, {});
+  assert.equal(preview.status, 202, preview.text);
+  assert.deepEqual(preview.json, { requested: true });
+  assert.equal(preview.headers["cache-control"], "no-store");
+  let requests = (await world.db.execute({ sql: "SELECT * FROM report_run_requests ORDER BY id", args: [] })).rows;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].kind, "preview");
+  assert.equal(requests[0].requested_by, "owner");
+  assert.equal(requests[0].report_id, report.id);
+
+  // A draft may not run now: the answer says to go live again, and writes no request.
+  const refused = await post(`${reportPath(report.id)}/run-now`, {});
+  assert.equal(refused.status, 409, refused.text);
+  assert.deepEqual(refused.json, { error: "go_live_needed", message: "Preview and go live again." });
+  requests = (await world.db.execute({ sql: "SELECT * FROM report_run_requests", args: [] })).rows;
+  assert.equal(requests.length, 1, "the refused run now wrote nothing");
+
+  // Live: run now is accepted.
+  const previewRunId = addPreviewRun(world, report);
+  assert.equal((await post(`${reportPath(report.id)}/go-live`, { previewRunId })).status, 200);
+  const runNow = await post(`${reportPath(report.id)}/run-now`, {});
+  assert.equal(runNow.status, 202, runNow.text);
+  assert.deepEqual(runNow.json, { requested: true });
+  requests = (await world.db.execute({ sql: "SELECT * FROM report_run_requests ORDER BY id", args: [] })).rows;
+  assert.deepEqual(requests.map((r) => r.kind), ["preview", "run_now"]);
+  assert.equal(requests[1].requested_by, "owner");
+
+  // A paused report may not run now either.
+  assert.equal((await post(`${reportPath(report.id)}/pause`, {})).status, 200);
+  const afterPause = await post(`${reportPath(report.id)}/run-now`, {});
+  assert.equal(afterPause.status, 409);
+  assert.equal(afterPause.json.error, "go_live_needed");
+
+  // The runs list, newest first, without the gateway's own run id.
+  await world.db.execute({
+    sql: `INSERT INTO report_runs (id, report_id, "trigger", requested_by, status, gateway_run_id, created_at)
+          VALUES ('rrn-0000000000000001', ?, 'manual', 'owner', 'ok', 'gateway-process-id', ?)`,
+    args: [report.id, 1_700_000_000_000],
+  });
+  const listed = await get(`${reportPath(report.id)}/runs`);
+  assert.equal(listed.status, 200, listed.text);
+  assert.equal(listed.json.runs.length, 1);
+  assert.equal(listed.json.runs[0].id, "rrn-0000000000000001");
+  assert.equal(listed.json.runs[0].status, "ok");
+  assert.equal(Object.hasOwn(listed.json.runs[0], "gatewayRunId"), false, "no process id in a list row");
+  assert.equal(listed.text.includes("gateway-process-id"), false);
+  assert.equal(listed.headers["cache-control"], "no-store");
+});
+
+test("the run routes 404 for a well-formed id that names no report", async () => {
+  const world = await setup();
+  const missing = `${REPORTS_API_PREFIX}/rpt-ffffffffffffffff`;
+  for (const [method, suffix, body] of [
+    ["POST", "/preview", {}],
+    ["POST", "/run-now", {}],
+    ["GET", "/runs", undefined],
+  ]) {
+    const r = await call(method, `${missing}${suffix}`, { body });
+    assert.equal(r.status, 404, `${method} ${suffix}: ${r.status} ${r.text}`);
+    assert.deepEqual(r.json, { error: "not_found", message: "Not found." });
+  }
+  const { rows } = await world.db.execute({ sql: "SELECT COUNT(*) AS n FROM report_run_requests", args: [] });
+  assert.equal(Number(rows[0].n), 0);
+});
+
 /* ------------------------------------------------------------------------ refusals */
 
 test("a malformed id is a 404 on every route that takes one", async () => {
@@ -413,6 +489,9 @@ test("a malformed id is a 404 on every route that takes one", async () => {
       ["POST", "/go-live", { previewRunId: "prv-1" }],
       ["POST", "/pause", {}],
       ["POST", "/resume", {}],
+      ["POST", "/preview", {}],
+      ["POST", "/run-now", {}],
+      ["GET", "/runs", undefined],
     ]) {
       const r = await call(method, `${REPORTS_API_PREFIX}/${id}${suffix}`, { body });
       assert.equal(r.status, 404, `${method} ${suffix} ${JSON.stringify(id)}: ${r.status} ${r.text}`);

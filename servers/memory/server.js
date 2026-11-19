@@ -1296,9 +1296,14 @@ export function createMemoryServer(dbPath, options = {}) {
   // stored as "reminder:<text>", bot routines as "pipeline:botcron:<bot>", and the daily briefing
   // row belongs to the News app. Times run in the row's zone (tz), or the instance zone when NULL.
 
-  const TYPE_LABEL = { reminder: "Reminder", bot_routine: "Bot routine", briefing: "Briefing", system: "System" };
+  const TYPE_LABEL = { reminder: "Reminder", bot_routine: "Bot routine", briefing: "Briefing", report: "Report", system: "System" };
   const scheduleError = (text) => ({ content: [{ type: "text", text }], isError: true });
   const briefingError = () => scheduleError(`The daily briefing belongs to the ${SCHEDULE_OWNERS["media:briefing"].app} app: change it with ${SCHEDULE_OWNERS["media:briefing"].tool}.`);
+  // A report's schedule row belongs to the report page: it is created, paused, resumed, run and
+  // deleted there, beside the approval that decides what the report may do. Only a task that is a
+  // report row WHOLE (`report:rpt-<16 hex>`, schedule-core's REPORT_TASK_RE) is refused: any other
+  // text beginning `report:` is the owner's own reminder text and is stored as one.
+  const REPORTS_OWNED_TEXT = "Reports are scheduled from the report page.";
   const MIN_REMINDER_EVERY = 60;
   const isoOf = (ms) => new Date(ms).toISOString();
 
@@ -1328,6 +1333,7 @@ export function createMemoryServer(dbPath, options = {}) {
       const pass = await shareGate("crow_create_schedule", extra).check(null, {});
       if (pass.isError) return pass;
       if (type === "briefing" || derived === "briefing") return briefingError();
+      if (derived === "report") return scheduleError(REPORTS_OWNED_TEXT);
       if (derived === "system") return scheduleError("Tasks starting with \"pipeline:\" are reserved for bot routines (pipeline:botcron:<bot_id>).");
       const kind = type || derived;
       if (kind === "bot_routine" && derived !== "bot_routine") return scheduleError("A bot routine's task is pipeline:botcron:<bot_id>. Bot routines are easiest to make in Bot Builder.");
@@ -1398,7 +1404,7 @@ export function createMemoryServer(dbPath, options = {}) {
     "List scheduled tasks with their type (Reminder, Bot routine, Briefing), zone, next run, last run status and missed runs. Optionally only enabled ones, or one type.",
     {
       enabled_only: z.boolean().optional().describe("If true, only return enabled schedules"),
-      type: z.enum(["reminder", "bot_routine", "briefing", "system"]).optional().describe("Only schedules of this type"),
+      type: z.enum(["reminder", "bot_routine", "briefing", "report", "system"]).optional().describe("Only schedules of this type"),
     },
     async ({ enabled_only, type }, extra) => {
       const pass = await shareGate("crow_list_schedules", extra).check(null, {});
@@ -1463,6 +1469,9 @@ export function createMemoryServer(dbPath, options = {}) {
       const row = rows[0];
       const kind = scheduleKind(row.task);
       if (kind === "briefing") return briefingError();
+      // Every branch below (enabled, run_now, delete, task, cron_expression, tz) would change a row
+      // the report page owns, so the refusal sits here, beside the briefing's.
+      if (kind === "report") return scheduleError(REPORTS_OWNED_TEXT);
 
       if (doDelete) {
         await deleteSchedule(db, id);

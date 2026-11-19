@@ -23,6 +23,7 @@ const href = (params) => esc(ROUTE + (params ? "?" + params : ""));
 const qs = (o) => Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
 const vh = (s) => `<span class="sc-vh"> ${esc(s)}</span>`;
 const NEWS_BRIEFINGS = "/dashboard/media?tab=briefings";
+const REPORTS_PAGE = "/dashboard/reports";
 
 const locale = (lang) => (lang === "es" ? "es-ES" : "en-US");
 const SPACES = /[  ]/g;
@@ -48,6 +49,7 @@ const TYPE = {
   reminder: ["schedule.type.reminder", "accent"],
   bot_routine: ["schedule.type.botRoutine", "info"],
   briefing: ["schedule.type.briefing", "plain"],
+  report: ["schedule.type.report", "info"],
   system: ["schedule.type.system", "muted"],
   box_hold: ["schedule.type.boxHold", "muted"],
   box_window: ["schedule.type.boxWindow", "muted"],
@@ -208,6 +210,12 @@ function detailControls(it, m) {
     </div>`;
   }
   const acts = [];
+  if (it.owned && it.kind === "report") {
+    // The report page owns this row: pausing, running or deleting it here would skip the report's own
+    // approval, so every control is a link there and the actions refuse the change.
+    acts.push(`<a class="btn btn-secondary" href="${REPORTS_PAGE}">${esc(t("schedule.openReports", lang))}</a>`);
+    return `<p class="sc-muted">${esc(t("schedule.err.reportOwned", lang))}</p><div class="sc-d-acts">${acts.join("")}</div>`;
+  }
   if (it.owned) {
     // News owns the briefing: its controls live in News → Briefings (a direct flip here would
     // skip News's own restart point and could make up a missed briefing).

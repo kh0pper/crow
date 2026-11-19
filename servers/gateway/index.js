@@ -971,6 +971,14 @@ async function gracefulShutdown() {
     stopScheduler();
   } catch {}
 
+  // Step 1b-bis — stop the reports scheduler hook the same way: it unregisters its tick hook and
+  // RELEASES the reports lease, so the next start may run reports without waiting for this pid to go
+  // away. No-op when this process started none (a --no-auth gateway, a failed boot).
+  try {
+    const { stopReportsHook } = await import("./boot/post-listen.js");
+    await stopReportsHook();
+  } catch {}
+
   // Step 1c — stop Crow Mail's sync supervisor too: its timers, watchers and connections must not
   // outlive the drain window or write to a database being checked in. No-op when mail never started.
   try {

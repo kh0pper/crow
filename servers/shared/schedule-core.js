@@ -15,6 +15,24 @@ import { validTimeZone } from "./relative-dates.js";
 export const ONCE = "@once"; // one-shot rows: next_run is an absolute ISO time, never recomputed from cron
 export const REMINDER_PREFIX = "reminder:";
 export const BOTCRON_PREFIX = "pipeline:botcron:";
+/** A recurring report's row: the task is exactly `report:<reportId>` (Crow Recurring Reports). */
+export const REPORT_PREFIX = "report:";
+/**
+ * A report row's task, whole: `report:` and the id the reports store mints (`rpt-` and 16 hex).
+ *
+ * The shape is strict on purpose. `report: Q3` and `Report: Q3` are the owner's own reminder text and
+ * stay reminders (a case-sensitive match here, so only the exact lowercase prefix counts), and a row
+ * that spells a report id any other way is never handed to the reports hook: it would name no report
+ * and be left alone forever.
+ */
+export const REPORT_TASK_RE = /^report:rpt-[0-9a-f]{16}$/;
+/**
+ * The same row shape as one SQL GLOB, so a query excludes exactly what REPORT_TASK_RE calls a report
+ * row: `report:rpt-` and sixteen lowercase hex characters (GLOB's classes are case sensitive, as the
+ * regular expression is). GLOB matches the whole string, so the classes already fix the length at 27;
+ * the queries that use this also spell out `length(task) = 27` (`report:` + `rpt-` + sixteen).
+ */
+export const REPORT_TASK_GLOB = "report:rpt-" + "[0-9a-f]".repeat(16);
 export const MISSED_CAP = 500; // a missed window counts at most this many occurrences ("500 or more")
 const OK_MS = 90_000; // a fire within 90 s of its time is "ok"; later (inside grace) is "late"
 /**
@@ -32,12 +50,16 @@ export const SCHEDULE_OWNERS = Object.freeze({
   "media:briefing": Object.freeze({ kind: "briefing", app: "News", tool: "crow_media_schedule_briefing", zoneSetting: Object.freeze({ key: "media_briefing_config", field: "tz" }) }),
 });
 
-/** "reminder" | "bot_routine" | "briefing" | "system". */
+/** "reminder" | "bot_routine" | "briefing" | "report" | "system". */
 export function scheduleKind(task) {
   const t = String(task ?? "").trim();
   if (t.startsWith(BOTCRON_PREFIX)) return "bot_routine";
   if (t.startsWith("pipeline:")) return "system"; // never delivered, never run by hand
   if (Object.hasOwn(SCHEDULE_OWNERS, t)) return SCHEDULE_OWNERS[t].kind;
+  // A report's row is owned by the reports scheduler hook (servers/gateway/reports/schedule-hook.js):
+  // this module never delivers it as a reminder. Only the exact id shape counts (REPORT_TASK_RE); any
+  // other text beginning `report:` is ordinary reminder text.
+  if (REPORT_TASK_RE.test(t)) return "report";
   return "reminder";
 }
 
