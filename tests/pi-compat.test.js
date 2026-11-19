@@ -87,6 +87,49 @@ test("a host pi has no rule for gets null", () => {
   assert.equal(piCompatFor("", "m1"), null);
 });
 
+// --- Crow-side known upstream quirks (pi has no rule for these) --------------
+// Alibaba Cloud Model Studio / DashScope rejects a `developer` message role
+// with HTTP 400, and pi 0.85.1 knows nothing about the host, so the door entry
+// must turn the flag off itself.
+test("quirk: Alibaba Cloud Model Studio hosts get supportsDeveloperRole: false", () => {
+  for (const url of [
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "https://aliyuncs.com/compatible-mode/v1",
+    // Fully-qualified form: one trailing dot is not part of the name.
+    "https://dashscope.aliyuncs.com./compatible-mode/v1",
+    "https://aliyuncs.com./compatible-mode/v1",
+    "https://DASHSCOPE-INTL.Aliyuncs.COM/compatible-mode/v1",
+  ]) {
+    assert.deepEqual(piCompatFor(url, "qwen3.8-max"), { supportsDeveloperRole: false }, url);
+  }
+});
+
+test("quirk: lookalike hosts and paths are not Alibaba", () => {
+  for (const url of [
+    "https://aliyuncs.com.evil.example/v1",
+    "https://notaliyuncs.com/v1",
+    "https://api.example.com/proxy/aliyuncs.com/compatible-mode/v1",
+    "https://api.example.com/v1?upstream=dashscope.aliyuncs.com",
+  ]) {
+    assert.equal(piCompatFor(url, "qwen3.8-max"), null, url);
+  }
+  // An unparseable baseUrl behaves as before: pi's own substring rules only.
+  assert.equal(piCompatFor("aliyuncs.com/compatible-mode/v1", "m"), null);
+});
+
+test("quirk: pi's own rules are unchanged by the quirk table", () => {
+  assert.deepEqual(piCompatFor("https://api.deepseek.com/v1", "deepseek-chat"), {
+    supportsStore: false, supportsDeveloperRole: false, maxTokensField: "max_tokens",
+    requiresReasoningContentOnAssistantMessages: true, thinkingFormat: "deepseek",
+  });
+  const or = piCompatFor("https://openrouter.ai/api/v1", "anthropic/claude-sonnet-5.5");
+  assert.equal(or.thinkingFormat, "openrouter");
+  assert.equal("supportsDeveloperRole" in or, false, "an OpenRouter anthropic/ id keeps the developer role");
+  assert.equal(piCompatFor("https://api.z.ai/api/coding/paas/v4", "glm-5.3").thinkingFormat, "zai");
+});
+
 // Drift check: the pinned list must equal the installed pi-ai registry when
 // the installed pi is the pinned version. Skipped (with the reason) otherwise.
 function findPinnedInstall() {
@@ -131,6 +174,9 @@ test("drift: PI_BUILTIN_PROVIDER_IDS equals the installed pi-ai registry", async
 // Live check: pull detectCompat out of the installed openai-completions chunk
 // and confirm that "what pi derives through the door" merged with
 // piCompatFor equals what pi derives talking to the upstream directly.
+// Crow's own quirks (KNOWN_UPSTREAM_QUIRKS: an aliyuncs.com host) are
+// deliberately NOT in these cases: there piCompatFor must differ from pi — the
+// check at the bottom of this file pins that difference.
 const DOOR = { provider: "crow-door", baseUrl: "http://127.0.0.1:3001/llm/c/cloud-a/v1" };
 const LIVE_CASES = [
   ["https://api.z.ai/api/coding/paas/v4", "glm-5.3"],
@@ -146,13 +192,13 @@ const LIVE_CASES = [
   ...HOST_TABLE.map(([u, id]) => [u, id]),
 ];
 
-test("live: piCompatFor reproduces the installed detectCompat for every case", (t) => {
+// Pull the installed pi's detectCompat out of the openai-completions chunk and
+// hand it back as a function. On no pinned install, returns `{ why }` for the
+// caller to skip with, exactly as the checks below always have.
+function installedDetectCompat() {
   const { allJs, root: piRoot, seen } = findPinnedInstall();
   if (!allJs) {
-    const why = seen.length ? `installed pi versions ${seen.join(", ")}, none is ${PI_PINNED_VERSION}` : "pi is not installed";
-    console.log(`[pi-compat] live detectCompat check skipped: ${why}`);
-    t.skip(why);
-    return;
+    return { why: seen.length ? `installed pi versions ${seen.join(", ")}, none is ${PI_PINNED_VERSION}` : "pi is not installed" };
   }
   const chunks = join(piRoot, "dist", "bundle", "chunks");
   const file = readdirSync(chunks).find((n) => /^openai-completions-.*\.js$/.test(n));
@@ -162,11 +208,44 @@ test("live: piCompatFor reproduces the installed detectCompat for every case", (
   const j = src.indexOf("function getCompat(model)");
   assert.ok(i >= 0 && j > i, "detectCompat and getCompat are where 0.85.1 has them");
   // eslint-disable-next-line no-new-func
-  const detectCompat = new Function(`${src.slice(i, j)}; return detectCompat;`)();
+  return { detectCompat: new Function(`${src.slice(i, j)}; return detectCompat;`)() };
+}
+
+test("live: piCompatFor reproduces the installed detectCompat for every case", (t) => {
+  const { detectCompat, why } = installedDetectCompat();
+  if (!detectCompat) {
+    console.log(`[pi-compat] live detectCompat check skipped: ${why}`);
+    t.skip(why);
+    return;
+  }
   const viaDoor = detectCompat({ ...DOOR, id: "m" });
   for (const [url, id] of LIVE_CASES) {
     const provider = url.includes("openrouter.ai") ? "openrouter" : "crow-door";
     const upstream = detectCompat({ provider, baseUrl: url, id });
     assert.deepEqual({ ...viaDoor, ...(piCompatFor(url, id) || {}) }, upstream, `${url} ${id}`);
+  }
+});
+
+// The quirk's premise: pi 0.85.1 has NO aliyuncs.com rule, so the installed
+// detectCompat keeps the developer role on for that host. If a future pi adds
+// its own rule, this fails — that is the signal to drop the Crow table entry
+// (and this case) rather than carry a duplicate.
+const ALIBABA_URLS = [
+  "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+];
+
+test("live: the installed detectCompat has no aliyuncs rule of its own", (t) => {
+  const { detectCompat, why } = installedDetectCompat();
+  if (!detectCompat) {
+    console.log(`[pi-compat] live detectCompat quirk check skipped: ${why}`);
+    t.skip(why);
+    return;
+  }
+  for (const url of ALIBABA_URLS) {
+    const upstream = detectCompat({ provider: "crow-door", baseUrl: url, id: "qwen3.8-max" });
+    assert.equal(upstream.supportsDeveloperRole, true, `${url}: pi keeps the developer role, so the quirk is still ours to carry`);
+    // …and Crow's quirk is the only thing that turns it off.
+    assert.equal(piCompatFor(url, "qwen3.8-max")?.supportsDeveloperRole, false, url);
   }
 });

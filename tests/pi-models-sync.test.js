@@ -254,6 +254,30 @@ test("T17: compat per model (OpenRouter's Anthropic cache control on one model o
   assert.deepEqual(gpt.compat, piCompatFor(or.baseUrl, "openai/gpt-6.1-terra"));
 });
 
+test("T17: an Alibaba Cloud row's written door entry turns the developer role off on every model", async () => {
+  // pi 0.85.1 has no rule for *.aliyuncs.com, and DashScope's
+  // OpenAI-compatible endpoint rejects a `developer` message role (HTTP 400),
+  // so the door entry must carry supportsDeveloperRole: false for every model.
+  const al = cloudRow("cloud-al", {
+    baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    models: [{ id: "qwen3.8-max" }, { id: "qwen3.5-plus", contextWindow: 131072 }],
+  });
+  const e = buildManagedEntries([al], doorOpts([al]));
+  assert.deepEqual(e["crow-c-cloud-al"].models.map((m) => m.compat.supportsDeveloperRole), [false, false]);
+  // …and the file pi actually reads carries it on each model. The path is the
+  // file's usual clearly-fake one and never touches the disk: the reader and
+  // the writer are both injected.
+  let written = null;
+  await syncPiModelsJson({}, {
+    path: "/home/u/.pi/agent/models.json", ...doorOpts([al]), listProvidersAllFn: async () => [al],
+    readFileFn: () => JSON.stringify({ providers: {} }),
+    writeFileAtomicFn: (p, data) => { written = JSON.parse(data); },
+  });
+  const models = written.providers["crow-c-cloud-al"].models;
+  assert.equal(models.length, 2);
+  for (const m of models) assert.equal(m.compat.supportsDeveloperRole, false, m.id);
+});
+
 test("T17: unconsented or moved rows get no entry", () => {
   const peer = cloudRow("cloud-peer");
   const moved = cloudRow("cloud-moved");

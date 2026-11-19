@@ -22,6 +22,11 @@
  *    into models.json reproduces the upstream behaviour exactly, provided the
  *    door's provider id is not a built-in id and the door URL matches none of
  *    the host rules below. It applies to `openai-completions` rows only.
+ *    On top of that mirror, piCompatFor applies Crow's own table of known
+ *    upstream quirks pi has no rule for yet (KNOWN_UPSTREAM_QUIRKS below).
+ *    Those cannot live in detect(): it must stay a faithful copy of pi's
+ *    rules, and a Crow-only entry there would read as pi behaviour and
+ *    drift silently from the installed pi (the live test checks it).
  */
 
 export const PI_PINNED_VERSION = "0.85.1";
@@ -131,6 +136,43 @@ function detect(provider, baseUrl, modelId) {
 // id at a URL no rule matches): the door's own view.
 const DEFAULTS = detect("", "", "");
 
+// Crow-side upstream quirks pi 0.85.1 has NO rule for. piCompatFor applies the
+// matching entry on top of what it derived from pi's rules, so a door entry
+// carries the flag pi should have used for the UPSTREAM url.
+//
+// `hosts` are matched against the URL's parsed HOST only (never a substring of
+// the whole string), with a single trailing dot (the fully-qualified form)
+// stripped first: the host equals an entry or is a subdomain of it. So
+// `dashscope-intl.aliyuncs.com`, `token-plan.ap-southeast-1.maas.aliyuncs.com`
+// and `aliyuncs.com.` match, while `aliyuncs.com.evil.example`,
+// `notaliyuncs.com` and a path that merely contains the name do not.
+//
+//  - aliyuncs.com — Alibaba Cloud Model Studio / DashScope, whose
+//    OpenAI-compatible endpoint (`.../compatible-mode/v1`) rejects a
+//    `developer` message role with HTTP 400: "developer is not one of
+//    ['system', 'assistant', 'user', 'tool', 'function']". pi sends the system
+//    prompt as a developer message unless the flag is off, and through the
+//    door pi only ever sees the gateway URL, which none of pi's own rules
+//    match — so without this every request through the door failed upstream.
+const KNOWN_UPSTREAM_QUIRKS = Object.freeze([
+  Object.freeze({ hosts: Object.freeze(["aliyuncs.com"]), compat: Object.freeze({ supportsDeveloperRole: false }) }),
+]);
+
+/** Apply KNOWN_UPSTREAM_QUIRKS to `got` in place. An unparseable baseUrl
+ * matches nothing (an empty host), leaving today's behaviour untouched. */
+function applyKnownUpstreamQuirks(baseUrl, got) {
+  let host;
+  try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { return got; }
+  // A fully-qualified host keeps its trailing dot in URL.hostname; one dot is
+  // not part of the name. Only a single one: `aliyuncs.com..` stays unmatched.
+  if (host.endsWith(".")) host = host.slice(0, -1);
+  if (!host) return got;
+  for (const q of KNOWN_UPSTREAM_QUIRKS) {
+    if (q.hosts.some((h) => host === h || host.endsWith("." + h))) Object.assign(got, q.compat);
+  }
+  return got;
+}
+
 /**
  * @param {string} baseUrl  the upstream provider's base URL
  * @param {string} modelId  the upstream model id
@@ -146,6 +188,9 @@ export function piCompatFor(baseUrl, modelId) {
   // "openrouter". Every other provider-keyed rule has a URL alternative.
   const provider = baseUrl.includes("openrouter.ai") ? "openrouter" : "";
   const got = detect(provider, baseUrl, id);
+  applyKnownUpstreamQuirks(baseUrl, got);
+  // Diff against pi's defaults AFTER the quirks, so the contract holds even
+  // when a quirk happens to agree with a rule pi already has.
   const out = {};
   for (const [k, v] of Object.entries(got)) {
     if (v !== DEFAULTS[k] && v !== undefined) out[k] = v;
