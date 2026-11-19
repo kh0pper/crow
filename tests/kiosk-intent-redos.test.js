@@ -60,8 +60,33 @@ const MATCHERS = {
   wantsHandoffStop: (s) => wantsHandoffStop(s, HANDOFF_BOTS),
 };
 const BUDGET_MS = 50;
+// Input grows 10x between the two sizes, so a function that really scales with its input gives about
+// 10x if linear, 100x if quadratic and far more if exponential; 25 leaves 2.5x margin over linear.
+// The intent matchers read only a capped prefix (INTENT_MAX_CHARS), so for them the two sizes cost
+// about the same, the small time sits at the floor, and the check works as an absolute cap of about
+// 12.5 ms median (25 x the 0.5 ms floor). The under-cap test below covers exponential behaviour on
+// the prefix itself; the control test proves the ratio check still catches real catastrophic
+// backtracking.
+const RATIO_BOUND = 25;
+const ABS_CEILING_MS = 500;
+const FLOOR_MS = 0.5;
 /** CPU time of one call, in ms (user + system: not fooled by a busy machine's wall clock). */
 function cpuMs(fn) { const a = process.cpuUsage(); fn(); const d = process.cpuUsage(a); return (d.user + d.system) / 1000; }
+/** Median CPU time of `runs` calls: one noisy scheduling slice cannot decide the verdict. */
+function medianCpuMs(fn, runs = 5) {
+  const times = [];
+  for (let i = 0; i < runs; i++) times.push(cpuMs(fn));
+  times.sort((a, b) => a - b);
+  return times[Math.floor(times.length / 2)];
+}
+/** How the cost of `fn` grows from the first size to the second: a ratio near 10 is linear growth. */
+function scalingVerdict(fn, makeInput, sizes = [5_000, 50_000]) {
+  const small = makeInput(sizes[0]);
+  const large = makeInput(sizes[1]);
+  const tSmall = Math.max(medianCpuMs(() => fn(small)), FLOOR_MS);
+  const tLarge = medianCpuMs(() => fn(large));
+  return { tSmall, tLarge, ratio: tLarge / tSmall };
+}
 
 const RUNS = ["what day is ", "how many days until ", "december ", "25th ", "twenty ", "the 25th of ", "cuantos dias faltan para ", "de ", " ", "what ", "a ", "hey crow ", "ok ", "okay ", "so and um ", "show me ", "put ", "set a ", "timer ", "remember ", "what s my ", "que ", "oye crow ", "por favor ", "display a | ", "|", "| ", "<a", "recipe a | b | ", "timer 1 minute ", "1 ", "\n", "á", "’",
   "h d ", "w x y z ", "hd1 ", "ninety point ", "to ", "too ", "wxyz hd ",
@@ -69,17 +94,28 @@ const RUNS = ["what day is ", "how many days until ", "december ", "25th ", "twe
   "nineteen ", "oh ", "twenty first ", "two thousand and ", "r and b ", "saint ", "1st "];
 const TAILS = ["", "!", " x", " what time is it", " zzz what time is it now please x", " | <title>"];
 
-test("adversarial input: 50,000-repeat runs, with and without a trailing mismatch — every matcher answers well inside 50 ms of CPU time", () => {
+test("adversarial input: 50,000-repeat runs, with and without a trailing mismatch: every matcher answers in a median CPU time that does not grow with the input (ratio to the 5,000-repeat run at most 25x; at most 500 ms)", () => {
   for (const [name, fn] of Object.entries(MATCHERS)) {
     fn("warm up what time is it");
     for (const run of RUNS) {
       for (const tail of TAILS) {
-        const input = run.repeat(50_000) + tail;
-        const ms = cpuMs(() => fn(input));
-        assert.ok(ms < BUDGET_MS, `${name} took ${ms.toFixed(1)} ms on ${JSON.stringify(run)} × 50,000 + ${JSON.stringify(tail)}`);
+        const v = scalingVerdict(fn, (n) => run.repeat(n) + tail);
+        const where = `${name} on ${JSON.stringify(run)} × n + ${JSON.stringify(tail)}: 5,000 in ${v.tSmall.toFixed(1)} ms, 50,000 in ${v.tLarge.toFixed(1)} ms`;
+        assert.ok(v.ratio <= RATIO_BOUND, `${where} — ratio ${v.ratio.toFixed(1)}x, cost is not linear in the input length`);
+        assert.ok(v.tLarge <= ABS_CEILING_MS, `${where} — ratio ${v.ratio.toFixed(1)}x, but the large run is over ${ABS_CEILING_MS} ms`);
       }
     }
   }
+});
+
+test("the scaling check catches real ReDoS: a catastrophic pattern fails it (control)", () => {
+  // /(a+)+$/ backtracks exponentially on "aaaa…b": 12 more characters are about 2^12 = 4000x the work.
+  const evil = /(a+)+$/;
+  const bad = scalingVerdict((s) => evil.test(s), (n) => "a".repeat(n) + "b", [14, 26]);
+  assert.ok(bad.ratio > RATIO_BOUND, `a catastrophic pattern must not pass: 14 chars in ${bad.tSmall.toFixed(1)} ms, 26 chars in ${bad.tLarge.toFixed(1)} ms — ratio ${bad.ratio.toFixed(1)}x`);
+  // …and a plainly linear function passes the same check.
+  const good = scalingVerdict((s) => s.split("a").length, (n) => "a".repeat(n) + "b");
+  assert.ok(good.ratio <= RATIO_BOUND, `a linear function must pass: 5,000 in ${good.tSmall.toFixed(1)} ms, 50,000 in ${good.tLarge.toFixed(1)} ms — ratio ${good.ratio.toFixed(1)}x`);
 });
 
 test("adversarial input UNDER the length cap: overlapping lead-ins and tails cannot blow up (the flagged pattern doubled per repeat)", () => {
