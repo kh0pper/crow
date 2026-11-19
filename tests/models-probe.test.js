@@ -319,17 +319,31 @@ function fakeFs({ existsFiles = [], readFiles = {}, statfs = null, dirs = {} } =
  * Fake execFile matching node:child_process's callback signature:
  * execFile(file, args, options, callback).
  * `handlers` maps command name -> stdout string (success) or `null` (error).
+ * A specific invocation can be keyed too, as `"<cmd> <arg> <arg>"`
+ * (e.g. `"sysctl -n iogpu.wired_limit_mb"`), so one command can answer
+ * differently per argument list; the exact-invocation key wins over the bare
+ * command key.
  */
 function fakeExecFile(handlers) {
   return (cmd, args, options, callback) => {
     const cb = typeof options === "function" ? options : callback;
-    if (!(cmd in handlers) || handlers[cmd] === null) {
-      cb(new Error(`${cmd}: command not found`));
+    const invocation = `${cmd} ${(Array.isArray(args) ? args : []).join(" ")}`.trim();
+    const key = Object.prototype.hasOwnProperty.call(handlers, invocation) ? invocation : cmd;
+    if (!(key in handlers) || handlers[key] === null) {
+      cb(new Error(`${key}: command not found`));
       return;
     }
-    cb(null, handlers[cmd], "");
+    cb(null, handlers[key], "");
   };
 }
+
+// darwin sysctl answers, keyed by invocation. 32 GiB of RAM; `0` for
+// iogpu.wired_limit_mb is what the system-default (no explicit limit) case
+// reports.
+const SYSCTL_32GIB_DEFAULT_WORKING_SET = {
+  "sysctl -n hw.memsize": "34359738368\n",
+  "sysctl -n iogpu.wired_limit_mb": "0\n",
+};
 
 const ALL_FAIL_EXEC = fakeExecFile({});
 
@@ -431,13 +445,15 @@ test("rocminfo consulted when vulkaninfo and nvidia-smi both fail -> accel vulka
 });
 
 test("darwin: accel metal, RAM from sysctl hw.memsize", async () => {
-  const execFile = fakeExecFile({ sysctl: "34359738368\n" }); // 32 GiB
+  const execFile = fakeExecFile(SYSCTL_32GIB_DEFAULT_WORKING_SET); // 32 GiB
   const fs = fakeFs({});
   const probe = await probeHardware({ execFile, fs, platform: "darwin", release: "23.0.0" });
 
   assert.equal(probe.platform, "darwin");
   assert.equal(probe.accel, "metal");
-  assert.equal(probe.ramAvailableMb, 32768);
+  assert.equal(probe.ramAvailableMb, 32768); // total RAM, not "available"
+  assert.equal(probe.ramTotalMb, 32768);
+  assert.equal(probe.gpuWorkingSetMb, 21845); // floor(32768 * 2 / 3)
 });
 
 test("disk free reported via fs.statfsSync when modelsDir given", async () => {
@@ -583,7 +599,7 @@ test("probeHardware: no GPU at all -> unified null (not false), gpuArch null; ra
   assert.equal(probe.ramTotalMb, 127941);
 });
 
-test("probeHardware: WSL2 and darwin leave every new field null", async () => {
+test("probeHardware: WSL2 leaves every new field null; darwin reports ramTotalMb + the GPU working set", async () => {
   const wsl = await probeHardware({
     execFile: fakeExecFile({ vulkaninfo: VULKANINFO_CROW_UNIFIED }),
     fs: fakeFs({ existsFiles: ["/proc/sys/fs/binfmt_misc/WSLInterop"], readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP } }),
@@ -593,12 +609,56 @@ test("probeHardware: WSL2 and darwin leave every new field null", async () => {
   assert.equal(wsl.unified, null);
   assert.equal(wsl.gpuArch, null);
   assert.equal(wsl.gttTotalMb, null);
+  assert.equal(wsl.gpuWorkingSetMb, null);
 
-  const mac = await probeHardware({ execFile: fakeExecFile({ sysctl: "34359738368\n" }), fs: fakeFs({}), platform: "darwin", release: "23.0.0" });
+  const mac = await probeHardware({
+    execFile: fakeExecFile(SYSCTL_32GIB_DEFAULT_WORKING_SET),
+    fs: fakeFs({}),
+    platform: "darwin",
+    release: "23.0.0",
+  });
   assert.equal(mac.unified, null);
   assert.equal(mac.gpuArch, null);
   assert.equal(mac.gttTotalMb, null);
-  assert.equal(mac.ramTotalMb, null);
+  assert.equal(mac.ramTotalMb, 32768);
+  assert.equal(mac.gpuWorkingSetMb, 21845);
+});
+
+test("darwin: no explicit wired limit (sysctl prints 0) -> gpuWorkingSetMb is 2/3 of total RAM", async () => {
+  const execFile = fakeExecFile(SYSCTL_32GIB_DEFAULT_WORKING_SET);
+  const probe = await probeHardware({ execFile, fs: fakeFs({}), platform: "darwin", release: "23.0.0" });
+
+  assert.equal(probe.ramTotalMb, 32768); // 34359738368 bytes / 1024 / 1024
+  assert.equal(probe.ramAvailableMb, 32768);
+  assert.equal(probe.gpuWorkingSetMb, 21845); // floor(32768 * 2 / 3)
+});
+
+test("darwin: explicit iogpu.wired_limit_mb -> gpuWorkingSetMb is that value, not the 2/3 fallback", async () => {
+  const execFile = fakeExecFile({
+    "sysctl -n hw.memsize": "34359738368\n",
+    "sysctl -n iogpu.wired_limit_mb": "28672\n",
+  });
+  const probe = await probeHardware({ execFile, fs: fakeFs({}), platform: "darwin", release: "23.0.0" });
+
+  assert.equal(probe.gpuWorkingSetMb, 28672);
+  assert.equal(probe.ramTotalMb, 32768);
+});
+
+test("darwin: hw.memsize fails -> gpuWorkingSetMb is the explicit wired limit or null", async () => {
+  const withWired = await probeHardware({
+    execFile: fakeExecFile({ "sysctl -n iogpu.wired_limit_mb": "28672\n" }),
+    fs: fakeFs({}),
+    platform: "darwin",
+    release: "23.0.0",
+  });
+  assert.equal(withWired.ramAvailableMb, null);
+  assert.equal(withWired.ramTotalMb, null);
+  assert.equal(withWired.gpuWorkingSetMb, 28672);
+  assert.ok(withWired.unknown.includes("ram"));
+
+  const withoutWired = await probeHardware({ execFile: ALL_FAIL_EXEC, fs: fakeFs({}), platform: "darwin", release: "23.0.0" });
+  assert.equal(withoutWired.gpuWorkingSetMb, null);
+  assert.equal(withoutWired.ramTotalMb, null);
 });
 
 test("readAmdgpuMem: only card<N> dirs count; among cards with GTT the smallest VRAM (the iGPU) wins; junk/unreadable skipped", () => {
@@ -825,6 +885,34 @@ test("fitBadge: unified:false keeps the discrete VRAM credit exactly as before",
   assert.equal(fitBadge(probe, { min_ram_mb: 16000, min_vram_mb: 8000 }), "fits");
 });
 
+// ---------------------------------------------------------------------------
+// fitBadge on darwin (GPU working-set ceiling)
+// ---------------------------------------------------------------------------
+
+test("fitBadge darwin: gpuWorkingSetMb caps the effective RAM — above the working set is wont_fit", () => {
+  const probe = { ramAvailableMb: 32768, gpuWorkingSetMb: 21845, unified: null, vramMb: null };
+  // Total RAM alone would say fits (26050 <= 32768).
+  assert.equal(fitBadge(probe, { min_ram_mb: 26050, min_vram_mb: 0 }), "wont_fit");
+});
+
+test("fitBadge darwin: at or under gpuWorkingSetMb -> fits", () => {
+  const probe = { ramAvailableMb: 32768, gpuWorkingSetMb: 21845, unified: null, vramMb: null };
+  assert.equal(fitBadge(probe, { min_ram_mb: 21000, min_vram_mb: 0 }), "fits");
+  assert.equal(fitBadge(probe, { min_ram_mb: 21845, min_vram_mb: 0 }), "fits");
+});
+
+test("fitBadge darwin: within 110% of gpuWorkingSetMb -> tight", () => {
+  const probe = { ramAvailableMb: 32768, gpuWorkingSetMb: 21845, unified: null, vramMb: null };
+  assert.equal(fitBadge(probe, { min_ram_mb: 22000, min_vram_mb: 0 }), "tight");
+});
+
+test("fitBadge darwin: a probe without gpuWorkingSetMb behaves as before", () => {
+  const probe = { ramAvailableMb: 32768, unified: null, vramMb: null };
+  assert.equal(fitBadge(probe, { min_ram_mb: 26050, min_vram_mb: 0 }), "fits");
+  assert.equal(fitBadge(probe, { min_ram_mb: 36044, min_vram_mb: 0 }), "tight"); // 32768 x 1.10
+  assert.equal(fitBadge(probe, { min_ram_mb: 36045, min_vram_mb: 0 }), "wont_fit");
+});
+
 test("models.fitTightHint copy covers 'other models stopped first' in en and es", () => {
   assert.match(t("models.fitTightHint", "en"), /other models stopped first/);
   assert.match(t("models.fitTightHint", "es"), /otros modelos/);
@@ -857,4 +945,51 @@ test("reprobe forces a fresh probe even when hardware inputs changed", async () 
   const fresh2 = await reprobe({ execFile: execFile2, fs: fsA, platform: "linux", release: "6.8.0-generic" });
   assert.equal(fresh2.accel, "vulkan");
   assert.strictEqual(getCachedProbe(), fresh2);
+});
+
+// ---------------------------------------------------------------------------
+// F2: discrete VRAM credit with quants read from the real catalog
+// ---------------------------------------------------------------------------
+// The quants below come from registry/model-catalog.json itself (read here,
+// never hardcoded), so these cases follow the catalog's own min_ram_mb /
+// min_vram_mb figures.
+
+const catalogFs = await import("node:fs");
+const REGISTRY_CATALOG = JSON.parse(
+  catalogFs.readFileSync(new URL("../registry/model-catalog.json", import.meta.url), "utf8")
+);
+
+/** A quant from the real catalog, by model id + quant label. */
+function registryQuant(modelId, quantLabel) {
+  const model = REGISTRY_CATALOG.models.find((m) => m.id === modelId);
+  assert.ok(model, `registry/model-catalog.json carries model ${modelId}`);
+  const quant = (model.quants || []).find((q) => q.quant === quantLabel);
+  assert.ok(quant, `registry/model-catalog.json carries ${modelId} ${quantLabel}`);
+  return quant;
+}
+
+test("F2 catalog fit: discrete card, qwen3.8-27b UD-Q4_K_XL — 16 GiB of VRAM is below its floor, 32 GiB covers it", () => {
+  const quant = registryQuant("qwen3.8-27b", "UD-Q4_K_XL");
+  const ample = { platform: "linux", unified: false, vramMb: 32768, ramAvailableMb: 8000 };
+  assert.equal(fitBadge(ample, quant), "fits");
+
+  const short = { platform: "linux", unified: false, vramMb: 16384, ramAvailableMb: 8000 };
+  assert.equal(fitBadge(short, quant), "wont_fit");
+});
+
+test("F2 catalog fit: discrete card, qwen3.5-4b UD-Q4_K_XL — 4 GiB of VRAM does not count, 8 GiB does", () => {
+  const quant = registryQuant("qwen3.5-4b", "UD-Q4_K_XL");
+  const ample = { platform: "linux", unified: false, vramMb: 8192, ramAvailableMb: 4000 };
+  assert.equal(fitBadge(ample, quant), "fits");
+
+  const short = { platform: "linux", unified: false, vramMb: 4096, ramAvailableMb: 4000 };
+  assert.equal(fitBadge(short, quant), "wont_fit");
+});
+
+test("F2 catalog fit: a unified probe that is not GTT-expanded never gets the VRAM credit", () => {
+  const quant = registryQuant("qwen3.8-27b", "UD-Q4_K_XL");
+  const probe = { platform: "linux", unified: true, vramMb: 32768, ramAvailableMb: 8000, gttTotalMb: 8000, ramTotalMb: 16000 };
+  // The heap is a slice of the same RAM on a unified host, so the fit is
+  // judged on RAM alone — 8000 MB, far below the quant's floor.
+  assert.equal(fitBadge(probe, quant), "wont_fit");
 });

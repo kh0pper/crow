@@ -64,7 +64,7 @@
           "quant": "UD-Q4_K_XL",
           "size_mb": 2912.11,
           "min_ram_mb": 7720,
-          "min_vram_mb": 0,
+          "min_vram_mb": 7720,
           "sha256": "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7"
         },
         {
@@ -72,7 +72,7 @@
           "quant": "Q8_0",
           "size_mb": 4482.4,
           "min_ram_mb": 9290,
-          "min_vram_mb": 0,
+          "min_vram_mb": 9290,
           "sha256": "10cc391b403021dd11c614679d2fd92f611c3681d29e29651b717316965d61e1"
         }
       ]
@@ -111,7 +111,7 @@
           "quant": "Q4_0",
           "size_mb": 3041.38,
           "min_ram_mb": 4728,
-          "min_vram_mb": 0,
+          "min_vram_mb": 4728,
           "sha256": "31d3a3c630d4e71a7416498c42660dd3805066948acaec76a47e1ffac7010132"
         }
       ]
@@ -141,7 +141,7 @@
           "quant": "Q8_0",
           "size_mb": 639.15,
           "min_ram_mb": 4900,
-          "min_vram_mb": 0,
+          "min_vram_mb": 4900,
           "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
         }
       ]
@@ -171,7 +171,7 @@
           "quant": "Q8_0",
           "size_mb": 639.15,
           "min_ram_mb": 2091,
-          "min_vram_mb": 0,
+          "min_vram_mb": 2091,
           "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7"
         }
       ]
@@ -200,7 +200,7 @@
           "quant": "Q8_0",
           "size_mb": 333.59,
           "min_ram_mb": 1100,
-          "min_vram_mb": 0,
+          "min_vram_mb": 1100,
           "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63"
         }
       ],
@@ -241,7 +241,7 @@
           "quant": "Q4_K_M",
           "size_mb": 2497.28,
           "min_ram_mb": 7842,
-          "min_vram_mb": 0,
+          "min_vram_mb": 7842,
           "sha256": "d4dcd426bfba75752a312b266b80fec8136fbaca13c62d93b7ac41fa67f0492b"
         },
         {
@@ -249,7 +249,7 @@
           "quant": "Q8_0",
           "size_mb": 4280.41,
           "min_ram_mb": 9625,
-          "min_vram_mb": 0,
+          "min_vram_mb": 9625,
           "sha256": "e30b41d2f2cc48149dfbba1b3fb2c023c7e6bf2def75833d4d43820df75efeb3"
         }
       ]
@@ -290,7 +290,7 @@
           "quant": "UD-Q5_K_XL",
           "size_mb": 27159.12,
           "min_ram_mb": 30356,
-          "min_vram_mb": 0,
+          "min_vram_mb": 30356,
           "sha256": "9de9a9420f61a0bb59bb2ca1ea170a6a57f6821fa1deec915bcaef523730a919"
         },
         {
@@ -298,7 +298,7 @@
           "quant": "UD-Q4_K_XL",
           "size_mb": 22853.66,
           "min_ram_mb": 26050,
-          "min_vram_mb": 0,
+          "min_vram_mb": 26050,
           "sha256": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
         }
       ]
@@ -339,7 +339,7 @@
           "quant": "UD-Q6_K_XL",
           "size_mb": 25299.06,
           "min_ram_mb": 34401,
-          "min_vram_mb": 0,
+          "min_vram_mb": 34401,
           "sha256": "701d8fa9ed214ab21bfc130cd2a7df19ca89bbef7713e2dfb19f3c63696aa917"
         },
         {
@@ -347,7 +347,7 @@
           "quant": "UD-Q4_K_XL",
           "size_mb": 17559.18,
           "min_ram_mb": 26662,
-          "min_vram_mb": 0,
+          "min_vram_mb": 26662,
           "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
         }
       ]
@@ -386,7 +386,7 @@
           "quant": "UD-Q4_K_XL",
           "size_mb": 111334.65,
           "min_ram_mb": 115068,
-          "min_vram_mb": 0,
+          "min_vram_mb": 115068,
           "sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082",
           "shards": [
             {
@@ -443,7 +443,7 @@
           "quant": "UD-IQ2_XXS",
           "size_mb": 101844.96,
           "min_ram_mb": 102934,
-          "min_vram_mb": 0,
+          "min_vram_mb": 102934,
           "sha256": "d9605eec5aa2c14fc9ccff1ba3341a1e9a1476b08714d41cd43d0e10a4db3f7a",
           "shards": [
             {
@@ -468,7 +468,7 @@
           "quant": "UD-IQ4_XS",
           "size_mb": 156822.11,
           "min_ram_mb": 157911,
-          "min_vram_mb": 0,
+          "min_vram_mb": 157911,
           "sha256": "eec97673e9acb38f8682250e778f88991e731771bab8d3c0b787985949aacefa",
           "shards": [
             {
@@ -498,7 +498,7 @@
           "quant": "UD-Q4_K_XL",
           "size_mb": 199707.33,
           "min_ram_mb": 200797,
-          "min_vram_mb": 0,
+          "min_vram_mb": 200797,
           "sha256": "00dceaf3ed08781b1e44513a44ebb19e96248d01ba2a80b17f675a2b6fa9a1ee",
           "shards": [
             {
@@ -555,7 +555,7 @@
           "quant": "UD-IQ3_XXS",
           "size_mb": 104207.85,
           "min_ram_mb": 106344,
-          "min_vram_mb": 0,
+          "min_vram_mb": 106344,
           "sha256": "dec1cee704800267d9d836d5a61aefc33705be939bbb3058fa9006d98191576d",
           "shards": [
             {
@@ -580,7 +580,7 @@
           "quant": "UD-Q2_K_XL",
           "size_mb": 96832.51,
           "min_ram_mb": 98968,
-          "min_vram_mb": 0,
+          "min_vram_mb": 98968,
           "sha256": "de65c5bb660817b95cc281bf54935f9d1bcc3b22535f2eae63b35a14c7c5724b",
           "shards": [
             {

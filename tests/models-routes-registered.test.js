@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { createLifecycleCore } from "../servers/gateway/models/lifecycle-core.js";
 import { createJobStore } from "../servers/gateway/models/lifecycle.js";
 import { hfSyntheticCatalog, registerModel } from "../servers/gateway/models/manager.js";
+import { fitBadge } from "../servers/gateway/models/probe.js";
 import { upsertProvider, listProvidersAll } from "../servers/shared/providers-db.js";
 import { loadState, registryKey } from "../servers/gateway/models/state.js";
 import {
@@ -250,8 +251,20 @@ test("hfSyntheticCatalog keeps the shape downloadHfFile always built", () => {
   const c = hfSyntheticCatalog({ hfRepo: "org/Repo-GGUF", file: "Repo-Q4_K_M.gguf", modelId: "repo-q4-k-m", sha256: "abc", sizeMb: 12.5 });
   assert.deepEqual(c, { models: [{
     id: "repo-q4-k-m", family: "Repo-GGUF", hf_repo: "org/Repo-GGUF", task: "chat", context_len: null, default_quant: "hf",
-    quants: [{ file: "Repo-Q4_K_M.gguf", quant: "hf", sha256: "abc", size_mb: 12.5, min_ram_mb: 12.5, min_vram_mb: 0 }],
+    quants: [{ file: "Repo-Q4_K_M.gguf", quant: "hf", sha256: "abc", size_mb: 12.5, min_ram_mb: 12.5, min_vram_mb: 12.5 }],
   }] });
+});
+
+test("hfSyntheticCatalog: the quant's VRAM floor is its size, so a discrete GPU with room for it fits", () => {
+  const quant = hfSyntheticCatalog({ hfRepo: "org/Repo-GGUF", file: "Repo-Q4_K_M.gguf", modelId: "repo-q4-k-m", sha256: "abc", sizeMb: 12000 })
+    .models[0].quants[0];
+  assert.equal(quant.min_vram_mb, quant.min_ram_mb);
+  // Small RAM, 16 GiB of VRAM: the HF quant fits only via its VRAM credit.
+  const discrete = { unified: false, ramAvailableMb: 4000, vramMb: 16384 };
+  assert.equal(fitBadge(discrete, quant), "fits");
+  // The same quant on a host whose GPU cannot hold it does not.
+  const shortVram = { unified: false, ramAvailableMb: 4000, vramMb: 8192 };
+  assert.equal(fitBadge(shortVram, quant), "wont_fit");
 });
 
 // ─── Review fixes (2026-10-15) ──────────────────────────────────────────────

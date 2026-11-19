@@ -243,6 +243,11 @@ export async function loadPanelData({
   // "estimated" everywhere it's rendered.
   let estimatedRamMb = 0;
   let estimatedVramMb = 0;
+  // A quant's VRAM figure is only memory IN ADDITION to RAM on a discrete
+  // GPU host. On a unified-memory host the heap is a slice of the same RAM
+  // already counted, and on a RAM-only/undetected host there is no VRAM to
+  // count at all — so those show RAM only, never the size twice.
+  const vramCounts = !!(probe && probe.unified === false && typeof probe.vramMb === "number" && probe.vramMb > 0);
   const quantLookup = new Map(); // modelId -> quant -> {min_ram_mb, min_vram_mb}
   for (const m of models) {
     const byQuant = new Map(m.quants.map((q) => [q.quant, q]));
@@ -257,7 +262,7 @@ export async function loadPanelData({
     const q = quant && quantLookup.get(rm.modelId)?.get(quant);
     if (q) {
       estimatedRamMb += q.min_ram_mb || 0;
-      estimatedVramMb += q.min_vram_mb || 0;
+      if (vramCounts) estimatedVramMb += q.min_vram_mb || 0;
     }
   }
 

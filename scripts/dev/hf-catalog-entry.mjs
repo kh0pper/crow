@@ -29,13 +29,13 @@
  * Usage:
  *   node scripts/dev/hf-catalog-entry.mjs <hf_repo> <filename> \
  *     --n-layer <int> --n-embd <int> [--context-len 8192] \
- *     [--quant Q4_K_M] [--min-vram-mb 0] [--overhead-mb 512] \
+ *     [--quant Q4_K_M] [--min-vram-mb <int>] [--overhead-mb 512] \
  *     [--kv-bytes-per-elem 2] [--n-kv-heads <int>] [--head-dim <int>] \
  *     [--hf-token <token>]
  *
  * Example:
  *   node scripts/dev/hf-catalog-entry.mjs Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf \
- *     --n-layer 36 --n-embd 2560 --context-len 8192 --quant Q4_K_M --min-vram-mb 0
+ *     --n-layer 36 --n-embd 2560 --context-len 8192 --quant Q4_K_M
  *
  * Gated repos: the HF API hides `blobs` (size + sha256) for gated repos
  * unless the request is authenticated AND the account has accepted the
@@ -74,7 +74,11 @@ Options:
   --quant <string>      Quant label to stamp on the entry (e.g. "Q4_K_M").
                         Default: inferred from <filename> (last _TOKEN before
                         ".gguf", uppercased) — override if inference is wrong.
-  --min-vram-mb <int>   min_vram_mb to stamp on the entry. Default 0 (CPU-ok).
+  --min-vram-mb <int>   min_vram_mb to stamp on the entry. Default: the computed
+                        min_ram_mb — every catalog launch block offloads all
+                        layers (ngl 999), so a full GPU offload keeps exactly
+                        the same weights, companions and KV/context/compute
+                        buffers in VRAM.
   --overhead-mb <int>   Fixed runtime/allocator overhead added on top of the
                         KV estimate. Default 512.
   --kv-bytes-per-elem <int>
@@ -118,7 +122,7 @@ function parseCliArgs(argv) {
         "n-embd": { type: "string" },
         "context-len": { type: "string", default: "8192" },
         quant: { type: "string" },
-        "min-vram-mb": { type: "string", default: "0" },
+        "min-vram-mb": { type: "string" },
         "overhead-mb": { type: "string", default: "512" },
         "kv-bytes-per-elem": { type: "string", default: "2" },
         "n-kv-heads": { type: "string" },
@@ -234,7 +238,7 @@ async function main() {
   const contextLen = Number(values["context-len"]);
   const overheadMb = Number(values["overhead-mb"]);
   const bytesPerElem = Number(values["kv-bytes-per-elem"]);
-  const minVramMb = Number(values["min-vram-mb"]);
+  const minVramOverride = values["min-vram-mb"] == null ? null : Number(values["min-vram-mb"]);
   const token = values["hf-token"] || process.env.HF_TOKEN || undefined;
 
   for (const [name, val] of [
@@ -243,9 +247,11 @@ async function main() {
     ["--context-len", contextLen],
     ["--overhead-mb", overheadMb],
     ["--kv-bytes-per-elem", bytesPerElem],
-    ["--min-vram-mb", minVramMb],
   ]) {
     if (!Number.isFinite(val) || val < 0) fail(`${name} must be a non-negative number, got ${val}`, 1);
+  }
+  if (minVramOverride != null && (!Number.isFinite(minVramOverride) || minVramOverride < 0)) {
+    fail(`--min-vram-mb must be a non-negative number, got ${minVramOverride}`, 1);
   }
 
   let meta;
@@ -263,6 +269,9 @@ async function main() {
 
   const sizeMb = meta.sizeBytes / 1e6;
   const minRamMb = computeMinRamMb({ sizeMb, nLayer, nEmbd, contextLen, bytesPerElem, overheadMb });
+  // Default: a full GPU offload (the catalog's ngl 999) keeps exactly the
+  // buffers min_ram_mb counts in VRAM, so min_vram_mb = min_ram_mb.
+  const minVramMb = minVramOverride ?? minRamMb;
   const quant = values.quant || inferQuantFromFilename(filename);
 
   if (meta.gatedFallback) {

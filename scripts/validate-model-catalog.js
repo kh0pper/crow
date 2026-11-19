@@ -18,12 +18,18 @@
  *   - min_ram_mb is never less than the quant's own size_mb (a RAM-math
  *     sanity floor: whatever else is estimated, the model has to fit in RAM
  *     at all before KV-cache/overhead are even added).
+ *   - min_vram_mb is always a positive number and never less than the
+ *     quant's own size_mb. 0 no longer means "CPU-capable": every catalog
+ *     launch block offloads every layer (ngl 999), so a quant's VRAM figure
+ *     is the same buffers min_ram_mb counts (weights, companions, KV/
+ *     context/compute overhead). CPU capability is a MODEL property and is
+ *     expressed with the "cpu-capable" tag, never with a zero VRAM floor.
  *   - min_runtime_version (a llama.cpp "b<build>" tag) must not exceed
  *     runtime.release's build number.
  *   - exactly one model has first_run_default:true, and that model must be
- *     ungated with at least one quant carrying min_vram_mb:0 (CPU-capable) —
- *     first_run_default is the model Crow offers as the default first
- *     install on a machine with no GPU.
+ *     ungated and carry the "cpu-capable" tag — first_run_default is the
+ *     model Crow offers as the default first install on a machine with no
+ *     GPU.
  *   - chat_template_kwargs, when present, must be a plain object (arrays,
  *     strings, and null are rejected) — it is threaded verbatim into
  *     llama-server's --jinja request body and into the openai adapter's
@@ -333,8 +339,14 @@ export function validateCatalog(catalog) {
       } else if (typeof quant.size_mb === "number" && quant.min_ram_mb < quant.size_mb) {
         errors.push(`${qlabel}: min_ram_mb (${quant.min_ram_mb}) is less than quant size_mb (${quant.size_mb})`);
       }
-      if (typeof quant.min_vram_mb !== "number") {
+      if (typeof quant.min_vram_mb !== "number" || !Number.isFinite(quant.min_vram_mb)) {
         errors.push(`${qlabel}: min_vram_mb must be a number`);
+      } else if (!(quant.min_vram_mb > 0)) {
+        errors.push(
+          `${qlabel}: min_vram_mb (${quant.min_vram_mb}) must be greater than 0 — 0 no longer means CPU-capable; mark the model with the "cpu-capable" tag instead`
+        );
+      } else if (typeof quant.size_mb === "number" && quant.min_vram_mb < quant.size_mb) {
+        errors.push(`${qlabel}: min_vram_mb (${quant.min_vram_mb}) is less than quant size_mb (${quant.size_mb})`);
       }
     });
   });
@@ -352,10 +364,9 @@ export function validateCatalog(catalog) {
     if (def.gated === true) {
       errors.push(`first_run_default model "${def.id}" must not be gated:true`);
     }
-    const quants = Array.isArray(def.quants) ? def.quants : [];
-    const hasCpuCapable = quants.some((q) => q && q.min_vram_mb === 0);
-    if (!hasCpuCapable) {
-      errors.push(`first_run_default model "${def.id}" must have at least one quant with min_vram_mb:0`);
+    const hasCpuCapableTag = Array.isArray(def.tags) && def.tags.includes("cpu-capable");
+    if (!hasCpuCapableTag) {
+      errors.push(`first_run_default model "${def.id}" must carry the "cpu-capable" tag`);
     }
     if (servingClassOf(def) !== "resident") {
       errors.push(`first_run_default model "${def.id}" must be serving.class "resident" (onboarding downloads it one-tap)`);

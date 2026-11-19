@@ -27,11 +27,15 @@
  * "vulkan"; else nvidia-smi -> accel "cuda"; else rocminfo (AMD family,
  * still reported as "vulkan" since the Probe.accel enum has no separate
  * "rocm" value — v1 always ships the Vulkan/Mesa asset for AMD). darwin ->
- * accel "metal" always (deterministic), RAM from `sysctl -n hw.memsize`
- * (this is total physical memory, not "available" — macOS has no direct
- * MemAvailable equivalent exposed via a single documented command; treating
- * total-as-available is a deliberate v1 simplification, not a detection
- * bug — see task-3-report.md).
+ * accel "metal" always (deterministic), RAM from `sysctl -n hw.memsize`.
+ * `ramAvailableMb` stays that same total physical memory on darwin (macOS
+ * has no direct MemAvailable equivalent exposed via a single documented
+ * command); the ceiling that actually limits a GPU-resident model there is
+ * `gpuWorkingSetMb`, and that is what fitBadge applies. `ramTotalMb` is the
+ * same total. `gpuWorkingSetMb` is `sysctl -n iogpu.wired_limit_mb` when
+ * that reports an integer above zero (zero means the system default),
+ * otherwise a conservative fraction of total RAM — see
+ * DARWIN_DEFAULT_WORKING_SET_NUM/DEN.
  *
  * Anything genuinely undetectable leaves its Probe field(s) null AND pushes
  * a short name ("gpu" | "ram" | "disk") into `unknown`. A deliberate,
@@ -65,6 +69,17 @@ const AMD_NAME_RE = /\b(AMD|Radeon|RADV)\b/i;
  * (Strix Halo runtime profile spec §2.1, D1).
  */
 export const UNIFIED_VRAM_CARVEOUT_MAX_MB = 2048;
+
+/**
+ * Apple does not publish the default fraction of
+ * `MTLDevice.recommendedMaxWorkingSetSize`. 2/3 is a conservative
+ * assumption; a fit badge must fail closed, so the conservative figure is
+ * the one used here. The installer should read the real
+ * `recommendedMaxWorkingSetSize` later; until then this is an
+ * approximation, not a measured value.
+ */
+export const DARWIN_DEFAULT_WORKING_SET_NUM = 2;
+export const DARWIN_DEFAULT_WORKING_SET_DEN = 3;
 
 // ---------------------------------------------------------------------------
 // execFile helper — always resolves (never throws/rejects); a command that
@@ -396,8 +411,11 @@ function readDiskFreeMb(fs, dir) {
  * @property {boolean|null} unified      GPU shares system RAM; null when no GPU detected
  * @property {number|null} gttTotalMb    amdgpu GTT aperture (the real single-box ceiling on unified)
  * @property {number|null} gttUsedMb
- * @property {number|null} ramAvailableMb
- * @property {number|null} ramTotalMb    /proc/meminfo MemTotal
+ * @property {number|null} ramAvailableMb  darwin: total RAM (no MemAvailable)
+ * @property {number|null} ramTotalMb    /proc/meminfo MemTotal; darwin: total RAM
+ * @property {number|null} gpuWorkingSetMb  darwin only: the GPU working-set ceiling
+ *                                       (explicit iogpu.wired_limit_mb, else a
+ *                                       conservative fraction of RAM); null elsewhere
  * @property {number|null} diskFreeMb
  * @property {string[]} unknown
  */
@@ -436,6 +454,7 @@ export async function probeHardware(opts = {}) {
     gttUsedMb: null,
     ramAvailableMb: null,
     ramTotalMb: null,
+    gpuWorkingSetMb: null,
     diskFreeMb: null,
     unknown,
   };
@@ -444,11 +463,27 @@ export async function probeHardware(opts = {}) {
     probe.accel = "metal";
     const out = await run(execFile, "sysctl", ["-n", "hw.memsize"]);
     const bytes = out ? parseInt(out.trim(), 10) : NaN;
-    if (Number.isFinite(bytes) && bytes > 0) {
-      probe.ramAvailableMb = Math.round(bytes / 1024 / 1024);
+    const totalMb = Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes / 1024 / 1024) : null;
+    // An explicit wired limit (0 means the system default, not a limit).
+    const wiredOut = await run(execFile, "sysctl", ["-n", "iogpu.wired_limit_mb"]);
+    const wiredMb = wiredOut ? parseInt(wiredOut.trim(), 10) : NaN;
+    const explicitWorkingSetMb = Number.isFinite(wiredMb) && wiredMb > 0 ? wiredMb : null;
+
+    if (totalMb != null) {
+      // No MemAvailable on darwin: this stays total RAM. gpuWorkingSetMb is
+      // the ceiling fitBadge applies.
+      probe.ramAvailableMb = totalMb;
+      probe.ramTotalMb = totalMb;
     } else {
       unknown.push("ram");
     }
+    // Apple publishes no default fraction of the GPU working set, so 2/3 of
+    // total RAM is the conservative fallback (fail closed).
+    probe.gpuWorkingSetMb =
+      explicitWorkingSetMb ??
+      (totalMb == null
+        ? null
+        : Math.floor((totalMb * DARWIN_DEFAULT_WORKING_SET_NUM) / DARWIN_DEFAULT_WORKING_SET_DEN));
     // No spec'd way to detect GPU name/VRAM on darwin (unified memory,
     // metal is deterministic from platform alone) — left null + unknown.
     unknown.push("gpu");
@@ -580,6 +615,15 @@ const positiveOrNull = (v) => (typeof v === "number" && Number.isFinite(v) && v 
  *   discrete formula below with effective = ramAvailableMb (no VRAM credit).
  *   A default GTT is NOT a ceiling — llama.cpp can run the rest on CPU.
  *
+ * macOS GPU working set (darwin only): after the effective figure is
+ * computed on the generic path, a positive `probe.gpuWorkingSetMb` caps it
+ * — `effective = min(effective, gpuWorkingSetMb)` — before the fits/tight
+ * comparison. It is a ceiling, never a credit: an explicit
+ * `iogpu.wired_limit_mb`, else a conservative fraction of RAM, is how much
+ * memory Metal will actually let a GPU-resident model wire down. A darwin
+ * probe carries `unified: null` and `vramMb: null`, so it takes the
+ * discrete branch below and no VRAM is added.
+ *
  * Discrete / unknown (`unified` false or null) — byte-identical to before:
  * effective RAM = probe.ramAvailableMb
  *   + (probe.vramMb, only when quant.min_vram_mb > 0 AND
@@ -624,6 +668,12 @@ export function fitBadge(probe, quant) {
       effective += probe.vramMb;
     }
   }
+
+  // darwin: the GPU working set is a ceiling on the effective figure (see
+  // the doc comment above). Not applied to the GTT-expanded branch, which
+  // returns above.
+  const workingSet = positiveOrNull(probe.gpuWorkingSetMb);
+  if (workingSet != null) effective = Math.min(effective, workingSet);
 
   if (minRam <= effective) return "fits";
   if (10 * minRam <= 11 * effective) return "tight"; // minRam / effective <= 1.10, integer-exact

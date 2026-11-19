@@ -103,13 +103,52 @@ test("first_run_default entry that is gated:true fails", () => {
   assert.ok(result.errors.some((e) => /first_run_default/i.test(e) && /gated/i.test(e)));
 });
 
-test("first_run_default entry with no min_vram_mb:0 quant fails", () => {
+test("first_run_default entry without the cpu-capable tag fails", () => {
   const catalog = loadSeed();
   const model = defaultModel(catalog);
-  for (const q of model.quants) q.min_vram_mb = 4096;
+  assert.ok(Array.isArray(model.tags) && model.tags.includes("cpu-capable"));
+  model.tags = model.tags.filter((tag) => tag !== "cpu-capable");
   const result = validateCatalog(catalog);
   assert.equal(result.ok, false);
-  assert.ok(result.errors.some((e) => /first_run_default/i.test(e) && /min_vram_mb/i.test(e)));
+  assert.ok(result.errors.some((e) => /first_run_default/i.test(e) && /cpu-capable/i.test(e)));
+});
+
+test("min_vram_mb 0 is rejected (0 no longer means CPU-capable)", () => {
+  const catalog = loadSeed();
+  const model = otherModel(catalog);
+  model.quants[0].min_vram_mb = 0;
+  const result = validateCatalog(catalog);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => /min_vram_mb/.test(e) && e.includes(model.quants[0].quant)),
+    JSON.stringify(result.errors)
+  );
+});
+
+test("min_vram_mb below the quant's size_mb is rejected", () => {
+  const catalog = loadSeed();
+  const model = otherModel(catalog);
+  model.quants[0].min_vram_mb = Math.floor(model.quants[0].size_mb) - 1;
+  const result = validateCatalog(catalog);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /min_vram_mb/.test(e)), JSON.stringify(result.errors));
+});
+
+test("the real catalog carries min_vram_mb === min_ram_mb > 0 for every quant", () => {
+  const catalog = loadSeed();
+  let quants = 0;
+  for (const model of catalog.models) {
+    for (const quant of model.quants) {
+      quants += 1;
+      assert.equal(
+        quant.min_vram_mb,
+        quant.min_ram_mb,
+        `${model.id} ${quant.quant}: min_vram_mb must equal min_ram_mb`
+      );
+      assert.ok(quant.min_vram_mb > 0, `${model.id} ${quant.quant}: min_vram_mb must be > 0`);
+    }
+  }
+  assert.ok(quants > 0, "the catalog has quants");
 });
 
 test("unknown runtime asset key fails", () => {
@@ -232,7 +271,7 @@ function makeV2Catalog() {
         serving: { class: "resident" },
         notes: "fixture",
         quants: [
-          { file: "small-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 100, min_ram_mb: 400, min_vram_mb: 0, sha256: SHA_A },
+          { file: "small-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 100, min_ram_mb: 400, min_vram_mb: 400, sha256: SHA_A },
         ],
       },
       {
@@ -255,7 +294,7 @@ function makeV2Catalog() {
             quant: "Q4_K_M",
             size_mb: 300,
             min_ram_mb: 400,
-            min_vram_mb: 0,
+            min_vram_mb: 400,
             sha256: SHA_A,
             shards: [
               { file: "Q4_K_M/sharded-Q4_K_M-00002-of-00003.gguf", size_mb: 100, sha256: SHA_B },

@@ -467,7 +467,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
 
       const sizeMb = typeof pathInfo.sizeBytes === "number" ? pathInfo.sizeBytes / 1_000_000 : null;
       const probe = getCachedProbeFn();
-      const badge = fitBadgeFn(probe, { min_ram_mb: sizeMb, min_vram_mb: 0 });
+      const badge = fitBadgeFn(probe, { min_ram_mb: sizeMb, min_vram_mb: sizeMb });
       if (badge === "wont_fit" && force !== true) {
         return res.status(409).json({
           error: `This file is unlikely to fit on this hardware (fitBadge: ${badge}). Pass force:true to download anyway.`,

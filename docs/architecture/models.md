@@ -124,6 +124,10 @@ On an APU, `vramMb` (RADV's `DEVICE_LOCAL` heap, 83 GiB on crow) is a slice of R
 
 Every other unified host (default GTT, or GTT/MemTotal unknown) uses the discrete formula minus the VRAM credit: `fits` within MemAvailable, `tight` within 110% of it, else `wont_fit`. So a laptop APU with default GTT never has a `fits` turned into `wont_fit`. Only GTT-expanded hosts get the wider `tight` band. There is no fourth badge value. The tight hint says both "close to your limits" and "may need other models stopped first". The discrete path is unchanged. The live GTT start gate is a separate change (two-host spec §6).
 
+**macOS GPU working set.** A darwin probe reports `gpuWorkingSetMb`, the GPU working-set ceiling `fitBadge` applies to the effective RAM — a ceiling, never a credit, applied before the `fits`/`tight` comparison. It is `sysctl -n iogpu.wired_limit_mb` when that reports an integer above zero (zero means the system default), otherwise `2/3` of `hw.memsize` (`DARWIN_DEFAULT_WORKING_SET_NUM` / `DARWIN_DEFAULT_WORKING_SET_DEN`). On older macOS versions the `iogpu.wired_limit_mb` key may be absent, in which case that 2/3 fallback applies. Apple does not publish the default fraction of `MTLDevice.recommendedMaxWorkingSetSize`; 2/3 is a conservative assumption, because a fit badge must fail closed. It is therefore an **approximate** ceiling: the installer should read the real `recommendedMaxWorkingSetSize` later. On darwin `ramAvailableMb` stays total RAM (macOS has no `MemAvailable`) and `ramTotalMb` is that same total; the working set, not the RAM figure, is what limits a GPU-resident model there. `gpuWorkingSetMb` is null on linux and WSL2.
+
+**`min_vram_mb`.** `min_vram_mb` is the VRAM a full GPU offload needs, equal to `min_ram_mb` in the curated catalog (weights, companions and the recorded KV/compute overhead).
+
 **Host launch profile.** `servers/gateway/models/host-profile.js` returns `{ flash_attn: "on", no_mmap: true, no_op_offload: true }` for `gpuArch: "gfx1151"` on `accel: "vulkan"`, and nothing otherwise. It is the **lowest** launch layer:
 
     host profile < catalog launch < provider gpu_policy.launch < jinja

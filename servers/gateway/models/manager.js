@@ -1234,7 +1234,7 @@ export function hfSyntheticCatalog({ hfRepo, file, modelId = deriveModelIdFromFi
       task: "chat",
       context_len: null,
       default_quant: "hf",
-      quants: [{ file, quant: "hf", sha256, size_mb: sizeMb, min_ram_mb: sizeMb, min_vram_mb: 0 }],
+      quants: [{ file, quant: "hf", sha256, size_mb: sizeMb, min_ram_mb: sizeMb, min_vram_mb: sizeMb }],
     }],
   };
 }

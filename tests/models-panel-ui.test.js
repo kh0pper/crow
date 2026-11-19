@@ -155,6 +155,36 @@ test("loadPanelData: maps models with fit badges, registered/running state, and 
   assert.equal(data.estimatedVramMb, 0);
 });
 
+test("loadPanelData: a unified-memory probe earns no VRAM credit — the live model's size is RAM only", async () => {
+  const data = await loadPanelData({
+    loadCatalogFn: fakeCatalog,
+    getCachedProbeFn: () => ({ platform: "linux", wsl2: false, accel: "vulkan", gpuName: "APU", unified: true, vramMb: 12000, gttTotalMb: 12000, ramTotalMb: 16000, ramAvailableMb: 16000, diskFreeMb: 500000, unknown: [] }),
+    loadStateFn: () => ({ reservations: {}, journal: {}, registry: { "ui-test-gated": { quant: "Q8" } } }),
+    getStatusSnapshotFn: () => ([{ alias: "ui-test-gated", state: "running", live: true, port: 18101, restartCount: 0, lastError: null, startedAt: "t", pid: 2 }]),
+    getNativeHandleFn: () => ({ live: true }),
+  });
+  assert.equal(data.runtimeModels[0].live, true);
+  assert.equal(data.estimatedRamMb, 20000);
+  // The heap is a slice of that same RAM on a unified host, so the quant's
+  // min_vram_mb (8000) is never added on top of it.
+  assert.equal(data.estimatedVramMb, 0);
+});
+
+test("loadPanelData: a discrete GPU probe adds the live model's min_vram_mb to the VRAM estimate", async () => {
+  const data = await loadPanelData({
+    loadCatalogFn: fakeCatalog,
+    getCachedProbeFn: () => ({ platform: "linux", wsl2: false, accel: "vulkan", gpuName: "Fake GPU", unified: false, vramMb: 12000, ramAvailableMb: 16000, diskFreeMb: 500000, unknown: [] }),
+    loadStateFn: () => ({ reservations: {}, journal: {}, registry: { "ui-test-gated": { quant: "Q8" } } }),
+    getStatusSnapshotFn: () => ([{ alias: "ui-test-gated", state: "running", live: true, port: 18101, restartCount: 0, lastError: null, startedAt: "t", pid: 2 }]),
+    getNativeHandleFn: () => ({ live: true }),
+  });
+  assert.equal(data.runtimeModels[0].live, true);
+  const liveQuant = fakeCatalog().models.find((m) => m.id === "ui-test-gated").quants[0];
+  assert.equal(data.estimatedRamMb, liveQuant.min_ram_mb);
+  assert.equal(data.estimatedVramMb, liveQuant.min_vram_mb);
+  assert.ok(liveQuant.min_vram_mb > 0);
+});
+
 test("loadPanelData: a registered-but-not-live model contributes nothing to the RAM/VRAM estimate", async () => {
   const data = await loadPanelData({
     loadCatalogFn: fakeCatalog,
