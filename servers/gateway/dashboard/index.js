@@ -118,6 +118,7 @@ import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
 import stagedPageRouter from "../routes/staged-page.js";
 import mailApiRouter from "../routes/mail-api.js";
+import reportsApiRouter from "../routes/reports-api.js";
 import widgetsRouter from "../routes/widgets.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
 import { isLocalPasswordSessionOn } from "./local-session.js";
@@ -962,6 +963,13 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // Crow Mail's private JSON API (`CROW_MAIL`): the same slot and rails as the staged page above
   // (session + CSRF, Funnel refused upstream), owner-only on its own prefix — see routes/mail-api.js.
   router.use(mailApiRouter(dashboardAuth));
+
+  // Crow Recurring Reports' private JSON API: the same slot and rails as the mail API above
+  // (session + CSRF, Funnel refused upstream), owner-only on its own prefix, and no-store on every
+  // answer. Mounted HERE and not in boot/feature-mounts.js: feature-mounts routers are mounted at app
+  // root, BEFORE this file's csrfMiddleware, so a go-live or a settings write there would skip the
+  // CSRF rail entirely. See routes/reports-api.js's header.
+  router.use(reportsApiRouter(dashboardAuth));
 
   // The "What needs me" widget's API (widgets phase 1): the JSON summary both renderers draw and
   // the act endpoint that answers an item in place. Same slot and rails as the phone confirm page

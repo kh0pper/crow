@@ -13,6 +13,7 @@ import {
 } from "../servers/shared/project-services-schema.js";
 import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
+import { REPORTS_DDL } from "../servers/shared/reports-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -3106,6 +3107,15 @@ for (const spec of MAIL_ACCOUNT_SEND_COLUMNS) {
 // servers/shared/mail-schema.js, which scripts/migrations/0030-mail-drafts.mjs also runs — one shape,
 // two rails; additive, no SCHEMA_GENERATION bump. MAIL_DDL is untouched, because 0027 executes it.
 await initTable("mail draft tables", MAIL_DRAFTS_DDL);
+
+// reports tables: Crow Recurring Reports' store — the report head (recipe, delivery and comment
+// settings, the go-live seal columns), its recipe revisions, the report's own key/value state, the
+// daily usage counters and the approval audit trail (servers/gateway/reports/*). Epoch-ms times;
+// statuses and approval words are validated in the stores (no CHECK, no FK). LOCAL ONLY (instance-sync
+// LOCAL_ONLY_TABLES): a report names the owner's sources, recipients and credentials. Same DDL as
+// REPORTS_DDL in servers/shared/reports-schema.js, which scripts/migrations/0031-reports-core.mjs also
+// runs — one shape, two rails; additive, no SCHEMA_GENERATION bump.
+await initTable("reports tables", REPORTS_DDL);
 
 // staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
 // servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the

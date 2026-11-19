@@ -196,7 +196,9 @@ export const SYNCED_TABLES = [
 // send counters, inbound high-water marks and visit records are per-instance; the mail tables:
 // they hold the user's mail and credentials metadata, and stay on the instance that synced it; the
 // mail draft tables: a draft, its revisions, its comments and its voice note hold the recipients, the
-// body and the operator's speech, so they stay on the instance that made them;
+// body and the operator's speech, so they stay on the instance that made them; the reports tables: a
+// report holds the owner's sources, recipients and credential references, and its approval seals are
+// keyed to this instance's keychain, so neither the report nor its audit trail leaves this machine;
 // project_bot_shares: a bot's grant to reach one project is this instance's own decision, keyed to
 // local ids and to a bot that lives here). The keychain has its own key file, but its rows are
 // still never replicated. Checked at load.
@@ -207,6 +209,7 @@ export const LOCAL_ONLY_TABLES = Object.freeze([
   "mail_accounts", "mail_folders", "mail_threads", "mail_messages", "mail_messages_fts",
   "mail_sync_state", "mail_image_allow",
   "mail_drafts", "mail_draft_revisions", "mail_draft_comments", "mail_draft_voice",
+  "reports", "report_recipe_revisions", "report_state", "report_usage", "report_approvals_audit",
   "project_bot_shares",
 ]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
