@@ -9,6 +9,30 @@
  *
  * WebSocket upgrade is handled (needed for VNC/noVNC).
  *
+ * ⚠ COOKIES (queue item #51). The gateway authenticates the request BEFORE
+ * proxying (authMiddleware, plus the owner check for a token-carrying viewer,
+ * and the same checks again on the upgrade path). After that, Crow's OWN
+ * cookies are removed from what the backend is handed: a proxied app is
+ * third-party code on the dashboard's origin, and forwarding `crow_session`
+ * would hand it a live, replayable dashboard session. Only the app's own
+ * cookies are forwarded, and the backend's `Set-Cookie` responses are filtered
+ * the same way and path-scoped under /proxy/<id>/. Both directions are ONE
+ * shared helper (../proxy-cookie-filter.js) — the companion proxy on
+ * /companion/* uses it too — and the names live in ONE list
+ * (../cookie-names.js) shared with every setter — see
+ * tests/extension-proxy-cookies.test.js.
+ *
+ * The WebSocket HANDSHAKE gets a stricter rule: EVERY `Set-Cookie` in the
+ * upgrade's response (a 101, or an error response to a refused upgrade) is
+ * dropped, Crow's or the app's own. That header block never passes through
+ * `proxyRes` — http-proxy writes it straight to the client socket — so the
+ * socket itself is filtered (stripSetCookieFromHandshake).
+ *
+ * The remaining risk is that the app still runs on the dashboard's ORIGIN: a
+ * same-origin page can read `crow_csrf` and send dashboard requests with the
+ * owner's session. That is only closed by serving extensions from their own
+ * origin (queue item #51); stripping the cookies closes the replay half.
+ *
  * Dashboard links should use:
  *   /proxy/browser/vnc.html   instead of   http://localhost:6080/vnc.html
  *   /proxy/minio/              instead of   http://localhost:9001/
@@ -22,6 +46,13 @@ import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
+import { SESSION_COOKIE } from "../cookie-names.js";
+import { scopeProxySetCookieHeader, stripCrowCookiesForBackend, stripSetCookieFromHandshake } from "../proxy-cookie-filter.js";
+
+// The Set-Cookie rules themselves live in ONE shared module (a shared helper,
+// because the companion proxy on /companion/* needs exactly the same policy).
+// Re-exported here so this file stays the entry point the cookie tests read.
+export { rewriteProxySetCookie, setCookieName } from "../proxy-cookie-filter.js";
 
 // Respect CROW_HOME so a secondary instance (systemd unit with its own
 // CROW_HOME) proxies ITS extensions — not the primary's. Hardcoding ~/.crow
@@ -257,7 +288,7 @@ export async function authorizeExtensionUpgrade(req) {
   // CROW_DASHBOARD_PUBLIC) — it reads req.headers + req.connection, both
   // present on a raw upgrade request.
   if (!isAllowedNetwork(req)) return false;
-  const token = parseCookies(req)["crow_session"];
+  const token = parseCookies(req)[SESSION_COOKIE];
   if (!token) return false;
   try {
     return (await verifySession(token)) === true;
@@ -354,6 +385,12 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         // If embedding is ever needed, this router needs its own CSRF or
         // origin check FIRST. tests/perch-routes.test.js pins both halves.
         proxyReq: (proxyReq, req) => {
+          // Crow's session/CSRF cookies never reach a proxied backend (queue item
+          // #51): the app gets its own cookies, nothing of Crow's. Do this FIRST —
+          // fixRequestBody below writes to proxyReq, and a header write after that
+          // throws ERR_HTTP_HEADERS_SENT.
+          stripCrowCookiesForBackend(proxyReq);
+
           const token = readAuthToken(ext.authTokenFile);
           if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
 
@@ -378,7 +415,16 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         // Same injection for the websocket upgrade, which never passes
         // through the `proxyReq` hook — http-proxy emits `proxyReqWs` for it.
         // ONE handler (a second `proxyReqWs` key would silently replace this).
-        proxyReqWs: (proxyReq) => {
+        proxyReqWs: (proxyReq, req, socket) => {
+          // The same cookie strip on the upgrade path: server.on("upgrade")
+          // reaches the backend with the browser's own Cookie header.
+          stripCrowCookiesForBackend(proxyReq);
+          // The RESPONSE half of the upgrade never reaches `proxyRes`: a 101 (or
+          // an error response to the upgrade) is written to the client socket
+          // by http-proxy, from the upstream's own headers. The socket is
+          // filtered here, before either is written, so no `Set-Cookie` from the
+          // app's handshake — Crow's or its own — lands on the dashboard origin.
+          stripSetCookieFromHandshake(socket);
           const token = readAuthToken(ext.authTokenFile);
           if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
           // The WebSocket token (readWsHostToken): the upstream Host on the
@@ -393,12 +439,14 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
           // Allow embedding in iframes (needed for VNC, MinIO console)
           delete proxyRes.headers["x-frame-options"];
           delete proxyRes.headers["content-security-policy"];
-          // Fix cookie paths (backend sets path=/ but we serve from /proxy/<id>/)
-          const setCookie = proxyRes.headers["set-cookie"];
-          if (setCookie) {
-            proxyRes.headers["set-cookie"] = (Array.isArray(setCookie) ? setCookie : [setCookie])
-              .map(c => c.replace(/path=\//i, `path=/proxy/${ext.id}/`));
-          }
+          // Backend cookies: never Crow's own names (an app must not be able to
+          // set or overwrite Crow's session/CSRF cookies via `/proxy/<id>/`),
+          // and everything else is path-scoped to this proxy. The rules are the
+          // shared ones (../proxy-cookie-filter.js: a real RFC 6265 parser, the
+          // app's LAST Path wins, sub-paths kept, Domain dropped).
+          const kept = scopeProxySetCookieHeader(proxyRes.headers["set-cookie"], proxyPath);
+          if (kept) proxyRes.headers["set-cookie"] = kept;
+          else delete proxyRes.headers["set-cookie"];
         },
       },
       // NOTE: dead since the http-proxy-middleware v2→v3 bump — v3 reads error
@@ -470,7 +518,7 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
             // accept a peer's SSO session, an on-host login, or a request from this
             // machine. authMiddleware never ran here, so set the session ourselves.
             if (ext.wsHostTokenEnv) {
-              req.dashboardSession = parseCookies(req)["crow_session"];
+              req.dashboardSession = parseCookies(req)[SESSION_COOKIE];
               // owner's own sign-in only: the token gives full control of the logged-in browser.
               const owner = await isLocalPasswordSession(req).catch(() => false);
               if (!owner) {

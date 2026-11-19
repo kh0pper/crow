@@ -24,6 +24,9 @@ import {
   mintSsoSession,
   SSO_SESSION_MAX_AGE,
 } from "./auth.js";
+// The one Crow cookie-name list (../cookie-names.js), shared with every setter
+// and with the extension proxy that strips these cookies before forwarding.
+import { PENDING_2FA_COOKIE, TRUSTED_2FA_COOKIE } from "../cookie-names.js";
 import {
   is2faEnabled,
   needs2faSetup,
@@ -275,7 +278,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       clearSetupToken();
     }
 
-    const deviceTrustToken = cookies.crow_2fa_trusted || null;
+    const deviceTrustToken = cookies[TRUSTED_2FA_COOKIE] || null;
     const userAgent = req.headers["user-agent"] || null;
     // A login from this machine itself (its console, the shared browser, a local script) is
     // stored as 'dashboard onhost': signed in, never the owner's turn (local-session.js).
@@ -305,7 +308,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       // Set pending_2fa cookie and show 2FA page
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
-      res.setHeader("Set-Cookie", `crow_pending_2fa=${result.pending2faToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
+      res.setHeader("Set-Cookie", `${PENDING_2FA_COOKIE}=${result.pending2faToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
       return res.type("html").send(render2faVerify({ lang }));
     }
 
@@ -346,7 +349,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
-    const pendingToken = cookies.crow_pending_2fa;
+    const pendingToken = cookies[PENDING_2FA_COOKIE];
 
     // Read any SSO context bound to this pending token BEFORE it is consumed.
     const pendingCtx = await getPending2faContext(pendingToken);
@@ -369,7 +372,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost, consentNext));
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
-      res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
+      res.setHeader("Set-Cookie", `${PENDING_2FA_COOKIE}=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
       return res.type("html").send(render2faVerify({ error: t("login.2faInvalidCode", lang), lang }));
     }
 
@@ -385,7 +388,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip, { onHost });
     } catch (err) {
       if (err?.code !== "sso_refused") throw err;
-      res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+      res.setHeader("Set-Cookie", `${PENDING_2FA_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
       return res.status(401).type("html").send(renderLogin({ error: t("login.ssoRefused", lang), lang }));
     }
     const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
@@ -394,7 +397,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       : (consentNext || "/dashboard");
 
     // Clear pending cookie
-    const cookieHeaders = [`crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
+    const cookieHeaders = [`${PENDING_2FA_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
 
     // Set device trust if requested
     if (trust_device === "1") {
@@ -402,7 +405,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       const maxAge = DEVICE_TRUST_TTL / 1000;
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
-      cookieHeaders.push(`crow_2fa_trusted=${trustToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`);
+      cookieHeaders.push(`${TRUSTED_2FA_COOKIE}=${trustToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`);
     }
 
     setSessionCookie(res, result.token, sessionMaxAge);
@@ -425,7 +428,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     if (!loginNetworkAllowed(req)) return sendNetworkRefusal(req, res);
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
-    const pendingToken = cookies.crow_pending_2fa;
+    const pendingToken = cookies[PENDING_2FA_COOKIE];
 
     // Read SSO context bound to the pending token before it is consumed.
     const pendingCtx = await getPending2faContext(pendingToken);
@@ -445,7 +448,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       const newToken = await createPending2faToken(retryPendingCtx(ssoCtx, onHost, consentNext));
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
-      res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
+      res.setHeader("Set-Cookie", `${PENDING_2FA_COOKIE}=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
       return res.type("html").send(render2faRecovery({ error: t("login.2faInvalidCode", lang), lang }));
     }
 
@@ -460,7 +463,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip, { onHost });
     } catch (err) {
       if (err?.code !== "sso_refused") throw err;
-      res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+      res.setHeader("Set-Cookie", `${PENDING_2FA_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
       return res.status(401).type("html").send(renderLogin({ error: t("login.ssoRefused", lang), lang }));
     }
     const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
@@ -468,7 +471,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       ? (ssoDest && isSafeDestPath(ssoDest) ? ssoDest : "/dashboard")
       : (consentNext || "/dashboard");
 
-    const cookieHeaders = [`crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
+    const cookieHeaders = [`${PENDING_2FA_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
     setSessionCookie(res, result.token, sessionMaxAge);
     const existing = res.getHeader("Set-Cookie") || [];
     res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), ...cookieHeaders]);
@@ -731,7 +734,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
         // separate cookie) so it can't bleed into a later normal login.
         const pendingToken = await createPending2faToken({ sso: { src, dest } });
         res.setHeader("Set-Cookie",
-          `crow_pending_2fa=${pendingToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
+          `${PENDING_2FA_COOKIE}=${pendingToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
         await audit({ hmacValid: true, nonce: result.ticket.nonce, error: "2fa_required" });
         return res.redirect(302, "/dashboard/login/2fa");
       }

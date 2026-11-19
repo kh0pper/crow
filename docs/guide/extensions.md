@@ -94,6 +94,10 @@ The extension UI is proxied through the Crow gateway at `/proxy/<id>/`. No extra
 
 **Example**: `/proxy/browser/vnc.html`
 
+The gateway signs you in first, then removes Crow's own cookies (`crow_session`, `crow_csrf` and the rest of the list in `servers/gateway/cookie-names.js`) from the request it forwards: the app receives only its own cookies, and it cannot set or overwrite a Crow cookie through the proxy — its `Set-Cookie`s are dropped for those names and re-scoped under `/proxy/<id>/` for the rest. What remains is that the app runs on the dashboard's **same origin**, so a flaw in it still acts with your signed-in dashboard session; serving extensions from their own origin is the remaining fix (issue #51).
+
+Because of that re-scoping, an app's `__Host-` cookies stop working through the proxy: browsers reject a `__Host-` cookie whose `Path` is not `/`, and the proxy rewrites every cookie's `Path` under `/proxy/<id>/`.
+
 ### Direct Mode
 For SPA apps (React, Vue) that can't work behind a subpath proxy. The extension port is opened in the firewall and served via Tailscale HTTPS.
 

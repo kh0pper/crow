@@ -11,15 +11,30 @@
  * WebSocket connections with ?room=X&token=Y are validated against active
  * room tokens. Connections without tokens are allowed (household mode).
  * Invalid tokens are rejected with 403.
+ *
+ * ⚠ COOKIES — the same rule as /proxy/<id>/ (routes/extension-proxy.js).
+ * `/companion/*` is a third-party app on the DASHBOARD's origin: the browser
+ * sends it every Crow cookie it holds, and the app's `Set-Cookie` lands on
+ * that origin. So Crow's own cookies are stripped from the request (HTTP and
+ * the WebSocket upgrade) and the app's `Set-Cookie`s are refused for a Crow
+ * name and re-scoped under /companion/. One shared helper does both
+ * (../proxy-cookie-filter.js) — see tests/companion-proxy-cookies.test.js.
+ *
+ * The WebSocket HANDSHAKE gets the stricter rule: EVERY `Set-Cookie` in the
+ * upgrade's response (a 101, or an error response) is dropped, because that
+ * header block never passes through `proxyRes` (see stripSetCookieFromHandshake).
  */
 
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { validateRoomToken } from "../../sharing/server.js";
 import { join } from "node:path";
 import { resolveDataDir } from "../../db.js";
+import { scopeProxySetCookieHeader, stripCrowCookiesForBackend, stripSetCookieFromHandshake } from "../proxy-cookie-filter.js";
 
 const COMPANION_PORT = process.env.COMPANION_PORT || "12393";
 const COMPANION_TARGET = `http://127.0.0.1:${COMPANION_PORT}`;
+/** The mount the companion is served under; every backend cookie is scoped to it. */
+const COMPANION_PATH = "/companion";
 
 /**
  * Set up companion proxy routes and WebSocket upgrade handler.
@@ -35,12 +50,34 @@ export default function setupCompanionProxy(app, server) {
     //   server "upgrade" listener on the first proxied HTTP request, which proxies every later
     //   upgrade (any path, no cookie) before our own auth checks run. Upgrades go only through
     //   the explicit .upgrade() call after those checks (proxy.ws does not need this option).
-    pathRewrite: { "^/companion": "" },
+    pathRewrite: { [`^${COMPANION_PATH}`]: "" },
     on: {
+      // Crow's session/CSRF cookies never reach the companion backend: it is a
+      // third-party app on the dashboard's origin, and `crow_session` is a live,
+      // replayable dashboard session (queue item #51 — same rule as /proxy/<id>/).
+      proxyReq: (proxyReq) => {
+        stripCrowCookiesForBackend(proxyReq);
+      },
+      // The upgrade never passes through `proxyReq`; http-proxy emits
+      // `proxyReqWs` for it (ONE handler — a second key would replace this).
+      proxyReqWs: (proxyReq, req, socket) => {
+        stripCrowCookiesForBackend(proxyReq);
+        // The app's handshake response (a 101, or an error response to the
+        // upgrade) never reaches `proxyRes`: http-proxy writes the upstream's
+        // header block straight to the client socket. Filter the socket here,
+        // before any of it is written, so a `Set-Cookie: crow_session=…` in the
+        // 101 cannot land on the dashboard's origin.
+        stripSetCookieFromHandshake(socket);
+      },
       proxyRes: (proxyRes) => {
         // Allow embedding; companion serves its own frontend
         delete proxyRes.headers["x-frame-options"];
         delete proxyRes.headers["content-security-policy"];
+        // The app may not set Crow's own cookie names on the dashboard's origin,
+        // and its own cookies are re-scoped under /companion/ (shared rules).
+        const kept = scopeProxySetCookieHeader(proxyRes.headers["set-cookie"], COMPANION_PATH);
+        if (kept) proxyRes.headers["set-cookie"] = kept;
+        else delete proxyRes.headers["set-cookie"];
       },
     },
     onError: (err, req, res) => {
@@ -86,7 +123,7 @@ export default function setupCompanionProxy(app, server) {
   });
 
   // HTTP proxy for companion frontend
-  app.use("/companion", httpProxy);
+  app.use(COMPANION_PATH, httpProxy);
 
   // WebSocket upgrade handler — validate room tokens before proxying
   server.on("upgrade", (req, socket, head) => {

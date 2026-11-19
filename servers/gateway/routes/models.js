@@ -61,6 +61,9 @@ import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { createDbClient, resolveDataDir } from "../../db.js";
 import { isAllowedNetwork, verifySession, parseCookies } from "../dashboard/auth.js";
+// One Crow cookie-name list (../cookie-names.js), shared with every setter and
+// with the extension proxy that strips these cookies before forwarding.
+import { SESSION_COOKIE } from "../cookie-names.js";
 import { listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { getCachedProbe, reprobe, fitBadge } from "../models/probe.js";
@@ -91,7 +94,6 @@ const MODEL_CATALOG_PATH = resolvePath(dirname(__filename), "..", "..", "..", "r
  * "qwen3-4b") so a future catalog entry can never collide with it. */
 export const HF_TOKEN_PROVIDER_ID = "crow-hf-token";
 
-const SESSION_COOKIE = "crow_session";
 const HF_SEARCH_TIMEOUT_MS = 8000;
 
 // ---------------------------------------------------------------------------

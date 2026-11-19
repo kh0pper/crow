@@ -86,6 +86,10 @@ La interfaz de la extensión se sirve a través del gateway de Crow en `/proxy/<
 
 **Ejemplo**: `/proxy/browser/vnc.html`
 
+El gateway te autentica primero y luego quita las cookies propias de Crow (`crow_session`, `crow_csrf` y el resto de la lista en `servers/gateway/cookie-names.js`) de la petición que reenvía: la app recibe solo sus propias cookies, y no puede establecer ni sobrescribir una cookie de Crow a través del proxy — sus `Set-Cookie` se descartan para esos nombres y se re-ámbito bajo `/proxy/<id>/` para el resto. Lo que queda es que la app se ejecuta en el **mismo origen** que el dashboard, así que un fallo en ella sigue actuando con tu sesión abierta; servir las extensiones desde su propio origen es el arreglo pendiente (issue #51).
+
+Por ese re-ámbito, las cookies `__Host-` de una app dejan de funcionar a través del proxy: los navegadores rechazan una cookie `__Host-` cuyo `Path` no sea `/`, y el proxy reescribe el `Path` de todas ellas bajo `/proxy/<id>/`.
+
 ### Modo Directo
 Para apps SPA (React, Vue) que no pueden funcionar detrás de un proxy con subruta. El puerto de la extensión se abre en el firewall y se sirve vía HTTPS de Tailscale.
 

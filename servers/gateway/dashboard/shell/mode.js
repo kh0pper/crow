@@ -7,10 +7,11 @@ import { createHash } from "node:crypto";
 import { readLocalInstanceIdOrNull, resolveInstanceDataDir } from "../../../shared/crow-home.js";
 import { hashToken, cookieSecureSuffix } from "../auth.js";
 import { readSetting, writeSetting } from "../settings/registry.js";
-
-export const MODE_COOKIE = "crow_mode";
-export const TRY_COOKIE = "crow_try_new";
-export const SCOPE_COOKIE = "crow_scope";
+// The base names live in the one Crow cookie list (../../cookie-names.js),
+// because the extension proxy strips every one of them before forwarding a
+// request to a bundle's backend. Re-exported here: this is where they are set.
+import { MODE_COOKIE, TRY_COOKIE, SCOPE_COOKIE } from "../../cookie-names.js";
+export { MODE_COOKIE, TRY_COOKIE, SCOPE_COOKIE };
 
 const MODE_MAX_AGE = 400 * 24 * 60 * 60; // seconds
 

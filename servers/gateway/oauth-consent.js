@@ -24,11 +24,13 @@ import { isAllowedNetwork, parseCookies, sessionFromRequest } from "./dashboard/
 import { isLocalPasswordSessionOn } from "./dashboard/local-session.js";
 import { escapeHtml } from "./dashboard/shared/components.js";
 import { SUPPORTED_LANGS, t } from "./dashboard/shared/i18n.js";
+// The one Crow cookie-name list (./cookie-names.js), shared with the setters
+// and with the extension proxy that strips these cookies.
+import { CSRF_COOKIE } from "./cookie-names.js";
 
 const CONSENT_PATH = "/dashboard/oauth/consent";
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 200;
-const CSRF_COOKIE = "crow_csrf";
 
 /**
  * The ONLY `next` the login page will honour: the consent page's own URL, with

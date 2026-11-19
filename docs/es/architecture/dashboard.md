@@ -263,6 +263,18 @@ Los manifiestos de complementos pueden declarar un objeto `webUI` para indicar q
 
 Establece `webUI` en `null` para complementos sin interfaz (p. ej., Ollama). El lanzador solo muestra el botón "Abrir" cuando `webUI` no es null.
 
+### El proxy `/proxy/<id>/`
+
+Un complemento con `webUI` (salvo que `webUI.proxyMode` sea `direct`) se sirve en `/proxy/<id>/`, en el mismo origen que el dashboard, mediante `servers/gateway/routes/extension-proxy.js`. El gateway autentica ANTES de hacer de proxy: `authMiddleware` en HTTP y, para una actualización WebSocket cruda, las mismas dos capas otra vez (`isAllowedNetwork` + un `crow_session` vivo; un visor que lleva token — el noVNC del navegador — además exige la sesión propia del dueño y un `Origin` que nombre este host).
+
+Lo que recibe el backend es deliberadamente menos de lo que envió el navegador:
+
+- **Las cookies propias de Crow se eliminan** de la cabecera `Cookie` reenviada, tanto en HTTP como en la actualización WebSocket, conservando las de la app. Los nombres viven en una sola lista, `servers/gateway/cookie-names.js`, compartida con cada lugar que las establece: `crow_session`, `crow_csrf`, `crow_pending_2fa`, `crow_2fa_trusted`, `crow_lang`, y las cookies por instancia `crow_mode`/`crow_try_new`/`crow_scope`. Una app proxificada es código de terceros; reenviarle `crow_session` le entregaría una sesión del dashboard viva y reutilizable.
+- **El backend tampoco puede establecer las cookies de Crow**: su `Set-Cookie` para uno de esos nombres se descarta. El resto de las cookies se re-ámbito bajo `/proxy/<id>/` — todos los atributos `Path` reescritos (sin distinguir mayúsculas), `Path=/proxy/<id>/` añadido cuando el backend no envió ninguno, y atributos `Domain` eliminados. (Antes el proxy reescribía solo el primer `path=/`, que un segundo atributo `Path` podía saltarse.)
+- El token `Authorization` propio del backend (`webUI.authTokenFile`) se inyecta después de esa autenticación, así que se llega a la app sin ninguna cookie de Crow.
+
+**Riesgo residual (issue #51):** una app proxificada sigue ejecutándose en el **mismo origen** que el dashboard, así que un fallo en ella alcanza lo que alcanza el dashboard — puede leer el `crow_csrf` (no HttpOnly) y emitir peticiones que viajan con la cookie de sesión `SameSite=Lax` del dueño. Eliminar las cookies de Crow de la petición proxificada cierra la *repetición* de sesión; mover las extensiones a su propio origen es el arreglo pendiente.
+
 ## Instalación automática de paneles
 
 Los complementos que incluyen un campo `panel` en su `manifest.json` obtienen su archivo de panel instalado automáticamente durante la instalación del complemento y eliminado durante la desinstalación. Esto funciona para cualquier tipo de complemento (bundle, mcp-server, skill), no solo para complementos de tipo panel.

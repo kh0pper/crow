@@ -283,6 +283,18 @@ Add-on manifests can declare a `webUI` object to indicate the add-on has a brows
 
 Set `webUI` to `null` for headless add-ons (e.g., Ollama). The launcher only shows the "Open" button when `webUI` is non-null.
 
+### The `/proxy/<id>/` proxy
+
+A `webUI` add-on (unless `webUI.proxyMode` is `direct`) is served at `/proxy/<id>/` on the dashboard's own origin by `servers/gateway/routes/extension-proxy.js`. The gateway authenticates BEFORE proxying: `authMiddleware` on HTTP, and for a raw WebSocket upgrade the same two layers again (`isAllowedNetwork` + a live `crow_session`; a token-carrying viewer — the browser's noVNC — also needs the owner's own sign-in and an `Origin` naming this host).
+
+What the backend is handed is deliberately smaller than what the browser sent:
+
+- **Crow's own cookies are stripped** from the forwarded `Cookie` header, on HTTP and on the WebSocket upgrade, keeping the app's own. The names live in one list, `servers/gateway/cookie-names.js`, shared with every place that sets them: `crow_session`, `crow_csrf`, `crow_pending_2fa`, `crow_2fa_trusted`, `crow_lang`, and the per-instance `crow_mode`/`crow_try_new`/`crow_scope`. A proxied app is third-party code; forwarding `crow_session` would hand it a live, replayable dashboard session.
+- **A backend cannot set Crow's cookies either**: its `Set-Cookie` for one of those names is dropped. Every other cookie is re-scoped to `/proxy/<id>/` — all `Path` attributes rewritten (case-insensitively), `Path=/proxy/<id>/` added when the backend sent none, `Domain` attributes removed. (The proxy used to rewrite only the first `path=/`, which a second `Path` attribute could slip past.)
+- The backend's own `Authorization` bearer (`webUI.authTokenFile`) is injected after that auth, so the app is reached without any Crow cookie.
+
+**Residual risk (issue #51):** a proxied app still runs on the dashboard's **same origin**, so a flaw in it reaches what the dashboard reaches — it can read the non-HttpOnly `crow_csrf` and issue requests that ride the owner's `SameSite=Lax` session cookie. Stripping Crow's cookies from the proxied request closes session *replay*; moving extensions to their own origin is the remaining fix.
+
 ## Panel Auto-Installation
 
 Add-ons that include a `panel` field in their `manifest.json` get their panel file automatically installed during add-on installation and removed during uninstallation. This works for any add-on type (bundle, mcp-server, skill), not just panel-type add-ons.

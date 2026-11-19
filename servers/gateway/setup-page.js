@@ -13,6 +13,9 @@
 import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
 import { allowFirstRun } from "./dashboard/setup-token.js";
 import { CROW_HERO_SVG } from "./dashboard/shared/crow-hero.js";
+// The one Crow cookie-name list (./cookie-names.js), shared with every setter
+// and with the extension proxy that strips these cookies.
+import { LANG_COOKIE } from "./cookie-names.js";
 
 /** Escape a string for safe interpolation into HTML attributes. */
 const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -148,7 +151,7 @@ export async function setupPageHandler(req, res) {
 
 <script>
 function setLang(l) {
-  document.cookie = 'crow_lang=' + l + ';path=/;max-age=' + (30*24*60*60) + ';SameSite=Strict';
+  document.cookie = '${LANG_COOKIE}=' + l + ';path=/;max-age=' + (30*24*60*60) + ';SameSite=Strict';
   var url = new URL(window.location);
   url.searchParams.set('lang', l);
   window.location = url.toString();

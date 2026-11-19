@@ -37,8 +37,9 @@
 
 import { parseCookies } from "../auth.js";
 import { escapeHtml } from "./components.js";
-
-const CSRF_COOKIE = "crow_csrf";
+// One list of Crow's cookie names (../../cookie-names.js), shared with every
+// setter and with the extension proxy that strips them.
+import { CSRF_COOKIE } from "../../cookie-names.js";
 const HEADER_NAME = "x-crow-csrf";
 const BODY_FIELD = "_csrf";
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);

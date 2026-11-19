@@ -5,6 +5,9 @@
 import { formField } from "../../shared/components.js";
 import { t, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { upsertSetting } from "../registry.js";
+// One Crow cookie-name list (../../../cookie-names.js), shared with every setter
+// and with the extension proxy that strips these cookies.
+import { LANG_COOKIE } from "../../../cookie-names.js";
 
 export default {
   id: "language",
@@ -45,7 +48,7 @@ export default {
     await upsertSetting(db, "language", newLang);
     const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production" ? "; Secure" : "";
     // append, not setHeader: the dispatch may already have set the shell's mode cookie.
-    res.append("Set-Cookie", `crow_lang=${newLang}; Path=/; Max-Age=${30*24*60*60}; SameSite=Strict${secure}`);
+    res.append("Set-Cookie", `${LANG_COOKIE}=${newLang}; Path=/; Max-Age=${30*24*60*60}; SameSite=Strict${secure}`);
     res.redirectAfterPost("/dashboard/settings?section=language");
     return true;
   },

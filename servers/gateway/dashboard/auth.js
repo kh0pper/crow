@@ -21,11 +21,13 @@ import { withWriteContext, ownerWriteContext, peerWriteContext } from "../../sha
 // and no tailscale-* header). setup-token.js imports auth.js only lazily, so
 // this is not an import cycle.
 import { isDirectLoopback } from "./setup-token.js";
+// The names of the two cookies this file sets live with every other Crow cookie
+// name (../cookie-names.js), because the extension proxy strips the whole list
+// before forwarding a request to a bundle's backend (queue item #51).
+import { SESSION_COOKIE, CSRF_COOKIE } from "../cookie-names.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
-const SESSION_COOKIE = "crow_session";
-const CSRF_COOKIE = "crow_csrf";
 const isHosted = !!process.env.CROW_HOSTED;
 const SESSION_MAX_AGE = isHosted ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
 // SSO-granted sessions are deliberately short-lived (24h) regardless of host
