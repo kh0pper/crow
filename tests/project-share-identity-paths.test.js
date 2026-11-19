@@ -244,9 +244,12 @@ test("botSessionEnv is the identity env the engine puts on pi's own process", ()
   assert.equal(bridge.botSessionEnv("glass", "G\u0007l\u202easses").CROW_ACTOR_BOT_NAME, "Glasses");
 });
 
+let stubSeq = 0;
+
 /** A stub pi that captures its own environment and stays alive long enough to be read. */
 async function spawnStubPi(mode, overrides = {}, tag = "") {
-  const d = join(dir, "pirpc-" + mode + tag);
+  // Each call gets its own scratch dir, so an earlier call's capture is never read.
+  const d = join(dir, "pirpc-" + mode + tag + "-" + (++stubSeq));
   mkdirSync(join(d, "sessions"), { recursive: true });
   const capture = join(d, "env.json");
   const stub = join(d, "stub-pi.mjs");
