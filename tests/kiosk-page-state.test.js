@@ -89,6 +89,24 @@ test("F3: a tap during local playback after turn_done is a barge (flush) even th
   assert.equal(tapDecision({ halted: true, playing: true, birdState: "speaking", turnOpen: false }), "resume");
 });
 
+test("B5: tapDecision with voice off still cancels a slow or a playing reply, and is otherwise inert", () => {
+  for (const [input, want] of [
+    [{ playing: true, birdState: "idle" }, "barge"],
+    [{ playing: true, birdState: "listening" }, "barge"],
+    [{ playing: false, birdState: "speaking" }, "barge"],
+    [{ playing: false, birdState: "thinking" }, "barge"],
+    [{ playing: false, birdState: "idle" }, "ignore"],
+    [{ playing: false, birdState: "listening" }, "ignore"],
+    [{ playing: false, birdState: "idle", turnOpen: true }, "ignore"],
+  ]) {
+    for (const starting of [false, true]) {
+      const t = { halted: false, turnOpen: false, starting, voiceOff: true, ...input };
+      assert.equal(tapDecision(t), want, JSON.stringify(t));
+    }
+  }
+  assert.equal(tapDecision({ halted: true, playing: true, birdState: "speaking", turnOpen: true, voiceOff: true }), "resume");
+});
+
 test("F3: turn_metrics waits for drain; a barge during playback after turn_done reports barged:true", () => {
   const now = 3100;
   assert.deepEqual(reportDecision(doneTurn(), { playing: true, now }), { report: false }, "still playing: wait for drain or barge");

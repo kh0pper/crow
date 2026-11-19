@@ -48,8 +48,14 @@ export function msToNextMinute(date) { return 60_000 - (date.getSeconds() * 1000
 export function displayedBird(serverBird, localPlaying) {
   return localPlaying && serverBird === "idle" ? "speaking" : serverBird;
 }
-export function tapDecision({ halted, playing, birdState, turnOpen, starting = false }) {
+export const LS_VOICE_OFF = "crow.kiosk.voice_off";
+export const MAX_TEXT_CHARS = 500;
+/** Item 17: trimmed, cut at the cap; "" = nothing to send. */
+export const composeText = (raw) => (typeof raw === "string" ? raw.trim().slice(0, MAX_TEXT_CHARS) : "");
+export const voiceOffFromStorage = (v) => v === "1";   // only the stored "1" means off
+export function tapDecision({ halted, playing, birdState, turnOpen, starting = false, voiceOff = false }) {
   if (halted) return "resume";
+  if (voiceOff) return playing || birdState === "speaking" || birdState === "thinking" ? "barge" : "ignore";   // item 17: quiet, but a slow reply can still be cancelled
   if (starting) return "ignore";                 // review H3: the mic is still opening for the last tap
   if (playing || birdState === "speaking") return "barge";
   if (turnOpen) return "stop";
@@ -192,7 +198,8 @@ export const releasesMic = (decision) => decision.action === "forget_token" || d
  * tts_start: `own` = it belongs to the active turn (may book playAt); `play` = false keeps the player
  * muted — a barged turn's tts_start/frames still in flight before the server saw barge_in.
  */
-export function ttsStartDecision(turn) {
+export function ttsStartDecision(turn, { voiceOff = false } = {}) {
+  if (voiceOff) return { play: false, own: false };   // voice off: no audio plays, and nothing is booked as the turn's
   if (turn && turn.barged && !turn.done) return { play: false, own: false };
   return { play: true, own: !!(turn && turn.ended && !turn.done && !turn.barged) };
 }

@@ -10,6 +10,7 @@ import {
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
   releasesMic, ttsStartDecision, settleDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
   duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS, mediaStartGate, releaseForMediaDecision, audioPortLine,
+  composeText, voiceOffFromStorage, LS_VOICE_OFF,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer, createMicGate } from "./audio.js";
@@ -61,6 +62,7 @@ let ws = null, attempt = 0, halted = false, config = {}, bird = null, wmView = n
 let ctx = null, mic = null, player = null, birdState = "idle", serverBird = "idle", turn = null, clockTimer = null, serverOffset = 0;
 let ttsSeq = 0, bannerKey = null, pairAttempt = 0;
 let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, micOpenMs = null, starting = false, micReleasedAt = null;
+let voiceOff = false, typed = null, typedSeq = 0;
 const micGate = createMicGate(() => { captureStarting(); return openMic(ctx, onFrame); });
 
 /*
@@ -198,10 +200,16 @@ function connect() {
   ws = sock;
   sock.binaryType = "arraybuffer";
   let opened = false;
-  sock.onopen = () => { opened = true; if (ws === sock) sock.send(JSON.stringify(SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ, owner: barOwner } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ })); };
+  sock.onopen = () => {
+    opened = true;
+    if (ws !== sock) return;
+    const hello = SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ, owner: barOwner } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ };
+    if (voiceOff) hello.voice_off = true;   // item 17 (B9): the server knows before its first line
+    sock.send(JSON.stringify(hello));
+  };
   sock.onmessage = (ev) => {
     if (ws !== sock) return;
-    if (typeof ev.data !== "string") { player?.push(ev.data); return; }
+    if (typeof ev.data !== "string") { if (!voiceOff) player?.push(ev.data); return; }
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
     onText(m);
@@ -245,6 +253,7 @@ function onText(m) {
       mountUi();
       mediaView?.offline(false);                      // F9: the server is back; its snapshot follows
       mediaView?.flush();                             // a media report the socket could not carry (re-review N3)
+      if (voiceOff) send({ type: "voice_mode", on: false });   // item 17: after every ready (a reconnect too)
       break;
     case "state":
       serverBird = m.bird;
@@ -252,9 +261,9 @@ function onText(m) {
       break;
     // Privacy (docs: transcripts live only in the 15-min server conversation): the ring keeps LENGTHS of what was said/answered, never the words.
     case "transcript_final": $("cap-user").textContent = m.text || ""; note("transcript", `${(m.text || "").length} chars`); caption("", "clear"); break;
-    case "caption_delta": { const was = $("cap-bot").textContent; $("cap-bot").textContent += m.text || ""; if (!was) note("caption:reply", "started"); break; }
+    case "caption_delta": { const was = $("cap-bot").textContent; $("cap-bot").textContent += m.text || ""; $("captions").scrollTop = $("captions").scrollHeight; if (!was) note("caption:reply", "started"); break; }
     case "tts_start": {
-      const d = ttsStartDecision(turn);
+      const d = ttsStartDecision(turn, { voiceOff });
       if (!d.play) break;                            // a barged turn's in-flight start: the player stays muted
       ttsSeq++;
       if (d.own) { turn.tts = true; turn.ttsSeq = ttsSeq; }   // this turn's own audio
@@ -273,6 +282,11 @@ function onText(m) {
       break;
     // The closing frame of a turn that never ran (empty, too long, busy): the turn ends here, no metrics.
     case "turn_over":
+      if (typed && m.turn_id === typed.id) {
+        if (m.reason === "busy" || m.reason === "empty") $("compose-text").value = typed.text;
+        if (m.reason === "busy") caption(t("err_turn_busy"), "turn_over busy");
+        typed = null;
+      }
       if (turn && turn.id === m.turn_id) {
         if (!turn.ended) { turn.ended = true; clearTimeout(turn.guard); turn.guard = null; mic?.stop(); releaseMicAfterTurn("closed"); }
         turn.reported = true;
@@ -314,12 +328,16 @@ function mountUi() {
     });
   }
   if (!clockTimer) tickClock(); else applyTheme();   // a pushed theme setting applies now, not at the next minute
-  if (!$("cap-bot").textContent) caption(t("tap_hint"), "tap_hint");
+  syncVoiceLabels();
+  const ph = t("type_placeholder");
+  $("compose-text").placeholder = ph; $("compose-text").setAttribute("aria-label", ph); $("compose-send").textContent = t("type_send");
+  if (voiceOff) caption(t("voice_off_hint"), "voice_off");
+  else if (!$("cap-bot").textContent) caption(t("tap_hint"), "tap_hint");
 }
 
-async function ensureAudio() {
+/** Item 17 (B4): the output side alone — the context and the player, never the microphone: a typed message's reply plays without a mic. */
+function ensureOutput() {
   if (!ctx) ctx = new AudioContext({ latencyHint: "interactive" });
-  if (outputNeedsResume()) { outputPaused = false; try { await ctx.resume(); } catch {} }
   if (!player) {
     player = createPlayer(ctx, {
       onLevel: (v) => bird?.setLevel(v),
@@ -332,6 +350,12 @@ async function ensureAudio() {
       onStall: (info) => { if (turn) { turn.ttsStalled = true; turn.stall ??= { ctx_state: info.ctxState, clock_moved: info.clockMoved === true }; } note("audio", `reply stalled (${info.left} left, ${info.ctxState})`); },
     });
   }
+  return ctx;
+}
+
+async function ensureAudio() {
+  ensureOutput();
+  if (outputNeedsResume()) { outputPaused = false; try { await ctx.resume(); } catch {} }
   if (!mic) {
     // One open at a time, shared by every caller (review H3); an open released meanwhile gives null.
     try { mic = await micGate.acquire(); } catch (err) { banner(micDecision(err, ctx.state)); return false; }
@@ -358,6 +382,7 @@ function onFrame(pcm, rms, at) {
 }
 
 async function startTurn(source) {
+  if (voiceOff) return;                          // item 17
   if (!ws || ws.readyState !== 1 || starting) return;
   // Review H3: from the tap until the turn exists, a second tap is ignored and the bird shows it heard the first.
   starting = true;
@@ -365,6 +390,7 @@ async function startTurn(source) {
   let ok = false;
   try { ok = await ensureAudio(); } finally { starting = false; $("bird").classList.remove("is-starting"); }
   if (!ok) return;
+  if (voiceOff) { micGate.release(); captureEnded(); mic = null; micReleasedAt = performance.now(); return; }
   if (turn) report(turn, true);                  // a pending no-audio wait is cut short: still reported (F9)
   const noSpeechMs = source === "follow_up" ? (config.follow_up_s || 6) * 1000 : 8000;
   const hangoverMs = Number(config.vad_hangover_ms) || VAD_DEFAULTS.hangoverMs;   // latency lever 1 (ruling R20; default 450 ms)
@@ -433,8 +459,35 @@ function chime() {
   o.start(); o.stop(ctx.currentTime + 0.6);
 }
 
+function syncVoiceLabels() {
+  const v = t(voiceOff ? "voice_turn_on" : "voice_turn_off"), y = t($("compose").hidden ? "type_open" : "type_close");
+  for (const [id, l] of [["voice-btn", v], ["type-btn", y]]) { $(id).setAttribute("aria-label", l); $(id).title = l; }
+  $("voice-btn").dataset.voice = voiceOff ? "off" : "on";
+}
+function setVoiceOff(on, quiet = false) {
+  voiceOff = !!on;
+  if (voiceOff) ls.set(LS_VOICE_OFF, "1"); else ls.del(LS_VOICE_OFF);
+  $("mic").hidden = voiceOff; $("compose").hidden = !voiceOff; $("type-btn").hidden = voiceOff;
+  syncVoiceLabels();
+  if (turn && !turn.ended) { send({ type: "barge_in" }); turn.ended = turn.barged = turn.reported = true; clearTimeout(turn.guard); turn.guard = null; }   // dropped, never endTurn'd: no turn_end
+  micGate.release(); captureEnded();
+  mic = null; micReleasedAt = performance.now(); player?.flush(); pauseOutput(); serverBird = "idle"; renderBird();
+  if (!quiet) caption(t(voiceOff ? "voice_off_hint" : "tap_hint"), voiceOff ? "voice_off" : "tap_hint");
+  send({ type: "voice_mode", on: !voiceOff });   // a no-op while the socket is down: the next ready says it again
+}
+function sendTyped() {
+  const text = composeText($("compose-text").value), id = `x${Date.now()}-${++typedSeq}`;
+  if (!text || !ws || ws.readyState !== 1) return;   // nothing to say, or the socket is down: the words stay
+  // Item 17 (B4): with voice on the reply's output is set up here, in this gesture — never the microphone. A reply
+  // still playing is replaced by this message, so it is flushed and the server told first.
+  if (!voiceOff) { if (player?.playing) { player.flush(); send({ type: "barge_in" }); } ensureOutput(); }
+  send({ type: "text_turn", turn_id: id, text });
+  typed = { id, text }; $("compose-text").value = "";
+  if (turn && turn.done) turn = null;   // a finished turn never settles this reply; an open one stays
+}
+
 async function onTap() {
-  switch (tapDecision({ halted, playing: !!player?.playing, birdState, turnOpen: !!(turn && !turn.ended), starting })) {
+  switch (tapDecision({ halted, playing: !!player?.playing, birdState, turnOpen: !!(turn && !turn.ended), voiceOff, starting })) {
     case "resume": halted = false; banner(null); connect(); return;
     case "barge":
       send({ type: "barge_in" });
@@ -461,6 +514,9 @@ $("bird").addEventListener("click", onTap);
   $("debug").addEventListener("click", () => { $("debug").hidden = true; });
 }
 $("mic").addEventListener("click", onTap);
+$("voice-btn").addEventListener("click", () => setVoiceOff(!voiceOff));
+$("type-btn").addEventListener("click", () => { $("compose").hidden = !$("compose").hidden; syncVoiceLabels(); if (!$("compose").hidden) $("compose-text").focus(); });
+$("compose").addEventListener("submit", (e) => { e.preventDefault(); sendTyped(); });
 window.addEventListener("pagehide", () => releaseAudio({ keepMedia: BAR }));
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && (SESSION || ls.get(LS_TOK))) connect(); });   // connect() is a no-op while a socket is live
 if (SESSION) {
@@ -492,6 +548,7 @@ mediaView = createMediaView({
   onChipTap: () => send({ type: "wm_event", kind: "nowplaying" }),   // F8: the server opens (or brings forward) the window
 });
 $("mic").textContent = t("mic_talk");
+setVoiceOff(voiceOffFromStorage(ls.get(LS_VOICE_OFF)), true);
 connect();
 // DV13 speaker chip: a Pi (?agent=1) only; one agent link per page load.
 if (!SESSION && new URLSearchParams(location.search).get("agent") === "1") Promise.all([import("./agent-link.js"), import("./speaker-view.js")]).then(([{ createAgentLink }, { createSpeakerView }]) => {

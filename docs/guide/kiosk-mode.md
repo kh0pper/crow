@@ -24,6 +24,14 @@ The avatar takes effect on the next kiosk session. The feature toggles apply at 
 
 The model pair is shared by every display because one companion container has a single LLM `base_url` (the gateway's [`/llm/v1` router](/architecture/companion)). A kiosk that genuinely needs a *different* model pair needs its **own companion container** (own port + `conf.yaml`).
 
+## Typing to Crow, and turning voice off
+
+The keyboard button on the page (**Type a message**) opens a message box: type what you want, tap **Send**, and Crow answers as it would to a spoken question. It is there on the phone's **Talk to Crow**, and on a kiosk display that has a keyboard attached (the Pi kiosk runs the page in cage with Chromium and installs no on-screen keyboard).
+
+The speaker button turns voice off with one tap (**Turn voice off**): you are not listened to, spoken replies and spoken lines are not spoken, and what Crow would have said appears on the screen as text instead (the timer's chime still sounds). A tap on it again (**Turn voice on**) brings the microphone and the spoken replies back. The choice is kept on that device, so a display set to text comes back in text after a reload.
+
+A typed message can ask for a hand-off just like a spoken one, and it is still confirmed on your phone: what decides is the screen the message came from, not whether you typed or spoke it.
+
 ## Social / chat features
 
 The companion's chatroom and DM features are gated by the per-device `social_chat` toggle, so a public-facing kiosk can run avatar-only (no social UI) while a personal display keeps full chat. Toggle it on the bot's Basics tab (channel **AI Companion (kiosk)**).

@@ -4,7 +4,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--k-sky); color: var(--k-ink); font-family: system-ui, sans-serif; font-size: 20px; line-height: 1.35; overflow: hidden; -webkit-user-select: none; user-select: none; }
 button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; border: 0; background: none; cursor: pointer; touch-action: manipulation; }
-.k-app { display: grid; grid-template-rows: 48px 1fr auto; height: 100vh; padding: 8px 16px; gap: 8px; }
+.k-app { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px 1fr auto; height: 100vh; padding: 8px 16px; gap: 8px; }
 .k-top { display: flex; align-items: baseline; gap: 16px; }
 .k-clock { font-size: 34px; font-weight: 700; }
 .k-date { color: var(--k-dim); }
@@ -57,11 +57,19 @@ button { font: inherit; color: inherit; min-height: 56px; min-width: 56px; borde
 html.k-ringing, html.k-ringing body { background: var(--k-teal-soft); }
 .k-win-timer.is-done { grid-row: -2; display: grid; place-content: center; text-align: center; padding: 16px 64px; background: var(--k-teal); border-color: var(--k-teal); color: var(--k-card); cursor: pointer; }
 .k-tap-dismiss { margin: 0; font-weight: 700; }
-.k-captions { min-height: 64px; }
+/* Item 17 (B3): a long reply scrolls inside the captions instead of pushing the composer (and the tools) off the page. */
+.k-captions { min-height: 64px; max-height: 30vh; overflow: auto; }
 .k-captions p { margin: 0; }
 .k-cap-user { color: var(--k-dim); }
 .k-cap-bot { font-size: 22px; }
 .k-mic { position: fixed; z-index: 5; right: 16px; bottom: 16px; min-height: 56px; padding: 0 24px; border-radius: 28px; background: var(--k-teal); color: var(--k-card); font-weight: 700; }
+/* Item 17: the tools row sits bottom-left, clear of the talk pill and the np chip. */
+.k-tools { position: fixed; left: 16px; bottom: 16px; display: flex; gap: 8px; z-index: 5; }
+.k-tools button { display: grid; place-items: center; width: 56px; padding: 0; border-radius: 50%; background: var(--k-card); border: 1px solid var(--k-line); }
+.k-tools svg { fill: none; stroke: currentColor; stroke-width: 2; }
+.k-compose { display: flex; gap: 8px; margin-bottom: 76px; }
+.k-compose input { flex: 1; min-width: 0; min-height: 56px; padding: 0 16px; border-radius: 28px; border: 1px solid var(--k-line); background: var(--k-card); color: var(--k-ink); font: inherit; font-size: 20px; }
+.k-compose button { padding: 0 20px; border-radius: 28px; background: var(--k-teal); color: var(--k-card); font-weight: 700; }
 .k-pairing { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; background: var(--k-sky); }
 .k-pair-code { font-size: 96px; font-weight: 800; letter-spacing: .08em; margin: 8px 0; color: var(--k-teal); font-variant-numeric: tabular-nums; }
 .k-debug { position: fixed; left: 8px; right: 8px; top: 48px; z-index: 20; max-height: 70vh; overflow: auto; padding: 12px; border-radius: 14px; background: var(--k-card); border: 2px solid var(--k-line); white-space: pre-wrap; font: 14px/1.4 ui-monospace, monospace; }
@@ -81,12 +89,14 @@ html.k-ringing, html.k-ringing body { background: var(--k-teal-soft); }
   .k-stage { grid-template-columns: 1fr; }
   .k-bird-art, .k-bird-svg { width: min(70vw, 260px); }
   .k-captions { padding-bottom: 88px; }
-}
+  .k-compose { margin-bottom: 84px; }}
 @media (prefers-reduced-motion: reduce) { .k-bird *, .k-bird { animation: none !important; transition: none !important; } }
 .no-anim .k-bird *, .no-anim .k-bird { animation: none !important; transition: none !important; }
 
 /* Media: the now-playing chip (the session's title, tap to pause or play) and window. */
+/* Review B1 of item 17: the chip sat exactly over an open composer (84…140 px from the bottom) and ate its taps. */
 .k-np-chip { position: fixed; left: 12px; bottom: 84px; max-width: calc(100% - 24px); min-height: 56px; padding: 8px 16px; border-radius: 28px; background: var(--k-card); border: 1px solid var(--k-line); font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.k-compose:not([hidden]) ~ .k-np-chip { bottom: 156px; }
 .k-np-chip[data-offline] { opacity: .55; }
 .k-np-title { margin: 0; font-size: 24px; }
 .k-np-sub { margin: 4px 0 12px; opacity: .75; }

@@ -47,6 +47,11 @@ test("no requestAnimationFrame and no video/iframe creation anywhere in the page
 // Pi launched with ?agent=1 (DV13), bar-link.js by a dashboard session frame opened with ?bar=1 (B3; a Pi never fetches it).
 const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js"]);
 
+// 98,261 → 100 KB (2026-11-18, queue item 17 review fixes: chip clearance, caption cap, output setup, stop while quiet):
+// the review of item 17 took the page from 98,261 of 98,304 bytes to just over 96 KB — the now-playing chip's clearance
+// over an open composer, the caption box's cap, the typed message's own output setup and a barge while voice is off.
+// 92 → 96 KB (2026-11-18, queue item 17, type to Crow and one-tap voice off): the composer and the voice toggle
+// (~3 KB) are eager — the composer is the phone's only way to talk with voice off, so it can't wait for a lazy import.
 // 90 → 92 KB (2026-11-02, For You §13 kiosk Morning window): its renderer and compacted CSS (~3 KB) are eager —
 // the window can open on its own when the kiosk idles in the morning, so it can't wait for a lazy import.
 // 88 → 90 KB (2026-10-16, B3 PR-C rebased on queue item 21c): the Android audio-mode guard (#500) took ~2.9 KB of the
@@ -54,9 +59,9 @@ const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js"]);
 // 82 → 88 KB (2026-10-15, queue item 21): the B3 mic-release start gate now, the player-bar link next (~+7 KB once, cached on a Pi 3).
 // 80 → 82 KB (2026-10-15, queue item 18): the page was at 80,853 of 81,920 bytes; the DV13 speaker chip's eager part
 // (its slot, its CSS and the ?agent=1 gate, ~1.2 KB) does not fit. The chip's code itself stays out of the count (LAZY).
-test("page weight ≤ 92 KB (html + css + eagerly loaded js, uncompressed); the agent-only and bar-only modules are loaded on demand", () => {
+test("page weight ≤ 100 KB (html + css + eagerly loaded js, uncompressed); the agent-only and bar-only modules are loaded on demand", () => {
   const total = files.filter((f) => !LAZY.has(f)).reduce((n, f) => n + statSync(new URL(f, PUB)).size, 0);
-  assert.ok(total <= 92 * 1024, `page is ${total} bytes`);
+  assert.ok(total <= 100 * 1024, `page is ${total} bytes`);
   for (const f of files.filter((x) => x.endsWith(".js"))) {
     for (const m of read(f).matchAll(/from\s+["']\.\/([\w.-]+)["']/g)) assert.ok(!LAZY.has(m[1]), `${f} imports ${m[1]} eagerly`);
   }

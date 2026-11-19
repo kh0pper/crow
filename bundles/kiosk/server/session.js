@@ -14,11 +14,20 @@
  * deps.onLive(device) / deps.onGone(device) (optional, every display): a display's hello made it the device's live
  * session / that live session ended (its socket closed unreplaced, or it was unpaired). A throw is logged.
  *
- * How a turn ends, as the page sees it: every turn_start is answered by exactly ONE closing frame for
- * that turn_id — `turn_done` when the turn ran (also when it failed or was interrupted), or
- * `turn_over { turn_id, reason: "empty" | "too_long" | "busy" }` when it never ran. The page ends
+ * How a turn ends, as the page sees it: every turn_start and every text_turn is answered by exactly ONE closing
+ * frame for that turn_id — `turn_done` when the turn ran (also when it failed or was interrupted), or
+ * `turn_over { turn_id, reason: "empty" | "too_long" | "busy" | "voice_off" }` when it never ran. The page ends
  * its own turn state on either (what it ducked or paused for the turn comes back). An older page
  * ignores turn_over, as it ignores any frame it does not know.
+ *
+ * Typing instead of speaking: `{ type: "text_turn", turn_id, text }` runs an ordinary voice turn with the typed
+ * words as the transcript (no audio, no STT; deps.runTurn gets `typed: true`). Control characters and newlines
+ * in the text are flattened to one space first, so a typed message can never put a line break into the model's
+ * prompt. The page may also mute the room: `{ type: "voice_mode", on }` is a per-socket flag (on by default)
+ * and while it is off nothing audible leaves this socket — no audio and no tts framing, while captions keep
+ * flowing — and a turn_start is answered `turn_over "voice_off"` instead of opening the mic. A line that would
+ * have been spoken (a finished timer, a failed station, a hand-off heads-up) is not lost with voice off: it is
+ * sent as `{ type: "announce", text }`, the frame the page captions, and nothing is synthesized for it.
  *
  * Media (deps.media, the media session store): on every hello the page is told the media state —
  * the current item, or an explicit stop when there is none — so a page that kept an element from
@@ -30,6 +39,8 @@ import { validTimeZone } from "./clock.js";
 export const HELLO_TIMEOUT_MS = 5000;
 export const MAX_TURN_BYTES = 1024 * 1024;
 export const MIN_TURN_BYTES = 6400;
+/** Longest text a typed turn carries: longer text is cut to this many characters. */
+export const MAX_TEXT_CHARS = 500;
 /** How long a turn waits for its early transcript before transcribing the audio itself. */
 export const EARLY_STT_WAIT_MS = 3000;
 
@@ -56,9 +67,10 @@ export function createSessionHub(deps) {
     let turnId = null;
     let abort = null;
     let busy = false;
-    const pendingSpeech = [];
+    const pendingSpeech = [];   // { text, shown }: `shown` = the caller already sent this line as an announce frame
     let speaking = false;
     let speechAbort = null;
+    let voiceOn = true;            // the page's voice mode (voice_mode): off = nothing audible leaves this socket
     // Early STT (lever D): {bytes, ctrl, startedAt, promise, done} for the transcription started
     // at the page's speech_pause, over the audio received so far. At most ONE runs at a time:
     // whisper (num_workers 1) cannot cancel a request, so a newer pause while one runs only
@@ -88,7 +100,7 @@ export function createSessionHub(deps) {
     const state = (bird) => sendJson(ws, { type: "state", bird });
     /** The closing frame of a turn that never ran (see the header). */
     const turnOver = (id, reason) => sendJson(ws, { type: "turn_over", turn_id: id, reason });
-    const self = { ws, get device() { return device; }, get caps() { return caps; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, runSpeech: (t) => { pendingSpeech.push(t); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile, capsOpts()); } };
+    const self = { ws, get device() { return device; }, get caps() { return caps; }, get busy() { return busy || speaking || inTurn; }, queueSpeech: (t, opts) => { pendingSpeech.push({ text: String(t ?? ""), shown: opts?.shown === true }); drainSpeech(); }, runSpeech: (t, opts) => { pendingSpeech.push({ text: String(t ?? ""), shown: opts?.shown === true }); drainSpeech(); }, abortTurn: () => abort?.abort(), recap: () => { caps = effectiveCaps(rawCaps, device?.kiosk_settings?.profile, capsOpts()); } };
 
     /**
      * Session displays: is the dashboard login still live? An ended login closes the socket (4401).
@@ -110,18 +122,35 @@ export function createSessionHub(deps) {
     }
     if (opts.revalidate) self.revalidate = () => stillAuthorized(false);
 
-    // Speech (timer/announce) is serialized: one at a time, never during a turn,
-    // with its own abort (barge_in / turn_start / close) and an abort-gated sink.
+    /**
+     * The voice-off filter: with voice off nothing audible leaves this socket — no audio, no tts_start/tts_end —
+     * while every other event (captions, transcript_final) still flows, so a quiet page still reads the reply.
+     * The flag is read per event, so muting mid-sentence is immediate. A line that would have been spoken is
+     * never replayed when voice comes back: drainSpeech below sends it as its caption instead.
+     */
+    function audible(sink) {
+      return {
+        event: (ev) => { if (!voiceOn && (ev?.type === "tts_start" || ev?.type === "tts_end")) return; sink.event(ev); },
+        audio: (b) => { if (voiceOn) sink.audio(b); },
+      };
+    }
+
+    // Speech (timer/announce) is serialized: one at a time, never during a turn, with its own abort (barge_in / turn_start / voice off / close) and an abort-gated sink.
+    // With voice off a line is NOT spoken: it goes out as an announce frame (the one the page captions), and
+    // deps.speak is never called, because nothing would be heard. A caller that already sent that caption
+    // (shown: true, the internal announce route) gets no second one.
     async function drainSpeech() {
       if (speaking) return;
       while (pendingSpeech.length && ws.readyState === 1 && !busy && !inTurn) {
-        const text = pendingSpeech.shift();
+        const line = pendingSpeech.shift();
+        if (!voiceOn) { if (!line.shown) sendJson(ws, { type: "announce", text: line.text }); continue; }
+        const text = line.text;
         speaking = true;
         const my = (speechAbort = new AbortController());
-        const sink = {
+        const sink = audible({
           event: (ev) => { if (!my.signal.aborted) sendJson(ws, ev); },
           audio: (b) => { if (!my.signal.aborted && ws.readyState === 1) ws.send(b); },
-        };
+        });
         try { await deps.speak({ device, text, sink, signal: my.signal }); } catch (err) { deps.log?.(`[kiosk] speak failed: ${err.message}`); }
         finally { speaking = false; if (speechAbort === my) speechAbort = null; }
       }
@@ -149,6 +178,10 @@ export function createSessionHub(deps) {
       if (ws.readyState !== 1) return;
       clearT(helloTimer);
       device = d;
+      // The page says its stored voice choice in hello (voice_off), so a reconnect is quiet from its first line:
+      // only exactly `true` mutes (a "yes" or a 1 from an older page leaves voice on), and a later voice_mode
+      // frame still overrides. Set before anything is sent, so no line can drain through a loud socket.
+      voiceOn = msg.voice_off !== true;
       rawCaps = msg.caps;
       barOwner = opts.authorize && typeof msg.owner === "string" && BAR_OWNER_RE.test(msg.owner) ? msg.owner : null;
       // A paired display nobody has typed yet gets the pairing guess, stored once as "guessed" (the
@@ -176,6 +209,32 @@ export function createSessionHub(deps) {
       } catch (err) { deps.log?.(`[kiosk] hello setup failed: ${err.message}`); ws.close(1011, "server_error"); return; }
       state("idle");
       Promise.resolve().then(() => deps.warmup(d)).catch(() => {});
+    }
+
+    /**
+     * The bookkeeping every turn shares once deps.runTurn settles (spoken or typed): an error frame when the turn
+     * threw, then the metrics line, the turn's ONE closing frame (turn_done), idle, and any speech queued behind it.
+     * `build` returns the deps.runTurn arguments without `signal` (it may do the turn's own work first; a throw
+     * from it is a failed turn like any other).
+     */
+    async function runTurnTracked(id, my, build) {
+      let r = null;
+      try {
+        r = await deps.runTurn({ ...(await build()), signal: my.signal });
+      } catch (err) {
+        if (!err?.aborted) {
+          deps.log?.(`[kiosk] turn failed: ${err.message}`);
+          sendJson(ws, { type: "error", code: "turn_failed", recoverable: true });
+        }
+      } finally {
+        busy = false;
+        abort = null;
+        const res = { route: r?.route ?? null, fastPath: !!r?.fastPath, escalated: !!r?.escalated, degraded: r?.degraded ?? null, aborted: my.signal.aborted || !!r?.aborted, failed: r ? (r.failed ?? null) : (my.signal.aborted ? null : "error"), timings: r?.timings || {} };
+        deps.metrics.serverTurn(device.id, id, res);
+        sendJson(ws, { type: "turn_done", turn_id: id, route: res.route, fast_path: res.fastPath, escalated: res.escalated, degraded: res.degraded, aborted: res.aborted, failed: res.failed, timings: res.timings });
+        state("idle");
+        drainSpeech();
+      }
     }
 
     async function onTurnEnd(msg) {
@@ -206,16 +265,15 @@ export function createSessionHub(deps) {
       const my = abort;
       const id = turnId;
       state("thinking");
-      const sink = {
+      const sink = audible({
         event: (ev) => {
           if (my.signal.aborted) return;
           sendJson(ws, ev);
           if (ev.type === "tts_start") state("speaking");
         },
         audio: (chunk) => { if (!my.signal.aborted && ws.readyState === 1) ws.send(chunk); },
-      };
-      let r = null;
-      try {
+      });
+      await runTurnTracked(id, my, async () => {
         let transcript = null, sttEarly = null;
         if (usable) {
           // A barge-in / close cancels the early request with the turn; a wedged whisper is capped.
@@ -236,21 +294,46 @@ export function createSessionHub(deps) {
         }
         if (!sttEarly) sttEarly = { used: false, discards, discard_ms: discardMs };
         if (my.signal.aborted) throw Object.assign(new Error("aborted"), { aborted: true });
-        r = await deps.runTurn({ device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, signal: my.signal, caps, tz, transcript, startedAt: turnStartedAt, sttEarly });
-      } catch (err) {
-        if (!err?.aborted) {
-          deps.log?.(`[kiosk] turn failed: ${err.message}`);
-          sendJson(ws, { type: "error", code: "turn_failed", recoverable: true });
-        }
-      } finally {
-        busy = false;
-        abort = null;
-        const res = { route: r?.route ?? null, fastPath: !!r?.fastPath, escalated: !!r?.escalated, degraded: r?.degraded ?? null, aborted: my.signal.aborted || !!r?.aborted, failed: r ? (r.failed ?? null) : (my.signal.aborted ? null : "error"), timings: r?.timings || {} };
-        deps.metrics.serverTurn(device.id, id, res);
-        sendJson(ws, { type: "turn_done", turn_id: id, route: res.route, fast_path: res.fastPath, escalated: res.escalated, degraded: res.degraded, aborted: res.aborted, failed: res.failed, timings: res.timings });
-        state("idle");
-        drainSpeech();
+        return { device: sessions.get(device.id)?.device || device, audio: deps.wrapPcmAsWav(pcm, 16000), sink, caps, tz, transcript, startedAt: turnStartedAt, sttEarly };
+      });
+    }
+
+    /**
+     * A typed turn (the page's keyboard): the same turn a spoken one runs, with the typed words as the transcript —
+     * no audio, no STT (`typed: true`). It is the operator's own words, so it is a NORMAL turn (never a relay), and
+     * which surface it came from still decides what a yes may do. It ends exactly as a spoken one does: busy while
+     * it runs, thinking on the display, one turn_done (or turn_over when it never ran), idle, queued speech drained.
+     */
+    async function onTextTurn(msg) {
+      const id = String(msg.turn_id || `t${nowMs()}`).slice(0, 64);
+      if (busy || inTurn) { sendJson(ws, { type: "error", code: "turn_busy", recoverable: true }); turnOver(id, "busy"); return; }
+      const turnStartedAt = nowMs();
+      // Control characters and newlines are one space: typed words reach the model prompt and the hand-off card
+      // as one line, whatever the frame carried.
+      const text = String(msg.text ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, MAX_TEXT_CHARS);
+      turnId = id;
+      // Nothing typed: the room is left alone (the announcement playing is not cut short for no words).
+      if (!text) { turnOver(id, "empty"); state("idle"); return; }
+      if (speechAbort) speechAbort.abort();   // what the room was saying stops first, as a spoken turn does
+      dropEarly(); earlyDiscards = 0;
+      busy = true;
+      if (opts.revalidate) {
+        // The login is re-checked before anything runs, as a spoken turn's turn_end does.
+        const ok = await stillAuthorized();
+        if (!ok || ws.readyState !== 1) { busy = false; return; }
       }
+      abort = new AbortController();
+      const my = abort;
+      state("thinking");
+      const sink = audible({
+        event: (ev) => {
+          if (my.signal.aborted) return;
+          sendJson(ws, ev);
+          if (ev.type === "tts_start") state("speaking");
+        },
+        audio: (chunk) => { if (!my.signal.aborted && ws.readyState === 1) ws.send(chunk); },
+      });
+      await runTurnTracked(id, my, () => ({ device: sessions.get(device.id)?.device || device, sink, caps, tz, transcript: text, typed: true, startedAt: turnStartedAt, sttEarly: { used: false, discards: 0, discard_ms: 0 } }));
     }
 
     ws.on("message", (raw, isBinary) => {
@@ -283,6 +366,7 @@ export function createSessionHub(deps) {
       try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
       switch (msg?.type) {
         case "turn_start":
+          if (!voiceOn) { turnOver(String(msg.turn_id || "").slice(0, 64), "voice_off"); return; }
           if (busy) { sendJson(ws, { type: "error", code: "turn_busy", recoverable: true }); turnOver(String(msg.turn_id || "").slice(0, 64), "busy"); return; }
           if (speechAbort) speechAbort.abort();
           dropEarly(); earlyDiscards = 0;
@@ -298,6 +382,28 @@ export function createSessionHub(deps) {
           return;
         case "turn_end":
           onTurnEnd(msg).catch((err) => deps.log?.(`[kiosk] turn_end failed: ${err?.message}`));
+          return;
+        case "text_turn":
+          onTextTurn(msg).catch((err) => deps.log?.(`[kiosk] text_turn failed: ${err?.message}`));
+          return;
+        case "voice_mode":
+          // A non-boolean `on` changes nothing. Going off is immediate in the room: an opening line stops, and
+          // every line queued behind it becomes the caption it would have been heard as — never sound, and
+          // never replayed when voice comes back.
+          if (typeof msg.on !== "boolean") return;
+          voiceOn = msg.on;
+          if (!voiceOn) {
+            if (speechAbort) speechAbort.abort();
+            for (const line of pendingSpeech.splice(0)) if (!line.shown) sendJson(ws, { type: "announce", text: line.text });
+            // The page can mute the room while its mic turn is still open (no turn_end yet): that turn is over now,
+            // answered like any turn that never ran, so the page is not left busy and its late turn_end is stale.
+            if (inTurn) {
+              dropEarly();
+              inTurn = false; frames = []; bytes = 0;
+              turnOver(turnId, "voice_off");
+              state("idle");
+            }
+          }
           return;
         case "barge_in":
           if (abort) abort.abort();
@@ -353,10 +459,10 @@ export function createSessionHub(deps) {
       return true;
     },
     sendTo(id, obj) { const s = sessions.get(id); if (!s || s.ws.readyState !== 1) return false; s.ws.send(JSON.stringify(obj)); return true; },
-    speak(id, text) {
+    speak(id, text, opts) {
       const s = sessions.get(id);
       if (!s || s.ws.readyState !== 1) return false;
-      s.queueSpeech(text);
+      s.queueSpeech(text, opts);
       return true;
     },
     refreshDevice(id, d) { const s = sessions.get(id); if (s && d) { Object.assign(s.device, d); s.recap?.(); } },

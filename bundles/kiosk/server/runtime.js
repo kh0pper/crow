@@ -530,7 +530,7 @@ export function createKioskRuntime(deps) {
     storeProfile: (id, profile) => withDb((db) => deps.deviceStore.updateDeviceProfiles(db, id, { kiosk_settings: { profile, profile_source: "guessed" } })),
     // F3/F6: the page's effective audio policy rides on display_config (the stored settings are never rewritten by it).
     displayConfig: (d, rawCaps) => withDb(async (db) => ({ name: d.name, ...(d.kiosk_settings || {}), ...audioPolicy(d.kiosk_settings, rawCaps), bird: await deps.resolveDisplayBird(db) })),
-    runTurn: ({ device: device0, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly }) => withDb(async (db) => {
+    runTurn: ({ device: device0, audio, sink, signal, caps, tz, transcript, startedAt, sttEarly, typed }) => withDb(async (db) => {
       lastTurnAt.set(device0.id, now());   // the operator is talking here (presence.js)
       const vb = await loadVoiceBot(db);
       const device = voiced(device0, vb);
@@ -539,7 +539,10 @@ export function createKioskRuntime(deps) {
       // r8 P1: the playback verbs the model asked crow_wm for, and the sentence's own verb where that one ran instead (fixed words).
       const asked = [], kept = [];
       const r = await deps.voice.runVoiceTurn({
-        db, device, audio, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
+        db, device, sink, signal, transcript: transcript ?? undefined, startedAt, sttEarly,
+        // A typed turn has no audio at all (the words were typed): the key is passed only when there is one.
+        ...(typed ? { typed: true } : {}),
+        ...(audio === undefined ? {} : { audio }),
         ...turnOptions(device, caps, tz, (ev) => sink.event(ev), { onModelVerb: (v, k) => { if (asked.length < 8) { asked.push(String(v).slice(0, 24)); if (k) kept.push(String(k).slice(0, 24)); } } }, vb),
       });
       if (r && typeof r === "object") r.timings = { ...(r.timings || {}), media_before: mediaBefore, media_after: media.stateOf(device.id), ...(asked.length ? { model_verbs: asked } : {}), ...(kept.length ? { model_verbs_kept: kept } : {}) };
@@ -802,7 +805,9 @@ export function createKioskRuntime(deps) {
     return withDb(async (db) => {
       const out = { delivered: [], offline: [] };
       for (const d of await targets(db, display)) {
-        if (hub.sendTo(d.id, { type: "announce", text })) { if (speak) hub.speak(d.id, text); out.delivered.push(d.name); }
+        // The announce frame is this caller's caption, so the hub never adds a second one for the line
+        // (`shown`): with voice off the same frame is all the page gets, and nothing is synthesized.
+        if (hub.sendTo(d.id, { type: "announce", text })) { if (speak) hub.speak(d.id, text, { shown: true }); out.delivered.push(d.name); }
         else out.offline.push(d.name);
       }
       return out;

@@ -619,6 +619,10 @@ export function createVoiceTurnRunner(deps) {
    *   action turn (no can't-do, no-backend or not-ready line: the model speaks the short version), and never
    *   changes the device's follow-up state (last families, last action, the own-tool window).
    * opts.noTranscript: true keeps this turn out of the opt-in transcript buffer (the kiosk turn check).
+   * opts.typed: true marks a turn whose transcript was TYPED, not heard (the kiosk page's keyboard): it is the
+   *   operator's own words and NOT a relay — there is no audio and no STT, the leading-"add" STT repair is skipped
+   *   (the words were not misheard), timings.typed = true, and which surface the turn came from still decides whether
+   *   a yes may confirm a hand-off (on a kiosk nothing in the room may, however the words arrived).
    * opts (beyond the transport): maxToolRounds — tool-calling rounds before a forced, tool-free
    * final answer (default deps.maxToolRounds); firstAudioBudgetMs — wall-clock from the turn start
    * to the first ANSWER audio (the filler does not count), after which the answer is cut and the
@@ -653,6 +657,9 @@ export function createVoiceTurnRunner(deps) {
   async function runVoiceTurn(opts) {
     const { db, device, sink, signal } = opts;
     const relay = isRelayTurn(opts);
+    // opts.typed: the transcript was typed, never heard (the kiosk page's keyboard). The operator's own words, so
+    // it is never a relay; it only skips the STT repair below.
+    const typed = opts.typed === true;
     const answerTurn = relayKindOf(opts) === "answer";   // the transcript is bot text: no tools, nothing saved as the user's
     // The voice conversation never keeps an answer turn: its "user" message would be the bot's own text.
     const saveConvo = (id, msgs) => { if (!answerTurn) convo.save(id, msgs); };
@@ -660,6 +667,7 @@ export function createVoiceTurnRunner(deps) {
     const t0 = Number.isFinite(opts.startedAt) ? opts.startedAt : now();
     const timings = { surface: VOICE_SURFACES.includes(opts.surface) ? opts.surface : "kiosk" };
     if (relay) timings.relay = true;
+    if (typed) timings.typed = true;
     const result = { transcript: "", route: null, fastPath: false, escalated: false, degraded: null, aborted: false, failed: null, timings };
     const mark = (k) => { if (timings[k] == null) timings[k] = now() - t0; };
     const aborted = () => signal?.aborted === true;
@@ -743,8 +751,9 @@ export function createVoiceTurnRunner(deps) {
       // A misheard leading "add" ("Had coffee Tuesday at 9", PR 2.1 [r2 I6]) is put back once, here, before any reader
       // of the words (the fast paths, actionWhen, the intent lists, the model): the caption and the saved conversation
       // keep the rewritten text. The voice bot only, never while a question waits for a yes (stt-rewrite.js: English only).
-      // A relay transcript (the relay contract) is not STT output: never rewritten.
-      const rw = transcript && !relay ? sttRewrite(transcript, { lang: opts.lang }) : null;
+      // A relay transcript (the relay contract) is not STT output: never rewritten. Typed words (opts.typed) were not
+      // misheard either, so the repair never applies to them.
+      const rw = transcript && !relay && !typed ? sttRewrite(transcript, { lang: opts.lang }) : null;
       if (rw) {
         let waiting = false;
         try { waiting = voiceActions?.turnContext?.({ device })?.pending === true; } catch { waiting = false; }
