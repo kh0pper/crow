@@ -1,8 +1,8 @@
 // tests/llm-router-turn-context.test.js
 //
-// The AI Companion (Open-LLM-VTuber) sends its turns to /llm/v1 with a static system prompt and no date. The router
+// A voice client sends its turns to /llm/v1 with a static system prompt and no date. The router
 // puts [Now] (every turn) and [Dates] (when the user names a relative day) plus the [Note] line on the LAST user
-// message — only for the companion's dedicated model id, never for a bare/unknown id, a door or a provider path —
+// message — only for the dedicated voice-turn model id, never for a bare/unknown id, a door or a provider path —
 // and strips an echo of those lines from the reply.
 
 process.env.COMPANION_FAST_MODEL = "crow-voice/qwen3.5-4b";

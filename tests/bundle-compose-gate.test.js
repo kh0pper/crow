@@ -224,8 +224,8 @@ test("long-syntax volume sources are held to the same sensitive-path rule", () =
     "long-syntax timezone mounts are not allowlisted (short syntax only)");
 });
 
-test("the four host-network bundles are privileged and explain it in English and Spanish", () => {
-  for (const id of ["companion", "coturn", "plex", "tailscale"]) {
+test("the three host-network bundles are privileged and explain it in English and Spanish", () => {
+  for (const id of ["coturn", "plex", "tailscale"]) {
     const m = JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));
     assert.equal(m.privileged, true, `${id} must be privileged (host networking)`);
     assert.ok(/host network/i.test(m.install_consent_messages?.en || ""), `${id}: English consent text must name host networking`);

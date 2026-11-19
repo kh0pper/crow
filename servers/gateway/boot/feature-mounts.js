@@ -1,5 +1,5 @@
 /**
- * boot/feature-mounts.js — feature route mounts (admin backup, storage, blog, wm,
+ * boot/feature-mounts.js — feature route mounts (admin backup, storage, blog,
  * media public, knowledge-base public, tea-maps public, AI chat, peer messages,
  * notifications, turbo streams, bot-board api, fileview, push, settings scope,
  * stt-debug).
@@ -89,22 +89,6 @@ export async function mountFeatureRoutes(app, deps) {
   } catch (err) {
     if (err.code !== "ERR_MODULE_NOT_FOUND") {
       console.warn("[blog] Failed to mount:", err.message);
-    }
-  }
-
-  // --- Mount Window Manager Server ---
-  // Same auth chain as every other MCP mount (W5 hardening — this was the one
-  // null-auth mount): local MCP token (the companion's mcp-proxy already sends
-  // it), OAuth bearer, or a paired instance gated default-deny by the peer
-  // exposure gate. crow_wm is not view-only — it can spawn the pet process and
-  // send P2P invites/memos/reactions — so it must not be reachable bare.
-  try {
-    const { createWmServer } = await import("../../wm/server.js");
-    mountMcpServer(app, "/wm", () => createWmServer(undefined, { instructions }), sessionManager, authMiddleware, peerExposureGate);
-    console.log("Window Manager server mounted");
-  } catch (err) {
-    if (err.code !== "ERR_MODULE_NOT_FOUND") {
-      console.warn("[wm] Failed to mount:", err.message);
     }
   }
 

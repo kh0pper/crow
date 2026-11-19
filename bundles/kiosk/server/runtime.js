@@ -1169,6 +1169,9 @@ export function createKioskRuntime(deps) {
     server.on("upgrade", (req, socket, head) => {
       const path = String(req.url || "").split("?")[0];
       if (path !== "/api/kiosk/session" && path !== SESSION_WS_PATH) return;
+      // Ours: claimed before any await, so the gateway's fallback (servers/shared/
+      // ws-upgrade-claim.js) never answers this request with its 404.
+      req.crowWsClaimed = true;
       if (req.headers["tailscale-funnel-request"] || !deps.isAllowedNetwork(req)) return refuse(socket, 403, "Forbidden");
       if (path === "/api/kiosk/session") return accept(req, socket, head);   // paired displays: the token arrives in hello
       // Session mode. Everything is decided BEFORE the upgrade: a browser page on another site can

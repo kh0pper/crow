@@ -41,12 +41,13 @@ function getScriptsDir() {
 
 /**
  * Validate a call room token. Checks both the sharing server's rooms
- * (for companion-created rooms) and the rooms created via POST /api/rooms
+ * (for rooms created by a room invite from the sharing tools) and the rooms
+ * created via POST /api/rooms
  * (the calls-rooms map — deliberately NOT in the sharing server's store,
  * which only sendRoomInvite writes).
  */
 export function validateCallRoomToken(roomCode, token) {
-  // Check sharing server's rooms first (companion-created rooms)
+  // Check sharing server's rooms first (room-invite rooms)
   const sharingResult = validateRoomToken(roomCode, token);
   if (sharingResult) return sharingResult;
 

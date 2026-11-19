@@ -4,9 +4,8 @@
  * GET /dashboard/federation/resolve-instance?name=<query>
  *
  * Takes a human-readable instance name and returns the unique matching
- * instance id. Used by the companion skill (and anything else that needs
- * to talk to a named peer) to avoid silently picking the wrong peer when
- * names collide.
+ * instance id. Used by anything that needs to talk to a named peer (a bot,
+ * a panel) to avoid silently picking the wrong peer when names collide.
  *
  * Matching strategy (first hit wins):
  *   1. Exact name (case-insensitive) on a trusted row.

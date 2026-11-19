@@ -90,7 +90,7 @@ function mapOpenAIUsage(u) {
  * `usage` block rides the final `include_usage` chunk). Returns null when no
  * usage is present (e.g. a stream that didn't request include_usage).
  *
- * Used by the /llm proxy tap to meter companion/glasses traffic.
+ * Used by the /llm proxy tap to meter voice/glasses traffic.
  *
  * @param {string} rawText  the full upstream response body
  * @returns {{inputTokens:number, outputTokens:number, cachedTokens:number}|null}

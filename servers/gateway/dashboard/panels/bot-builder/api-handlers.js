@@ -493,72 +493,11 @@ export async function handleBotBuilderPost(req, res, { db }) {
       const simpleGateways = normalizeGatewayFields(gwType, b);
       if (simpleGateways) {
         def.gateways = simpleGateways;
-      } else if (gwType === "glasses") {
-        // Retired: glasses answer as Crow, so this binds nothing and writes no device. A stored glasses
-        // gateway record is kept as it is.
-      } else if (gwType === "companion") {
-        // Bind this bot to a companion kiosk device. Mirrors the glasses
-        // binding (device.bound_bot_id is the source of truth) but tags the
-        // device device_kind:"companion" so the companion path claims it, and
-        // stores per-device companion_features that drive the kiosk UI.
-        // The model pair (fast 4B -> 35B) is global (the gateway /llm/v1 router),
-        // not per device — see docs/architecture/companion.md.
-        let deviceId = (b.gw_device_id || "").trim();
-        // One-step kiosk creation: a typed name (and no selected device)
-        // pairs a fresh companion-kind device right here, so a host with
-        // the companion bundle but NOT meta-glasses (whose panel used to be
-        // the only pairing UI) still works out of the box.
-        const newKioskName = (b.gw_new_kiosk_name || "").trim();
-        if (!deviceId && newKioskName) {
-          try {
-            const { listDevices, pairDevice } = await import("../../../../shared/device-store.js");
-            const baseId = ("kiosk-" + newKioskName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40)).replace(/-$/, "") || "kiosk";
-            const taken = new Set((await listDevices(db).catch(() => [])).map((d) => String(d.id)));
-            let newId = baseId;
-            for (let n = 2; taken.has(newId); n++) newId = `${baseId}-${n}`;
-            await pairDevice(db, { id: newId, name: newKioskName, generation: "unknown", device_kind: "companion" });
-            deviceId = newId;
-          } catch (err) {
-            extraQ = "&warn=" + encodeURIComponent("could not create kiosk device: " + err.message);
-          }
-        }
-        const features = {
-          avatar_model: (b.gw_avatar_model || "").trim() || undefined,
-          avatar_animation: b.gw_avatar_animation === "on" || b.gw_avatar_animation === "true",
-          pet_mode: b.gw_pet_mode === "on" || b.gw_pet_mode === "true",
-          social_chat: b.gw_social_chat === "on" || b.gw_social_chat === "true",
-          memory_integration: b.gw_memory_integration === "on" || b.gw_memory_integration === "true",
-          face_tracking: b.gw_face_tracking === "on" || b.gw_face_tracking === "true",
-          hearing_style: (b.gw_hearing_style || "push_to_talk").trim(),
-          voice_idle_timeout: Number(b.gw_voice_idle_timeout || 30) || 30,
-        };
-        const prior = (def.gateways || []).find((g) => g && g.type === "companion");
-        const priorDeviceId = prior && prior.device_id ? String(prior.device_id) : "";
-        // Persist the TYPE even with no device — same draft semantics as the
-        // glasses branch above (W1-4: device-less save must not snap the
-        // dropdown back to gmail).
-        def.gateways = [{ type: "companion", ...(deviceId ? { device_id: deviceId } : {}) }];
-        def.companion_features = features;
-        try {
-          const { updateDeviceProfiles, unbindBotFromOtherDevices } = await import("../../../../shared/device-store.js");
-          if (deviceId) {
-            await unbindBotFromOtherDevices(db, botId, deviceId);   // skips kiosk displays (review M7)
-            if (priorDeviceId && priorDeviceId !== deviceId) {
-              await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-            }
-            await updateDeviceProfiles(db, deviceId, {
-              bound_bot_id: botId,
-              device_kind: "companion",
-              companion_features: features,
-            });
-          } else if (priorDeviceId) {
-            // A device WAS bound and the form now submits none — explicit unbind.
-            await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-          }
-          // No device before, none now: pure type-change draft — mutate nothing.
-        } catch (err) {
-          extraQ = "&warn=" + encodeURIComponent("companion binding incomplete: " + err.message);
-        }
+      } else if (gwType === "glasses" || gwType === "companion") {
+        // Retired channels. glasses answer as Crow; the AI Companion was removed with
+        // its bundle. Neither binds a device, writes companion_features or pairs a
+        // kiosk, and a stored record of either type is kept exactly as it is (the
+        // editor shows it read-only). No new companion-kind device can be created.
       } else if (gwType === "crow-messages") {
         // First-class P2P gateway (host adapter from Plan 1). Identity is derived
         // and invites/ACL live in their own tables (edited via gw_* actions); the

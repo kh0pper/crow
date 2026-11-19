@@ -32,12 +32,12 @@ See `DATA-HANDLING.md` for exactly what data is stored, COPPA/GDPR-K posture, an
 
 ## Same-host kiosk (Pi-style deployment)
 
-When the Crow host IS the kiosk (Raspberry Pi + attached display, solo mode), the Blockly page and the AI Companion's web UI should appear tiled side-by-side.
+When the Crow host IS the kiosk (Raspberry Pi + attached display, solo mode), the Blockly page and the Crow Kiosk display page (`/display`, from the Kiosk display bundle) can be tiled side-by-side.
 
 `scripts/launch-kiosk.sh` opens both in Chromium `--app` windows (2/3 left, 1/3 right). Usage:
 
 ```bash
-# Default: localhost:3002 (gateway) + localhost:12393 (companion)
+# Default: the Crow gateway on localhost:3002, the display page at /display
 ./scripts/launch-kiosk.sh
 
 # Custom host
@@ -61,35 +61,17 @@ Each lesson declares:
 - `success_check.required_blocks` — block types the workspace must contain before "I'm done!" is accepted
 - `canned_hints` — fallback hints when the LLM is unavailable or filtered
 
-## Companion integration
+## Voice
 
-**Phase 2 MVP** (what ships today): kiosk browser uses `speechSynthesis` to voice the hint. No companion modifications required.
+**What ships today**: the kiosk browser uses `speechSynthesis` to voice the hint.
 
-**Phase 2 upgrade path** (requires companion rebuild): apply the `tutor-event` patch so the AI Companion's per-client TTS voices the hint through the mascot. Two pieces:
-
-1. `bundles/companion/scripts/patch-tutor-event.py` — idempotent patcher, wired into the companion's `entrypoint.sh`. Modifies `/app/src/open_llm_vtuber/websocket_handler.py` at container startup.
-2. `bundles/maker-lab/panel/routes.js` — serves `POST /maker-lab/api/hint-internal` (loopback-only) for the patched handler to call.
-
-To apply:
-
-```bash
-# Rebuild the companion image to pick up the patch script.
-cd bundles/companion && docker compose build && docker compose up -d
-
-# The patcher runs at container startup. Logs show:
-#   Applying Maker Lab tutor-event patch...
-#   [maker-lab patch] tutor-event handler installed
-# (or "already present; skipping" on subsequent starts)
-```
-
-The kiosk's Blockly page sends a `tutor-event` WebSocket message to the companion, the companion calls `/maker-lab/api/hint-internal` with the session token, and the filtered reply plays through the mascot's TTS.
-
-Until the companion is rebuilt, the kiosk continues using `speechSynthesis`.
+The AI Companion (Open-LLM-VTuber + Live2D) that used to sit beside this page was retired
+from Crow, and the `tutor-event` patch pipeline that voiced hints through its avatar's TTS
+went with it. There is no companion backend to patch and no image to rebuild: a deployment
+that wants spoken hints uses the browser's own voice, or the Kiosk display bundle's TTS.
 
 ## Phase 3 preview (not yet shipped)
 
-- Electron/Tauri pet-mode overlay — floating Live2D mascot on top of the Blockly window
-- Cubism SDK install-time fetch (see `bundles/companion/CUBISM-LICENSE.md`)
-- Submodule + patch pipeline for the companion backend + renderer
+- Electron/Tauri pet-mode overlay — floating mascot on top of the Blockly window
 
 See `PHASE-0-REPORT.md` for the spike report that informed these decisions.

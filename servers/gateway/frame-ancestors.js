@@ -3,13 +3,12 @@
  * page in a frame.
  *
  * The gateway itself ('self'), the SAME hostname on any https port, and the
- * hostnames of trusted paired instances. The cross-origin framers are the AI
- * Companion: served from this host on its own port, it frames
- * `https://<its hostname>:<gateway port>/…`, and its federation windows frame
- * a trusted peer's gateway at `https://<peer hostname>/proxy/…`
- * (bundles/companion/scripts/crow-wm.js). Any other site — the old rule was
- * `'self' https:`, i.e. every https origin — can no longer frame the
- * dashboard (clickjacking).
+ * hostnames of trusted paired instances. The cross-origin framers are a proxied
+ * app served from this host on its own port (it frames
+ * `https://<its hostname>:<gateway port>/…`), the dashboard's own panels, and a
+ * trusted peer's gateway at `https://<peer hostname>/proxy/…`. Any other site —
+ * the old rule was `'self' https:`, i.e. every https origin — can no longer
+ * frame the dashboard (clickjacking).
  *
  * The own hostname comes from the request's Host header. That is safe here:
  * for a framed page the browser sets Host from the URL being framed, never

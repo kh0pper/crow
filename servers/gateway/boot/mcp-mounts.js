@@ -283,7 +283,7 @@ export async function mountMcpServers(app, deps) {
 
   // Bundle asset repair: when a bundle is marked installed but its ~/.crow/bundles/<id>/
   // directory is missing user-visible files (settings-section.js, panel/, manifest.json),
-  // re-copy them from the app repo. Prevents the Companion migration gap from recurring.
+  // re-copy them from the app repo. Prevents the bundle-asset migration gap from recurring.
   try {
     const { repairInstalledBundleAssets } = await import("../routes/bundles.js");
     const { repaired, errors, skillsKept = [] } = await repairInstalledBundleAssets();

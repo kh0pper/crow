@@ -154,11 +154,10 @@ test("sections with no group or an unknown group render under Advanced", async (
   assert.ok(hasRow(adv, "bogus-group-test"));
 });
 
-test("the companion bundle's settings section is in the voice group", async () => {
+test("a section declaring a known group keeps it (the voice group is still in the menu)", async () => {
   const { reg } = await setup();
-  const mod = (await import("../bundles/companion/settings-section.js")).default;
-  reg.registerSettingsSection(mod);
-  assert.equal(reg.getSettingsSection(mod.id).group, "voice");
+  reg.registerSettingsSection({ id: "voice-group-test", group: "voice", labelKey: "settings.section.blog", render: async () => "" });
+  assert.equal(reg.getSettingsSection("voice-group-test").group, "voice");
 });
 
 test("POST from the combined Sharing page stays on it; POST without a section is still dispatched", async () => {

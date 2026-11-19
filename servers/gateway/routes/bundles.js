@@ -74,6 +74,7 @@ import {
 import { isModelOrchestrationDisabled, isModelBundleManifest } from "../../shared/model-orchestration.js";
 import { syncBundleSkills, removeBundleSkills, readSkillLedger, skillSyncMode } from "../bundle-skill-sync.js";
 import { isSatelliteEntry } from "../satellites/installs.js";
+import { isRetiredBundle, retiredBundleManifest } from "../retired-bundles.js";
 import { openTailnetPorts, closeTailnetPorts } from "../bundle-firewall.js";
 import { envValueProblem, encodeEnvValue, formatEnvLines, updateEnvText, pathEnvKeys } from "../bundle-env-codec.js";
 import { sanitizeKeychainRequest, recordKeychainForInstall, markBundleKeychainRemoved, keychainRestoreValues, backfillKeychainEntries, restoreServicesAfterInstall } from "../keychain/install-hooks.js";
@@ -396,6 +397,56 @@ let _uninstallAffectedForTest = null;
 /** Test seam: replaces the uninstall route's affected-projects query (tests only). */
 export function _setUninstallAffectedForTest(fn) { _uninstallAffectedForTest = fn || null; }
 
+/**
+ * Test seam: the command runner the uninstall uses to close a bundle's firewall port and
+ * its Tailscale Serve mapping (tests only). Without it a test would shell out to
+ * `sudo -n ufw` / `sudo -n tailscale serve` on the host that runs the suite.
+ */
+let _closePortsRunForTest = null;
+export function _setClosePortsRunForTest(fn) { _closePortsRunForTest = fn || null; }
+
+/**
+ * The uninstall route's handler, assigned by `bundlesRouter()` at mount. One
+ * implementation, two entry points: the Extensions page's Remove
+ * (`POST /bundles/api/uninstall`) and the Fix-it card's one-click Remove for a
+ * RETIRED bundle (`uninstallRetiredBundle` below). Calling the handler itself — with
+ * a synthetic request and a response that swallows the JSON — is deliberate: a second
+ * copy of the job would be a second ordering, and an uninstall has one.
+ */
+let uninstallRouteHandler = null;
+
+/**
+ * Remove a bundle Crow has RETIRED (servers/gateway/retired-bundles.js) through the
+ * product's own uninstall path: same handler, same job, same steps, same log, same
+ * gateway restart.
+ *
+ * Called by the boot-time Fix-it card for an install that still has one. `delete_data`
+ * stays false: uninstall never removes the add-on's own data folder, and this keeps it
+ * that way (the kept-data rules apply unchanged). Nothing else is "undone" — the bundle
+ * is gone and its kept data stays where the owner left it.
+ *
+ * A record-only install (an `installed.json` entry whose folder is already gone) is
+ * handled by the same route, so this resolves there too instead of throwing `not
+ * installed` at every click.
+ *
+ * @returns {Promise<object>} the route's answer ({ ok, job_id, message, affectedProjects })
+ */
+export async function uninstallRetiredBundle(bundleId, { deleteData = false } = {}) {
+  if (!isValidBundleId(bundleId)) throw new Error("Invalid bundle ID");
+  if (!isRetiredBundle(bundleId)) throw new Error(`'${bundleId}' is not a retired bundle`);
+  if (typeof uninstallRouteHandler !== "function") throw new Error("The bundle uninstall path is not available yet");
+  let answer = null;
+  const res = {
+    statusCode: 200,
+    status(code) { this.statusCode = code; return this; },
+    json(body) { answer = { status: this.statusCode, body }; return this; },
+  };
+  await uninstallRouteHandler({ body: { bundle_id: bundleId, delete_data: deleteData === true } }, res);
+  if (!answer) throw new Error("The bundle uninstall path gave no answer");
+  if (answer.status !== 200) throw new Error(answer.body?.error || `uninstall refused (${answer.status})`);
+  return answer.body;
+}
+
 export async function uninstallAffectedProjects(bundleId, { dbFactory = createDbClient } = {}) {
   let db;
   try {
@@ -412,6 +463,32 @@ export async function uninstallAffectedProjects(bundleId, { dbFactory = createDb
 export function _createJobForTest(bundleId, action) { return createJob(bundleId, action); }
 export function _getJobForTest(id) { return jobs.get(id); }
 export function _finishJobForTest(job, status) { return finishJob(job, status); }
+
+/**
+ * Wait for an in-process job to finish. The retired-bundle Fix-it card's one-click Remove
+ * answers its click with the truth, and a job that has not finished has not removed
+ * anything yet.
+ *
+ * Resolves with the job (its status is the answer: `complete`/`complete_restart`/`failed`),
+ * or null when the job is unknown/already evicted or still `running` at `timeoutMs` — the
+ * caller then says "removal started" instead of claiming success. Never throws.
+ *
+ * @param {string} jobId
+ * @param {{ timeoutMs?: number, pollMs?: number }} [opts]
+ * @returns {Promise<object|null>}
+ */
+export async function waitForJob(jobId, { timeoutMs = 10_000, pollMs = 50 } = {}) {
+  const id = String(jobId ?? "");
+  if (!id) return null;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const job = jobs.get(id);
+    if (!job) return null;
+    if (job.status !== "running") return job;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
 
 /**
  * C4 Task 3 (r1 critical #4): the unfinished ("running") install job for
@@ -5331,7 +5408,9 @@ export default function bundlesRouter() {
   });
 
   // POST /bundles/api/uninstall — Remove a bundle
-  router.post("/bundles/api/uninstall", async (req, res) => {
+  // Named and kept at module scope (`uninstallRouteHandler`) because the Fix-it card's
+  // one-click Remove for a RETIRED bundle runs this same handler.
+  const uninstallHandler = async (req, res) => {
     const { bundle_id, delete_data } = req.body;
     // Fallback-password retention keys on volumes ACTUALLY removed (a refused/failed down -v keeps them).
     let volumesRemoved = false;
@@ -5348,7 +5427,13 @@ export default function bundlesRouter() {
     }
 
     const bundleDir = join(BUNDLES_DIR, bundle_id);
-    if (!existsSync(bundleDir)) {
+    // A RECORD whose folder is already gone (a half-removed install, a folder deleted by hand)
+    // is still an install to `installed.json` and to the owner, so its Remove finishes the job:
+    // the record goes and, for a bundle whose manifest is code-held (a retired one), the port
+    // and Serve mapping the install opened are closed too. Only an id that is neither on disk
+    // nor recorded is "not installed".
+    const recorded = getInstalled().some((i) => i && i.id === bundle_id);
+    if (!existsSync(bundleDir) && !recorded) {
       return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
     }
 
@@ -5380,9 +5465,12 @@ export default function bundlesRouter() {
     job.affectedProjects = [];
     res.json({ ok: true, job_id: job.id, message: `Removing ${bundle_id}...`, affectedProjects });
 
+    // The job body runs detached, exactly as before: the route answers with the job id
+    // first and the Extensions page polls it. A retired bundle's one-click Remove enters
+    // through this same handler (uninstallRouteHandler + uninstallRetiredBundle above).
     (async () => {
       try {
-        const manifest = getManifest(bundle_id);
+        const manifest = getManifest(bundle_id) ?? retiredBundleManifest(bundle_id);
         const addonType = manifest?.type || "bundle";
         // The compose project this uninstall tore down, for the "what was kept" lookups below
         // (named volumes are looked up by that project label). Null when there was nothing to
@@ -5514,17 +5602,18 @@ export default function bundlesRouter() {
         // 4. Close firewall ports (if manifest has ports and ufw is available)
         if (manifest?.ports && Array.isArray(manifest.ports)) {
           const { execFileSync: efs } = await import("node:child_process");
+          const runCmd = _closePortsRunForTest || ((cmd, args, opts) => efs(cmd, args, opts));
           // Both the scoped rule this version writes and the unscoped one an older install
           // may have left behind (bundle-firewall.js); each is allowed to be absent.
           await closeTailnetPorts({
             ports: manifest.ports,
-            run: (cmd, args, opts) => efs(cmd, args, opts),
+            run: runCmd,
             log: (m) => appendLog(job, m),
           });
           // Remove Tailscale HTTPS proxy for direct-mode webUI
           if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
             try {
-              efs("sudo", ["-n", "tailscale", "serve", `--https=${manifest.webUI.port}`, "off"], { timeout: 10000 });
+              runCmd("sudo", ["-n", "tailscale", "serve", `--https=${manifest.webUI.port}`, "off"], { timeout: 10000 });
               appendLog(job, `Removed Tailscale HTTPS on port ${manifest.webUI.port}`);
             } catch {}
           }
@@ -5664,8 +5753,9 @@ export default function bundlesRouter() {
         finishJob(job, "failed");
       }
     })();
-  });
-
+  };
+  uninstallRouteHandler = uninstallHandler;
+  router.post("/bundles/api/uninstall", uninstallHandler);
   /**
    * Unified bundle-action dispatcher: if the bundle manifest declares
    * `host: <instance-id>` (and trust boundary passes), forward to that peer.

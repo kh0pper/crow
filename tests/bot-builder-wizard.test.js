@@ -208,12 +208,14 @@ test("channel step renders shared gateway fields; review re-emits newlines as en
   await clearProviders();
 });
 
-test("the new-bot channel picker no longer offers glasses (they answer as Crow); companion is still there", async () => {
+test("the new-bot channel picker offers neither glasses nor the retired AI Companion", async () => {
   const html = await renderPost({ action: "wizard_step", step: "3", nav: "reload", tpl: "blank", display_name: "X", bot_id: "x", model: "prov/m1", gw_type: "none" });
   const opts = [...html.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
-  assert.ok(opts.includes("companion") && opts.includes("gmail"), opts.join(","));
-  assert.ok(!opts.includes("glasses"));
+  assert.ok(opts.includes("gmail") && opts.includes("crow-messages"), opts.join(","));
+  assert.ok(!opts.includes("glasses"), "glasses answer as Crow");
+  assert.ok(!opts.includes("companion"), "the AI Companion was retired: no new bot can be given it");
   assert.ok(!("botbuilder.wizGw_glasses" in translations));
+  assert.ok(!("botbuilder.wizGw_companion" in translations));
 });
 
 test("channel reload (update-fields button) re-renders the same step with the new type's fields", async () => {
@@ -329,7 +331,7 @@ test("wizard_create with nav=back sends nothing (falls through to the step rende
   assert.equal(res.html, null);
 });
 
-test("wizard_create (voice type): persists a type-only draft record", async () => {
+test("wizard_create with the retired companion type falls back to no channel and still creates the bot", async () => {
   await addProvider("prov", [{ id: "m1" }]);
   const res = mkRes();
   await handleWizardCreate({ body: {
@@ -337,7 +339,9 @@ test("wizard_create (voice type): persists a type-only draft record", async () =
     tpl: "blank", display_name: "Kiosk Bot", bot_id: "kiosk-bot", model: "prov/m1", gw_type: "companion",
   } }, res, { db, lang: "en" });
   const def = JSON.parse((await botRow("kiosk-bot")).definition);
-  assert.deepEqual(def.gateways, [{ type: "companion" }], "device-less draft, W1-4 semantics");
+  // Not a wizard channel any more, so the create writes no gateway record: the bot lands
+  // with no channel and the owner picks one on the Gateways tab. It must never crash.
+  assert.deepEqual(def.gateways ?? [], [], "a retired channel is never written by the wizard");
   await clearProviders();
 });
 

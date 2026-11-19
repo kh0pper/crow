@@ -434,8 +434,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
 
   // Host-path policy: an ALLOWLIST everywhere. Inside Crow's home and data folder: the
   // bundle's own folder, CROW_HOME/<id> or <id>-*, <data>/<id>, CROW_HOME/media (library
-  // defaults), and, read-only with privileged consent, crow.db and the extensions folder
-  // (companion). Outside them: /etc/localtime read-only, the Docker socket and /proc, /sys
+  // defaults), and, read-only with privileged consent, crow.db and the extensions folder.
+  // Outside them: /etc/localtime read-only, the Docker socket and /proc, /sys
   // (read-only, consent), and folders the owner chose (ctx.operatorRoots). Under a chosen
   // folder a floor still applies: system folders, PATH folders, the gateway checkout, home
   // dot-folders and ~/bin, a whole home folder, a git checkout, and any folder that

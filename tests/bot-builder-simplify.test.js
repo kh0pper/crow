@@ -207,8 +207,9 @@ test("Basics: one voice-model control, one channel picker that never auto-submit
   const enabled = sets.filter((f) => !f.hasAttribute("disabled"));
   assert.equal(enabled.length, 1);
   assert.equal(enabled[0].getAttribute("data-channel"), "gmail");
-  assert.equal(sets.length, 8, "glasses is retired: not offered for a bot that does not have it");
+  assert.equal(sets.length, 7, "glasses and the AI Companion are retired: neither is offered for a bot that does not have it");
   assert.ok(!sets.some((f) => f.getAttribute("data-channel") === "glasses"));
+  assert.ok(!sets.some((f) => f.getAttribute("data-channel") === "companion"));
   assert.equal(document.querySelector("#bx-name").getAttribute("value"), "Bot gm");
 });
 
@@ -335,14 +336,17 @@ test("Basics: an empty name is refused and nothing is written", async () => {
   assert.equal(JSON.parse((await row("gm")).definition).system_prompt, "You are Hank.");
 });
 
-test("Basics: a glasses post stores nothing (retired); a companion save keeps hearing style and idle timeout", async () => {
+test("Basics: a glasses post stores nothing (retired); a companion save stores nothing either (the AI Companion was removed)", async () => {
   await putBot("comp", COMPANION);
+  const before = JSON.parse((await row("comp")).definition);
   const body = await formOf("comp", "basics");
-  body.gw_social_chat = undefined; delete body.gw_social_chat; // untick one feature
-  await post(body);
+  body.gw_social_chat = undefined; delete body.gw_social_chat; // an edit that used to write
+  const res = await post(body);
+  assert.match(res.redirected, /saved=1/, res.redirected);
   const def = JSON.parse((await row("comp")).definition);
-  assert.equal(def.companion_features.social_chat, false);
-  assert.equal(def.companion_features.hearing_style, "wake_word");
+  assert.deepEqual(def.gateways, before.gateways, "the stored record is kept as it is");
+  assert.deepEqual(def.companion_features, before.companion_features, "companion_features is readable and no longer written");
+  assert.equal(def.companion_features.hearing_style, "wake_word", "the old value survives untouched");
   assert.equal(def.companion_features.voice_idle_timeout, 60);
 
   await putBot("gl", { models: { default: "test-prov/model-a" }, gateways: [] });

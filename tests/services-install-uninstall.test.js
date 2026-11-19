@@ -325,8 +325,13 @@ test("D6.9 kept (review I1): a collection install that starts while the affected
     B._setUninstallAffectedForTest(null);
   }
   // Source order: no await between the install-set check and createJob in the uninstall route.
+  // The handler is a named function now (the retired-bundle Fix-it card enters through the
+  // same one), and the route is registered WITH that handler — both halves are asserted.
   const src = readFileSync(join(REPO, "servers/gateway/routes/bundles.js"), "utf8");
-  const route = src.slice(src.indexOf('router.post("/bundles/api/uninstall"'));
+  const start = src.indexOf("const uninstallHandler = async (req, res) => {");
+  assert.ok(start > 0, "the uninstall handler exists");
+  assert.match(src, /router\.post\("\/bundles\/api\/uninstall", uninstallHandler\)/, "the route is registered with that handler");
+  const route = src.slice(start, src.indexOf("uninstallRouteHandler = uninstallHandler"));
   const between = route.slice(route.indexOf("if (isInstallSetRunning())"), route.indexOf('createJob(bundle_id, "uninstall")'));
   assert.ok(between.length > 0 && !/\bawait\b/.test(between), "no await between the check and createJob");
   assert.ok(route.indexOf("uninstallAffectedProjects)(bundle_id)") < route.indexOf("if (isInstallSetRunning())"));

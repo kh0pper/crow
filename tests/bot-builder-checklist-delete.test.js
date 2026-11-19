@@ -140,9 +140,10 @@ test("no gateway: Channel row warns but does not error", async () => {
   assert.match(html, /none yet/);
 });
 
-test("companion without a device: NOT-ready; discord with only a token: ready (fail-open)", async () => {
+test("a retired companion record needs no device (nothing to pair any more); discord with only a token: ready (fail-open)", async () => {
   const kiosk = mkBot({ gateways: [{ type: "companion" }] });
-  assert.match(await renderReadiness(db, kiosk, defOf(kiosk), "en"), /setup incomplete \(paired device\)/);
+  const kioskHtml = await renderReadiness(db, kiosk, defOf(kiosk), "en");
+  assert.ok(!kioskHtml.includes("setup incomplete"), "the AI Companion is retired: a stored record claims nothing and needs nothing");
   const dc = mkBot({ gateways: [{ type: "discord", token: "t", allowlist: [], channel_ids: [] }] });
   const html = await renderReadiness(db, dc, defOf(dc), "en");
   assert.ok(!html.includes("setup incomplete"), "discord token-only must not false-red");

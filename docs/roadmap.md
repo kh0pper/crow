@@ -19,7 +19,7 @@ The original 2026 roadmap on this page listed four education-focused milestones.
 
 - **Messages & federation** — encrypted P2P messaging over Nostr, contact and group management that follows the user across instances, delete-wins tombstones, live in-feed key rotation, and a multi-instance sync mesh proven by executable multi-instance tests rather than by hand.
 - **Extensions** — the add-on store with provenance badges (official vs community), themed collections with one-click install sets, community stores for third-party listings, and ~90 published add-ons.
-- **Bot Builder** — a guided agent-creation wizard with templates, a readiness checklist, per-agent tool scoping and permission policies, EN/ES localization, and channels for Gmail, Discord, and voice (Meta glasses / companion).
+- **Bot Builder** — a guided agent-creation wizard with templates, a readiness checklist, per-agent tool scoping and permission policies, EN/ES localization, and channels for Gmail, Discord, and voice (Meta glasses / kiosk).
 - **Install & first-run** — a one-line installer with a platform gate and point-of-use Docker/Tailscale offers, a first-run wizard with identity backup, honest empty states, and a connect wizard for pairing AI clients.
 - **Project spaces** — the shareable project redesign: membership, roles, per-member capability overrides, and an audit log.
 - **Engineering floor (July 2026)** — CI on every PR and push with branch protection that binds the maintainer too, a runtime database-migration guard with automatic backup and quarantine, and fleet auto-update that refuses to pull a red or unverified `main`.

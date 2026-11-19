@@ -7,8 +7,8 @@
  *   invalidatePeerCache(instanceId) → synchronous drop; call after trust/status flip
  *
  * Cache keying: "${source}::${instanceId}" where source is currently always
- * "dashboard". Phase 3 will add a second source ("companion") on the same map
- * without cross-policy poisoning.
+ * "dashboard"; the map carries a source segment so a second consumer can be
+ * added later without cross-policy poisoning.
  *
  * TTL policy:
  *   - success envelope  → 30s
@@ -257,7 +257,7 @@ export async function prefetchPeerOverviews(db, instanceIds, opts = {}) {
 /**
  * Synchronous cache-drop. Call after a trust/status mutation on a peer.
  * No-op when the peer isn't cached. Drops ALL source namespaces for the
- * instance id — a trust flip invalidates dashboard + companion + any
+ * instance id — a trust flip invalidates dashboard + any
  * future source consistently.
  */
 export function invalidatePeerCache(instanceId, { source = null } = {}) {

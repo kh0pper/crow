@@ -16,10 +16,15 @@ const SUDO = /\b[\w$.]+\(\s*["'`]sudo["'`\s]|["'`]sudo\s+-[A-Za-z]/;
 // NoNewPrivileges=yes they fail into the logged "open manually" note on the
 // install job. A new site is a real finding: do not add it here without a reason.
 const KNOWN = [
-  // direct-mode bundle install/uninstall: Tailscale Serve only — the tailnet ufw rules now go
-  // through servers/gateway/bundle-firewall.js (which takes an injected runner, so it spawns
-  // nothing itself).
-  { file: "servers/gateway/routes/bundles.js", re: /efs\("sudo", \["-n", "(ufw|tailscale)"/, count: 2 },
+  // direct-mode bundle install: Tailscale Serve only — the tailnet ufw rules now go through
+  // servers/gateway/bundle-firewall.js (which takes an injected runner, so it spawns nothing
+  // itself).
+  { file: "servers/gateway/routes/bundles.js", re: /^\s*efs\("sudo", \["-n", "tailscale", "serve"/, count: 1 },
+  // direct-mode bundle uninstall: the same Serve mapping switched off. This site goes through
+  // the uninstall job's local `runCmd` (the closeTailnetPorts runner, injectable in tests via
+  // _setClosePortsRunForTest), so the alias the guard must accept here is `runCmd` — one site,
+  // this one, and none of the calls it forwards to.
+  { file: "servers/gateway/routes/bundles.js", re: /^\s*runCmd\("sudo", \["-n", "tailscale", "serve"/, count: 1 },
   // The tailnet ufw rules themselves (servers/gateway/bundle-firewall.js): it spawns nothing
   // — the command goes to an injected `run` (install/uninstall pass execFileSync), so under
   // NoNewPrivileges=yes the add/delete simply fails into the logged "open manually" note.

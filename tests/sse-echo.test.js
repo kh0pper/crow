@@ -1,5 +1,5 @@
 /**
- * servers/gateway/voice/sse-echo.js — the companion's echo guard on the router's HTTP path. A small model sometimes
+ * servers/gateway/voice/sse-echo.js — the echo guard on the router's HTTP voice path. A small model sometimes
  * reads the injected [Now]/[Dates]/[Note] lines back as the start of its answer; the filter rewrites only the
  * string `choices[0].delta.content` of an OpenAI-style SSE stream and passes every other byte through unchanged.
  */

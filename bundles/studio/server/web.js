@@ -1488,6 +1488,9 @@ export function createStudioWeb({
     httpServer.on("upgrade", (req, socket, head) => {
       const path = String(req.url || "").split("?")[0];
       if (path !== WS_PATH) return; // Not ours: leave the socket alone.
+      // Ours: claimed before the awaits below, so the gateway's fallback (servers/shared/
+      // ws-upgrade-claim.js) never answers this request with its 404.
+      req.crowWsClaimed = true;
 
       if (req.headers["tailscale-funnel-request"] || !auth.isAllowedNetwork(req)) {
         return refuse(socket, 403, "Forbidden");

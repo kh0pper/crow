@@ -12,6 +12,7 @@ import caddyAdminSocketDetector from "./detectors/caddy-admin-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
 import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
 import bundleBindDriftDetector from "./detectors/bundle-bind-drift.js";
+import retiredBundleDetector, { SOURCE as RETIRED_BUNDLE_SOURCE, cardTitle as retiredBundleTitle, cardWhy as retiredBundleWhy } from "./detectors/retired-bundle.js";
 import addonWallDetector, {
   SOURCE as ADDON_WALL_SOURCE,
   TITLE as ADDON_WALL_TITLE,
@@ -35,6 +36,12 @@ import addonUnwallRemedy, {
   keepOffRemedy,
   unwallLabel,
 } from "./remedies/addon-unwall.js";
+import removeRetiredBundle, {
+  ACTION_ID as REMOVE_RETIRED_ACTION,
+  FLASH as RETIRED_REMOVED_FLASH,
+  STARTED_FLASH as RETIRED_REMOVING_FLASH,
+  label as removeRetiredLabel,
+} from "./remedies/remove-retired-bundle.js";
 import { wallFailureByItemId } from "../../../scripts/addon-sandbox/failures.mjs";
 import { recordSuppressedRequest } from "./peer-card-counters.js";
 import { CARD_ACTION_IDS } from "./peer-card-policy.js";
@@ -52,6 +59,7 @@ export function wireFixIt() {
   registry.registerDetector(bootGuardDetector);
   registry.registerDetector(dataBackendReapprovalDetector);
   registry.registerDetector(bundleBindDriftDetector);
+  registry.registerDetector(retiredBundleDetector);
   registry.registerDetector(addonWallDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   // The owner's own copy of a bundle compose, put back with the previous file kept
@@ -69,6 +77,9 @@ export function wireFixIt() {
   // its own actionId (the POST carries only action_id). All three run the same
   // one-device grant; the duration rides in the stored args.
   for (const actionId of CARD_ACTION_IDS) registry.registerRemedy(actionId, exposeCapabilityRemedy);
+  // A bundle Crow retired that is still installed: one click runs the product's own
+  // uninstall for it (keeps its data folder; no undo beyond that).
+  registry.registerRemedy(REMOVE_RETIRED_ACTION, removeRetiredBundle);
   wired = true;
 }
 
@@ -76,7 +87,7 @@ export function wireFixIt() {
  * The detectors runBootChecks() drives. A condition no request emits an event for
  * belongs here; the list is exported so the set can be asserted, not grepped.
  */
-export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, caddyAdminSocketDetector, bootGuardDetector, dataBackendReapprovalDetector, bundleBindDriftDetector]);
+export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, caddyAdminSocketDetector, bootGuardDetector, dataBackendReapprovalDetector, bundleBindDriftDetector, retiredBundleDetector]);
 
 /**
  * Where a `kind: "link"` remedy may point, held HERE and never read from the
@@ -105,7 +116,7 @@ export function linkRemedyTarget(r) {
  * The flash codes a remedy may send the owner back with. Fixed here, never read
  * from the remedy result unchecked: the redirect target is built from it.
  */
-export const REMEDY_FLASHES = Object.freeze(["fixit_addon_stale", "fixit_addon_unwalled", OWNER_ONLY_FLASH, NEEDS_KEY_FLASH]);
+export const REMEDY_FLASHES = Object.freeze(["fixit_addon_stale", "fixit_addon_unwalled", OWNER_ONLY_FLASH, NEEDS_KEY_FLASH, RETIRED_REMOVED_FLASH, RETIRED_REMOVING_FLASH]);
 
 /** Build a db-bound store; the bound upsertItem also fires urgent push. */
 function boundStore(db) {
@@ -226,7 +237,23 @@ function remedyButton(item, r, req) {
  * share crow.db can write them. Everything comes from the live failure record
  * bound to this item, or from this file's constants.
  */
-function cardParts(item, req) {
+function cardParts(item, req, lang) {
+  if (item.source === RETIRED_BUNDLE_SOURCE) {
+    // A retired bundle's card reads NOTHING from the stored row: the title, the body, the
+    // button's label and the bundle's name all come from code (retired-bundles.js + this
+    // detector), in the dashboard's language — so the button says what the body's instruction
+    // says to press, in both languages, whatever a crow.db writer put in the row. The one
+    // stored input — the id — selects a code-held entry, so a crow.db writer can raise no
+    // card that names anything else.
+    const id = typeof item.context?.bundle === "string" ? item.context.bundle : "";
+    const remedy = { actionId: REMOVE_RETIRED_ACTION, kind: "instant", label: removeRetiredLabel(lang), args: { bundle: id } };
+    return {
+      title: retiredBundleTitle(id, lang),
+      why: retiredBundleWhy(id, lang),
+      buttons: remedyButton(item, remedy, req),
+      details: "",
+    };
+  }
   if (item.source === ADDON_WALL_SOURCE) {
     const record = wallFailureByItemId(Number(item.id));
     const keepOff = { actionId: KEEP_OFF_ACTION, kind: "instant", label: KEEP_OFF_LABEL };
@@ -268,7 +295,7 @@ export async function renderFixItCards(db, { lang, req } = {}) {
   if (!items.length) return "";
 
   const cards = items.map((item) => {
-    const parts = cardParts(item, req);
+    const parts = cardParts(item, req, lang);
     const countBadge = item.count > 1
       ? `<span style="font-size:0.7rem;color:var(--crow-text-muted)">×${escapeHtml(String(item.count))}</span>` : "";
     return `<div class="nest-fixit-card" style="border:1px solid var(--crow-border,#2222);border-left:3px solid var(--crow-warning,#e0a000);border-radius:8px;padding:0.8rem 1rem;margin-bottom:0.6rem;background:var(--crow-surface,rgba(255,255,255,0.02))">

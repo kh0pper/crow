@@ -1173,7 +1173,7 @@
         "en": "The TURN relay uses host networking because it relays calls over a range of UDP ports (49152-49252) as well as ports 3478 and 5349. It listens on every network interface of this machine so devices outside your network can reach it. Only callers holding a short-lived credential from Crow can relay through it, but a caller who holds one can relay traffic to addresses on your local network and tailnet too.",
         "es": "El relé TURN usa la red del host porque retransmite llamadas por un rango de puertos UDP (49152-49252) además de los puertos 3478 y 5349. Escucha en todas las interfaces de red de esta máquina para que los dispositivos fuera de tu red puedan alcanzarlo. Solo quien tenga una credencial temporal de Crow puede retransmitir a través de él, pero quien tenga una también puede retransmitir tráfico hacia direcciones de tu red local y de tu tailnet."
       },
-      "description": "Self-hosted TURN relay for WebRTC voice chat. Enables NAT traversal for remote companion access when STUN alone is not sufficient.",
+      "description": "Self-hosted TURN relay for WebRTC voice chat. Enables NAT traversal for remote call guests when STUN alone is not sufficient.",
       "type": "bundle",
       "author": "Crow",
       "category": "infrastructure",
@@ -1229,7 +1229,7 @@
         5349
       ],
       "webUI": null,
-      "notes": "Optional for Tailscale-only deployments (STUN is sufficient). Required when users connect from restrictive networks (corporate NAT, mobile carriers). The companion gateway generates time-limited credentials via /api/turn-credentials using the shared secret.",
+      "notes": "Optional for Tailscale-only deployments (STUN is sufficient). Required when users connect from restrictive networks (corporate NAT, mobile carriers). The gateway generates time-limited credentials via /api/turn-credentials using the shared secret.",
       "official": true
     },
     {
@@ -1512,7 +1512,7 @@
       "type": "bundle",
       "name": "Faster-Whisper Server (local)",
       "category": "ai",
-      "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses, the Kiosk display and AI-chat voice input. Runs on crow CPU; loopback :8004 only. The AI Companion keeps its own in-container faster-whisper and does not use this server.",
+      "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses, the Kiosk display and AI-chat voice input. Runs on crow CPU; loopback :8004 only.",
       "host": "local",
       "requires": {
         "platform": "linux-x86_64"
@@ -3027,7 +3027,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -3227,7 +3227,7 @@
       "type": "bundle",
       "name": "Kokoro TTS (local)",
       "category": "ai",
-      "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the Kiosk display, AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
+      "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the Kiosk display and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
       "host": "local",
       "requires": {
         "platform": "linux-x86_64"
@@ -4505,7 +4505,7 @@
     {
       "id": "meta-glasses",
       "name": "Meta Glasses",
-      "version": "0.3.7",
+      "version": "0.3.8",
       "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. The Crow Android app uses Meta's official Wearables Device Access Toolkit to give the glasses a voice turn powered by your configured STT + AI + TTS profiles.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6640,7 +6640,7 @@
       "id": "sdxl",
       "name": "SDXL Background Generator",
       "version": "1.0.2",
-      "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
+      "description": "AI-generated background images via SDXL Turbo, for pages and tools that ask for one. Requires NVIDIA GPU.",
       "type": "bundle",
       "author": "Crow",
       "category": "ai",
@@ -6697,7 +6697,7 @@
           "secret": false
         }
       ],
-      "notes": "Requires nvidia-container-toolkit on the host. Models (~25GB) download automatically on first start. Used by the AI Companion for dynamic backgrounds and by the storage server's crow_generate_background tool.",
+      "notes": "Requires nvidia-container-toolkit on the host. Models (~25GB) download automatically on first start. Used by the storage server's crow_generate_background tool.",
       "official": true
     },
     {
@@ -6951,7 +6951,7 @@
     {
       "id": "studio",
       "name": "Crow Studio",
-      "version": "0.23.0",
+      "version": "0.23.1",
       "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
       "type": "mcp-server",
       "author": "Crow",

@@ -1212,8 +1212,8 @@ test("the browser's noVNC viewer has no password of its own, so /proxy/browser/ 
   } finally { console.warn = w; }
 });
 
-test("token-only upgrade paths (calls signaling, companion) are never Funnel-public by default", () => {
-  for (const p of ["/calls/ws", "/companion/client-ws", "/client-ws"]) {
+test("token-only upgrade paths (calls signaling) are never Funnel-public by default", () => {
+  for (const p of ["/calls/ws"]) {
     assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((x) => (x.endsWith("/") ? p.startsWith(x) : p === x)), p);
     assert.ok(!effectiveFunnelPrefixes().some((x) => (x.endsWith("/") ? p.startsWith(x) : p === x)), p);
   }

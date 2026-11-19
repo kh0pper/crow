@@ -8,7 +8,7 @@ Este documento es la **única fuente de verdad** para cada puerto del host consu
 
 ## Convenciones
 
-- Todos los puertos de los bundles se vinculan a `127.0.0.1`, a menos que el bundle sea explícitamente un reverse proxy (Caddy) o use `network_mode: host` (browser, companion, coturn, phone, plex, tailscale, crowdsec-firewall-bouncer).
+- Todos los puertos de los bundles se vinculan a `127.0.0.1`, a menos que el bundle sea explícitamente un reverse proxy (Caddy) o use `network_mode: host` (browser, coturn, phone, plex, tailscale, crowdsec-firewall-bouncer).
 - Un puerto de bundle cuya IP del host es una variable debe llevar un valor por defecto no vacío — `${CROW_TAILSCALE_IP:-127.0.0.1}` — o ser una variable OBLIGATORIA (`${CROW_TAILSCALE_IP:?…}`), con la que Compose se niega a arrancar. Una variable desnuda (`${CROW_TAILSCALE_IP}`, `$VAR` o `${VAR:-}`) publica en todas las interfaces cuando la variable no está definida — así es como un servidor de modelos, STT o TTS sin autenticación acaba en la LAN. Por eso las variables de IP del host en los bundles tienen `127.0.0.1` por defecto: sin definir es loopback, nunca `0.0.0.0`. Lo verifica `tests/compose-port-bind-defaults.test.js`; la única excepción deliberada es el 80/443 público del reverse proxy, listado en `scripts/port-bind-allowlist.txt`.
 - El gateway de Crow no es uno de esos procesos solo-loopback: escucha en `0.0.0.0` (todas las interfaces) a menos que se defina `CROW_GATEWAY_BIND` (`servers/gateway/listen-host.js`). La instalación con Docker lo publica solo en `127.0.0.1`; una instalación nativa escucha en todas las interfaces y la protegen el cortafuegos del host y Tailscale, no la dirección de enlace.
 - Las filas "existente" son bundles que ya se publicaron antes de que se introdujera este registro — se registran aquí para que los bundles futuros los eviten.
@@ -46,7 +46,7 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 | 3001 | todas las interfaces (`0.0.0.0`, a menos que se defina `CROW_GATEWAY_BIND` — `servers/gateway/listen-host.js`); la instalación en contenedor publica el puerto solo en `127.0.0.1` | gateway de Crow (HTTPS) | core |
 | 3002 | igual que 3001 (el proceso escucha en todas las interfaces a menos que se defina `CROW_GATEWAY_BIND`) | gateway de Crow (alterno) | core |
 | 3004 | igual que 3001 (el proceso escucha en todas las interfaces a menos que se defina `CROW_GATEWAY_BIND`) | gateway de Crow (alterno) | core |
-| 3005 | 127.0.0.1 | sdxl (se cambia con `SDXL_PORT`; companion lo alcanza en localhost por la red del host) | existente |
+| 3005 | 127.0.0.1 | sdxl (se cambia con `SDXL_PORT`) | existente |
 | 3007 | 127.0.0.1 | uptime-kuma | MVP PR 1 |
 | 3020 | 127.0.0.1 | adguard-home (UI de administración) | MVP PR 3 |
 | 3030 | 127.0.0.1 | homepage | MVP PR 1 |
@@ -128,7 +128,6 @@ Estos son anteriores a este registro y necesitan una resolución de seguimiento 
 Estos bundles usan `network_mode: host`. Consumen directamente en el host los puertos que su servicio upstream espera:
 
 - `browser` (Chrome DevTools — verificar puertos)
-- `companion` (verificar)
 - `coturn` (3478 UDP, más los puertos de escucha de turnserver)
 - `phone` (el propio listener del runner en `127.0.0.1:3065` dentro del contenedor; no publica ningún puerto del host)
 - `plex` (32400, más los puertos de descubrimiento)

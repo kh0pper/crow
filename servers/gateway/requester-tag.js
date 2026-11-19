@@ -1,4 +1,4 @@
-/** Who asked for a model? /llm/v1 is unauthenticated by design (companion is
+/** Who asked for a model? /llm/v1 is unauthenticated by design (a voice device is
  * loopback), so attribution is whatever the request carries: peer ip, a
  * bounded user-agent, and the optional X-Crow-Client tag first-party clients set.
  * Pure and never throws — `req` may be `{}`, null, or headerless. The result is

@@ -112,15 +112,6 @@ All media is peer-to-peer. The gateway only handles signaling (room management a
 
 Rooms support up to 4 participants by default (configurable via `CROW_CALLS_MAX_PEERS`). Each participant establishes a WebRTC connection with every other participant (mesh topology).
 
-## Companion Integration
-
-When the [AI Companion](/architecture/companion) bundle is also installed, the Calls page gains additional modes:
-
-- **Avatar mode** — the companion's Live2D avatar joins the call as a video participant
-- **Face tracking** — the avatar mirrors your expressions via webcam
-
-These modes appear as extra buttons on the call page when both bundles are active.
-
 ## Configuration
 
 | Variable | Default | Description |

@@ -24,7 +24,6 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { createProjectServer } = await import("../servers/research/server.js");
 const { braveSearch, stripSnippetHtml } = await import("../servers/shared/brave-search.js");
-const { searchWeb } = await import("../servers/wm/server.js");
 
 const text = (r) => (r.content || []).map((c) => c.text).join("\n");
 const STAMP = "SNIPPET, not a source: open it with crow_add_source before citing";
@@ -94,14 +93,6 @@ test("the registry gives crow-projects an optional key", async () => {
   const cat = crowServerCatalog(join(HOME, ".crow"));
   assert.ok(cat.servers["crow-projects"]);
   assert.equal(cat.unconfigured["crow-projects"], undefined);
-});
-
-test("wm searchWeb still renders cards through braveSearch", async () => {
-  const r = await searchWeb("cats", 2, async () => ({ ok: true, results: [{ title: "T", url: "https://a.example.com/", description: "d" }] }));
-  assert.equal(r.title, "Search: cats");
-  assert.deepEqual(r.blocks[1], { type: "card", title: "T", body: "d", link: "https://a.example.com/" });
-  assert.match((await searchWeb("q", 1, async () => ({ ok: false, reason: "not_configured" }))).error, /not configured/);
-  assert.match((await searchWeb("q", 1, async () => ({ ok: false, reason: "no_results" }))).error, /No results/);
 });
 
 test("a stalled Brave connection returns a timed-out result", async () => {

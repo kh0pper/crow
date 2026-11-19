@@ -68,6 +68,7 @@ import {
   SM_VERSION, SessionChannel, NULL_SESSION, transcriptHash, deriveSessionKeys, decideSession,
 } from "../shared/sync-session.js";
 import { testTunableMs } from "../shared/test-timing.js";
+import { claimUpgrade } from "../shared/ws-upgrade-claim.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -1021,6 +1022,9 @@ export function setupTailnetSyncServer(server, ctx) {
 
   server.on("upgrade", async (req, socket, head) => {
     if (!req.url || !req.url.startsWith(WS_PATH)) return; // let other handlers process
+    // Ours: claimed before the handshake await below, so the gateway's fallback
+    // (shared/ws-upgrade-claim.js) never answers this request with its 404.
+    claimUpgrade(req);
     // Network-exposure invariant, defense-in-depth: instance-sync must never
     // be reachable via Tailscale Funnel. The ed25519 mutual auth below would
     // reject an outsider anyway, but a Funnel-tagged request shouldn't even

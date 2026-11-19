@@ -46,8 +46,10 @@ export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "revi
 // Channel types offered by the wizard. Simple types render their fields via
 // the shared gateway-fields module; device-bound types persist a type-only
 // draft record and finish on the Gateways tab (spec §D3). "none" is the
-// always-present "skip for now" (spec §D1 step 3).
-const WIZARD_GW_TYPES = ["none", "crow-messages", "perch", "gmail", "discord", "telegram", "slack", "companion"];
+// always-present "skip for now" (spec §D1 step 3). The AI Companion channel
+// is NOT offered: it was retired with its bundle, and a new bot can never be
+// bound to it (a bot that already has the channel keeps it, read-only).
+const WIZARD_GW_TYPES = ["none", "crow-messages", "perch", "gmail", "discord", "telegram", "slack"];
 
 // Every field the wizard collects; the carry re-emits these as hidden inputs
 // on steps that don't edit them (spec §D1: state lives in the POST body).
@@ -172,8 +174,6 @@ function channelBody(state, lang) {
     fields = r.fields + r.hint;
   } else if (gwType === "crow-messages") {
     fields = `<p class="btb-hint">${t("botbuilder.wizGwCrowMessagesNote", lang)}</p>`;
-  } else if (gwType === "companion") {
-    fields = `<p class="btb-hint">${t("botbuilder.wizGwFinishLaterNote", lang)}</p>`;
   } else {
     fields = `<p class="btb-hint">${t("botbuilder.wizGwNoneNote", lang)}</p>`;
   }
@@ -195,15 +195,13 @@ function gatewayDraftFromState(state, gwType) {
 async function reviewBody(db, state, lang) {
   const tpl = getTemplate(state.tpl) || BOT_TEMPLATES[0];
   const gwType = WIZARD_GW_TYPES.includes(state.gw_type) ? state.gw_type : tpl.gwType;
-  const finishLater = gwType === "companion";
   const rows = [
     [t("botbuilder.wizReviewTemplate", lang), t(`botbuilder.tpl_${tpl.id}_title`, lang)],
     [t("botbuilder.wizReviewName", lang), escapeHtml(state.display_name || "")],
     [t("botbuilder.wizReviewBotId", lang), `<code>${escapeHtml(state.bot_id || "")}</code>`],
     [t("botbuilder.wizReviewModel", lang), `<code>${escapeHtml(state.model || "")}</code>`],
     [t("botbuilder.wizReviewChannel", lang),
-      t(`botbuilder.wizGw_${gwType.replace(/-/g, "_")}`, lang) +
-      (finishLater ? ` — ${t("botbuilder.wizGwFinishLaterShort", lang)}` : "")],
+      t(`botbuilder.wizGw_${gwType.replace(/-/g, "_")}`, lang)],
   ];
   return `<div class="table-scroll"><table class="btb-review-table">` +
     rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
@@ -460,8 +458,6 @@ export async function handleWizardCreate(req, res, { db, lang }) {
     def.gateways = simpleGateways;
   } else if (gwType === "crow-messages") {
     def.gateways = [buildCrowMessagesGatewayConfig(b)];
-  } else if (gwType === "companion") {
-    def.gateways = [{ type: gwType }];
   }
 
   if (projectId != null) {

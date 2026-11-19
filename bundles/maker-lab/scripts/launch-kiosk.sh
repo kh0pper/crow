@@ -2,10 +2,14 @@
 #
 # Maker Lab — same-host kiosk launcher.
 #
-# Opens the Blockly kiosk tile-left and the AI Companion web UI tile-right
-# in fullscreen-ish browser windows. Designed for solo-mode-on-same-host
-# deployments (e.g., a Raspberry Pi display running Chromium) where there's
-# no separate grown-up admin device to hand off a QR code.
+# Opens the Blockly kiosk tile-left and the Crow Kiosk display tile-right
+# (`/display`, served by the Kiosk display bundle) in fullscreen-ish browser
+# windows. Designed for solo-mode-on-same-host deployments (e.g., a Raspberry
+# Pi display running Chromium) where there's no separate grown-up admin device
+# to hand off a QR code.
+#
+# The AI Companion's web UI that used to fill the right tile was retired with
+# the Companion bundle; `/display` is Crow's own display surface now.
 #
 # Usage:
 #   ./launch-kiosk.sh                     # uses http://localhost
@@ -27,10 +31,9 @@ CROW_HOST="${CROW_HOST:-localhost}"
 CROW_PROTO="${CROW_PROTO:-http}"
 BROWSER="${BROWSER:-}"
 GATEWAY_PORT="${CROW_GATEWAY_PORT:-3002}"
-COMPANION_PORT="${COMPANION_PORT:-12393}"
 
 BLOCKLY_URL="${CROW_PROTO}://${CROW_HOST}:${GATEWAY_PORT}/kiosk/"
-COMPANION_URL="${CROW_PROTO}://${CROW_HOST}:${COMPANION_PORT}/"
+DISPLAY_URL="${CROW_PROTO}://${CROW_HOST}:${GATEWAY_PORT}/display"
 
 # Pick a browser.
 pick_browser() {
@@ -64,16 +67,16 @@ case "$B" in
          --user-data-dir="$HOME/.crow/bundles/maker-lab/chromium-profile-blockly" \
          >/dev/null 2>&1 &
     sleep 1
-    "$B" --app="$COMPANION_URL" \
+    "$B" --app="$DISPLAY_URL" \
          --window-position="${LEFT_W},0" \
          --window-size="${RIGHT_W},${SCREEN_H}" \
-         --user-data-dir="$HOME/.crow/bundles/maker-lab/chromium-profile-companion" \
+         --user-data-dir="$HOME/.crow/bundles/maker-lab/chromium-profile-display" \
          >/dev/null 2>&1 &
     ;;
   firefox)
     "$B" --new-window "$BLOCKLY_URL" >/dev/null 2>&1 &
     sleep 1
-    "$B" --new-window "$COMPANION_URL" >/dev/null 2>&1 &
+    "$B" --new-window "$DISPLAY_URL" >/dev/null 2>&1 &
     # Firefox can't split windows from the CLI — user needs to tile manually,
     # or call xdotool / the host WM.
     if command -v xdotool >/dev/null 2>&1; then
@@ -88,4 +91,4 @@ case "$B" in
     ;;
 esac
 
-echo "launched: $BLOCKLY_URL (2/3 left) + $COMPANION_URL (1/3 right)"
+echo "launched: $BLOCKLY_URL (2/3 left) + $DISPLAY_URL (1/3 right)"

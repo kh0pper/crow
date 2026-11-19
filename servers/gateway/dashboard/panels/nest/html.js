@@ -130,6 +130,11 @@ function buildHealthStrip(health, lang, flash, flashAddon = null, flashKey = nul
     flashHtml = `<div class="nest-flash nest-flash--success">Done — it's shared now.</div>`;
   } else if (flash === "fixit_dismissed") {
     flashHtml = `<div class="nest-flash nest-flash--success">Dismissed for now.</div>`;
+  } else if (flash === "fixit_retired_removed") {
+    flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(t("health.retiredRemoved", lang))}</div>`;
+  } else if (flash === "fixit_retired_removing") {
+    // Started, not done: no success styling, and no claim that anything was removed yet.
+    flashHtml = `<div class="nest-flash">${escapeHtml(t("health.retiredRemoving", lang))}</div>`;
   } else if (flash === "fixit_error") {
     flashHtml = `<div class="nest-flash nest-flash--error">Couldn't apply that fix.</div>`;
   } else if (flash === "fixit_not_pending") {

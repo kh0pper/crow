@@ -1,7 +1,7 @@
 /**
- * The context-echo guard for a model reply relayed over HTTP (the /llm/v1 router's companion turns).
+ * The context-echo guard for a model reply relayed over HTTP (the /llm/v1 router's voice turns).
  *
- * The router puts [Now] (and, when a day is named, [Dates]) plus the [Note] line on the companion's user message
+ * The router puts [Now] (and, when a day is named, [Dates]) plus the [Note] line on the voice turn's user message
  * (context-echo.js withTurnContext). A small model sometimes reads those lines back as the start of its answer.
  * This filter rewrites ONLY a string `choices[0].delta.content` of an OpenAI-style SSE stream through one
  * createContextEchoGate(); every other event — the role frame (content null), tool_call deltas, reasoning_content,

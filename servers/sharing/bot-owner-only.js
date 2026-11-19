@@ -88,7 +88,7 @@ export const SHARING_TOOL_CLASS = Object.freeze({
   crow_list_sync_conflicts: OWNER_ONLY, // reveals replication conflicts across instances and projects
 
   // --- rooms and social ---
-  crow_room_invite: OWNER_ONLY, // invites a contact into a live companion room
+  crow_room_invite: OWNER_ONLY, // invites a contact into a live room
   crow_room_close: OWNER_ONLY, // closes the operator's live room out from under them
   crow_voice_memo: OWNER_ONLY, // sends an audio memo to a contact (the operator's voice turn: VOICE_ALLOWED)
   crow_react: OWNER_ONLY, // sends a reaction into a shared room, as the operator

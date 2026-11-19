@@ -1,6 +1,6 @@
 /**
- * Kiosk crow_wm (spec §8, rulings R3/R4). Same tool name, same single
- * `command` string, same JSON action shape as servers/wm/server.js — but a
+ * Kiosk crow_wm (spec §8, rulings R3/R4). One tool name, one
+ * `command` string, one JSON action shape — but a
  * kiosk-native executor: it implements the display subset and REFUSES every
  * other command without running it (invite/memo/react/relay/search/open … have
  * side effects a shared household display must not trigger). Window state is

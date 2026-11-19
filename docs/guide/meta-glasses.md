@@ -269,7 +269,7 @@ scrobble-grade "50% + 4 minutes").
 ## Household profiles
 
 If you share your Crow with family, pair each person's glasses separately
-and associate each with a Companion **household profile**. That way each
+and associate each with a **household profile**. That way each
 member's glasses get their own voice (TTS profile override), persona, and
 memory scope.
 
@@ -324,7 +324,7 @@ The `/session` protocol is documented in the bundle's `README.md`.
 - [AI Providers (BYOAI)](/guide/ai-providers)
 - Speech-to-Text settings live at `Settings → Speech-to-Text` in your Crow dashboard
 - Text-to-Speech settings live at `Settings → Text-to-Speech` in your Crow dashboard
-- The **Companion** bundle shares the same TTS profiles — if you already have Companion voices configured, the glasses can use them verbatim
+- The Kiosk display and the glasses share the same TTS profiles, so a voice you pick for one is available to the other
 
 ## Licensing & legal
 

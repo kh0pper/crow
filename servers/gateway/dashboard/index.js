@@ -66,7 +66,6 @@ import { createOAuthConsentRouter, isConsentNext } from "../oauth-consent.js";
 import secretSubmitRouter from "../routes/secret-submit.js";
 import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
 import federationRouterFactory from "../routes/federation.js";
-import federationCompanionRouterFactory from "../routes/federation-companion.js";
 import federationResolveRouterFactory from "../routes/federation-resolve.js";
 import { getTrustedInstances } from "./panels/nest/data-queries.js";
 import { getPeerOverview } from "./overview-cache.js";
@@ -1063,14 +1062,11 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     }
   });
 
-  // Federation companion router (Phase 3) — session-authed, under dashboard
-  // auth. Mounted AFTER dashboardAuth so session cookies are validated.
-  // /dashboard/federation/companion-overview → merged local+peer WM registry.
+  // Federation resolver — session-authed, under dashboard auth. Mounted AFTER
+  // dashboardAuth so session cookies are validated.
   // /dashboard/federation/resolve-instance  → name-to-id resolver for AI.
   if (federationEnabled) {
-    const federationCompanionRouter = federationCompanionRouterFactory({ createDbClient });
     const federationResolveRouter = federationResolveRouterFactory({ createDbClient });
-    router.use("/dashboard", federationCompanionRouter);
     router.use("/dashboard", federationResolveRouter);
   }
 

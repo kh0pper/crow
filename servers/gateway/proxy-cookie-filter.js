@@ -2,12 +2,12 @@
  * Proxy cookie policy — ONE rule, shared by every gateway reverse proxy that
  * serves a third-party app on the dashboard's ORIGIN.
  *
- * Crow proxies more than one such app: installed bundles' web UIs at
- * `/proxy/<id>/` (routes/extension-proxy.js) and the AI companion at
- * `/companion/*` (routes/companion-proxy.js). Both hand a request the gateway
- * has already authenticated to code nobody audited, and both hand the answer
- * back to the browser on the dashboard's own origin. So both need the same
- * rules, and having them in two places is how one of them drifts:
+ * Crow proxies third-party apps on the dashboard's ORIGIN: installed bundles'
+ * web UIs at `/proxy/<id>/` (routes/extension-proxy.js), WebSockets included.
+ * Each hands a request the gateway
+ * has already authenticated to code nobody audited, and hands the answer
+ * back to the browser on the dashboard's own origin. So they all need the same
+ * rules, and having them in more than one place is how one of them drifts:
  *
  *   1. REQUEST — the browser's `Cookie` header goes upstream with Crow's own
  *      cookies removed (`stripCrowCookiesForBackend`). `crow_session` is a
@@ -288,7 +288,7 @@ export function proxyCookiePath(proxyPath, backendPath) {
  * the app wrote it (a quoted name keeps its quotes).
  *
  * @param {unknown} value one `Set-Cookie` header value
- * @param {string} proxyPath the mount path, e.g. "/proxy/browser" or "/companion"
+ * @param {string} proxyPath the mount path, e.g. "/proxy/browser"
  * @returns {string|null} the value to forward, or null to drop it
  */
 export function rewriteProxySetCookie(value, proxyPath) {

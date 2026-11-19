@@ -7,7 +7,9 @@
  *
  * Device-bound types (glasses, companion) and crow-messages keep their
  * bespoke handling where it was: they need db/device-store/identity context
- * that a pure (gwType, body) mapping cannot have.
+ * that a pure (gwType, body) mapping cannot have. Both device-bound types are
+ * RETIRED: a stored record is readable but binds nothing and is never offered
+ * to a new bot.
  */
 
 import { escapeHtml, formField } from "../../shared/components.js";
@@ -36,9 +38,9 @@ export const GATEWAY_REQUIRED_FIELDS = {
   "crow-messages": [],
   // Retired: glasses answer as Crow, so a stored glasses record needs nothing to be complete.
   glasses: [],
-  // Companion works only once a device is bound (the voice turn reads device.bound_bot_id; a type-only record
-  // is a UI draft, W1-4).
-  companion: ["device_id"],
+  // Retired: the AI Companion was removed, so a stored companion record is kept as it
+  // is and needs nothing to be complete (it binds no device any more).
+  companion: [],
   // Perch (originally Perch Hub P1, C-4): the chat surface is native to the
   // dashboard, addressed by bot id — there is nothing per-bot to collect, so
   // the record is complete the moment the type is chosen. Modelled explicitly

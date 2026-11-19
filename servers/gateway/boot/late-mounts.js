@@ -1,11 +1,12 @@
 /**
  * boot/late-mounts.js — calls routes (CROW_CALLS_ENABLED gate), LLM-router,
- * companion proxy, extension web UI proxy.
+ * extension web UI proxy.
  *
- * S1: RETURNS ALL THREE handles { setupCallsSignaling, setupCompanionProxy,
- * extensionProxyWsSetup } — the latter two are null-guarded in the listen
- * callback; a missed handle silently never wires WebSocket upgrades and no
- * gate catches it (route-stack diff does not see WS wiring).
+ * S1: RETURNS BOTH handles { setupCallsSignaling, extensionProxyWsSetup } — each
+ * is null-guarded in the listen callback; a missed handle silently never wires
+ * WebSocket upgrades and no gate catches it (route-stack diff does not see WS
+ * wiring). The AI Companion's proxy (and the third handle it needed) was retired
+ * with the bundle; nothing mounts under /companion any more.
  * deps: { dashboardAuth }
  */
 
@@ -28,7 +29,7 @@ export async function mountLateRoutes(app, deps) {
   }
 
   // --- Mount the models lifecycle API (plan 2 Task 8). Its OWN try/catch: an
-  // import failure here must never stop the companion /llm/v1 router below. ---
+  // import failure here must never stop the voice /llm/v1 router below. ---
   try {
     const { default: llmModelsRouter } = await import("../routes/llm-models.js");
     app.use(llmModelsRouter());
@@ -37,9 +38,9 @@ export async function mountLateRoutes(app, deps) {
     console.warn("[llm-models] Failed to mount:", err.message);
   }
 
-  // --- Mount LLM-router (folds the standalone companion model-proxy into the
-  // gateway). No dashboardAuth: the host-networked companion arrives as loopback,
-  // which isAllowedNetwork() rejects; protected instead by rejectFunneledMiddleware
+  // --- Mount LLM-router (folds the old standalone voice model-proxy into the
+  // gateway). No dashboardAuth: a voice device arrives as loopback, which
+  // isAllowedNetwork() rejects; protected instead by rejectFunneledMiddleware
   // (mounted above) + tailnet/loopback-only exposure. See routes/llm-router.js. ---
   try {
     const { default: llmRouterRouter } = await import("../routes/llm-router.js");
@@ -48,17 +49,6 @@ export async function mountLateRoutes(app, deps) {
   } catch (err) {
     if (err.code !== "ERR_MODULE_NOT_FOUND") {
       console.warn("[llm-router] Failed to mount:", err.message);
-    }
-  }
-
-  // --- Mount Companion Proxy ---
-  let setupCompanionProxy = null;
-  try {
-    const { default: _setupCompanionProxy } = await import("../routes/companion-proxy.js");
-    setupCompanionProxy = _setupCompanionProxy;
-  } catch (err) {
-    if (err.code !== "ERR_MODULE_NOT_FOUND") {
-      console.warn("[companion-proxy] Failed to load:", err.message);
     }
   }
 
@@ -82,7 +72,7 @@ export async function mountLateRoutes(app, deps) {
     }
   }
 
-  // S1: return all three handles — companion and extension consumers are null-guarded
-  // ifs in the listen callback; a missed handle silently skips WS wiring
-  return { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup };
+  // S1: return both handles — each consumer is a null-guarded if in the listen
+  // callback; a missed handle silently skips WS wiring
+  return { setupCallsSignaling, extensionProxyWsSetup };
 }

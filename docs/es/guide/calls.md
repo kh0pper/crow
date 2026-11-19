@@ -112,15 +112,6 @@ Todos los medios son peer-to-peer. El gateway solo maneja la señalización (ges
 
 Las salas soportan hasta 4 participantes por defecto (configurable vía `CROW_CALLS_MAX_PEERS`). Cada participante establece una conexión WebRTC con cada uno de los demás participantes (topología de malla).
 
-## Integración con el Companion
-
-Cuando el bundle del [AI Companion](/es/architecture/companion) también está instalado, la página de Calls gana modos adicionales:
-
-- **Modo avatar** — el avatar Live2D del companion se une a la llamada como participante de video
-- **Seguimiento facial** — el avatar refleja tus expresiones vía webcam
-
-Estos modos aparecen como botones adicionales en la página de la llamada cuando ambos bundles están activos.
-
 ## Configuración
 
 | Variable | Predeterminado | Descripción |

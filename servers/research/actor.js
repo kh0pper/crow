@@ -4,7 +4,7 @@
 // authenticated mount is the owner, a --no-auth mount is unknown; the voice executor: its bound
 // bot). Each call may then narrow it: a peer-instance caller is unknown (checked before `_meta`,
 // so a peer cannot pose as a bot), and a `crow/actor` in the call's `_meta` can name a bot or
-// make the caller unknown. A product-generated client (the companion, rookery) that holds the
+// make the caller unknown. A product-generated client (a voice device, rookery) that holds the
 // gateway token marks itself with an `x-crow-actor-kind` request header (bot | unknown, plus
 // `x-crow-actor-id` for a bot): the same downgrade, read from the HTTP request. Nothing per call
 // ever yields the owner, and a missing actor is never the owner.

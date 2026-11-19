@@ -70,7 +70,7 @@ const SUFFIXES = ["mcp", "sse", "messages"];
 test("every unsigned gateway mount prefix is an owner mount, every signed one is not", () => {
   const mounts = bootMounts();
   // The extraction itself: the mounts this repo publishes today.
-  for (const prefix of ["/router", "/projects", "/research", "/memory", "/sharing", "/storage", "/blog-mcp", "/wm", "/tools", "/tools-client"]) {
+  for (const prefix of ["/router", "/projects", "/research", "/memory", "/sharing", "/storage", "/blog-mcp", "/tools", "/tools-client"]) {
     assert.ok(mounts.some((m) => m.prefix === prefix && !m.signed && !m.draftScoped), "unsigned mount extracted: " + prefix);
   }
   for (const prefix of ["/board", "/secrets", "/phone", "/artifacts"]) {
@@ -107,7 +107,7 @@ test("every unsigned gateway mount prefix is an owner mount, every signed one is
 test("the writer's own mounting of a disallowed url block still disables it", async () => {
   const { buildBotMcp } = await import("../scripts/pi-bots/mcp_writer.mjs");
   const blocks = {};
-  for (const prefix of ["/sharing", "/wm"]) {
+  for (const prefix of ["/sharing", "/projects"]) {
     blocks["gateway" + prefix] = { url: "http://192.0.2.10:3001" + prefix + "/mcp" };
   }
   const { json, servers, disabled } = buildBotMcp({ tools: { crow_mcp: Object.keys(blocks) } }, { mcpServers: blocks }, {});

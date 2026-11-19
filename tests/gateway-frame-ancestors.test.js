@@ -1,8 +1,8 @@
 // The gateway's CSP frame-ancestors: who may embed the dashboard in a frame.
 // It used to be `'self' https:` — any https site could frame the dashboard
-// (clickjacking). The legitimate cross-origin framers are the AI Companion,
-// served from the SAME hostname on another port, and its federation windows
-// on trusted paired instances, so the rule is now `'self'` plus
+// (clickjacking). The legitimate cross-origin framers are an app on the SAME
+// hostname on another port (a proxied bundle UI) and trusted paired instances,
+// so the rule is now `'self'` plus
 // `https://<this hostname>:*` plus `https://<trusted peer>:*`.
 import { test } from "node:test";
 import assert from "node:assert/strict";

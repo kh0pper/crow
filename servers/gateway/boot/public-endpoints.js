@@ -39,17 +39,16 @@ const turnCredLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeader
  *     session check (network rule first, which also refuses Tailscale Funnel,
  *     then the crow_session cookie). This is what a browser on the gateway
  *     origin already sends (same-origin fetches carry cookies by default),
- *     i.e. the operator's dashboard, the /calls page opened by the operator,
- *     and the companion proxied at /companion/;
+ *     i.e. the operator's dashboard and the /calls page opened by the operator;
  *  2. a verified bot actor — the X-Crow-Actor-{Kind,Id,Thread,Gateway,Sig}
  *     headers a bot's turn already carries, verified with the same
  *     verifyActorSig() /phone/mcp and /board/mcp use. The MAC key is per-boot
  *     and lives only in this process's memory, so a named bot without its
  *     signature (or with another kind's signature) is refused;
- *  3. a room credential — the `?room=&token=` pair the call page and the
- *     companion page present on their OTHER endpoints (/calls?room&token,
- *     /api/rooms/:code?token, the /calls/ws and /companion/client-ws
- *     handshakes). Companion rooms go through deps.validateRoomToken
+ *  3. a room credential — the `?room=&token=` pair the call page presents on
+ *     its OTHER endpoints (/calls?room&token, /api/rooms/:code?token, the
+ *     /calls/ws handshake). Rooms created through a shareRoom invite go through
+ *     deps.validateRoomToken
  *     (the sharing server's store); rooms created by POST /api/rooms go
  *     through lookupCallRoom. This is the only credential a REMOTE guest on
  *     an invited call holds: they have no session on this gateway.
@@ -82,7 +81,7 @@ export async function turnCredentialAllowed(req, deps = {}) {
     return true;
   }
 
-  // 3. room credential (call page / companion page)
+  // 3. room credential (call page)
   const room = typeof req.query?.room === "string" ? req.query.room.trim() : "";
   const token = typeof req.query?.token === "string" ? req.query.token.trim() : "";
   if (room && token) {
@@ -116,7 +115,7 @@ export async function mountPublicEndpoints(app, deps) {
   // /dashboard routes per device mode (new → Chat, classic → the nest).
   app.get("/", (req, res) => res.redirect("/dashboard"));
 
-  // --- Room Token Validation (used by companion for WebSocket auth) ---
+  // --- Room Token Validation (used by the calls page for WebSocket auth) ---
   app.get("/api/room/validate", (req, res) => {
     const { validateRoomToken } = deps;
     const { room, token } = req.query;

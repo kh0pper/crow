@@ -289,18 +289,18 @@ export function draftingTurnMcpConfig(block, { canonical, canonicalPath } = {}) 
 // treats a valid local MCP token as the owner, and a url block gets no actor env, so a bot handed
 // one of these would act as the owner. Each mount (mountMcpServer) answers on <prefix>/mcp,
 // <prefix>/sse and <prefix>/messages; the prefixes are /router, /projects, /research, /memory,
-// /sharing, /storage, /blog-mcp, /wm, /tools and /tools-<name> (servers/gateway/boot/mcp-mounts.js
-// for the first group, boot/feature-mounts.js for /storage, /blog-mcp and /wm). These paths exist
+// /sharing, /storage, /blog-mcp, /tools and /tools-<name> (servers/gateway/boot/mcp-mounts.js
+// for the first group, boot/feature-mounts.js for /storage and /blog-mcp). These paths exist
 // only on Crow gateways (any host, any scheme: loopback, LAN, a Serve HTTPS front); legitimate peer
 // access goes through stdio crow-remote-proxy blocks. Board/secrets/phone/artifacts mounts carry
 // signed actor headers instead, so they are deliberately absent here. /memory and /storage too: a
 // bot reaching them with the gateway token would run as an unknown caller (e.g. able to change the
-// operator's writing rules, or read every project's files). /sharing and /wm reach the operator's
-// contacts and the window manager the same way. The gateway's root /mcp is matched only on a
+// operator's writing rules, or read every project's files). /sharing reaches the operator's
+// contacts the same way. The gateway's root /mcp is matched only on a
 // loopback host (isOwnerProjectUrl): `/mcp` is the ordinary path of third-party remote MCP servers.
 // The gateway reached by a tailnet or LAN name at its root is a known limit until bot containment
 // keeps the gateway token from bots.
-const OWNER_MOUNT_PATH = /^\/(router|projects|research|memory|sharing|storage|blog-mcp|wm|tools(-[a-z0-9-]+)?)\/(mcp|sse|messages)$/;
+const OWNER_MOUNT_PATH = /^\/(router|projects|research|memory|sharing|storage|blog-mcp|tools(-[a-z0-9-]+)?)\/(mcp|sse|messages)$/;
 
 /** True if a url block reaches a Crow gateway's owner-capable mounts. */
 export function isOwnerProjectUrl(rawUrl) {

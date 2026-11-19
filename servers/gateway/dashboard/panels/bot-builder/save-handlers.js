@@ -65,67 +65,14 @@ async function saveChannel(def, b, { db, botId, changed }) {
     if (simple.length === 0 && def.gateways === undefined) return { changed: false };
     return { changed: put(simple[0] || null) };
   }
-  if (gwType === "crow-messages") return { changed: put(buildCrowMessagesGatewayConfig(b)) };
-  if (gwType === "glasses") {
-    // Retired: glasses answer as Crow, so a glasses save binds nothing and writes no device. A stored glasses
-    // record is kept exactly as it is (it renders read-only); only a type switch replaces it, above.
+  if (gwType === "glasses" || gwType === "companion") {
+    // Retired channels. glasses answer as Crow; the AI Companion was removed with its
+    // bundle. Either save binds nothing, pairs no device and writes no
+    // companion_features; a stored record is kept exactly as it is (it renders
+    // read-only), and only a type switch replaces it, above.
     return { changed: false };
   }
-  if (gwType === "companion") {
-    let deviceId = String(b.gw_device_id || "").trim();
-    let warn;
-    let pairNew = null; // a kiosk to pair once the write succeeded
-    const newKioskName = String(b.gw_new_kiosk_name || "").trim();
-    if (!deviceId && newKioskName) {
-      try {
-        const { listDevices } = await import("../../../../shared/device-store.js");
-        const baseId = ("kiosk-" + newKioskName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40)).replace(/-$/, "") || "kiosk";
-        const taken = new Set((await listDevices(db).catch(() => [])).map((d) => String(d.id)));
-        let newId = baseId;
-        for (let n = 2; taken.has(newId); n++) newId = `${baseId}-${n}`;
-        pairNew = { id: newId, name: newKioskName, generation: "unknown", device_kind: "companion" };
-        deviceId = newId;
-      } catch (err) {
-        warn = "could not create kiosk device: " + err.message;
-      }
-    }
-    // Only the features whose control changed are written; everything else in
-    // the stored features (hearing_style, voice_idle_timeout, an absent
-    // face_tracking that means "on") stays exactly as stored.
-    const on = (k) => b[k] === "on" || b[k] === "true";
-    const priorFeatures = def.companion_features && typeof def.companion_features === "object" ? def.companion_features : {};
-    const features = { ...priorFeatures };
-    const fieldMap = { gw_avatar_animation: "avatar_animation", gw_pet_mode: "pet_mode", gw_social_chat: "social_chat",
-      gw_memory_integration: "memory_integration", gw_face_tracking: "face_tracking" };
-    const typeSwitched = !(priorGw && priorGw.type === "companion");
-    for (const [field, key] of Object.entries(fieldMap)) {
-      if (typeSwitched || changed(field)) features[key] = on(field);
-    }
-    if (typeSwitched || changed("gw_avatar_model")) {
-      const v = String(b.gw_avatar_model || "").trim();
-      if (v) features.avatar_model = v; else delete features.avatar_model;
-    }
-    const wasCompanion = priorGw && priorGw.type === "companion";
-    const priorDeviceId = wasCompanion && priorGw.device_id ? String(priorGw.device_id) : "";
-    const featuresChanged = !same(features, def.companion_features ?? (typeSwitched ? undefined : {}));
-    const recChanged = put({ type: "companion", ...(deviceId ? { device_id: deviceId } : {}) }, ["device_id"]);
-    if (!recChanged && !featuresChanged) return { changed: false, warn };
-    if (featuresChanged) def.companion_features = features;
-    const after = async () => {
-      const { updateDeviceProfiles, unbindBotFromOtherDevices, pairDevice } = await import("../../../../shared/device-store.js");
-      if (pairNew) await pairDevice(db, pairNew);
-      if (deviceId) {
-        if (recChanged) {
-          await unbindBotFromOtherDevices(db, botId, deviceId);
-          if (priorDeviceId && priorDeviceId !== deviceId) await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-        }
-        await updateDeviceProfiles(db, deviceId, { ...(recChanged ? { bound_bot_id: botId, device_kind: "companion" } : {}), companion_features: def.companion_features });
-      } else if (priorDeviceId) {
-        await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-      }
-    };
-    return { changed: true, warn, after, afterLabel: "companion binding incomplete: " };
-  }
+  if (gwType === "crow-messages") return { changed: put(buildCrowMessagesGatewayConfig(b)) };
   // a type this editor does not manage: leave the stored record alone
   return { changed: false };
 }

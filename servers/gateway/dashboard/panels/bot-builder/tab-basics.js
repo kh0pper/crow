@@ -23,6 +23,15 @@ import { card } from "./ui.js";
 
 export const CHANNEL_TYPES = ["gmail", "discord", "telegram", "slack", "glasses", "companion", "crow-messages", "perch", "none"];
 
+/**
+ * Channels that are no longer offered for a NEW bot but stay readable on a bot that
+ * already has one: the saved record is shown read-only and never rewritten by a save.
+ *   glasses   — retired: the glasses answer as Crow, so the record binds nothing.
+ *   companion — retired: the AI Companion (Open-LLM-VTuber) was removed, so a stored
+ *               record is kept as it is and neither pairs a device nor writes one.
+ */
+export const RETIRED_CHANNEL_TYPES = ["glasses", "companion"];
+
 function modelOptions(byProv, sel, lang, roleLabel = null) {
   // A stored model this Crow no longer offers stays selected (and saved) as
   // itself — a save never quietly switches or drops a model.
@@ -38,27 +47,6 @@ function modelOptions(byProv, sel, lang, roleLabel = null) {
       `<option value="${escapeHtml(m.key)}"${m.key === sel ? " selected" : ""}>${escapeHtml(m.label)}` +
       `${m.piKnown === false ? " (" + escapeHtml(t("botbuilder.modelNotInEngine", lang)) + ")" : ""}</option>`).join("") +
     `</optgroup>`).join("");
-}
-
-async function deviceOptions(db, botId, selId, lang, { markGlasses = false } = {}) {
-  let devices = [];
-  try {
-    const { listDevices } = await import("../../../../shared/device-store.js");
-    devices = (await listDevices(db).catch(() => [])).filter((d) => d.device_kind !== "kiosk");
-  } catch { devices = []; }
-  const opts = `<option value="">${escapeHtml(t("botbuilder.bxSelectDevice", lang))}</option>` +
-    devices.map((d) => {
-      const boundElse = d.bound_bot_id && d.bound_bot_id !== botId
-        ? ` — ${escapeHtml(fill(t("botbuilder.bxBoundTo", lang), { bot: d.bound_bot_id }))}` : "";
-      const kind = markGlasses && (d.device_kind || "glasses") !== "companion" ? ` [${escapeHtml(t("botbuilder.bxGlassesTag", lang))}]` : "";
-      return `<option value="${escapeHtml(String(d.id))}"${String(d.id) === String(selId || "") ? " selected" : ""}>` +
-        `${escapeHtml(d.name || String(d.id))}${kind}${boundElse}</option>`;
-    }).join("") +
-    // A saved device this Crow no longer lists stays selected (and saved)
-    // until the operator picks another — never silently unbound by a save.
-    (selId && !devices.some((d) => String(d.id) === String(selId))
-      ? `<option value="${escapeHtml(String(selId))}" selected>${escapeHtml(fill(t("botbuilder.bxDeviceMissing", lang), { id: String(selId) }))}</option>` : "");
-  return { devices, opts };
 }
 
 function field(label, inner, hint = "", id = "") {
@@ -104,8 +92,9 @@ export async function renderBasics(ctx) {
   // A stored type this editor does not manage (e.g. a "coming soon" one)
   // stays selectable as itself and is never rewritten by a Basics save.
   const curType = savedType;
-  // "glasses" is retired: offered only for a bot that already has it (read-only), never for a new one.
-  const offered = savedType === "glasses" ? CHANNEL_TYPES : CHANNEL_TYPES.filter((v) => v !== "glasses");
+  // Retired channels (glasses, companion) are offered only for a bot that already has
+  // one (read-only); a new bot can never pick them.
+  const offered = RETIRED_CHANNEL_TYPES.includes(savedType) ? CHANNEL_TYPES : CHANNEL_TYPES.filter((v) => !RETIRED_CHANNEL_TYPES.includes(v));
   const types = offered.includes(savedType) ? offered : [...offered, savedType];
   const typeLabel = {
     gmail: "Gmail", discord: "Discord", telegram: "Telegram", slack: "Slack",
@@ -128,24 +117,9 @@ export async function renderBasics(ctx) {
       // Retired: glasses answer as Crow. A stored record is kept as it is and shown read-only.
       inner = `<p class="btb-notice-info">${escapeHtml(t("botbuilder.bxGlassesRetired", lang))}</p>`;
     } else if (type === "companion") {
-      const { opts } = await deviceOptions(db, botId, rec.device_id, lang, { markGlasses: true });
-      const cf = def.companion_features || {};
-      const chk = (v) => (v ? " checked" : "");
-      inner =
-        field(t("botbuilder.gwLabelPairedKiosk", lang), `<select name="gw_device_id" class="btb-select">${opts}</select>`) +
-        field(t("botbuilder.gwLabelNewKiosk", lang),
-          `<input type="text" name="gw_new_kiosk_name" class="btb-input" placeholder="${escapeHtml(t("botbuilder.gwPlaceholderNewKiosk", lang))}">`,
-          t("botbuilder.gwHintNewKiosk", lang)) +
-        field(t("botbuilder.gwLabelAvatarModel", lang),
-          `<input type="text" name="gw_avatar_model" class="btb-input" value="${escapeHtml(cf.avatar_model || "")}">`) +
-        `<div class="btb-group"><label>${escapeHtml(t("botbuilder.bxKioskFeatures", lang))}</label><div class="btb-checkbox-group btb-checkbox-col">` +
-        `<label class="btb-checkbox"><input type="checkbox" name="gw_avatar_animation"${chk(cf.avatar_animation)}> ${escapeHtml(t("botbuilder.bxFeatAnimation", lang))}</label>` +
-        `<label class="btb-checkbox"><input type="checkbox" name="gw_pet_mode"${chk(cf.pet_mode)}> ${escapeHtml(t("botbuilder.bxFeatPet", lang))}</label>` +
-        `<label class="btb-checkbox"><input type="checkbox" name="gw_social_chat"${chk(cf.social_chat)}> ${escapeHtml(t("botbuilder.bxFeatSocial", lang))}</label>` +
-        `<label class="btb-checkbox"><input type="checkbox" name="gw_memory_integration"${chk(cf.memory_integration)}> ${escapeHtml(t("botbuilder.bxFeatMemory", lang))}</label>` +
-        `<label class="btb-checkbox"><input type="checkbox" name="gw_face_tracking"${chk(cf.face_tracking !== false)}> ${escapeHtml(t("botbuilder.bxFeatFace", lang))}</label>` +
-        `</div></div>` +
-        `<p class="btb-hint">${t("botbuilder.gwHintHousehold", lang)}</p><p class="btb-hint">${t("botbuilder.gwHintCompanion", lang)}</p>`;
+      // Retired: the AI Companion was removed. A stored record is kept as it is and shown
+      // read-only — it pairs no device and writes no companion_features any more.
+      inner = `<p class="btb-notice-info">${escapeHtml(t("botbuilder.bxCompanionRetired", lang))}</p>`;
     } else if (type === "crow-messages") {
       const allowPaired = rec.allow_paired_instances === true;
       inner =

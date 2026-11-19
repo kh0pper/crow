@@ -44,12 +44,11 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 | Variable | Predeterminado | Propósito |
 |---|---|---|
 | `CROW_ORCHESTRATOR_PROVIDER` / `CROW_ORCHESTRATOR_MODEL` | *(primero la tabla `providers` de la BD)* | Proveedor/modelo predeterminado para el orquestador. Es preferible configurar los proveedores en Configuración → IA. |
-| `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Modelo rápido para los turnos de voz del AI Companion. |
+| `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Modelo rápido para los turnos de voz de la ruta de voz (Kiosk, gafas, teléfono). El nombre es histórico: el front end para el que se escribió ya no existe. |
 | `COMPANION_ESCALATION_MODEL` | `crow-chat/qwen3.6-35b-a3b` | Modelo de escalación (turnos con `!escalate` / herramientas). |
 | `COMPANION_FAST_DISABLE_THINKING` | `1` | Desactiva la cadena de razonamiento en los turnos de voz. |
 | `COMPANION_TOOL_ESCALATION` | `1` | Escala automáticamente cuando se detecta uso de herramientas. |
 | `COMPANION_TOOL_CONTEXT_LOOKBACK` | `8` | Mensajes que se escanean en busca de intención de usar herramientas. |
-| `COMPANION_PORT` | `12393` | Puerto del servidor del Companion (Open-LLM-VTuber). |
 | `SDXL_SERVICE_URL` | `http://127.0.0.1:3005` | Servicio de generación de imágenes para las herramientas de almacenamiento. |
 | `GPU_IDLE_CHECK_INTERVAL_MS` / `GPU_IDLE_REVERT_MS` | `120000` / `1200000` | Sondeo de inactividad del orquestador de GPU / ventana de reversión. |
 

@@ -3,7 +3,7 @@
  *
  * vLLM is a backend bundle, not a user-facing UI. This panel is an
  * operator status page: which model is loaded, is the endpoint up,
- * how to wire it into Maker Lab / Companion. It does a single live
+ * how to wire it into Maker Lab. It does a single live
  * GET to /v1/models with a short timeout; if that fails we fall back
  * to showing just the configured env state.
  */
@@ -84,7 +84,7 @@ export default {
                <p>When Maker Lab is installed alongside vLLM, the hint pipeline auto-detects this endpoint at startup. Manual override:</p>
                <pre><code>MAKER_LAB_LLM_ENDPOINT=${escapeHtml(endpointUrl)}/v1
 MAKER_LAB_LLM_MODEL=${escapeHtml(configuredModel)}</code></pre>`}
-        <p class="vl-muted">vLLM's endpoint is OpenAI-compatible — any client that speaks <code>/v1/chat/completions</code> (including Companion, the gateway's BYOAI chat, and third-party tools) drops in here directly.</p>
+        <p class="vl-muted">vLLM's endpoint is OpenAI-compatible — any client that speaks <code>/v1/chat/completions</code> (including Crow's BYOAI chat, the Kiosk display's voice and third-party tools) drops in here directly.</p>
       </section>
       <section class="vl-card">
         <h2>Classroom sizing</h2>

@@ -42,7 +42,7 @@ Cada fila en `pi_bot_defs` es una definición JSON con estas partes:
 - **persona**: el system prompt
 - **skills**: nombres que se resuelven a texto de skill en tiempo de ejecución
 - **tools**: el conjunto de herramientas permitido: las categorías de herramientas centrales de Crow más herramientas de extensiones seleccionadas
-- **gateways**: los canales en los que corre el agente (`gmail`, `discord`, `glasses`, `companion`)
+- **gateways**: los canales en los que corre el agente (`gmail`, `discord`, `glasses` — retirado, legible —, `companion` — retirado, legible —, `crow-messages`, `perch`, `none`)
 - **permission_policy**: los conjuntos de confirmación / denegación, el modo `external_send` y el interruptor `self_authoring`
 - **model** y un `fast_voice_model` opcional
 
@@ -65,10 +65,11 @@ Cuando un agente selecciona una herramienta de una extensión que no forma parte
 | **Gmail** | `bridge_tick.mjs` | Sondea un buzón conectado, redacta borradores o envía respuestas sujeto a la política |
 | **Discord** | `discord_gateway.mjs` | Un WebSocket de Discord de larga vida que dirige el runtime, con una lista de usuarios permitidos por agente |
 | **Meta Glasses** | `bundles/meta-glasses/` | Las gafas emparejadas responden como Crow, el bot de voz (`crow.voice`); no hay un bot por dispositivo |
-| **AI Companion** | `bundles/companion/` + el router `/llm/v1` del gateway (`servers/gateway/routes/llm-router.js`) | El bucle OLVV del [companion](/es/architecture/companion) con el avatar y las funciones ajustados en la pestaña Lo básico del bot (canal *Compañero de IA (quiosco)*); la voz responde como Crow, con el router que enruta rápido (4B) → escalado (35B) |
 | **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | El agente es accesible como contacto a través de la mensajería entre pares de Crow; los DM cifrados de remitentes autorizados dirigen el runtime y el agente responde desde su propia identidad derivada. Consulta [Crow Messages](#crow-messages-los-bots-como-contactos) abajo. |
 
-> Los canales de Meta Glasses y AI Companion ejecutan su propio bucle de voz (el turno de voz de los lentes; OLVV para el companion) en lugar del runtime pi `bridge.mjs` — el motor es el front end de voz, no pi, y responde como `crow.voice` (la persona, las herramientas y los límites vienen del bot de voz de Crow). La vinculación de un dispositivo companion solo lleva su avatar y sus funciones. Consulta [AI Companion](/es/architecture/companion).
+> El canal Meta Glasses ejecuta su propio bucle de voz (el turno de voz de los lentes) en lugar del runtime pi `bridge.mjs` — el motor es el front end de voz, no pi, y responde como `crow.voice` (la persona, las herramientas y los límites vienen del bot de voz de Crow).
+>
+> Un bot guardado con el canal retirado *Compañero de IA* conserva su registro y lo muestra en solo lectura: el Compañero de IA se eliminó, así que ese canal no vincula nada y ningún bot nuevo puede recibirlo. La voz por dispositivo es la Pantalla kiosk, que también responde como Crow.
 
 ## Crow Messages: los bots como contactos
 

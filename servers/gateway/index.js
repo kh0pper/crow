@@ -431,8 +431,8 @@ async function resolveCspStorageOrigin() {
   return _cspStorageOrigin;
 }
 
-// Trusted peers' hostnames for frame-ancestors (the companion's federation
-// windows frame a peer gateway). Refreshed in the background, never awaited.
+// Trusted peers' hostnames for frame-ancestors (a dashboard page may embed a
+// peer gateways' pages). Refreshed in the background, never awaited.
 let _frameDb = null;
 const peerFrameHosts = createPeerFrameHosts(async () => {
   _frameDb ||= createDbClient();
@@ -443,9 +443,9 @@ const peerFrameHosts = createPeerFrameHosts(async () => {
 app.use(async (req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   // Frame embedding: X-Frame-Options is legacy and doesn't support cross-port.
-  // Skip for /proxy/ (proxied apps manage own), /blog/ and /dashboard/ (loaded in companion iframe).
+  // Skip for /proxy/ (proxied apps manage own), /blog/ and /dashboard/ (a panel may be framed).
   // CSP frame-ancestors (below, frame-ancestors.js) provides the actual protection.
-  if (!req.path.startsWith("/proxy/") && !req.path.startsWith("/companion") && !req.path.startsWith("/blog") && !req.path.startsWith("/dashboard")) {
+  if (!req.path.startsWith("/proxy/") && !req.path.startsWith("/blog") && !req.path.startsWith("/dashboard")) {
     res.setHeader("X-Frame-Options", "SAMEORIGIN");
   }
   res.setHeader("X-XSS-Protection", "0");
@@ -862,19 +862,23 @@ await mountPeerPublicApi(app, { authMiddleware, relayDb, loadDynamicBackends });
 
 // --- Start Server ---
 
-// boot/late-mounts.js — calls routes, LLM-router, companion proxy, extension proxy
-// S1: returns all three handles for WS wiring in the listen callback
-const { setupCallsSignaling: _setupCallsSignaling, setupCompanionProxy: _setupCompanionProxy, extensionProxyWsSetup: _extensionProxyWsSetup } = await mountLateRoutes(app, { dashboardAuth });
+// boot/late-mounts.js — calls routes, LLM-router, extension proxy
+// S1: returns both handles for WS wiring in the listen callback
+const { setupCallsSignaling: _setupCallsSignaling, extensionProxyWsSetup: _extensionProxyWsSetup } = await mountLateRoutes(app, { dashboardAuth });
 
 // After every router mounted here: a body-parser refusal (the global 1mb parser above all)
 // answers a fixed { error: "bad_body" } and one fixed log line. Express's default handler would
 // log, and echo outside production, the parser's message, which quotes body text that may hold
 // a pasted secret (credential card §10.3). Every other error passes on unchanged.
-// The companion proxy's routes (/companion/device-config and the /companion proxy) register
-// later, in post-listen; that is harmless because they have no body parser of their own, so a
-// body error can only come from the global parser above, which this handler already follows.
+// No router mounted after this point owns a body parser of its own, so a body error can only
+// come from the global parser above, which this handler already follows.
 const { bodyErrorHandler } = await import("./body-error-handler.js");
 app.use(bodyErrorHandler);
+
+// Every upgrade handler in this tree claims its own path before it awaits
+// (ws-upgrade-claim.js); this is what answers the paths NOBODY owns — a removed
+// surface has to read as refused, not as a socket that never gets an answer.
+const { installUnclaimedUpgradeFallback } = await import("../shared/ws-upgrade-claim.js");
 
 let proxyServer = null;
 
@@ -887,7 +891,6 @@ const server = app.listen(PORT, BIND, (error) => {
   // S2: called fire-and-forget; listen callback cannot await
   runPostListenSetup(server, app, {
     setupCallsSignaling: _setupCallsSignaling,
-    setupCompanionProxy: _setupCompanionProxy,
     extensionProxyWsSetup: _extensionProxyWsSetup,
     PORT,
     BIND,
@@ -909,6 +912,11 @@ const server = app.listen(PORT, BIND, (error) => {
   // only costs the proxy path.
   if (!noAuth) proxyServer = startActivatedProxySocket(app, server);
 });
+
+// Upgrades to a path no handler owns get a 404 and a closed socket (see the import's
+// comment above). Registered on the main server; proxy-socket.js replays its listeners
+// onto the systemd-activated one, so Caddy's upgrades are answered the same way.
+installUnclaimedUpgradeFallback(server);
 
 // A supervised restart closes the TCP listener in post-listen; close the proxy
 // listener alongside it, so no connection is left accepted on a dying process.

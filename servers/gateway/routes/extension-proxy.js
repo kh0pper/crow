@@ -17,8 +17,8 @@
  * would hand it a live, replayable dashboard session. Only the app's own
  * cookies are forwarded, and the backend's `Set-Cookie` responses are filtered
  * the same way and path-scoped under /proxy/<id>/. Both directions are ONE
- * shared helper (../proxy-cookie-filter.js) — the companion proxy on
- * /companion/* uses it too — and the names live in ONE list
+ * shared helper (../proxy-cookie-filter.js) — every gateway reverse proxy that
+ * serves an app on the dashboard's origin uses it — and the names live in ONE list
  * (../cookie-names.js) shared with every setter — see
  * tests/extension-proxy-cookies.test.js.
  *
@@ -48,9 +48,10 @@ import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { SESSION_COOKIE } from "../cookie-names.js";
 import { scopeProxySetCookieHeader, stripCrowCookiesForBackend, stripSetCookieFromHandshake } from "../proxy-cookie-filter.js";
+import { claimUpgrade } from "../../shared/ws-upgrade-claim.js";
 
-// The Set-Cookie rules themselves live in ONE shared module (a shared helper,
-// because the companion proxy on /companion/* needs exactly the same policy).
+// The Set-Cookie rules themselves live in ONE shared module (shared by every
+// gateway reverse proxy, so one of them cannot drift).
 // Re-exported here so this file stays the entry point the cookie tests read.
 export { rewriteProxySetCookie, setCookieName } from "../proxy-cookie-filter.js";
 
@@ -500,6 +501,9 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         // A path BOUNDARY: /proxy/browser-x/… is not /proxy/browser.
         const url = String(req.url || "");
         if (url === proxyPath || url.startsWith(proxyPath + "/") || url.startsWith(proxyPath + "?")) {
+          // Ours — claimed before the auth await below, so ws-upgrade-claim.js's fallback
+          // (the 404 for an upgrade nobody owns) leaves this socket alone.
+          claimUpgrade(req);
           // A token-carrying upgrade only from a page on the dashboard's own origin.
           if (ext.wsHostTokenEnv && !upgradeFromOwnOrigin(req)) {
             socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");

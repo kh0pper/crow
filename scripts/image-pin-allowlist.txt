@@ -4,7 +4,6 @@
 #
 # Format: <path> <image as written> [ # reason ]
 # An entry that no longer matches a compose file is STALE and fails the suite.
-bundles/companion/docker-compose.yml  crow-companion  # built locally from bundles/companion
 bundles/sdxl/docker-compose.yml  crow-sdxl  # built locally from bundles/sdxl
 bundles/scratch-offline/docker-compose.yml  crow-scratch-offline:latest  # built locally; its :latest IS the local build tag
 servers/gateway/preview/container/compose.yml  ${CROW_PREVIEW_IMAGE}  # built locally per instance; the tag is minted at boot

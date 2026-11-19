@@ -1000,6 +1000,9 @@ export function setupWebSocket(server) {
   server.on("upgrade", async (req, socket, head) => {
     const url = req.url || "";
     if (!url.startsWith("/api/meta-glasses/session")) return;
+    // Ours: claimed before the awaits below, so the gateway's fallback (servers/shared/
+    // ws-upgrade-claim.js) never answers this request with its 404.
+    req.crowWsClaimed = true;
 
     const refuse = (status, reason) => { try { socket.write(`HTTP/1.1 ${status} ${reason}\r\n\r\n`); } catch {} socket.destroy(); };
     // An upgrade never passes through Express, so the gateway's Funnel refusal and network

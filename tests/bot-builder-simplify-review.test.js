@@ -406,14 +406,14 @@ test("a refused glasses save (row changed meanwhile) binds, unbinds and re-profi
   assert.equal(await devices(), before, "no device was bound, unbound or changed");
 });
 
-test("a refused new-kiosk save pairs no device", async () => {
+test("a save that names a new kiosk pairs no device: the AI Companion's pairing path is gone", async () => {
   await putBot("kRef", { models: { default: "test-prov/model-a" }, gateways: [{ type: "companion" }] });
   const before = await devices();
   const body = (await allSaveForms("kRef")).find((f) => f.tb === "basics").body;
   body.gw_new_kiosk_name = "Hall display";
-  const res = await refusedSave("kRef", body);
-  assert.match(res.redirected, /error=/);
-  assert.equal(await devices(), before, "no kiosk device was created");
+  const res = await post(body);
+  assert.match(res.redirected, /saved=1/, res.redirected);
+  assert.equal(await devices(), before, "no kiosk device was created: companion-kind devices are never created any more");
 });
 
 test("an accepted save of a bot with a glasses gateway binds, unbinds and re-profiles no device, and keeps the stored record", async () => {

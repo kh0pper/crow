@@ -6,7 +6,7 @@
 # tailnet peers) can use it for inference — e.g. a glasses bot on another
 # instance. It binds the specific Tailscale IP, NOT 0.0.0.0, so it is reachable
 # from the tailnet only, never the LAN or public internet. The loopback binding
-# is kept here too so the local companion's localhost path is unaffected
+# is kept here too so the local voice path over localhost is unaffected
 # regardless of how Compose merges the ports list.
 #
 # CROW_TAILSCALE_IP defaults to 127.0.0.1: a forgotten variable falls back to

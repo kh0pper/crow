@@ -107,7 +107,7 @@ function composeBuildsAnything(text) {
  *
  * A compose service with a `build:` section, or one whose image is in
  * scripts/image-pin-allowlist.txt, has nothing to download: `compose pull`
- * failing on it is expected (companion, sdxl, scratch-offline) and must stay a
+ * failing on it is expected (sdxl, scratch-offline) and must stay a
  * job-log line, or every install of a locally built bundle rings once a day.
  *
  * Attribution first: the error output usually names the image it could not

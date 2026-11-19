@@ -30,7 +30,6 @@ tools:
 - Calls happen in the browser at the `/calls` page
 - Audio calling works out of the box
 - Video calling available when camera is enabled (Phase 2)
-- If the AI Companion is also installed, users get avatar representation modes
 
 ### Ending a call
 - Users hang up from the call page UI

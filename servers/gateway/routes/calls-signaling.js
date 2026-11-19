@@ -2,7 +2,7 @@
  * Calls WebSocket Signaling Relay
  *
  * Provides /calls/ws WebSocket endpoint for peer-to-peer call signaling.
- * Independent of the companion's WebSocket (OLV). Works standalone.
+ * Works standalone.
  *
  * Room lifecycle:
  *   - Room created on first peer join
@@ -19,6 +19,7 @@
 
 import { WebSocketServer } from "ws";
 import { validateCallRoomToken } from "./calls-page.js";
+import { claimUpgrade } from "../../shared/ws-upgrade-claim.js";
 
 const MAX_PEERS = parseInt(process.env.CROW_CALLS_MAX_PEERS || "4", 10);
 const RECONNECT_WINDOW_MS = 30_000; // 30s window for reconnection without triggering leave
@@ -147,8 +148,8 @@ setInterval(() => {
 /**
  * Set up the calls WebSocket signaling relay.
  *
- * IMPORTANT: This upgrade handler MUST be registered BEFORE companion
- * and extension proxy handlers to get first crack at /calls/ws.
+ * IMPORTANT: This upgrade handler MUST be registered BEFORE the extension
+ * proxy handler to get first crack at /calls/ws.
  * When /calls/ws matches, the socket is consumed (upgraded). When it
  * doesn't match, return lets subsequent handlers process it.
  *
@@ -160,6 +161,9 @@ export default function setupCallsSignaling(server) {
   server.on("upgrade", (req, socket, head) => {
     const url = req.url || "";
     if (!url.startsWith("/calls/ws")) return; // Let other handlers process
+    // Ours: claimed before any await, so the gateway's fallback (ws-upgrade-claim.js)
+    // never answers this request with its 404.
+    claimUpgrade(req);
 
     // Parse query params
     const params = new URL(url, "http://localhost").searchParams;

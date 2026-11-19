@@ -30,7 +30,7 @@ test("switch on: ollama (gpu_arch only) and faster-whisper-server (stt seed) are
   process.env.CROW_DISABLE_MODEL_ORCHESTRATION = "1";
   assert.equal(bundleOrchestrationRefusal("ollama")?.code, "MODEL_ORCHESTRATION_DISABLED");
   assert.equal(bundleOrchestrationRefusal("faster-whisper-server")?.code, "MODEL_ORCHESTRATION_DISABLED");
-  assert.equal(bundleOrchestrationRefusal("companion"), null);
+  assert.equal(bundleOrchestrationRefusal("caddy"), null);
 });
 
 test("switch on: a non-model bundle passes; switch off: a model bundle passes", () => {

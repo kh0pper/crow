@@ -72,7 +72,7 @@ export async function loadExternalPanels() {
       console.warn(`[dashboard] Failed to load panel ${id}:`, err.message);
     }
 
-    // Check for companion routes file ({id}-routes.js)
+    // Check for the panel's optional routes file ({id}-routes.js)
     const routesPath = join(panelsDir, `${id}-routes.js`);
     if (existsSync(routesPath)) {
       try {

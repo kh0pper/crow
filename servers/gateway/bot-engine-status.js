@@ -36,8 +36,8 @@ const BOT_ENGINE_BUNDLE_ID = "bot-engine";
  * gmail does — a perch turn runs handleInbound(), which spawns pi — even
  * though its record carries no credentials: GATEWAY_REQUIRED_FIELDS.perch is
  * [], so a bare {type:"perch"} record is complete by construction and the
- * attach gate fires on engine state alone. Device/voice types (glasses,
- * companion) and crow-messages are deliberately absent.
+ * attach gate fires on engine state alone. Device/voice types (glasses — retired,
+ * companion — retired) and crow-messages are deliberately absent.
  */
 export const ENGINE_CHANNELS = ["gmail", "discord", "telegram", "slack", "perch"];
 

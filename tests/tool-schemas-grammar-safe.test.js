@@ -67,7 +67,7 @@ test("every published tool schema is typed all the way down (no {} and no $ref)"
 test("the inventory covers every surface: core, router, board, every bundle factory, the re-publishers", async () => {
   const { entries, bundleFactories } = await collectPublishedToolSchemas();
   const sources = new Set(entries.map((e) => e.source));
-  for (const s of ["core:memory", "core:projects", "core:sharing", "core:storage", "core:blog", "core:wm", "core:crow-core",
+  for (const s of ["core:memory", "core:projects", "core:sharing", "core:storage", "core:blog", "core:crow-core",
     "gateway:router", "gateway:board", "republish:gateway-proxy", "republish:crow-remote-proxy"]) {
     assert.ok(sources.has(s), `missing source ${s}`);
   }

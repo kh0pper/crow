@@ -61,7 +61,7 @@ actAsServe();
 
 let server = null;
 let port = 0;
-let companionRoom = null;
+let inviteRoom = null;
 let callsRoom = null;
 
 before(async () => {
@@ -74,14 +74,14 @@ before(async () => {
   raw.pragma("wal_checkpoint(TRUNCATE)");
   raw.close();
 
-  // A companion room, in the shape sendRoomInvite() (servers/sharing/rooms.js)
+  // A room invite, in the shape sendRoomInvite() (servers/sharing/rooms.js)
   // writes it: this is the invitation URL a REMOTE guest opens.
-  companionRoom = { room: "room-companion-1", token: "companion-token-1" };
-  _activeRooms.set(companionRoom.room, {
-    token: companionRoom.token,
+  inviteRoom = { room: "room-invite-1", token: "invite-token-1" };
+  _activeRooms.set(inviteRoom.room, {
+    token: inviteRoom.token,
     hostCrowId: "crow:host-example",
     hostName: "host",
-    companionUrl: "/companion/?room=" + companionRoom.room + "&token=" + companionRoom.token,
+    companionUrl: "/calls?room=" + inviteRoom.room + "&token=" + inviteRoom.token,
     createdAt: Date.now(),
     participants: new Set(),
   });
@@ -102,7 +102,7 @@ before(async () => {
 });
 
 after(() => {
-  _activeRooms.delete(companionRoom?.room);
+  _activeRooms.delete(inviteRoom?.room);
   if (server) server.close();
   rmSync(root, { recursive: true, force: true });
 });
@@ -194,15 +194,15 @@ test("another kind's signature never authenticates the bot kind (MAC domain)", a
   assertNoCredentials(r, "board-kind signature");
 });
 
-// --- 5. a room credential: the companion page ------------------------------
-test("a companion room credential (?room=&token=, the invitation URL) → 200; a wrong token → 401", async () => {
+// --- 5. a room credential: the invitation URL -------------------------------
+test("a room credential (?room=&token=, the invitation URL) → 200; a wrong token → 401", async () => {
   assertCredentials(
-    await turn({ query: "?room=" + encodeURIComponent(companionRoom.room) + "&token=" + encodeURIComponent(companionRoom.token) }),
-    "companion room",
+    await turn({ query: "?room=" + encodeURIComponent(inviteRoom.room) + "&token=" + encodeURIComponent(inviteRoom.token) }),
+    "invite room",
   );
   assertNoCredentials(
-    await turn({ query: "?room=" + encodeURIComponent(companionRoom.room) + "&token=wrong" }),
-    "companion room, wrong token",
+    await turn({ query: "?room=" + encodeURIComponent(inviteRoom.room) + "&token=wrong" }),
+    "invite room, wrong token",
   );
 });
 
@@ -215,7 +215,7 @@ test("a calls room created by POST /api/rooms (?room=&token=) → 200", async ()
 });
 
 // --- 6b. the 24 h room TTL is enforced, not just the token compare ---------
-test("a companion room past its 24 h TTL → 401, and the store drops it", async () => {
+test("a room invite past its 24 h TTL → 401, and the store drops it", async () => {
   // The sharing store reads exactly one field for expiry — room.createdAt — so
   // an expired room is a room written with a createdAt older than the TTL.
   // Placed in _activeRooms, the map validateRoomToken() itself reads.
@@ -225,14 +225,14 @@ test("a companion room past its 24 h TTL → 401, and the store drops it", async
     token,
     hostCrowId: "crow:host-example",
     hostName: "host",
-    companionUrl: "/companion/?room=" + room + "&token=" + token,
+    companionUrl: "/calls?room=" + room + "&token=" + token,
     createdAt: Date.now() - CALL_ROOM_TTL_MS - 1000,
     participants: new Set(),
   });
   try {
     assertNoCredentials(
       await turn({ query: "?room=" + encodeURIComponent(room) + "&token=" + encodeURIComponent(token) }),
-      "expired companion room",
+      "expired room invite",
     );
     assert.equal(_activeRooms.has(room), false, "the verifier deletes the expired room it was handed");
   } finally {
@@ -270,9 +270,9 @@ test("the room token compare is constant time and refuses a missing/non-string t
 
   // And through the sharing verifier itself (the calls-room one is exercised
   // over HTTP above; it is the same helper).
-  assert.equal(validateRoomToken(companionRoom.room, undefined), null);
-  assert.equal(validateRoomToken(companionRoom.room, 42), null);
-  assert.equal(validateRoomToken(companionRoom.room, companionRoom.token)?.roomCode, companionRoom.room);
+  assert.equal(validateRoomToken(inviteRoom.room, undefined), null);
+  assert.equal(validateRoomToken(inviteRoom.room, 42), null);
+  assert.equal(validateRoomToken(inviteRoom.room, inviteRoom.token)?.roomCode, inviteRoom.room);
 });
 
 // --- 7. Funnel ------------------------------------------------------------

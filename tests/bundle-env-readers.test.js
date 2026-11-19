@@ -43,7 +43,6 @@ test("restore-scratch.sh reads the admin user through envfile.py (no sed)", () =
 
 test("static guard: the remaining raw readers import the codec and dropped their ad-hoc parsers", () => {
   const files = [
-    "bundles/companion/settings-section.js",
     "servers/gateway/migrations.js",
     "bundles/peertube/scripts/configure-storage.mjs",
     "bundles/pixelfed/scripts/configure-storage.mjs",

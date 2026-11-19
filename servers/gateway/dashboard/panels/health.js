@@ -229,7 +229,7 @@ export default {
     // flash may name and the env key a compose flash may name (the Nest re-checks
     // both before it renders them).
     const flash = (typeof req.query?.flash === "string" &&
-      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error", "fixit_not_pending", "fixit_addon_stale", "fixit_addon_unwalled", "fixit_owner_only", "fixit_compose_needs_key"].includes(req.query.flash))
+      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error", "fixit_not_pending", "fixit_addon_stale", "fixit_addon_unwalled", "fixit_owner_only", "fixit_compose_needs_key", "fixit_retired_removed", "fixit_retired_removing"].includes(req.query.flash))
       ? req.query.flash
       : null;
     const flashAddon = typeof req.query?.addon === "string" ? req.query.addon : null;

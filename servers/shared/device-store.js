@@ -9,6 +9,12 @@
  *   kiosk_settings, bound_bot_id }
  *
  * device_kind: "glasses" | "companion" | "kiosk".
+ *   "companion" is LEGACY and never created: the AI Companion (Open-LLM-VTuber) was
+ *   retired, so nothing pairs a companion-kind device any more and the Bot Builder no
+ *   longer offers that channel. The kind stays in the accepted set on purpose — dropping
+ *   it would coerce a surviving record to "glasses" (normalizeKind below) and it would
+ *   then show up in the glasses list. Existing records are read, never rewritten, and no
+ *   route deletes them. `companion_features` is likewise readable and no longer written.
  * A KIOSK token is hashed domain-separated (sha256("crow-kiosk-v1:"+token)) and
  * verifies only through verifyToken(..., {kind:"kiosk"}), so no glasses route
  * (and no older installed copy of this store) can ever accept it (ruling R2).

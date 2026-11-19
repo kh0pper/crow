@@ -1,21 +1,20 @@
 /**
- * Gateway LLM-router route — folds the standalone companion model-proxy
- * (scripts/companion/model-proxy.mjs, formerly companion-model-proxy.service on
- * loopback :11435) INTO the gateway as an OpenAI-compatible route.
+ * Gateway LLM-router route — folds the old standalone voice model proxy
+ * (a retired systemd service on loopback :11435) INTO the gateway
+ * as an OpenAI-compatible route.
  *
  *   POST /llm/v1/chat/completions   pick fast vs escalate, forward + stream
  *                                   (or a door forward when explicitly addressed)
  *   POST /llm/v1/{completions,embeddings,rerank}   door forwards only
  *   POST /llm/p/<provider>/v1/...    the provider-scoped door
  *   POST /llm/c/<provider>/v1/...    the cloud door (consented cloud rows only)
- *   GET  /llm/v1/models             companion ids + forwardable door models
+ *   GET  /llm/v1/models             voice ids + forwardable door models
  *
  * It does ONE job: choose which local model answers each turn, then forward the
- * request verbatim and stream the response straight back. The companion
- * (Open-LLM-VTuber, host-networked) and the Meta Glasses both point their LLM
- * base_url here, so each keeps running its own tool loop — MCP tools, the
- * client-side crow_wm window/media control, and token streaming all keep
- * working; this route only chooses the upstream.
+ * request verbatim and stream the response straight back. The Meta Glasses and
+ * the Kiosk display both point their LLM base_url here, so each keeps running
+ * its own tool loop — MCP tools, the client-side crow_wm window/media control,
+ * and token streaming all keep working; this route only chooses the upstream.
  *
  * Routing (ported verbatim from model-proxy.mjs):
  *   - default             → fast model  (crow-voice / qwen3.5-4b, :8011)
@@ -24,18 +23,18 @@
  *     use instead of calling; the 35B is the far better tool-caller).
  *
  * SECURITY: mounted WITHOUT dashboardAuth. isAllowedNetwork() rejects bare
- * loopback (auth.js), and the host-networked companion arrives as loopback, so
+ * loopback (auth.js), and a host-networked voice device arrives as loopback, so
  * password/network auth here would 403 every legitimate turn. The gateway
  * listens on ALL interfaces (LAN + tailnet + loopback), so binding is not a
- * boundary. Every /llm/v1 and /llm/p request — the companion path included
- * (Casey decision 2026-10-02: every companion device is on Tailscale) — door
+ * boundary. Every /llm/v1 and /llm/p request — the voice path included
+ * (Casey decision 2026-10-02: every voice device is on Tailscale) — door
  * addressing (provider path /llm/p/<provider>/v1, the X-Crow-Provider header,
  * a qualified "<provider>/<model>" id, or a bare id that resolves to a
  * forwardable row) and /llm/acquire are limited to loopback and the tailnet
  * (100.64.0.0/10, fd7a:115c:a1e0::/48) or a bearer token. Funnel is refused
  * here (first middleware, so CROW_DASHBOARD_PUBLIC cannot bypass it) and by
  * the global rejectFunneledMiddleware (asserted in tests/auth-network.test.js).
- * Mirrors routes/companion-proxy.js. NOT a pi gateway: it never spawns pi.
+ * NOT a pi gateway: it never spawns pi.
  *
  * IDENTITY (phase A1, SHADOW): every one of those three checks now also asks
  * models/door-identity.js WHO is calling — loopback, local-token, peer-token,
@@ -107,7 +106,7 @@ const ESCALATE_RE = /^\s*!escalate\b[:,]?\s*/i;
 // user's message reads like an action request, route to the big model (a far
 // better tool-caller). Set COMPANION_TOOL_ESCALATION=0 to disable.
 const TOOL_ESCALATION = (process.env.COMPANION_TOOL_ESCALATION || "1") !== "0";
-// Action verbs/targets that map to the companion's crow_wm + storage tools
+// Action verbs/targets that map to a voice turn's crow_wm + storage tools
 // (open/play media, transport control, search, files, image gen, calls). Word-
 // boundary, case-insensitive. False positives only cost a slower (still-correct)
 // turn; false negatives look like a hang — so this leans toward escalating.
@@ -168,14 +167,15 @@ function authHeaders(apiKey) {
 }
 
 /**
- * The model id the AI Companion's generated config sends (bundles/companion/scripts/generate-config.py). Only a
- * request naming exactly this id gets the turn context below: a request with no model, an unknown id or a bare
- * fast/escalate id (a peer, pi-lab, an outside client) is forwarded as it came.
+ * The dedicated voice-turn model id ("crow-companion"). Only a request naming exactly this id gets the turn
+ * context below: a request with no model, an unknown id or a bare fast/escalate id (a peer, pi-lab, an outside
+ * client) is forwarded as it came. The voice route still accepts it (the retired AI Companion used to send it);
+ * renaming it belongs to the voice redesign that owns /llm/v1.
  */
 export const COMPANION_TURN_MODEL = "crow-companion";
 
 /**
- * The bare model ids a request may name and still get the companion heuristics: the resolved fast and escalate
+ * The bare model ids a request may name and still get the voice heuristics: the resolved fast and escalate
  * ids, the raw constants' ids (a client configured before a role was chosen keeps working) and
  * COMPANION_TURN_MODEL. With the raw keys this is exactly the old constant list.
  */
@@ -658,13 +658,13 @@ function stripEscalate(body) {
 }
 
 /**
- * The companion's turn context (dates follow-up to queue item 17a). Open-LLM-VTuber sends a static system prompt and
+ * The voice turn's context (dates follow-up to queue item 17a). A voice client sends a static system prompt and
  * no date, so "add a dentist appointment Monday" had nothing to count from. On a request naming COMPANION_TURN_MODEL,
  * the LAST user message gets [Now] (every turn) and [Dates] (when the user's words name a relative day), closed by
- * the [Note] line (context-echo.js withTurnContext). Never the system message or an earlier message: OLVV keeps the
- * raw text in its memory, so history (and the prefix cache over it) matches turn to turn. Server zone (OLVV sends
- * none). Skipped when the message already carries a [Now]/[Dates] line or a dashboard-style "Current date and
- * time:" stamp. COMPANION_TURN_CONTEXT=0 turns it off (read per request).
+ * the [Note] line (context-echo.js withTurnContext). Never the system message or an earlier message: a voice client
+ * keeps the raw text in its memory, so history (and the prefix cache over it) matches turn to turn. Server zone (the
+ * client sends none). Skipped when the message already carries a [Now]/[Dates] line or a dashboard-style "Current date
+ * and time:" stamp. COMPANION_TURN_CONTEXT=0 turns it off (read per request).
  * → the injected context text (for the echo guard), or null when nothing was added.
  */
 const ALREADY_STAMPED = /^\[(Now|Dates)\] |Current date and time:/m;
@@ -908,7 +908,7 @@ async function handleChat(req, res, deps) {
   // tests/gpu-orchestrator-native.test.js's "maybeAcquireLocalProvider does
   // not early-out on a native provider's null bundleId"). What this route
   // does NOT have is chat.js's `provider_warming`/`error` SSE events — this
-  // is a raw OpenAI-compat proxy for the companion/glasses LLM loop, which
+  // is a raw OpenAI-compat proxy for the voice/glasses LLM loop, which
   // forwards the upstream body verbatim and never authors its own SSE
   // frames, so there is no event channel to put a "warming" notice on. The
   // companion sees a warm-up simply as this await taking longer, same as
@@ -997,7 +997,7 @@ async function handleChat(req, res, deps) {
   res.status(upstream.status);
   res.set("Content-Type", upstream.headers.get("content-type") || "application/json");
   if (!upstream.body) return res.end();
-  // Tap the pass-through to meter usage (companion/glasses). Bytes are forwarded
+  // Tap the pass-through to meter usage (voice/glasses). Bytes are forwarded
   // unchanged; we keep only a bounded tail because the OpenAI usage block rides
   // the final include_usage SSE frame (or is the whole non-streaming JSON body).
   // An injected companion turn goes through the echo guard (not an error body: that passes as it came); the

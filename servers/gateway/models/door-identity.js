@@ -11,7 +11,7 @@
  * caller is at the door:
  *
  *   loopback      a direct loopback socket with no forwarding and no
- *                 tailscale-* header (the companion, r4, the bots) — always
+ *                 tailscale-* header (a voice device, r4, the bots) — always
  *                 admitted, and no credential is ever read for it;
  *   local-token   the bearer is this instance's local MCP token or its models
  *                 token (exactly what the door's own bearer check accepts);

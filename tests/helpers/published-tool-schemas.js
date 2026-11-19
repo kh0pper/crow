@@ -165,7 +165,6 @@ export async function collectPublishedToolSchemas() {
       ["sharing", "../../servers/sharing/server.js", "createSharingServer"],
       ["storage", "../../servers/storage/server.js", "createStorageServer"],
       ["blog", "../../servers/blog/server.js", "createBlogServer"],
-      ["wm", "../../servers/wm/server.js", "createWmServer"],
     ];
     for (const [id, path, fn] of core) {
       await attempt(`core:${id}`, async () => (await import(path))[fn](dbPath));

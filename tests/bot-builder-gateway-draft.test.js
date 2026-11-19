@@ -1,11 +1,14 @@
 /**
- * W1-4 regression: selecting a device-bound gateway type (companion/glasses)
- * in the Gateways tab posts a type-only save BEFORE a device is chosen (the
- * dropdown's auto-submit). The handler used to drop the record entirely
- * (`def.gateways = []`) when no device id was present, so the re-render —
- * which derives the dropdown from def.gateways[0].type — snapped back to
- * gmail and the companion fields were unreachable. The type must persist as
- * a device-less draft record.
+ * W1-4 regression: selecting a device-bound gateway type in the Gateways tab posts a
+ * type-only save BEFORE a device is chosen (the dropdown's auto-submit). The handler used
+ * to drop the record entirely (`def.gateways = []`) when no device id was present, so the
+ * re-render — which derives the dropdown from def.gateways[0].type — snapped back to gmail
+ * and the type's fields were unreachable. The type must persist as a device-less draft
+ * record.
+ *
+ * Both device-bound types are RETIRED now (glasses answer as Crow; the AI Companion was
+ * removed), so what this file pins has shifted: a save of either type is a NO-OP that
+ * neither rewrites the stored record, nor binds a device, nor pairs a companion-kind one.
  */
 import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -65,39 +68,39 @@ async function readDef() {
   return JSON.parse(rows[0].definition);
 }
 
-test("device-less companion save persists the type as a draft (no gmail snap-back)", async () => {
-  const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_hearing_style: "push_to_talk" } },
-    res, { db }
-  );
-  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
-  const def = await readDef();
-  assert.equal(def.gateways[0]?.type, "companion", "type must persist without a device");
-  assert.equal(def.gateways[0]?.device_id, undefined, "no device_id on a draft record");
-  assert.equal(def.companion_features?.hearing_style, "push_to_talk");
+test("a companion save is a no-op: the record is kept, nothing is bound and no device is created", async () => {
+  const { listDevices } = await import("../servers/shared/device-store.js");
+  const priorDef = await readDef();
+  const priorDevices = JSON.stringify(await listDevices(db));
+  for (const extra of [{}, { gw_new_kiosk_name: "Kitchen Tablet" }, { gw_device_id: "kiosk-kitchen-tablet" }, { gw_face_tracking: "on" }]) {
+    const res = mkRes();
+    await handleBotBuilderPost({ body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", ...extra } }, res, { db });
+    assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+    const def = await readDef();
+    assert.deepEqual(def.gateways, priorDef.gateways, "a retired channel never rewrites the stored record");
+    assert.deepEqual(def.companion_features, priorDef.companion_features, "companion_features is no longer written");
+  }
+  assert.equal(JSON.stringify(await listDevices(db)), priorDevices, "no companion-kind device is ever created");
+  assert.equal((await listDevices(db)).some((d) => d.device_kind === "companion"), false);
 });
 
-test("companion save with gw_face_tracking=on persists face_tracking: true", async () => {
+test("a stored companion record with a device_id loads and saves without error (tolerance rule)", async () => {
+  // A public install may still carry one. It must read and re-save: the channel is
+  // retired, not rejected as unknown.
+  await db.execute({
+    sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'draft-bot'",
+    args: [JSON.stringify({ gateways: [{ type: "companion", device_id: "kiosk-legacy" }], companion_features: { avatar: "heron" }, tools: {}, models: {} })],
+  });
   const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_face_tracking: "on" } },
-    res, { db }
-  );
+  await handleBotBuilderPost({ body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion" } }, res, { db });
   assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
   const def = await readDef();
-  assert.equal(def.companion_features?.face_tracking, true, "checked box persists true");
-});
-
-test("companion save with gw_face_tracking absent persists face_tracking: false", async () => {
-  const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion" } },
-    res, { db }
-  );
-  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
-  const def = await readDef();
-  assert.equal(def.companion_features?.face_tracking, false, "absent checkbox persists false");
+  assert.equal(def.gateways[0]?.type, "companion", "the stored record survives a save");
+  assert.equal(def.gateways[0]?.device_id, "kiosk-legacy");
+  await db.execute({
+    sql: "UPDATE pi_bot_defs SET definition = ? WHERE bot_id = 'draft-bot'",
+    args: [JSON.stringify({ gateways: [{ type: "gmail", address: "x@y.z", allowlist: [] }], tools: {}, models: {} })],
+  });
 });
 
 test("glasses are retired: a glasses save (with or without a device) neither stores a record nor binds a device", async () => {
@@ -115,52 +118,16 @@ test("glasses are retired: a glasses save (with or without a device) neither sto
   }
 });
 
-test("typed kiosk name pairs + binds a companion device in one Save (no glasses bundle needed)", async () => {
-  const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_new_kiosk_name: "Kitchen Tablet", gw_hearing_style: "wake_word" } },
-    res, { db }
-  );
-  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
-  const def = await readDef();
-  assert.equal(def.gateways[0]?.type, "companion");
-  assert.equal(def.gateways[0]?.device_id, "kiosk-kitchen-tablet", "device id derived from the name");
-  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
-  const devices = await listDevices(db);
-  const d = devices.find((x) => x.id === "kiosk-kitchen-tablet");
-  assert.ok(d, "device must exist in the store");
-  assert.equal(d.device_kind, "companion");
-  assert.equal(d.bound_bot_id, "draft-bot", "device must be bound to the bot");
-  assert.equal(d.name, "Kitchen Tablet");
+test("a retired companion channel is never offered to a NEW bot (render check)", async () => {
+  const { CHANNEL_TYPES } = await import("../servers/gateway/dashboard/panels/bot-builder/tab-basics.js");
+  // Still a known type (a stored record must render read-only), but the editor filters it
+  // out of the picker unless the bot already has it.
+  assert.ok(CHANNEL_TYPES.includes("companion"), "the type stays known");
+  const { GATEWAY_REQUIRED_FIELDS } = await import("../servers/gateway/dashboard/panels/bot-builder/gateway-fields.js");
+  assert.deepEqual(GATEWAY_REQUIRED_FIELDS.companion, [], "a retired record needs nothing to be 'complete'");
 });
 
-test("kiosk name collision gets a numeric suffix instead of re-pairing the existing device", async () => {
-  const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_new_kiosk_name: "Kitchen Tablet" } },
-    res, { db }
-  );
-  assert.match(res.redirected, /saved=1/);
-  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
-  const devices = await listDevices(db);
-  assert.ok(devices.find((x) => x.id === "kiosk-kitchen-tablet-2"), "second device must get -2 suffix");
-});
-
-test("selected device wins over a typed name", async () => {
-  const res = mkRes();
-  await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_device_id: "kiosk-kitchen-tablet", gw_new_kiosk_name: "Ignored Name" } },
-    res, { db }
-  );
-  assert.match(res.redirected, /saved=1/);
-  const def = await readDef();
-  assert.equal(def.gateways[0]?.device_id, "kiosk-kitchen-tablet");
-  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
-  const devices = await listDevices(db);
-  assert.ok(!devices.find((x) => x.name === "Ignored Name"), "no device created when one was selected");
-});
-
-test("switching back to gmail still works after a draft", async () => {
+test("switching back to gmail still works after a retired-channel save", async () => {
   // Complete gmail record → the engine-attach gate (Task 7) would fire if
   // the engine resolved "absent"; pin "ready" so this test is hermetic on
   // any host, not just one with a global pi install.

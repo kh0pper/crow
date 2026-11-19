@@ -129,17 +129,18 @@ test("the bell reads the dashboard language", async () => {
 // ── build-only images do not ring (a service this repo builds has nothing to
 // pull, so `compose pull` failing on it is expected, not news) ──
 
-/** The real companion compose shapes: `build:` + a local `image:` tag. */
-const COMPANION_COMPOSE = [
+/** A build-only compose shape: `build:` + a local `image:` tag (the form sdxl and
+ *  scratch-offline ship). */
+const BUILT_COMPOSE = [
   "services:",
-  "  companion:",
+  "  app:",
   "    build:",
   "      context: .",
   "      dockerfile: Dockerfile",
-  "    image: crow-companion",
-  "    container_name: crow-companion",
+  "    image: crow-built-example",
+  "    container_name: crow-built-example",
 ].join("\n");
-const COMPANION_ALLOWLIST = "bundles/companion/docker-compose.yml  crow-companion  # built locally\n";
+const BUILT_ALLOWLIST = "bundles/built-example/docker-compose.yml  crow-built-example  # built locally\n";
 
 /** The real navidrome compose shape: a pulled image, no build. */
 const NAVIDROME_COMPOSE = [
@@ -149,10 +150,9 @@ const NAVIDROME_COMPOSE = [
   "    container_name: navidrome",
 ].join("\n");
 
-const PULL_DENIED = "Error response from daemon: pull access denied for crow-companion, repository does not exist";
-
+const PULL_DENIED = "Error response from daemon: pull access denied for crow-built-example, repository does not exist";
 test("the compose services are read as written (build flag + image)", () => {
-  assert.deepEqual(parseComposeServices(COMPANION_COMPOSE), [{ name: "companion", image: "crow-companion", hasBuild: true }]);
+  assert.deepEqual(parseComposeServices(BUILT_COMPOSE), [{ name: "app", image: "crow-built-example", hasBuild: true }]);
   assert.deepEqual(parseComposeServices(NAVIDROME_COMPOSE), [{ name: "navidrome", image: "deluan/navidrome:0.64.2", hasBuild: false }]);
 });
 
@@ -160,9 +160,9 @@ test("a build-only bundle's failed pull rings NO bell", async () => {
   const { db } = makeDb();
   const { calls, notify } = makeNotify();
   const row = await reportImagePullFailure({
-    bundleId: "companion",
-    composeText: COMPANION_COMPOSE,
-    allowlistText: COMPANION_ALLOWLIST,
+    bundleId: "built-example",
+    composeText: BUILT_COMPOSE,
+    allowlistText: BUILT_ALLOWLIST,
     output: PULL_DENIED,
     dbFactory: () => ({ ...db, close() {} }),
     notify,

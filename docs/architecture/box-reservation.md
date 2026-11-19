@@ -231,7 +231,7 @@ A plain `hold` by the owner may **preempt** a GPU job: a booking (or live hold) 
 
 | Actor | Behavior |
 |---|---|
-| `/llm/v1/chat/completions` escalation (companion, glasses, voice bots) | If the fast model is resident, the request is served by it with a system note that the larger model is unavailable. Otherwise `503` with `error.code = "box_reserved"`, an `error.reason`, and a `Retry-After`. Never a 240-second stall, never a start. |
+| `/llm/v1/chat/completions` escalation (glasses, kiosk, voice bots) | If the fast model is resident, the request is served by it with a system note that the larger model is unavailable. Otherwise `503` with `error.code = "box_reserved"`, an `error.reason`, and a `Retry-After`. Never a 240-second stall, never a start. |
 | `POST /llm/acquire` (bots warming a model) | `409` with `box_reserved` and the same `reason`. The bridge already treats a failed warm as "proceed without warming". |
 | Dashboard chat | An error event naming the owner and the expiry (`box_reserved`) instead of the generic "model did not load". |
 | Models panel start | `409 BOX_RESERVED` with the owner and the expiry. |

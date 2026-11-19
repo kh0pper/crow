@@ -293,6 +293,50 @@ Estas se adaptan automáticamente a los modos oscuro y claro. Consulta la secci�
 3. Inicia el gateway: `npm run gateway`
 4. Abre `http://localhost:3001/dashboard/<id>`
 
+## Rutas WebSocket: reclama tu ruta
+
+Un panel puede tener su propio WebSocket exportando `setupWebSocket(server)` desde su archivo `<id>-routes.js`. El gateway la llama una vez con su servidor HTTP, y tu función añade un listener de `"upgrade"`:
+
+```js
+// ~/.crow/panels/weather-routes.js
+import { WebSocketServer } from "ws";
+
+export function setupWebSocket(server) {
+  const wss = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    // Solo tu propia ruta, comparada de forma síncrona.
+    const path = String(req.url || "").split("?")[0];
+    if (path !== "/weather/ws") return;
+
+    // RECLAMA la ruta aquí, de forma síncrona, antes de tu primer `await`.
+    // (El código de la app importa claimUpgrade() de servers/shared/ws-upgrade-claim.js
+    // y la llama; esta propiedad es todo lo que ese helper escribe.)
+    req.crowWsClaimed = true;
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      ws.on("message", (m) => ws.send(String(m)));
+    });
+  });
+}
+```
+
+### El contrato de reclamación
+
+El gateway tiene varios manejadores de upgrade (`/calls/ws`, la sincronización entre instancias, la pantalla Kiosk, Meta Glasses, Studio, `/proxy/<id>`) y cada uno ignora las rutas que no son suyas. Para que una petición que no es de nadie no se quede colgada para siempre, el gateway también instala un respaldo que responde `404 Not Found` a un upgrade no reclamado y cierra el socket.
+
+Ese respaldo es lo que hace obligatorio reclamar: **un manejador debe reclamar su ruta de forma síncrona, antes de su primer `await`.** Si no, una ruta tuya se responderá como desconocida.
+
+- **Desde el código de la app** (un servidor, el lado servidor de un bundle de primera parte): `import { claimUpgrade } from "../shared/ws-upgrade-claim.js"` y llama `claimUpgrade(req)` como primera línea del manejador, antes de tus comprobaciones de autenticación.
+- **Desde un archivo de panel** (`~/.crow/panels/…`, que se carga fuera del árbol de la app) o cualquier código que no pueda importar ese módulo: escribe la misma propiedad, `req.crowWsClaimed = true;`. Es todo el contrato — exactamente lo que escribe el helper.
+
+Reclama antes de comprobar la autorización, y rechaza escribiendo tu propio estado (`403`, `401`) como lo harías normalmente. Una vez reclamado, el respaldo te deja el socket a ti, tanto si aceptas el upgrade como si lo rechazas.
+
+El respaldo tampoco toca un socket que ya ha sido RESPONDIDO, así que un manejador escrito antes de este contrato (o una copia instalada de uno) sigue funcionando: solo escribe su `404` en un socket al que nadie ha escrito ni un byte. Pero un manejador que espera algo antes de reclamar sí se rechaza, así que mantén la reclamación al principio.
+
+### Los upgrades no pasan por Express
+
+Un evento `"upgrade"` nunca llega al router de tu panel, así que no se ejecuta ningún middleware de Express para él: las comprobaciones de sesión y CSRF, y los rechazos de Funnel/red, tienen que aplicarlos tu propio manejador antes de aceptar la conexión.
+
 ## Compatibilidad con Turbo Drive
 
 El Crow's Nest navega entre paneles con [Turbo Drive](https://turbo.hotwired.dev/) cuando `CROW_ENABLE_TURBO=1` está configurado en el gateway. Turbo hace un fetch HTTP, intercambia el contenido de `<main>` en el body y mantiene en su lugar el `<head>` + la barra lateral + la barra del reproductor persistente. Los paneles normales funcionan sin cambios, pero algunos patrones requieren cuidado:

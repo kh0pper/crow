@@ -55,15 +55,14 @@ after(() => {
 /**
  * Files whose /dashboard/nest is not a link the operator taps into the nest:
  * the service worker's precached shell, the gateway's own route + its landing
- * check, the nest panel's peer links (an SSO launch target, another
- * instance's own nest), and the companion's window-manager map.
+ * check, and the nest panel's peer links (an SSO launch target, another
+ * instance's own nest).
  */
 const ALLOWED = new Set([
   "servers/gateway/public/sw.js",
   "servers/gateway/dashboard/index.js",
   "servers/gateway/dashboard/shell/request.js",
   "servers/gateway/dashboard/panels/nest/html.js",
-  "bundles/companion/scripts/crow-wm.js",
 ]);
 const SKIP_DIRS = new Set(["node_modules", "vendor", ".git"]);
 

@@ -1,6 +1,6 @@
 ---
 name: vllm
-description: Operational skill for the vLLM classroom inference engine — size the GPU, pick a model, wire into Maker Lab / Companion, diagnose common issues
+description: Operational skill for the vLLM classroom inference engine — size the GPU, pick a model, wire into Maker Lab, diagnose common issues
 triggers:
   - vllm
   - classroom engine
@@ -60,7 +60,7 @@ MAKER_LAB_LLM_ENDPOINT=http://<host>:8044/v1
 MAKER_LAB_LLM_MODEL=<same as VLLM_MODEL>
 ```
 
-Same two env vars wire into Companion (it's also OpenAI-compatible-speaking) and the gateway's BYOAI chat.
+Same two env vars wire into any OpenAI-compatible client on this box and the gateway's BYOAI chat.
 
 ## Workflow 4: diagnose common issues
 

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -136,10 +136,27 @@ test("smoke 2026-10-04 levers: hangover defaults to 450 ms (range 300-900); stt_
   assert.equal((await store.updateDeviceProfiles(db, "kiosk-a", { kiosk_settings: { stt_model: "default" } })).kiosk_settings.stt_model, "default");
 });
 
-test("companion devices keep their existing semantics (no migration in K1, ruling R1)", async () => {
+test("companion devices keep their existing semantics (legacy records), and nothing creates the kind any more", async () => {
   const db = await freshDb();
   await store.pairDevice(db, { id: "crow-kiosk", name: "Kiosk", device_kind: "companion" });
   assert.equal((await store.findDevice(db, "crow-kiosk")).device_kind, "companion");
+  // Read-only: a surviving record is never coerced to "glasses" (which would list it on the
+  // glasses page) and never deleted.
+  assert.equal((await store.updateDeviceProfiles(db, "crow-kiosk", { name: "Renamed" })).device_kind, "companion");
+  assert.equal(store.DEVICE_KINDS.includes("companion"), true, "the kind stays READABLE");
+  // No producer left: the AI Companion was removed, so the Bot Builder no longer offers the
+  // channel and no route pairs a companion-kind device. This is a static scan of the two
+  // places that used to write it.
+  const writes = [
+    join(ROOT, "servers/gateway/dashboard/panels/bot-builder/api-handlers.js"),
+    join(ROOT, "servers/gateway/dashboard/panels/bot-builder/save-handlers.js"),
+  ];
+  for (const file of writes) {
+    const src = readFileSync(file, "utf8");
+    assert.doesNotMatch(src, /device_kind:\s*["']companion["']/, `${file} must not create a companion-kind device`);
+    assert.doesNotMatch(src, /pairDevice\(/, `${file} must not pair a device any more`);
+  }
+  assert.equal(existsSync(join(ROOT, "bundles/companion")), false, "the bundle that claimed the kind is gone");
 });
 
 test("the meta-glasses shim re-exports the core store, from the repo AND from an installed copy", async () => {

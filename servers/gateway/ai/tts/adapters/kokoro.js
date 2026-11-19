@@ -13,9 +13,10 @@ import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../shar
 
 export default function createKokoroTtsAdapter(config) {
   // Normalize: strip trailing slashes AND a trailing `/v1` so the same profile
-  // works whether its baseUrl includes /v1 or not. The companion (OLVV) needs
-  // /v1 in the profile baseUrl, but this adapter appends /v1/audio/speech itself
-  // — without this strip, a shared /v1 profile would hit /v1/v1/audio/speech.
+  // works whether its baseUrl includes /v1 or not. A client that speaks the
+  // OpenAI-compatible API wants /v1 in the profile baseUrl, but this adapter
+  // appends /v1/audio/speech itself — without this strip, such a shared profile
+  // would hit /v1/v1/audio/speech.
   const baseUrl = (config.baseUrl || "http://localhost:8880")
     .replace(/\/+$/, "")
     .replace(/\/v1$/, "");

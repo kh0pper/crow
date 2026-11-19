@@ -62,7 +62,7 @@ async function main() {
   // 1. allowlist membership
   assert(isSyncable("ai_profiles"), "isSyncable('ai_profiles') true");
   assert(isSyncable("integration_foo"), "isSyncable('integration_foo') true (prefix match)");
-  assert(isSyncable("companion_persona"), "isSyncable('companion_persona') true (prefix match)");
+  assert(!isSyncable("companion_persona"), "isSyncable('companion_persona') false (the AI Companion was retired)");
   assert(!isSyncable("password_hash"), "isSyncable('password_hash') false");
   assert(!isSyncable(""), "isSyncable('') false");
 

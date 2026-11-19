@@ -7,9 +7,11 @@
  * here; this module does NOT receive authMiddleware/sessionManager/instructions/
  * dashboardAuth/relayDb.
  *
- * deps EXACTLY: { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup,
- *                 PORT, BIND, noAuth }
- * params: server, app (app used once for companion proxy)
+ * deps EXACTLY: { setupCallsSignaling, extensionProxyWsSetup, PORT, BIND, noAuth }
+ * params: server, app
+ *
+ * The AI Companion's proxy (which was the one consumer of `app` here) was
+ * retired with the bundle; nothing mounts under /companion any more.
  *
  * Internal relative specifiers re-anchored for boot/ (one level deeper).
  */
@@ -423,7 +425,7 @@ function sendAddonWallChangeNote(diff) {
 }
 
 export async function runPostListenSetup(server, app, deps) {
-  const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
+  const { setupCallsSignaling, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
   // Boot hardening (audit N1c-18): this instance's home, its data dir and
   // crow.db (+ the WAL/SHM SQLite keeps beside it) must be owner-only — they
@@ -461,7 +463,7 @@ export async function runPostListenSetup(server, app, deps) {
     }
   })();
 
-  // Wire up calls WebSocket signaling (MUST be before extension and companion)
+  // Wire up calls WebSocket signaling (MUST be before extension proxies)
   if (setupCallsSignaling) {
     setupCallsSignaling(server);
   }
@@ -508,11 +510,6 @@ export async function runPostListenSetup(server, app, deps) {
   // Wire up WebSocket upgrade for extension proxies (needs server instance)
   if (extensionProxyWsSetup) {
     extensionProxyWsSetup(server);
-  }
-
-  // Wire up companion proxy (needs server instance for WebSocket upgrade)
-  if (setupCompanionProxy) {
-    setupCompanionProxy(app, server);
   }
 
   // Wire up any panel-registered WebSocket setups (e.g. meta-glasses /session)

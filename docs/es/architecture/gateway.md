@@ -45,7 +45,6 @@ Transporte MCP moderno usado por la mayoría de los clientes.
 | `POST\|GET\|DELETE /storage/mcp` | crow-storage (condicional, requiere MinIO) |
 | `POST\|GET\|DELETE /blog-mcp/mcp` | crow-blog |
 | `POST\|GET\|DELETE /tools/mcp` | Proxy de herramientas externas |
-| `POST\|GET\|DELETE /wm/mcp` | Gestor de ventanas (cliente kiosk del companion; misma cadena de autenticación que cualquier otro montaje — token MCP local, OAuth o peer con exposición controlada) |
 | `POST\|GET\|DELETE /mcp` | crow-memory (alias de compatibilidad) |
 
 Las sesiones se gestionan mediante el header `mcp-session-id`. Las sesiones nuevas se crean en las solicitudes `initialize`. Cada transporte recibe un `EventStore` en memoria para reanudación.

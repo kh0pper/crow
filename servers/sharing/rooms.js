@@ -10,13 +10,13 @@ import { tokensEqual } from "../shared/token-compare.js";
 import { createNotification } from "../shared/notifications.js";
 import { getManagersOrNull } from "./managers.js";
 
-// In-memory room state — active companion room tokens.
+// In-memory room state — active room tokens.
 // Map<roomCode, { token, hostCrowId, hostName, companionUrl, createdAt, participants: Set<contactId> }>
 // Exported raw: tools/rooms-social.js (crow_room_close) is the only authorized mutator outside this module.
 export const _activeRooms = new Map();
 
 /**
- * Validate a room token for companion access.
+ * Validate a room token for room access.
  * Returns the room info if valid, null if invalid/expired.
  */
 export function validateRoomToken(roomCode, token) {
@@ -33,8 +33,8 @@ export function validateRoomToken(roomCode, token) {
 }
 
 /**
- * Send a room invite to a contact by name. Used by the WM server
- * to proxy "invite <name>" commands from the companion.
+ * Send a room invite to a contact by name. Used by the room tools and
+ * the Bot Builder's invite flow.
  * Returns { ok, message, roomCode?, joinUrl? }
  */
 export async function sendRoomInvite(contactName, hostName, opts = {}) {
@@ -52,7 +52,7 @@ export async function sendRoomInvite(contactName, hostName, opts = {}) {
   const contactRow = result.rows[0];
 
   // Use caller-provided room credentials if available (calls bundle flow),
-  // otherwise generate new ones (companion/MCP tool flow)
+  // otherwise generate new ones (MCP tool flow)
   const roomCode = opts.roomCode || randomBytes(6).toString("hex");
   const token = opts.token || randomBytes(16).toString("hex");
 
@@ -61,14 +61,16 @@ export async function sendRoomInvite(contactName, hostName, opts = {}) {
     joinUrl = opts.joinUrl;
   } else {
     const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
-    // Use /calls URL when calls bundle is enabled, /companion/ otherwise
+    // A room is joined on the calls page. The AI Companion's page was the old
+    // fallback and was retired, so there is no second surface to point at: the
+    // caller must enable Calls (CROW_CALLS_ENABLED=1) and name the gateway.
     if (process.env.CROW_CALLS_ENABLED === "1" && gatewayUrl) {
       joinUrl = `${gatewayUrl}/calls?room=${roomCode}&token=${token}`;
     } else {
-      const companionPort = process.env.COMPANION_PORT || "12393";
-      joinUrl = gatewayUrl
-        ? `${gatewayUrl}/companion/?room=${roomCode}&token=${token}`
-        : `http://localhost:${companionPort}/?room=${roomCode}&token=${token}`;
+      return {
+        ok: false,
+        message: "Rooms are joined on the Calls page: install Calls (and set CROW_CALLS_ENABLED=1 with CROW_GATEWAY_URL) to invite a contact to a room.",
+      };
     }
   }
 
@@ -132,7 +134,7 @@ export function getActiveRooms() {
 }
 
 /**
- * Send a text voice memo to a contact. The recipient's companion speaks it aloud via TTS.
+ * Send a text voice memo to a contact. The recipient's voice assistant speaks it aloud via TTS.
  * Returns { ok, message }
  */
 export async function sendVoiceMemo(contactName, text, senderName) {

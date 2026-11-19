@@ -307,6 +307,50 @@ These automatically adapt to dark and light modes. See the [Brand Identity](/arc
 3. Start the gateway: `npm run gateway`
 4. Open `http://localhost:3001/dashboard/<id>`
 
+## WebSocket routes: claim your path
+
+A panel can own a WebSocket by exporting `setupWebSocket(server)` from its `<id>-routes.js` file. The gateway calls it once with its HTTP server, and your function adds an `"upgrade"` listener:
+
+```js
+// ~/.crow/panels/weather-routes.js
+import { WebSocketServer } from "ws";
+
+export function setupWebSocket(server) {
+  const wss = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    // Only your own path, matched synchronously.
+    const path = String(req.url || "").split("?")[0];
+    if (path !== "/weather/ws") return;
+
+    // CLAIM the path here, synchronously, before your first `await`.
+    // (App code imports claimUpgrade() from servers/shared/ws-upgrade-claim.js and
+    // calls it instead; this property is the whole of what that helper sets.)
+    req.crowWsClaimed = true;
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      ws.on("message", (m) => ws.send(String(m)));
+    });
+  });
+}
+```
+
+### The claim contract
+
+The gateway has several upgrade handlers (`/calls/ws`, instance sync, the Kiosk display, Meta Glasses, Studio, `/proxy/<id>`) and each one ignores the paths it does not own. To keep a request nobody owns from hanging forever, the gateway also installs a fallback that answers an unclaimed upgrade with `404 Not Found` and closes the socket.
+
+That fallback is what makes claiming mandatory: **a handler must claim its own path synchronously, before its first `await`.** Anything else and a path you own is answered as unknown.
+
+- **From app code** (a server, a first-party bundle's server side): `import { claimUpgrade } from "../shared/ws-upgrade-claim.js"` and call `claimUpgrade(req)` as the first statement of your handler, before your auth checks.
+- **From a panel file** (`~/.crow/panels/…`, loaded outside the app tree) or any code that cannot import that module: set the same property yourself, `req.crowWsClaimed = true;`. It is the whole contract — the same one thing the helper sets.
+
+Claim before you check authorization, and refuse by writing your own status (`403`, `401`) the way you would normally. Once claimed, the fallback leaves the socket to you, whether you accept the upgrade or refuse it.
+
+The fallback also leaves alone a socket that has already been ANSWERED, so a handler written before this contract (or an installed copy of one) keeps working: it only writes its `404` into a socket nobody has written a byte to. But a handler that waits for something before it claims is still refused, so keep the claim first.
+
+### Upgrades do not pass through Express
+
+An `"upgrade"` event never reaches your panel's router, so no Express middleware runs for it: session checks, CSRF and the Funnel/network refusals have to be applied by your handler itself, before you accept the connection.
+
 ## Turbo Drive compatibility
 
 The Crow's Nest navigates between panels with [Turbo Drive](https://turbo.hotwired.dev/) when `CROW_ENABLE_TURBO=1` is set on the gateway. Turbo does an HTTP fetch, body-swaps the `<main>` content, and keeps the `<head>` + sidebar + persistent player bar in place. Normal panels work unchanged, but a few patterns need care:

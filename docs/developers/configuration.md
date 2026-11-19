@@ -48,19 +48,18 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | `CROW_MODELS_JSON` | *(unset = standard locations)* | Colon-separated override of the models.json search paths. Empty string = ignore all models.json files (hermetic tests / fresh-install audits). |
 | `CROW_DISABLE_NOSTR` | *(unset)* | `1` disables all Nostr relay dialing (messaging transport). For scratch/test gateways: set together with `CROW_DISABLE_INSTANCE_SYNC=1` for a fully-offline boot. |
 | `CROW_DISABLE_MODEL_ORCHESTRATION` | *(unset)* | `1` (or `true`) makes this gateway **never start, stop or evict a model or a model bundle**: on-demand acquires return "not managed here" (callers dial the provider's base_url), boot residency, warm and idle-revert are skipped, model-bundle install/start/stop (including peer-forwarded starts) answer 409 `MODEL_ORCHESTRATION_DISABLED`, and the Models panel's Start answers the same. Read-only health polls stay on. For hosts whose models are owned by something else (raven: halogen under systemd). Any other value, including `0`, leaves orchestration on. |
-| `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Fast voice-turn model for the AI Companion. |
+| `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Fast voice-turn model for the voice route (Kiosk, glasses, phone). The name is historical: the front end it was written for is gone. |
 | `COMPANION_ESCALATION_MODEL` | `crow-chat/qwen3.6-35b-a3b` | Escalation model (`!escalate` / tool turns). |
 | `COMPANION_FAST_DISABLE_THINKING` | `1` | Disable chain-of-thought on voice turns. |
 | `COMPANION_TOOL_ESCALATION` | `1` | Auto-escalate when tool use is detected. |
 | `COMPANION_TOOL_CONTEXT_LOOKBACK` | `8` | Messages scanned for tool intent. |
-| `COMPANION_PORT` | `12393` | Companion (Open-LLM-VTuber) server port. |
 | `SDXL_SERVICE_URL` | `http://127.0.0.1:3005` | Image-generation service for storage tools. |
 | `GPU_IDLE_CHECK_INTERVAL_MS` / `GPU_IDLE_REVERT_MS` | `120000` / `1200000` | GPU orchestrator idle polling / revert window. |
 
 ### Where model providers come from
 
 The `providers` table in the database is the canonical registry every model
-picker (Bot Builder, companion routing, the `/llm/v1` router) reads. It starts
+picker (Bot Builder, voice routing, the `/llm/v1` router) reads. It starts
 **empty** on a fresh install — Crow does not ship a provider list. Providers
 get in three ways:
 

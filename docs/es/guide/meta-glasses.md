@@ -331,7 +331,7 @@ El protocolo de `/session` está documentado en el `README.md` del complemento.
 - [Proveedores de IA (BYOAI)](/es/guide/ai-providers)
 - La configuración de voz a texto vive en `Configuración → Voz a texto` en tu dashboard de Crow
 - La configuración de texto a voz vive en `Configuración → Texto a voz` en tu dashboard de Crow
-- El complemento **Companion** comparte los mismos perfiles de TTS — si ya tienes voces del Compañero configuradas, los lentes pueden usarlas tal cual
+- La Pantalla kiosk y los lentes comparten los mismos perfiles de TTS, así que una voz que elijas para una está disponible para los otros
 
 ## Licencias y aspectos legales
 

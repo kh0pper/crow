@@ -75,23 +75,6 @@
         "http://localhost:5010"
       ]
     },
-    "companion": {
-      "COMPANION_AVATAR": [
-        "mao_pro"
-      ],
-      "COMPANION_CHARACTER_NAME": [
-        "Crow"
-      ],
-      "COMPANION_PERSONA": [
-        "You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud."
-      ],
-      "COMPANION_TTS_VOICE": [
-        "en-US-AvaMultilingualNeural"
-      ],
-      "EIKANYA_MODELS_DIR": [
-        ""
-      ]
-    },
     "coturn": {
       "TURN_PORT": [
         "3478"

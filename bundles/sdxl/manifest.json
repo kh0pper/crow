@@ -2,7 +2,7 @@
   "id": "sdxl",
   "name": "SDXL Background Generator",
   "version": "1.0.2",
-  "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
+  "description": "AI-generated background images via SDXL Turbo, for pages and tools that ask for one. Requires NVIDIA GPU.",
   "type": "bundle",
   "author": "Crow",
   "category": "ai",
@@ -55,5 +55,5 @@
       "secret": false
     }
   ],
-  "notes": "Requires nvidia-container-toolkit on the host. Models (~25GB) download automatically on first start. Used by the AI Companion for dynamic backgrounds and by the storage server's crow_generate_background tool."
+  "notes": "Requires nvidia-container-toolkit on the host. Models (~25GB) download automatically on first start. Used by the storage server's crow_generate_background tool."
 }

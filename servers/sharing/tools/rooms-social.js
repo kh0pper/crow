@@ -19,7 +19,7 @@ export function registerRoomsSocialTools(server, ctx) {
 
   server.tool(
     "crow_room_invite",
-    "Invite a Crow contact to join your companion room. Generates a room token and sends an encrypted invite via Nostr. The contact receives a notification with a join link.",
+    "Invite a Crow contact to join a live room call. Generates a room token and sends an encrypted invite via Nostr. The contact receives a notification with a join link to the calls page.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact to invite"),
       host_name: z.string().max(100).optional().describe("Your display name shown in the invite (defaults to Crow ID)"),
@@ -49,7 +49,7 @@ export function registerRoomsSocialTools(server, ctx) {
 
   server.tool(
     "crow_room_close",
-    "Close an active companion room. Invalidates the room token and optionally notifies participants.",
+    "Close an active room. Invalidates the room token and optionally notifies participants.",
     {
       room_code: z.string().max(50).optional().describe("Room code to close (closes the most recent room if omitted)"),
     },
@@ -113,7 +113,7 @@ export function registerRoomsSocialTools(server, ctx) {
 
   server.tool(
     "crow_voice_memo",
-    "Send a text voice memo to a Crow contact. The recipient's companion will speak it aloud using TTS.",
+    "Send a text voice memo to a Crow contact. The recipient's voice assistant will speak it aloud using TTS.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
       message: z.string().max(2000).describe("The message text to send as a voice memo"),

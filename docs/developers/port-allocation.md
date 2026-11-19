@@ -8,7 +8,7 @@ This document is the **single source of truth** for every host port consumed by 
 
 ## Conventions
 
-- All bundle ports bind to `127.0.0.1` unless the bundle is explicitly a reverse proxy (Caddy) or uses `network_mode: host` (browser, companion, coturn, phone, plex, tailscale, crowdsec-firewall-bouncer).
+- All bundle ports bind to `127.0.0.1` unless the bundle is explicitly a reverse proxy (Caddy) or uses `network_mode: host` (browser, coturn, phone, plex, tailscale, crowdsec-firewall-bouncer).
 - A bundle port whose host IP is a variable must carry a non-empty default — `${CROW_TAILSCALE_IP:-127.0.0.1}` — or be a REQUIRED variable (`${CROW_TAILSCALE_IP:?…}`), which Compose refuses to start without. A bare `${CROW_TAILSCALE_IP}`, `$VAR` or `${VAR:-}` publishes on every interface when the variable is unset — which is how an unauthenticated model, STT or TTS server ends up on the LAN. Bundle host-IP variables therefore default to `127.0.0.1`: unset means loopback, never `0.0.0.0`. `tests/compose-port-bind-defaults.test.js` enforces this; the one deliberate exception is the reverse proxy's public 80/443, listed in `scripts/port-bind-allowlist.txt`.
 - The Crow gateway is not one of those loopback-only processes: it listens on `0.0.0.0` (every interface) unless `CROW_GATEWAY_BIND` is set (`servers/gateway/listen-host.js`). The docker install publishes it on `127.0.0.1` only; a bare-metal/native install binds every interface and is protected by the host firewall and Tailscale, not by the bind address.
 - "Existing" rows are bundles already shipped before this registry was introduced — they are recorded here so future bundles avoid them.
@@ -53,7 +53,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3001 | every interface (`0.0.0.0`, unless `CROW_GATEWAY_BIND` is set — `servers/gateway/listen-host.js`); the container install publishes the port on `127.0.0.1` only | Crow gateway (HTTPS) | core |
 | 3002 | same as 3001 (the process binds every interface unless `CROW_GATEWAY_BIND` is set) | Crow gateway (alt) | core |
 | 3004 | same as 3001 (the process binds every interface unless `CROW_GATEWAY_BIND` is set) | Crow gateway (alt) | core |
-| 3005 | 127.0.0.1 | sdxl (overridable via `SDXL_PORT`; companion reaches it at localhost over host networking) | existing |
+| 3005 | 127.0.0.1 | sdxl (overridable via `SDXL_PORT`) | existing |
 | 3007 | 127.0.0.1 | uptime-kuma | MVP PR 1 |
 | 3008 | same as 3001 (the process binds every interface unless `CROW_GATEWAY_BIND` is set) | Crow gateway (alt) | core |
 | 3014 | 127.0.0.1 | Satellite Crow agent (satellite host only, `CROW_SATELLITE_PORT`; tailnet reach through Tailscale Serve, never Funnel) | SAT-3 |
@@ -151,7 +151,6 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 These bundles use `network_mode: host`. They consume whatever ports their upstream service expects directly on the host:
 
 - `browser` (noVNC 6080 and the CDP relay 9222, both `127.0.0.1`; Chromium itself opens no port)
-- `companion` (verify)
 - `coturn` (3478 UDP, plus turnserver listen ports)
 - `phone` (the runner's own listener on `127.0.0.1:3065` inside the container; it publishes no host port)
 - `plex` (32400, plus discovery ports)

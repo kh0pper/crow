@@ -249,8 +249,8 @@ export default {
       }
       <\/script>
       <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
-        TTS profiles configure how text becomes speech. Bundles like Companion and Meta Glasses
-        share these profiles. The <strong>default</strong> profile is used when a bundle doesn't
+        TTS profiles configure how text becomes speech. The Kiosk display and Meta Glasses
+        share these profiles. The <strong>default</strong> profile is used when a surface doesn't
         pick one explicitly.
       </p>`;
 

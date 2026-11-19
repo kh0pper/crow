@@ -153,12 +153,7 @@ export default {
       if (PROFILE_SUBTABS[sectionId]) {
         return res.redirect(`/dashboard/settings?section=llm&tab=profiles&subtab=${PROFILE_SUBTABS[sectionId]}`);
       }
-      // Alias map: resolve deprecated section ids to their replacements.
-      const SECTION_ALIASES = {
-        "companion-voice": "companion",
-      };
-      const resolvedId = SECTION_ALIASES[sectionId] || sectionId;
-      const section = getSettingsSection(resolvedId);
+      const section = getSettingsSection(sectionId);
       if (!section) return res.redirect("/dashboard/settings");
       const html = await section.render({ req, res, db, lang });
       const sectionLabel = t(section.labelKey, lang);

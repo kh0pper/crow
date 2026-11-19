@@ -42,7 +42,7 @@ Each row in `pi_bot_defs` is a JSON definition with these parts:
 - **persona**: the system prompt
 - **skills**: names resolved to skill text at run time
 - **tools**: the allowed tool set: Crow's core tool categories plus selected extension tools
-- **gateways**: the channels the agent runs on (`gmail`, `discord`, `glasses`, `companion`)
+- **gateways**: the channels the agent runs on (`gmail`, `discord`, `glasses` — retired, kept readable —, `companion` — retired, kept readable —, `crow-messages`, `perch`, `none`)
 - **permission_policy**: confirm / deny sets, `external_send` mode, and the `self_authoring` switch
 - **model** and an optional `fast_voice_model`
 
@@ -65,10 +65,11 @@ When an agent selects a tool from an extension that is not part of Crow's canoni
 | **Gmail** | `bridge_tick.mjs` | Polls a connected mailbox, drafts or sends replies subject to policy |
 | **Discord** | `discord_gateway.mjs` | A long-lived Discord WebSocket that drives the runtime, with a per-agent user allowlist |
 | **Meta Glasses** | `bundles/meta-glasses/` | Paired glasses answer as Crow, the voice bot (`crow.voice`); there is no per-device bot |
-| **AI Companion** | `bundles/companion/` + the gateway's `/llm/v1` router (`servers/gateway/routes/llm-router.js`) | The [companion](/architecture/companion)'s OLVV loop with the avatar and features set on the bot's Basics tab (channel *AI Companion (kiosk)*); voice itself answers as Crow, with the router routing fast (4B) → escalate (35B) |
 | **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | The agent is reachable as a contact over Crow's peer messaging; authorized senders' encrypted DMs drive the runtime and the agent replies from its own derived identity. See [Crow Messages](#crow-messages-bots-as-contacts) below. |
 
-> The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — the engine is the voice front end, not pi, and it answers as `crow.voice` (persona, tools and limits come from Crow's voice bot). A companion device's binding carries only its avatar and features. See [AI Companion](/architecture/companion).
+> The Meta Glasses channel runs its own voice loop (the glasses voice turn) rather than the pi `bridge.mjs` runtime — the engine is the voice front end, not pi, and it answers as `crow.voice` (persona, tools and limits come from Crow's voice bot).
+>
+> A bot stored with the retired *AI Companion* channel keeps its saved record and shows it read-only: the AI Companion was removed, so that channel binds nothing and no new bot can be given it. Device-bound voice is the Kiosk display, which answers as Crow too.
 
 ## Crow Messages: bots as contacts
 
