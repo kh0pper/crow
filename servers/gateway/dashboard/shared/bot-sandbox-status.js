@@ -25,6 +25,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { probePiSandbox, piSandboxMode, piSandboxReasonCode } from "../../../../scripts/pi-bots/pi_sandbox.mjs";
+import { containExemptedBots } from "../../../../scripts/pi-bots/pi_contain.mjs";
 import { t, fill } from "./i18n.js";
 import { escapeHtml } from "./components.js";
 
@@ -94,16 +95,22 @@ const NEXT_KEY = {
  * The status of the bot sandbox as text.
  * @returns {{sandboxed:boolean, observed:boolean, code:string|null, reason:string|null,
  *            exposure:string|null, nextStep:string|null, sentence:string,
- *            setpriv:boolean}}
+ *            setpriv:boolean, excluded:string[]}}
  * `sentence` is the one line both surfaces show; `nextStep` is the single plain
  * action for the reason (null when already sandboxed). `observed` is false when
  * the spawns happen outside this process, so nothing here can claim a tier.
+ * `excluded` names the bots the operator exempted from the contain tier
+ * (CROW_PI_CONTAIN_EXCLUDE) that containment would otherwise cover: the exempt
+ * bot runs the default tier, so this is the one place the settings page can say
+ * so for a bot this process has not spawned yet (the per-bot containment level
+ * comes from spawn records; see containment-status.mjs).
  */
 export function botSandboxStatus({
   probe = null,
   mode = piSandboxMode(process.env),
   lang = "en",
   externalSupervisor = spawnsOutsideThisProcess(),
+  excluded = null,
 } = {}) {
   const p = probe || botSandboxProbe() || {};
   if (externalSupervisor) {
@@ -116,7 +123,14 @@ export function botSandboxStatus({
       nextStep: t("settings.sandboxStatus.nextUnobserved", lang),
       sentence: t("settings.sandboxStatus.unobserved", lang),
       setpriv: false,
+      // Nothing about a bot's tier is claimed when its spawns happen elsewhere.
+      excluded: [],
     };
+  }
+  let exempted = [];
+  if (Array.isArray(excluded)) exempted = excluded.filter((id) => typeof id === "string" && id);
+  else {
+    try { exempted = containExemptedBots(process.env); } catch { exempted = []; }
   }
   const code = piSandboxReasonCode(p, mode);
   const sandboxed = code === null;
@@ -156,7 +170,7 @@ export function botSandboxStatus({
   const sentence = sandboxed
     ? t("settings.sandboxStatus.sandboxed", lang)
     : fill(t("settings.sandboxStatus.unsandboxed", lang), { reason, exposure });
-  return { sandboxed, observed: true, code, reason, exposure, nextStep, sentence, setpriv: !!p.setpriv };
+  return { sandboxed, observed: true, code, reason, exposure, nextStep, sentence, setpriv: !!p.setpriv, excluded: exempted };
 }
 
 /** The Bot Runtime settings status line (its own block, above the form). */
@@ -166,8 +180,12 @@ export function renderBotSandboxStatus(opts = {}) {
   const next = status.nextStep
     ? `<p style="margin:0.25rem 0 0;color:var(--crow-text-secondary);font-size:0.9rem">${escapeHtml(status.nextStep)}</p>`
     : "";
+  const excluded = status.excluded.length
+    ? `<p id="crow-sandbox-status-excluded" style="margin:0.25rem 0 0;color:var(--crow-text-secondary);font-size:0.9rem">${
+      escapeHtml(fill(t("settings.sandboxStatus.excluded", lang), { bots: status.excluded.join(", ") }))}</p>`
+    : "";
   return `<div class="crow-sandbox-status" id="crow-sandbox-status" style="margin:0 0 1.5rem">
       <p id="crow-sandbox-status-line" style="margin:0;font-weight:600">${escapeHtml(status.sentence)}</p>
-      ${next}
+      ${next}${excluded}
     </div>`;
 }

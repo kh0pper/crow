@@ -32,6 +32,12 @@
  * upstream/gateway port the recorder itself opened becomes <UP1>, <UP2>...
  * in creation order, and the value of an HTTP `date` header becomes <DATE>
  * (a clock reading is not part of the protocol bytes being pinned).
+ *
+ * This module replays the calls those two test files make, so it does NOT track
+ * tests added after the golden was recorded: a new contain-plan test does not
+ * change the golden, and an existing case's bytes only change when the sandbox
+ * code itself does. (contain-plans.json was re-recorded once, for the
+ * masked-folder fix — see tests/bot-path-golden.test.js's header.)
  */
 import { createHmac } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -266,9 +272,9 @@ export function buildContainCases() {
 
     const big = mk(P, "big", "tree");
     for (let i = 0; i < 30; i++) writeFileSync(join(big, "f" + i), "");
-    record("scan cap: a policy path too large to scan is not bound; an engine dir too large refuses the spawn", () => buildContainPlan(base({ readPaths: [big], envScanMaxEntries: 25 })));
+    record("scan cap: a policy path too large to scan is not bound; an engine dir too large refuses the spawn", () => buildContainPlan(base({ dataDir: null, readPaths: [big], envScanMaxEntries: 25 })));
     mk(P, "deep2", "a", "b", "c", "d");
-    record("scan cap: a policy path too large to scan is not bound; an engine dir too large refuses the spawn", () => buildContainPlan(base({ readPaths: [join(P, "deep2")], envScanMaxDepth: 2 })));
+    record("scan cap: a policy path too large to scan is not bound; an engine dir too large refuses the spawn", () => buildContainPlan(base({ dataDir: null, readPaths: [join(P, "deep2")], envScanMaxDepth: 2 })));
     record("scan cap: a policy path too large to scan is not bound; an engine dir too large refuses the spawn", () => buildContainPlan(base({ envScanMaxEntries: 3 })));
 
     const CH = mk(P, "chome");

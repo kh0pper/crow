@@ -6,6 +6,58 @@
 // later PR: a green run here means a refactor changed nothing observable. Any
 // diff to either golden file (or to this test's normalisation) must be
 // rejected in review — a regenerated golden proves nothing.
+//
+// ONE recorded exception: contain-plans.json was re-recorded for the contain
+// tier's masked-folder fix (2026-11-19 inventory, B4). The whole diff is, per
+// masked directory, an appended `--remount-ro <dir>` (a mask is now an empty
+// READ-ONLY mount, so a write into another project's folder fails instead of
+// vanishing into scratch), plus one redundant `--ro-bind` pair dropped in the
+// "MCP servers" case because the command's install root is already inside the
+// server's bound cwd. Nothing else moved; tests/pi-contain-plan.test.js pins the
+// new mask shape directly, so the property is not only golden-derived.
+//
+// A SECOND recorded exception (security review, 2026-11-20): contain-plans.json
+// was re-recorded again for the data-dir CREATION fix. Every reserved data-dir
+// name and every installed bundle id is now masked whether or not it exists at
+// spawn (a bot must not be able to create `<data>/<installed id>/.venv`, code a
+// host-side uv then runs), so each case that binds a data dir gained one
+// `--tmpfs <data>/<name>` plus its trailing `--remount-ro <data>/<name>` per
+// absent reserved name.
+//
+// What the re-record was checked against, so a reviewer knows what to look for
+// in the diff: the same cases in the same order, every `refused` list and `env`
+// object identical, and every token of the old argv still present, in order.
+// The ONLY thing a correct diff may therefore contain is added `--tmpfs` /
+// `--remount-ro` pairs on data-dir paths — any other change (a moved token, a
+// different refusal line, a dropped bind) is a bug, not the fix.
+// tests/pi-contain-plan.test.js pins the property directly (B11), so it is not
+// only golden-derived.
+//
+// A THIRD recorded exception (contain-tier review, 2026-11-21): re-recorded for
+// the mount-point fix. The plan no longer creates the mount point of an
+// absent-entry mask as a side effect (a swallowed `mkdirSync` — nothing checked
+// that the directory existed when bwrap ran, and a spawn without it ran with a
+// trusted data-dir name reachable, which is what
+// `<data>/<installed id>/.venv` succeeding in a real sandbox looked like). The
+// plan now NAMES those mount points and the spawn path makes them
+// (`ensureContainMountPoints`, refusing the spawn on a symlink, a file, another
+// uid or a failure), and `assembleBindArgs` emits the `--remount-ro` ops in PATH
+// order. What the re-record changed is therefore EXACTLY this: the order of the
+// `--remount-ro` ops (they used to follow the order the masks happened to be
+// recorded in — readdir order for data-dir entries that existed at spawn, so a
+// host's filesystem decided part of the argv). Mask sets, tokens, `env`,
+// `refused` and case order are unchanged; the re-record was diffed case by case
+// against the previous file and the only delta was that ordering.
+//
+// The count, so a reviewer knows the `--tmpfs` volume is the intended one and
+// not a leak: 32 masks per case that binds a data dir (34 reserved names minus
+// the two FILE-shaped ones — `identity.json` and `instance-id` are never
+// created), 31 in the cases whose fixture keeps one (`projects`, re-exposed down
+// to the bot's own workspace, and the C9 keep-list), and NOT ONE
+// installed-bundle-id mask, because none of these fixture instances records an
+// absent installed id. 1085 data-dir masks in total; nothing in the plan reads
+// the repository's `registry/add-ons.json`. tests/pi-contain-plan.test.js (B11c)
+// asserts that source rule directly.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

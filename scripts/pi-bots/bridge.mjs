@@ -56,7 +56,7 @@ import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REF
   GCLOUD_DIR_REL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal } from "./hidden_files.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
-import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
+import { containSelected, containExcluded, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
 import { botContainment, defToolNames, recordContainment, formatContainmentLine } from "./containment-status.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
@@ -261,6 +261,23 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     modelRolesFile: roleSnapshotPath(),
   });
   const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
+  // The bot's OWN pre-project world root (<crowHome>/pi-bots/<id>, or a custom
+  // def.session_dir): self-authoring stages skill proposals below it
+  // (<def.session_dir>/proposed-skills) and the Bot Builder's review UI scans
+  // exactly that path, so the contain plan binds that folder writable instead
+  // of dropping the policy write path as a hidden home entry.
+  // The id is validated against the engine's bot-id charset (BOT_ID_RE, the
+  // same pattern botWorkspaceEnv uses) BEFORE it is joined into a path: a def is
+  // bot-writable, so an id carrying a separator or a dot name must never name a
+  // folder of its choosing. An id outside the pattern is refused — no derived
+  // folder at all, one log line — and a custom def.session_dir still applies
+  // (the plan re-checks the resolved root under <crowHome>/pi-bots).
+  const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
+  const stateBotId = typeof sandboxBotId === "string" && BOT_ID_RE.test(sandboxBotId) ? sandboxBotId : null;
+  if (sandboxBotId && !stateBotId) {
+    console.error("[pi-bots] contain: bot id refused for the world root (not a bot id): " + String(sandboxBotId).slice(0, 80));
+  }
+  const botStateDir = (def && def.session_dir) || (stateBotId ? join(crowHome, "pi-bots", stateBotId) : null);
   const netIn = containNetInputs({ def });
   let relay = null;
   if (netIn) {
@@ -284,6 +301,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     crowHome, dataDir, botCacheDir, unmaskIdentity,
     dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
+    botStateDir,
     writePaths: [...(piPolicy.write_paths || []), ...extraRw], readPaths: piPolicy.read_paths || [],
     mcpServers: servers,
     // Co-hosted Crow homes, RESOLVED (the secrets-dir scan's homes, including
@@ -344,13 +362,13 @@ export function filterSpawnEnvWithReport(def) {
   const spawnEnv = {};
   const stripped = [];
   for (const k of Object.keys((def && def.spawn_env) || {})) {
-    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS / _DATA_KEEP / _NET) is the operator's switch for the pi sandbox; a bot def must
-    // not be able to turn the sandbox off for itself.
+    // CROW_PI_SANDBOX (and CROW_PI_CONTAIN_BOTS / _EXCLUDE / _DATA_KEEP / _NET) is the operator's switch for the pi sandbox; a bot def must
+    // not be able to turn the sandbox off for itself (or exempt itself from the contain tier).
     // CROW_MODEL_ROLES_FILE names the instance's role snapshot pi reads; a def
     // must not point pi at a file of its choosing.
     // PEER_CREDENTIAL_ENV (item 46 PR-B): no bot process may be pointed at the
     // peer credential store.
-    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_BOT_SESSION" || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_PI_CONTAIN_NET" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
+    if (/^PI_BOT_|^PIBOT_|^CROW_ACTOR_/.test(k) || k === "CROW_BOT_SESSION" || k === "CROW_PI_SANDBOX" || k === "CROW_PI_CONTAIN_BOTS" || k === "CROW_PI_CONTAIN_EXCLUDE" || k === "CROW_PI_CONTAIN_DATA_KEEP" || k === "CROW_PI_CONTAIN_NET" || k === "CROW_MODEL_ROLES_FILE" || PEER_CREDENTIAL_ENV.includes(k)) { stripped.push(k); continue; }
     // Loader hooks run code before pi starts (and a bot can edit its own def
     // through its DB-touching tools): never from a def. A NODE_OPTIONS made
     // only of heap-size flags is kept.
@@ -1054,6 +1072,12 @@ export class PiRpc {
     const reportContainment = (tier, refusal = null) => {
       const status = botContainment({
         tier, mcpServers: statusServers,
+        // The operator's exemption (CROW_PI_CONTAIN_EXCLUDE) is not a weaker
+        // containment: this bot never entered the tier, and the record says so
+        // in the operator's own words rather than "runs with the operator's files".
+        // containExcluded is true only when the exemption really bit (containment
+        // would otherwise have covered this bot).
+        excluded: containExcluded(process.env, sandboxBotId),
         providerIds: (containModels && containModels.providerIds) || [],
         missing: [
           ...((contain && Array.isArray(contain.missing)) ? contain.missing : []),

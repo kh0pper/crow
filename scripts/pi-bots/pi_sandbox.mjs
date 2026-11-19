@@ -98,7 +98,9 @@
  * Contain tier (opt-in, queue item 19 step 2a): pi_contain.mjs. With
  * CROW_PI_SANDBOX=contain (every pi) or CROW_PI_CONTAIN_BOTS=<id,...> (listed
  * bots) a bot spawn gets an EMPTY root with only its engine, its own paths
- * and its instance data bound, instead of the whole host filesystem.
+ * and its instance data bound, instead of the whole host filesystem. An id in
+ * CROW_PI_CONTAIN_EXCLUDE is exempt: it runs the default tier above (contain
+ * every bot, exempt a test bot).
  *
  * Modes, from the GATEWAY's env only (process.env; a bot def's spawn_env
  * cannot change it): CROW_PI_SANDBOX = "auto" (default: bwrap, else the
@@ -109,7 +111,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, fstatSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { containSelected, buildContainPlan, ContainRefused } from "./pi_contain.mjs";
+import { containSelected, buildContainPlan, ContainRefused, ensureContainMountPoints } from "./pi_contain.mjs";
 import { buildSeccompProgram, seccompSupported } from "./pi_seccomp.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { fileURLToPath } from "node:url";
@@ -209,7 +211,8 @@ export function systemdUserUnitDirs(home = homedir(), { create = true } = {}) {
 }
 
 const SCRUB_EXACT = new Set(["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS", "CROW_PI_CONTAIN_DATA_KEEP", "CROW_PI_CONTAIN_NET"]);
+  "TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CROW_PI_SANDBOX", "CROW_PI_CONTAIN_BOTS",
+  "CROW_PI_CONTAIN_EXCLUDE", "CROW_PI_CONTAIN_DATA_KEEP", "CROW_PI_CONTAIN_NET"]);
 
 /** Copy of env without user-session IPC pointers (and the sandbox switch). */
 export function scrubSandboxEnv(env) {
@@ -380,7 +383,10 @@ function validExposed(list, { hideDirs, tmpfs, pidns, bindFd, uid = process.getu
  * an already-open fd (`--ro-bind-fd`; a git-enabled bot's own key dir). Only
  * entries that pass validExposed() reach the argv, and `exposed` reports the
  * dirs that really did.
- * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[], exposed:string[]}}
+ * In the contain tier `mountPoints` lists the empty dirs this call made before exec for the
+ * absent-entry masks (a reserved or installed data-dir name with no folder yet); a mount
+ * point it cannot make refuses the spawn.
+ * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[], exposed:string[], mountPoints?:string[]}}
  * @throws when mode is "required" and bwrap is unavailable.
  */
 export function wrapPiSpawn(cmd, args, opts = {}) {
@@ -392,7 +398,8 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
   if (mode === "off") return plain("CROW_PI_SANDBOX=off");
   const probe = opts.probe || probePiSandbox();
   // Contain tier (pi_contain.mjs): selected for this bot by the spawner's env
-  // (CROW_PI_SANDBOX=contain, or CROW_PI_CONTAIN_BOTS listing the bot) and
+  // (CROW_PI_SANDBOX=contain, or CROW_PI_CONTAIN_BOTS listing the bot, less the
+  // CROW_PI_CONTAIN_EXCLUDE exemptions) and
   // possible only when the caller passed the bot's mount inputs. An opted-in
   // spawn never silently downgrades: no bubblewrap, or a policy that cannot
   // be contained (bypass), is an error the caller surfaces as a failed turn.
@@ -402,6 +409,14 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
       throw new Error("pi contain tier selected but bwrap cannot make a PID namespace here (" + (probe.pidnsReason || "unavailable") + ")");
     }
     const plan = buildContainPlan(opts.contain);
+    // The empty mount points of the absent-entry masks (a reserved data-dir name or an
+    // installed bundle id with no folder yet) EXIST BEFORE bwrap runs, or there is no spawn.
+    // bwrap mounts over a path, so a path it had to invent itself — 0755, on the host,
+    // because the parent is a bind of the real data dir — is one a bot may have got to
+    // first, and a spawn without the mount point leaves the name reachable. Created here,
+    // 0700, never through a symlink; a symlink, a file, a creation failure or a dir another
+    // uid owns refuses the spawn (ContainRefused), never a downgrade.
+    const mountPoints = ensureContainMountPoints(plan.mountPoints);
     // A provider the bot needs whose row has no door (a literal-key cloud row
     // this box never consented to, a LAN/tailnet row /llm/p does not serve):
     // the turn would run with no way to its model. Refused, never downgraded.
@@ -465,7 +480,7 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     const tier = (seccomp ? "contain" : "contain-noseccomp") + (plan.net ? "" : "-hostnet");
     return { cmd: probe.bwrap, args: [...pre, "--", ...inner], env: { ...scrubSandboxEnv(env), ...plan.env },
       sandboxed: true, wrapper: "bwrap", tier, pidNamespace: true, reason: null,
-      masked, exposed: [], unreachable, refused: plan.refused, seccomp, net: plan.net };
+      masked, exposed: [], unreachable, refused: plan.refused, seccomp, net: plan.net, mountPoints };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {

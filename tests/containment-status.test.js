@@ -16,6 +16,10 @@ const SWAP = "an uncontained bot could replace the hidden secrets dir before a r
 const UNCONTAINED = "runs with the operator's files, network and keys";
 const NO_BWRAP = "this host has no bwrap";
 const UNOBSERVED = "spawns outside this process are not observed here, so this bot counts as not contained";
+// The words an exempt bot's line carries. The caveat is not decoration: crow.db is bound
+// read-write into every CONTAINED bot and it holds pi_bot_defs, so a contained bot can change
+// an excluded bot's definition and have it run at the default tier.
+const EXCLUDED = "not contained (excluded by the operator — other bots can change its settings)";
 
 test("phase 1 is never contained: a contain-tier bot with any config is partly contained, and crow.db is always the first line", () => {
   for (const tier of ["contain", "contain-noseccomp", "contain-hostnet", "contain-noseccomp-hostnet"]) {
@@ -30,6 +34,33 @@ test("phase 1 is never contained: a contain-tier bot with any config is partly c
   assert.equal(CS.OPEN_UNCONTAINED, UNCONTAINED);
   assert.equal(CS.OPEN_NO_BWRAP, NO_BWRAP);
   assert.equal(CS.OPEN_UNOBSERVED, UNOBSERVED);
+  assert.equal(CS.OPEN_EXCLUDED, EXCLUDED);
+});
+
+test("a bot the operator exempted from the contain tier (CROW_PI_CONTAIN_EXCLUDE) says so, never as a failure", () => {
+  // The exempt bot really ran the default tier; the status must not read like a
+  // refusal (no `missing`) nor like a bug in containment (`runs with the
+  // operator's files` alone would hide that the operator asked for this).
+  for (const tier of ["pidns", "userns", "nnp", "none", null]) {
+    assert.deepEqual(CS.botContainment({ tier, excluded: true, mcpServers: ["github"], tools: [] }),
+      { level: "not contained", open: [EXCLUDED] }, String(tier));
+  }
+  // A refusal still wins: a refused spawn did not run at all (the exemption
+  // means it cannot be refused, so this only proves the order).
+  assert.deepEqual(CS.botContainment({ excluded: true, missing: [{ provider: "lan-row" }] }).open,
+    ["provider lan-row has no door"]);
+  // Not excluded: unchanged.
+  assert.deepEqual(CS.botContainment({ tier: "pidns", excluded: false }), { level: "not contained", open: [UNCONTAINED] });
+  // An exempt bot is uncontained, so the instance line about the secrets dir applies and the
+  // instance can never read as contained.
+  const inst = CS.instanceContainment([
+    { botId: "test-bot", ...CS.botContainment({ tier: "pidns", excluded: true }) },
+    { botId: "desk", level: "partly contained", open: [DATA] },
+  ], { host: { bwrap: true } });
+  assert.equal(inst.level, "not contained");
+  assert.ok(inst.open.includes("test-bot: " + EXCLUDED), inst.open.join(" | "));
+  assert.ok(!inst.open.includes("test-bot: " + UNCONTAINED), "the exemption has its own words");
+  assert.ok(inst.open.includes(SWAP));
 });
 
 test("an unobserved bot (no record here, or PIBOT_SUPERVISOR=external) is not contained, with the one line (F1)", () => {

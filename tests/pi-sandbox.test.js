@@ -228,10 +228,38 @@ test("M1: the mode comes from the gateway's env, never from the child env", () =
     assert.ok(!("CROW_PI_SANDBOX" in w.env));
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_SANDBOX: "off", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_SANDBOX");
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_BOTS: "x", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_BOTS");
+    assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_EXCLUDE: "test-bot", A: "1" } }), { A: "1" },
+      "spawn_env strips CROW_PI_CONTAIN_EXCLUDE (a def cannot exempt itself)");
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_DATA_KEEP: "x", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_DATA_KEEP");
     assert.deepEqual(filterSpawnEnv({ spawn_env: { CROW_PI_CONTAIN_NET: "off", A: "1" } }), { A: "1" }, "spawn_env strips CROW_PI_CONTAIN_NET");
   } finally {
     if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+  }
+});
+
+test("CROW_PI_CONTAIN_EXCLUDE: an exempt bot spawned under CROW_PI_SANDBOX=contain gets the default tier, the others stay contained", () => {
+  _resetPiSandboxForTest();
+  const saved = { sandbox: process.env.CROW_PI_SANDBOX, exclude: process.env.CROW_PI_CONTAIN_EXCLUDE };
+  const good = { ok: true, pidns: true, bwrap: "/usr/bin/bwrap", reason: null };
+  const opts = () => ({ mode: "auto", probe: good, sockets: [], runtimeDirs: [], roDirs: [],
+    // Only reached when the contain tier is selected; the exempt spawn must not touch it.
+    contain: { home: "/h", crowHome: "/h/.crow", dataDir: "/h/.crow/data", appRoot: "/h/crow", nodeBin: "/n/node",
+      sessionDir: "/h/s", cwd: "/h/s", writePaths: [], readPaths: [], mcpServers: [], otherHomes: [] } });
+  try {
+    process.env.CROW_PI_SANDBOX = "contain";
+    process.env.CROW_PI_CONTAIN_EXCLUDE = "test-bot";
+    const exempt = wrapPiSpawn("/n/node", ["cli.js"], { ...opts(), botId: "test-bot" });
+    assert.equal(exempt.sandboxed, true, "still the bubblewrap sandbox");
+    assert.equal(exempt.tier, "pidns", "the default tier, exactly as with the contain switch off");
+    assert.ok(!exempt.args.some((a) => a === "--tmpfs" && a === "/") && !exempt.args.includes("--unshare-net"),
+      "no contain plan: no empty root");
+    const contained = wrapPiSpawn("/n/node", ["cli.js"], { ...opts(), botId: "real-bot" });
+    assert.match(contained.tier, /^contain/, "every other bot is still contained");
+  } finally {
+    for (const [k, v] of [["CROW_PI_SANDBOX", saved.sandbox], ["CROW_PI_CONTAIN_EXCLUDE", saved.exclude]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    _resetPiSandboxForTest();
   }
 });
 

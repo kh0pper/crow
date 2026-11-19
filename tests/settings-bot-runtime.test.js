@@ -21,7 +21,7 @@ import section, {
 } from "../servers/gateway/dashboard/settings/sections/bot-runtime.js";
 import {
   _resetContainmentForTest, recordContainment, botContainment, addOnLine,
-  OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED,
+  OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED, OPEN_EXCLUDED,
 } from "../scripts/pi-bots/containment-status.mjs";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 
@@ -95,6 +95,18 @@ test("a recorded contain spawn renders `Bots: partly contained` and each open li
   assert.ok(!html.includes(OPEN_UNOBSERVED), "a recorded spawn is observed");
   assert.ok(html.includes(t("settings.containment.note", "en")), "the phase 1 note");
   assert.equal(section.id, "bot-runtime");
+  _resetContainmentForTest();
+});
+
+test("a recorded EXEMPT spawn (CROW_PI_CONTAIN_EXCLUDE) says so, not a failure, and says other bots can change its settings", async () => {
+  _resetContainmentForTest();
+  const status = botContainment({ tier: "pidns", mcpServers: ["github"], tools: [], excluded: true });
+  recordContainment("helper", { ...status, tier: "pidns" });
+  const html = await section.render({ db: dbWith([HELPER]), lang: "en" });
+  assert.match(html, /Bots: not contained/);
+  assert.ok(html.includes("helper: " + OPEN_EXCLUDED), html);
+  assert.ok(!html.includes("helper: " + OPEN_UNCONTAINED), "the exemption has its own words");
+  assert.ok(!html.includes("Bots: partly contained"));
   _resetContainmentForTest();
 });
 
@@ -240,7 +252,7 @@ test("Spanish: the unobserved line and the other-owner reason are translated too
 });
 
 test("containmentLineText: English output is the policy sentence byte for byte, bot prefix included", () => {
-  for (const line of [OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED]) {
+  for (const line of [OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED, OPEN_EXCLUDED]) {
     assert.equal(containmentLineText(line, "en"), line);
   }
   assert.equal(containmentLineText("helper: " + OPEN_BROWSER, "en"), "helper: " + OPEN_BROWSER);

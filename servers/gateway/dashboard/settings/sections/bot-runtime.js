@@ -18,7 +18,7 @@ import { isMpaHost } from "../../../../shared/mpa-detect.js";
 import {
   instanceContainment, recordedContainment, unobservedContainment,
   LEVEL_CONTAINED, LEVEL_PARTLY, LEVEL_NOT,
-  OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED,
+  OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED, OPEN_EXCLUDED,
 } from "../../../../../scripts/pi-bots/containment-status.mjs";
 import { botSandboxProbe, renderBotSandboxStatus, spawnsOutsideThisProcess } from "../../shared/bot-sandbox-status.js";
 import { secretsAncestorsReport } from "../../../../../servers/shared/secrets-ancestors.js";
@@ -98,6 +98,7 @@ export function containmentLineText(line, lang = "en") {
   if (s === OPEN_BROWSER) return t("settings.containment.openBrowser", lang);
   if (s === OPEN_SECRETS_SWAP) return t("settings.containment.openSecretsSwap", lang);
   if (s === OPEN_UNCONTAINED) return t("settings.containment.openUncontained", lang);
+  if (s === OPEN_EXCLUDED) return t("settings.containment.openExcluded", lang);
   if (s === OPEN_NO_BWRAP) return t("settings.containment.openNoBwrap", lang);
   if (s === OPEN_UNOBSERVED) return t("settings.containment.openUnobserved", lang);
   let m = /^(.+) runs inside the sandbox with its own credentials$/.exec(s);

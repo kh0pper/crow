@@ -3416,6 +3416,14 @@ export const translations = {
     en: "spawns outside this process are not observed here, so this bot counts as not contained",
     es: "los arranques fuera de este proceso no se observan aquí, así que este bot cuenta como sin contención",
   },
+  "settings.containment.openExcluded": {
+    en: "not contained (excluded by the operator — other bots can change its settings)",
+    es: "sin contención (excluido por el operador — otros bots pueden cambiar su configuración)",
+  },
+  "settings.sandboxStatus.excluded": {
+    en: "Not contained (excluded by the operator — other bots can change its settings): {bots}.",
+    es: "Sin contención (excluidos por el operador — otros bots pueden cambiar su configuración): {bots}.",
+  },
   "settings.containment.ancestorFinding": { en: "{path}: {why}", es: "{path} — {why}" },
   "settings.containment.ancestorRefused": {
     en: "the secrets dir anchor is refused while these are open (CROW_BOT_UID is set)",

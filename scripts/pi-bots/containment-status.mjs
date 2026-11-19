@@ -44,6 +44,16 @@ export const OPEN_SECRETS_SWAP =
   "an uncontained bot could replace the hidden secrets dir before a restart (peer tokens, service bindings)";
 /** An uncontained bot keeps today's world: everything the uid has. */
 export const OPEN_UNCONTAINED = "runs with the operator's files, network and keys";
+/**
+ * The operator exempted this bot from the contain tier (CROW_PI_CONTAIN_EXCLUDE):
+ * it never entered the tier, so it runs the default one. The words say WHY, so
+ * the exemption is never mistaken for a containment failure — and they say what
+ * the exemption costs: `crow.db` is bound read-write into every CONTAINED bot and
+ * it holds `pi_bot_defs`, so any contained bot can rewrite this bot's definition
+ * (instructions, tools, write_paths) and have it run at the default tier. An
+ * exemption is not a boundary, and the line must not read like one.
+ */
+export const OPEN_EXCLUDED = "not contained (excluded by the operator — other bots can change its settings)";
 /** Instance-level: the contain tier cannot even start (pi_sandbox.mjs). */
 export const OPEN_NO_BWRAP = "this host has no bwrap";
 /**
@@ -137,9 +147,11 @@ function dedupe(lines) {
  * @param {Array<{provider?: string, reason?: string}|string>} [a.missing]
  *                                    providers with no door: the spawn was REFUSED
  * @param {string[]} [a.tools]        tool names, for browser detection
+ * @param {boolean} [a.excluded]      the operator exempted this bot from the
+ *                                    contain tier (CROW_PI_CONTAIN_EXCLUDE)
  * @returns {{level: string, open: string[]}}
  */
-export function botContainment({ tier = null, mcpServers = [], providerIds = [], missing = [], tools = [] } = {}) {
+export function botContainment({ tier = null, mcpServers = [], providerIds = [], missing = [], tools = [], excluded = false } = {}) {
   // A refused spawn is not a weaker containment: it did not run. Say what stood
   // in the way (the same sentence the failed turn carries).
   const refused = dedupe((Array.isArray(missing) ? missing : []).map((m) => {
@@ -150,6 +162,10 @@ export function botContainment({ tier = null, mcpServers = [], providerIds = [],
     return id == null ? null : noDoorLine(id);
   }));
   if (refused.length) return { level: LEVEL_NOT, open: refused };
+  // An exemption is not a refusal and not a downgrade: the spawn ran exactly as
+  // the operator asked, in the tier it would have had without the contain
+  // switch. Said plainly, so the status never reads like a containment bug.
+  if (excluded === true) return { level: LEVEL_NOT, open: [OPEN_EXCLUDED] };
 
   const servers = (Array.isArray(mcpServers) ? mcpServers : []).filter((n) => typeof n === "string" && n);
   const contain = typeof tier === "string" && tier.startsWith("contain");

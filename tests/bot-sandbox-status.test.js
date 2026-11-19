@@ -19,11 +19,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import section, { _setHostBwrapProbeForTest } from "../servers/gateway/dashboard/settings/sections/bot-runtime.js";
+import section, { _setHostBwrapProbeForTest, containmentLineText } from "../servers/gateway/dashboard/settings/sections/bot-runtime.js";
 import {
-  botSandboxStatus, _setBotSandboxProbeForTest,
+  botSandboxStatus, renderBotSandboxStatus, _setBotSandboxProbeForTest,
   _setUsernsRestrictionPathForTest, _setApparmorDirForTest,
 } from "../servers/gateway/dashboard/shared/bot-sandbox-status.js";
+import { OPEN_EXCLUDED } from "../scripts/pi-bots/containment-status.mjs";
 import {
   collectHealthSignals, invalidateHealthCache,
   _setDiskReader, _setTailscaleReader, _setFirewallReader,
@@ -46,6 +47,8 @@ const USERNS_BLOCKED = Object.freeze({
 
 const savedEnv = {
   CROW_PI_SANDBOX: process.env.CROW_PI_SANDBOX,
+  CROW_PI_CONTAIN_BOTS: process.env.CROW_PI_CONTAIN_BOTS,
+  CROW_PI_CONTAIN_EXCLUDE: process.env.CROW_PI_CONTAIN_EXCLUDE,
   PIBOT_SUPERVISOR: process.env.PIBOT_SUPERVISOR,
   CROW_PUBLISH_SNAPSHOT: process.env.CROW_PUBLISH_SNAPSHOT,
   CROW_BACKUP_DIR: process.env.CROW_BACKUP_DIR,
@@ -110,6 +113,8 @@ after(() => {
 
 beforeEach(() => {
   delete process.env.CROW_PI_SANDBOX;
+  delete process.env.CROW_PI_CONTAIN_BOTS;
+  delete process.env.CROW_PI_CONTAIN_EXCLUDE;
   delete process.env.PIBOT_SUPERVISOR;
   _setHostBwrapProbeForTest(null);
   _setBotSandboxProbeForTest(null);
@@ -243,6 +248,43 @@ test("botSandboxStatus: restriction ON with the profile installed never sends th
   const c = botSandboxStatus({ probe: USERNS_BLOCKED });
   assert.equal(c.nextStep, t("settings.sandboxStatus.nextUserns", "en"),
     "only a real profile line counts as installed");
+});
+
+test("the operator's contain exemption is shown, with what it costs: 'not contained (excluded by the operator — other bots can change its settings)'", async () => {
+  process.env.CROW_PI_SANDBOX = "contain";
+  process.env.CROW_PI_CONTAIN_EXCLUDE = "test-bot, bad id";
+  try {
+    const s = botSandboxStatus({ probe: SANDBOXED });
+    assert.equal(s.sandboxed, true, "the sandbox itself is still on");
+    assert.deepEqual(s.excluded, ["test-bot"], "the malformed entry is dropped, not shown as a bot");
+    const html = renderBotSandboxStatus({ probe: SANDBOXED });
+    assert.match(html, /id="crow-sandbox-status-excluded"/);
+    assert.ok(html.includes("Not contained (excluded by the operator — other bots can change its settings): test-bot."), html);
+    assert.ok(!html.includes("bad id"), "a malformed entry never reaches the page");
+    // The Bot Runtime settings page renders that same line (audit N1b-2's rule:
+    // the settings page and every other surface read one module).
+    const page = await section.render({ db: dbWithBots(), lang: "en" });
+    assert.ok(page.includes("Not contained (excluded by the operator — other bots can change its settings): test-bot."), page);
+
+    // The same words the per-bot containment level uses, so the two surfaces agree.
+    assert.equal(containmentLineText(OPEN_EXCLUDED), t("settings.containment.openExcluded", "en"));
+    assert.equal(containmentLineText("test-bot: " + OPEN_EXCLUDED), "test-bot: " + t("settings.containment.openExcluded", "en"));
+  } finally {
+    _setHostBwrapProbeForTest(null);
+    delete process.env.CROW_PI_SANDBOX;
+    delete process.env.CROW_PI_CONTAIN_EXCLUDE;
+  }
+  assert.deepEqual(botSandboxStatus({ probe: SANDBOXED }).excluded, [], "no exemption, no line");
+});
+
+test("an exemption that exempts nothing (no contain switch) is not claimed as one", () => {
+  process.env.CROW_PI_CONTAIN_EXCLUDE = "test-bot";
+  try {
+    assert.deepEqual(botSandboxStatus({ probe: SANDBOXED }).excluded, []);
+    assert.ok(!renderBotSandboxStatus({ probe: SANDBOXED }).includes("id=\"crow-sandbox-status-excluded\""));
+  } finally {
+    delete process.env.CROW_PI_CONTAIN_EXCLUDE;
+  }
 });
 
 test("botSandboxStatus: PIBOT_SUPERVISOR=external is unobserved, never sandboxed", () => {
