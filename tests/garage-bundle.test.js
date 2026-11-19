@@ -15,6 +15,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, cpSync, rmSync } from "node:fs";
 import { rmScratch } from "./helpers/safe-rm.js";
+import { dockerSkip } from "./helpers/docker-available.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,7 +175,7 @@ async function entries() {
 }
 
 let FIRST;
-test("fresh install: every secret minted in its shape, saved to the keychain; the gateway gets S3_* only", async () => {
+test("fresh install: every secret minted in its shape, saved to the keychain; the gateway gets S3_* only", { skip: dockerSkip() }, async () => {
   const { env, job } = await install(formDefaults(manifest()));
   FIRST = env;
   assert.match(env.GARAGE_RPC_SECRET, /^[0-9a-f]{64}$/);
@@ -196,7 +197,7 @@ test("fresh install: every secret minted in its shape, saved to the keychain; th
   for (const k of ["GARAGE_ADMIN_TOKEN", "GARAGE_RPC_SECRET", "GARAGE_DEFAULT_SECRET_KEY"]) assert.ok(!log.includes(env[k]), `${k} value never reaches the job log`);
 });
 
-test("in-place reinstall keeps GARAGE_BIND_ADDR, GARAGE_DATA_PATH and every generated value", async () => {
+test("in-place reinstall keeps GARAGE_BIND_ADDR, GARAGE_DATA_PATH and every generated value", { skip: dockerSkip() }, async () => {
   const dataPath = mkdtempSync(join(tmpdir(), "crow-garage-objects-"));
   try {
     // The owner sets both once (a typed folder is granted to this extension)...
@@ -215,7 +216,7 @@ test("in-place reinstall keeps GARAGE_BIND_ADDR, GARAGE_DATA_PATH and every gene
   }
 });
 
-test("rebuilt machine (no .env, no retained copy): the keychain restores the same key id and secrets", async () => {
+test("rebuilt machine (no .env, no retained copy): the keychain restores the same key id and secrets", { skip: dockerSkip() }, async () => {
   rmSync(join(CROW_HOME, "bundles", "garage"), { recursive: true, force: true });
   rmSync(S.retainedEnvPath(CROW_HOME, "garage"), { force: true });
   const { env } = await install(formDefaults(manifest()));
@@ -224,7 +225,7 @@ test("rebuilt machine (no .env, no retained copy): the keychain restores the sam
   }
 });
 
-test("a manifest-bump refresh never re-renders or re-copies garage.toml or docker-compose.yml", async () => {
+test("a manifest-bump refresh never re-renders or re-copies garage.toml or docker-compose.yml", { skip: dockerSkip() }, async () => {
   const dest = join(CROW_HOME, "bundles", "garage");
   writeFileSync(join(dest, "garage.toml"), "# owner's two-dir layout\n");
   writeFileSync(join(dest, "docker-compose.yml"), "# installed compose\n");
@@ -253,7 +254,7 @@ async function installWith({ gwEnv = "# gateway env (test)\n", sharedRow = false
   return { gw: parseEnvText(readFileSync(GW_ENV, "utf8")), log: job.log.join("\n") };
 }
 
-test("no storage set up yet: installing Garage points Crow's storage at it (S3_* in the gateway .env)", async () => {
+test("no storage set up yet: installing Garage points Crow's storage at it (S3_* in the gateway .env)", { skip: dockerSkip() }, async () => {
   const { gw } = await installWith({});
   assert.equal(gw.S3_ENDPOINT, "127.0.0.1:3900");
   assert.equal(gw.S3_ACCESS_KEY, FIRST.GARAGE_DEFAULT_ACCESS_KEY);
@@ -265,7 +266,7 @@ for (const [label, state] of [
   ["Shared Storage rows in the DB", { sharedRow: true }],
   ["the MinIO extension installed", { minioInstalled: true }],
 ]) {
-  test(`storage already set up (${label}): installing Garage leaves it pointing where it is`, async () => {
+  test(`storage already set up (${label}): installing Garage leaves it pointing where it is`, { skip: dockerSkip() }, async () => {
     const { gw, log } = await installWith(state);
     for (const k of ["S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"]) assert.equal(gw[k], undefined, `${k} not written`);
     if (state.gwEnv) assert.equal(gw.MINIO_ENDPOINT, "localhost", "the MinIO env is untouched");

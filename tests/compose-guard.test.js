@@ -13,6 +13,7 @@ import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, execFile } from "node:child_process";
+import { dockerSkip } from "./helpers/docker-available.js";
 
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-cguard-home-"));
 process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "crow-cguard-data-"));
@@ -348,7 +349,7 @@ function stage(id, compose, files = {}) {
 // Passes the text check, fails the model check: a YAML merge key that turns on privileged.
 const MERGE_PRIV = `x-p: &p\n  privileged: true\nservices:\n  app:\n    image: busybox\n    <<: *p\n`;
 
-dockerTest("collection path: a member whose model fails is refused inside install-set, before any compose up", async () => {
+test("collection path: a member whose model fails is refused inside install-set, before any compose up", { skip: dockerSkip() || (HAVE_COMPOSE ? false : "docker compose not available") }, async () => {
   stage("fx-col", MERGE_PRIV);
   const colPath = join(FIXTURES, "collections.json");
   writeFileSync(colPath, JSON.stringify({ version: 1, collections: [{ id: "fxc", name: "Fx", description: "d", icon: "home", members: [{ id: "fx-col", kind: "deploys" }] }] }));
@@ -741,7 +742,7 @@ dockerTest("services behind an inactive profile are checked too (a hook or an op
   assert.equal((await gateDir(dir, { textCheck: false })).valid, false);
 });
 
-dockerTest("managed hosting: host networking is refused from the resolved model too (${N:-host}, LAN-level drivers)", async () => {
+test("managed hosting: host networking is refused from the resolved model too (${N:-host}, LAN-level drivers)", { skip: dockerSkip() || (HAVE_COMPOSE ? false : "docker compose not available") }, async () => {
   const { validateInstall } = B;
   const prev = process.env.CROW_HOSTED;
   process.env.CROW_HOSTED = "1";

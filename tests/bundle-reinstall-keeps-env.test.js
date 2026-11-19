@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync } from "node:fs";
 import { rmScratch } from "./helpers/safe-rm.js";
+import { dockerSkip } from "./helpers/docker-available.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,7 +82,7 @@ async function reinstall(id, envVars, manifest, opts = {}) {
   return parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8"));
 }
 
-test("MinIO reinstall: the form's default 127.0.0.1 does not overwrite the kept MINIO_BIND_ADDR", async () => {
+test("MinIO reinstall: the form's default 127.0.0.1 does not overwrite the kept MINIO_BIND_ADDR", { skip: dockerSkip() }, async () => {
   const manifest = minioManifest();
   seedMinio(PRIOR_MINIO);
   const env = await reinstall("minio", formDefaults(manifest), manifest);
@@ -89,7 +90,7 @@ test("MinIO reinstall: the form's default 127.0.0.1 does not overwrite the kept 
   assert.equal(env.MINIO_ROOT_PASSWORD, "kept-generated-pw-0123456789abcdef", "the generated password is kept");
 });
 
-test("MinIO reinstall: a field the owner edited wins, even when it equals the default", async () => {
+test("MinIO reinstall: a field the owner edited wins, even when it equals the default", { skip: dockerSkip() }, async () => {
   const manifest = minioManifest();
   seedMinio(PRIOR_MINIO);
   let env = await reinstall("minio", formDefaults(manifest), manifest, { editedEnv: ["MINIO_BIND_ADDR"] });

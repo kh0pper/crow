@@ -105,6 +105,8 @@ async function samplePixels(tab, buf) {
 
 test("live: the watcher attaches to the leased page, streams a JPEG, reads the domain, shoots ≤ 1280 px", async (t) => {
   if (!chrome) { t.skip("no headless Chrome (set CROW_REQUIRE_TEST_CHROME=1 to require one)"); return; }
+  const watcherMod = await import("../servers/gateway/browser-tile/watcher.js");
+  if (watcherMod.isContainerized()) { t.skip("running inside a container: the watcher refuses to attach (resolveCdpUrl returns null)"); return; }
   assert.equal(await W.resolveCdpUrl({ crowHome: HOME }), chrome.cdp, "the endpoint comes from this instance's .env");
 
   const bot = await botTab();

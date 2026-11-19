@@ -960,12 +960,12 @@ test("wrapPiSpawn: the contain tier never binds an exposed dir (no git there in 
   }
 });
 
-// Real bubblewrap only: SKIP when no bwrap binary exists at the installer's
-// path. Every other failure is a failure (a host WITH bwrap that cannot make
-// the namespace is a broken sandbox, not a reason to skip).
+// Real bubblewrap only: SKIP when there is no bwrap binary OR the probe finds the
+// sandbox unavailable (a stub, or a missing namespace capability). A probe-ok host
+// that then fails is still a failure.
 const noBwrapBinary = existsSync("/usr/bin/bwrap") ? false : "no bwrap binary at /usr/bin/bwrap";
 
-test("integration: an exposed key dir is readable inside; every other key, the secrets dir and every write are not", { skip: noBwrapBinary }, async () => {
+test("integration: an exposed key dir is readable inside; every other key, the secrets dir and every write are not", { skip: noBwrapBinary || noSandbox }, async () => {
   const f = exposeFixture();
   const a = join(f.secrets, "bot-git", "a");
   const b = join(f.secrets, "bot-git", "b");

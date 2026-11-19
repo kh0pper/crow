@@ -9,6 +9,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, cpSync, existsSync, rmSync } from "node:fs";
 import { rmScratch } from "./helpers/safe-rm.js";
+import { dockerSkip } from "./helpers/docker-available.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,7 +120,7 @@ async function entriesFor(id) {
 }
 
 for (const e of EXPECT.filter((x) => ["miniflux", "actual-budget"].includes(x.id))) {
-  test(`collection-style install of ${e.id} (empty env, no keychain request): value minted, keychain entry made, .env holds it`, async () => {
+  test(`collection-style install of ${e.id} (empty env, no keychain request): value minted, keychain entry made, .env holds it`, { skip: dockerSkip() }, async () => {
     const manifest = stage(e.id);
     const job = B._createJobForTest(e.id, "install");
     const out = await B.runInstallJob(e.id, {}, { job, installedSnapshot: [], consentVerified: false, manifest, keychain: null });
@@ -159,7 +160,7 @@ for (const e of EXPECT.filter((x) => ["miniflux", "actual-budget"].includes(x.id
   });
 }
 
-test("reinstall keeps the kept value (never regenerated)", async () => {
+test("reinstall keeps the kept value (never regenerated)", { skip: dockerSkip() }, async () => {
   const id = "miniflux";
   const before = parseEnvText(readFileSync(join(CROW_HOME, "bundles", id, ".env"), "utf8")).MINIFLUX_ADMIN_PASSWORD;
   assert.ok(before);
@@ -262,7 +263,7 @@ test("actual-budget: a refused bootstrap is an error that names the reason, not 
   await assert.rejects(AB.ensureBootstrapped("http://localhost:5006", "pw-secret-x", { fetchImpl: f }), (err) => /invalid-password/.test(err.message) && !err.message.includes("pw-secret-x"));
 });
 
-test("actual-budget install runs its postInstall hook (sets the password right away)", () => {
+test("actual-budget install runs its postInstall hook (sets the password right away)", { skip: dockerSkip() }, () => {
   assert.ok(hookRuns.length >= 1, "postInstall hook invoked");
   assert.equal(manifestOf("actual-budget").postInstall.script, "scripts/set-server-password.sh");
 });

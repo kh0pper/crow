@@ -8,6 +8,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { rmScratch } from "./helpers/safe-rm.js";
+import { dockerSkip } from "./helpers/docker-available.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,7 +116,7 @@ test("media bundles no longer block a blank install: their library defaults insi
   } finally { B._setAppBundlesForTest(FIXTURES); }
 });
 
-test("collection-style install of jellyfin (empty env): the media path is a CROW_HOME folder, never the example path", async () => {
+test("collection-style install of jellyfin (empty env): the media path is a CROW_HOME folder, never the example path", { skip: dockerSkip() }, async () => {
   const id = "jellyfin";
   const dir = join(FIXTURES, id);
   mkdirSync(dir, { recursive: true });

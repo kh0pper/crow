@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { dockerSkip } from "./helpers/docker-available.js";
 
 const G = await import("../servers/satellite/gate.js");
 const { checkSatelliteComposeModel, checkSatelliteCompose, SAT_SAFE_CAPS } = await import("../servers/satellite/compose-rules.js");
@@ -257,7 +258,7 @@ test("privileged-equivalents: the full check refuses each one even with a consen
   assert.match(p.reason, /privileged/);
 });
 
-test("positive control: a Gitea-shaped compose passes the full satellite check", () => {
+test("positive control: a Gitea-shaped compose passes the full satellite check", { skip: dockerSkip() }, () => {
   const gitea = {
     name: "gitea",
     services: {

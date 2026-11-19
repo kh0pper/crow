@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { dockerSkip } from "./helpers/docker-available.js";
 
 const G = await import("../servers/gateway/compose-guard.js");
 const home = mkdtempSync(join(tmpdir(), "crow-guard-vol-"));
@@ -125,7 +126,7 @@ test("the browser bundle keeps its own volumes (primary and r4); fresh, unlabell
   assert.deepEqual(check("thing", model("thing", { data: {} }), { thing_data: { project: "crow-thing-2", bundle: "thing" } }), { valid: true }, "its own second instance");
 });
 
-test("ownableProject, reservedCommunityId and the docker lookup", () => {
+test("ownableProject, reservedCommunityId and the docker lookup", { skip: dockerSkip() }, () => {
   assert.equal(G.ownableProject("browser", "browser"), true);
   assert.equal(G.ownableProject("browser", "crow-browser-r4"), true);
   assert.equal(G.ownableProject("browser-chromium", "browser"), false);

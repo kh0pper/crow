@@ -87,7 +87,13 @@ test("the aarch64 table matches asm-generic where it exists", { skip: !existsSyn
 
 const bwrap = ["/usr/bin/bwrap", "/bin/bwrap"].find((p) => existsSync(p));
 const py = ["/usr/bin/python3", "/bin/python3"].find((p) => existsSync(p));
-const live = bwrap && py && seccompSupported() ? false : "needs bwrap, python3 and x64/arm64";
+/** Does the bwrap binary that exists here actually make user+pid namespaces? */
+function bwrapWorks() {
+  if (!bwrap) return false;
+  const r = spawnSync(bwrap, ["--dev-bind", "/", "/", "--unshare-user", "--unshare-pid", "--proc", "/proc", "--", "/bin/true"], { timeout: 15000 });
+  return r?.status === 0;
+}
+const live = bwrap && py && seccompSupported() && bwrapWorks() ? false : "needs a working bwrap (user+pid namespaces), python3 and x64/arm64";
 
 test("integration: under the filter the denied syscalls fail with EPERM and ordinary programs still run", { skip: live, timeout: 60000 }, async () => {
   const { openSync, writeFileSync, mkdtempSync, unlinkSync, closeSync, rmSync } = await import("node:fs");

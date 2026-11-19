@@ -39,6 +39,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          # registry/addon-past-defaults reads git history; a shallow clone skips it
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
