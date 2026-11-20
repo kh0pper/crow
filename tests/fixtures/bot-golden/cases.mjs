@@ -190,6 +190,11 @@ export function buildContainCases() {
     record("engine paths read-only: node install, pi package, checkout, pi-lab", () => buildContainPlan(base()));
     record("pi agent dir: a writable SHADOW at the real path, real subdirs read-only on top, sessions not exposed", () => buildContainPlan(base()));
     record("instance data dir read-write with its secrets masked; the rest of CROW_HOME is not bound", () => buildContainPlan(base()));
+    // The second call of that title used to build with the retired
+    // `unmaskIdentity` option (a sharing bot keeping the file). The option is
+    // gone, so this case is now byte-identical to the first: the identity mask
+    // is unconditional. It is kept as a case of its own so the golden shows
+    // that the old opt-in path no longer changes the argv.
     record("instance data dir read-write with its secrets masked; the rest of CROW_HOME is not bound", () => buildContainPlan(base({ unmaskIdentity: true })));
 
     // The bot-paths test creates its symlink inside the test body.

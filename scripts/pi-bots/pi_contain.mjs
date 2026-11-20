@@ -27,9 +27,12 @@
  *               entry's `!cat` apiKey names. The ONE file under the Crow home
  *               a contained bot reads.
  *   instance    the data dir read-write (the bot's stdio MCP servers open
- *               crow.db directly; documented residual), identity.json masked
- *               unless a sharing tool needs it; CROW_HOME itself, its tokens,
- *               secrets/ and env/ are not bound. <crowHome>/skills read-only.
+ *               crow.db directly; documented residual). identity.json is masked
+ *               UNCONDITIONALLY — the sharing identity holds the master seed
+ *               every instance and bot key derives from, and no tier gives it
+ *               back (there is no opt-out: `unmaskIdentity` was removed).
+ *               CROW_HOME itself, its tokens, secrets/ and env/ are not bound.
+ *               <crowHome>/skills read-only.
  *               Every OTHER entry of the data dir is masked with an empty
  *               READ-ONLY mount, so a write into another project's folder (or
  *               a bundle's state folder) FAILS instead of vanishing into a
@@ -157,6 +160,10 @@ import { buildContainedAgentDir } from "./pi_contain_agent.mjs";
 // The engine's bot-id charset, IMPORTED: an operator's exemption names a bot,
 // and a token that is not a bot id is a typo, not a bot (leaf module: fs/path only).
 import { BOT_ID_RE } from "./bot-workspace-env.mjs";
+// The sharing identity's file names (identity.json and its copies): the one
+// data-dir entry the operator's keep-list may not re-expose. A leaf module
+// (fs/path only), so this pulls nothing into the spawner.
+import { isIdentityFileName } from "./hidden_files.mjs";
 // The gateway's own list of the names Crow's data uses directly under the data folder
 // (servers/gateway/compose-guard.js, where no bundle mount may claim one). It is IMPORTED,
 // not copied, so a name the gateway starts using is masked for contained bots in the same
@@ -266,7 +273,7 @@ export const BUNDLE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /**
  * Top-level entries of the instance's data dir that belong to the INSTANCE, never to a
  * bundle. The data-dir mask below handles them BY NAME: the DB files are kept (SQLite
- * writes -wal/-shm/-journal beside them), a sharing bot keeps identity.json, `projects`
+ * writes -wal/-shm/-journal beside them), `projects`
  * is re-exposed down to the bot's own workspace, and the rest — peers, instance-sync,
  * backups, pi-bots, secrets, env, history, previews, … — are masked wholesale. So no
  * bundle may claim one: a uv bind at <data>/<such a name>/… would sit OVER that mask and
@@ -1225,10 +1232,13 @@ export function buildContainPlan(o) {
       // The directory itself must be bound (SQLite creates -wal/-shm/-journal
       // beside the DB; a private copy of those would corrupt it), so every
       // OTHER entry present at spawn time is masked: other projects, backups,
-      // peers, sync state, DB copies. Kept: the DBs, the bot's own project,
-      // identity.json for a sharing bot, and the operator's keep-list.
-      const keep = new Set(o.dataKeep || []);
-      if (o.unmaskIdentity) keep.add("identity.json");
+      // peers, sync state, DB copies. Kept: the DBs, the bot's own project, and
+      // the operator's keep-list. identity.json is NOT in it and can never be:
+      // the sharing identity holds the master seed every instance and bot key
+      // derives from, so no bot definition and no `crow-sharing` entry can ask
+      // for it back — and a keep-list naming it (`CROW_PI_CONTAIN_DATA_KEEP`)
+      // cannot either.
+      const keep = new Set((o.dataKeep || []).filter((n) => !isIdentityFileName(n)));
       const wsReal = o.workspaceDir ? real(o.workspaceDir, exists) : null;
       let entries = [];
       try { entries = readdirSync(rd); } catch {}
@@ -1236,12 +1246,11 @@ export function buildContainPlan(o) {
       for (const e of entries) {
         const p = join(rd, e);
         // The instance's own state, by name (RESERVED_DATA_ENTRIES): the DB files
-        // and their journals stay (SQLite writes beside them), a sharing bot keeps
-        // identity.json, `projects` is re-exposed down to the bot's own workspace,
-        // and every other reserved entry — peers, instance-sync, backups, pi-bots,
-        // secrets, env, history, previews, … — is masked with the rest. Nothing
-        // reserved is ever a bundle's data folder (isReservedDataEntry gates bundle
-        // ids too).
+        // and their journals stay (SQLite writes beside them), `projects` is
+        // re-exposed down to the bot's own workspace, and every other reserved
+        // entry — identity.json, peers, instance-sync, backups, pi-bots, secrets,
+        // env, history, previews, … — is masked with the rest. Nothing reserved is
+        // ever a bundle's data folder (isReservedDataEntry gates bundle ids too).
         if (isReservedDataEntry(e)) {
           if (DB_FILE_RE.test(e) || keep.has(e)) continue;
           if (e === "projects" && wsReal && under(wsReal, p)) {

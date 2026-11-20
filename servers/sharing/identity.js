@@ -29,15 +29,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /**
  * Resolve data directory. Priority: CROW_DATA_DIR env → for a non-default
  * CROW_HOME, resolveInstanceDataDir (the servers/db.js rule) → ~/.crow/data/ → ./data/
+ * `env` is a parameter so a caller (and a test) can ask for another env's
+ * answer; the module's own anchor below is computed once from process.env.
  */
-function resolveDataDir() {
-  if (process.env.CROW_DATA_DIR) {
-    return resolve(process.env.CROW_DATA_DIR);
+function resolveDataDir(env = process.env) {
+  if (env.CROW_DATA_DIR) {
+    return resolve(env.CROW_DATA_DIR);
   }
-  if (!isDefaultCrowHome(process.env)) {
-    return resolveInstanceDataDir(process.env);
+  if (!isDefaultCrowHome(env)) {
+    return resolveInstanceDataDir(env);
   }
-  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const home = env.HOME || env.USERPROFILE || "";
   const crowHome = resolve(home, ".crow", "data");
   if (home && existsSync(crowHome)) {
     return crowHome;
@@ -47,6 +49,23 @@ function resolveDataDir() {
 
 const DATA_DIR = resolveDataDir();
 const IDENTITY_PATH = resolve(DATA_DIR, "identity.json");
+
+/**
+ * This module's OWN instance-data-dir anchor, re-derived from `env` at call
+ * time — the directory IDENTITY_PATH lives in, i.e. the one dir this module
+ * reads and writes the master seed from.
+ *
+ * Exported for the bot sandbox: the identity file a bot must never read is the
+ * one THIS resolver names (`<dataDir>/identity.json`, and loadInstanceSeed's
+ * same name), which is NOT necessarily `dirname(CROW_DB_PATH)`: that variable
+ * says where the sqlite file is, not where the instance lives, and on the home
+ * server the two legitimately differ (a repo data dir holding crow.db, with the
+ * seed only in the instance dir whose crow.db is a symlink to it). Any caller
+ * that masks the seed file has to use this answer, not a DB-derived guess.
+ */
+export function identityDataDir(env = process.env) {
+  return resolveDataDir(env);
+}
 
 /**
  * identity.json holds the master seed every bot/instance key derives from,

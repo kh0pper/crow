@@ -184,6 +184,51 @@ test("integration (M7, no docker needed): a masked socket is unreachable inside,
   }
 });
 
+test("integration: a bot that names crow-sharing cannot READ the instance's identity file (default tier)", { skip: noPidns }, async () => {
+  // The sharing identity holds the MASTER SEED every instance and bot key derives
+  // from. The default tier masks it like the other secret files — the old
+  // `unmaskIdentity` path (a def naming crow-sharing tools) is gone, so this def
+  // changes nothing. A REAL sandbox is asked for the bytes.
+  const dir = mkdtempSync(join(tmpdir(), "crow-pi-sandbox-identity-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const identityPath = join(process.env.CROW_DATA_DIR, "identity.json");
+  const seed = "c0ffee".repeat(10) + "c0ff";
+  writeFileSync(identityPath, JSON.stringify({ version: 1, crowId: "crow:test", seed }), { mode: 0o600 });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, [
+    'import { readFileSync } from "node:fs";',
+    'const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");',
+    'let identity = ""; try { identity = readFileSync(process.env.CROW_TEST_IDENTITY, "utf8"); } catch (e) { identity = "ERR:" + (e.code || e.message); }',
+    'out({ type: "report", identity });',
+    'process.stdin.resume();',
+  ].join("\n"));
+  const prev = process.env.CROW_TEST_IDENTITY;
+  process.env.CROW_TEST_IDENTITY = identityPath;
+  const pi = new PiRpc({
+    def: { tools: { pi_builtin: ["read"], crow_mcp: ["crow-sharing/list_invites", "crow-sharing"] },
+      permission_policy: { bash: "deny", write_paths: [], read_paths: [] } },
+    sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" },
+    nodeBin: process.execPath, cliPath: stub,
+  });
+  try {
+    assert.equal(pi.sandboxed, true);
+    assert.ok(pi.sandboxMaskedFiles.includes(identityPath), "the launch reports the identity file masked");
+    const r = await pi.waitFor((m) => m.type === "report", 20000, "report");
+    // Masked with /dev/null, so a read answers empty; EACCES/ENOENT would be the
+    // same answer. The seed is what must never come back.
+    assert.ok(r.identity === "" || String(r.identity).startsWith("ERR:"),
+      "identity.json reads empty or fails inside: " + JSON.stringify(String(r.identity).slice(0, 40)));
+    assert.ok(!String(r.identity).includes(seed));
+    // …and the host file is untouched, so the gateway still has its identity.
+    assert.ok(readFileSync(identityPath, "utf8").includes(seed));
+  } finally {
+    await pi.close();
+    if (prev === undefined) delete process.env.CROW_TEST_IDENTITY; else process.env.CROW_TEST_IDENTITY = prev;
+    try { rmSync(identityPath, { force: true }); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("wrapPiSpawn: off / auto-unavailable / required / available argv", () => {
   _resetPiSandboxForTest();
   const off = wrapPiSpawn("node", ["cli.js"], { mode: "off", env: { SSH_AUTH_SOCK: "x" } });

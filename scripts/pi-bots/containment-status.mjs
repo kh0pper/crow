@@ -39,6 +39,18 @@ export const OPEN_DATA_DBS =
   "crow.db and tasks.db are readable and writable (provider keys, OAuth tokens, settings, bot definitions)";
 /** A configured browser has no door, so a contained bot cannot reach it. */
 export const OPEN_BROWSER = "the browser is unreachable (no browser door yet)";
+/**
+ * Instance-level: this spawn's tier cannot hold the identity-file mask, and an
+ * identity file exists. Two shapes, one sentence, because the operator's read is
+ * the same either way: `pidns` is the only default tier that makes the mask
+ * hold (bwrap without its own PID namespace leaves the host /proc reachable
+ * through /proc/<pid>/root/..., and the setpriv/plain fallbacks mask nothing at
+ * all). The contain tier always has a PID namespace, so it never carries this
+ * line. The bridge does NOT refuse such a spawn (the operator decides); it logs
+ * a loud warning and names the exposure here.
+ */
+export const OPEN_IDENTITY_UNMASKED =
+  "the instance's identity file is not hidden (this spawn has no bubblewrap sandbox with its own PID namespace)";
 /** Instance-level: a `not contained` bot shares this uid with the gateway. */
 export const OPEN_SECRETS_SWAP =
   "an uncontained bot could replace the hidden secrets dir before a restart (peer tokens, service bindings)";
@@ -176,9 +188,12 @@ function dedupe(lines) {
  * @param {string[]} [a.droppedWrites] configured writable paths the plan dropped
  *                                    because they do not exist (pi_contain.mjs);
  *                                    each one gets its own open line
+ * @param {boolean} [a.identityExposed] an identity file exists and this spawn's
+ *                                    tier cannot hold the mask (see
+ *                                    OPEN_IDENTITY_UNMASKED)
  * @returns {{level: string, open: string[]}}
  */
-export function botContainment({ tier = null, mcpServers = [], providerIds = [], missing = [], tools = [], excluded = false, droppedWrites = [] } = {}) {
+export function botContainment({ tier = null, mcpServers = [], providerIds = [], missing = [], tools = [], excluded = false, droppedWrites = [], identityExposed = false } = {}) {
   // A refused spawn is not a weaker containment: it did not run. Say what stood
   // in the way (the same sentence the failed turn carries).
   const refused = dedupe((Array.isArray(missing) ? missing : []).map((m) => {
@@ -192,11 +207,13 @@ export function botContainment({ tier = null, mcpServers = [], providerIds = [],
   // An exemption is not a refusal and not a downgrade: the spawn ran exactly as
   // the operator asked, in the tier it would have had without the contain
   // switch. Said plainly, so the status never reads like a containment bug.
-  if (excluded === true) return { level: LEVEL_NOT, open: [OPEN_EXCLUDED] };
+  if (excluded === true) return { level: LEVEL_NOT, open: [OPEN_EXCLUDED, ...(identityExposed === true ? [OPEN_IDENTITY_UNMASKED] : [])] };
 
   const servers = (Array.isArray(mcpServers) ? mcpServers : []).filter((n) => typeof n === "string" && n);
   const contain = typeof tier === "string" && tier.startsWith("contain");
-  if (!contain) return { level: LEVEL_NOT, open: [OPEN_UNCONTAINED] };
+  if (!contain) {
+    return { level: LEVEL_NOT, open: [OPEN_UNCONTAINED, ...(identityExposed === true ? [OPEN_IDENTITY_UNMASKED] : [])] };
+  }
 
   // Contain tier, Phase 1: never "contained". The data dir is bound read-write,
   // so the DB line always applies; each add-on brings its own secrets; and a

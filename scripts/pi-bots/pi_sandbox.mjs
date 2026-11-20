@@ -88,9 +88,19 @@
  *    Still readable, because something inside the sandbox reads each one:
  *    the cloud model key (llm-cloud-token), the local models token
  *    (models-token), the kiosk and studio tokens (kiosk-announce-token,
- *    studio-agent-token), the browser and workspace add-on settings, the
- *    sharing identity (data/identity.json), the database (crow.db) and
- *    ~/.claude.
+ *    studio-agent-token), the browser and workspace add-on settings, and the
+ *    database (crow.db) and ~/.claude. The instance's sharing identity
+ *    (data/identity.json, the master seed every instance and bot key derives
+ *    from) is NOT one of them: it is masked on every spawn in both tiers, with
+ *    no opt-out — but only a tier that can hold a mask does so (`pidns`, or
+ *    contain). With CROW_PI_SANDBOX=off, without bwrap (the setpriv fallback
+ *    masks nothing) or in the `userns` tier (host /proc is visible) the file IS
+ *    readable inside; the bridge logs one WARNING per tier and the
+ *    `[containment]` line names it, and the boot check fails with that reason
+ *    rather than claiming a pass. Bot-run tool servers that read the identity
+ *    (crow-storage, studio, sunvox-studio, ramble, data-dashboard) lose their
+ *    identity-backed path inside the sandbox — see IDENTITY_HIDDEN_LIMITATION in
+ *    hidden_files.mjs.
  *
  * Without bubblewrap (e.g. the cloud VM), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.

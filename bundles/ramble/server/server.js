@@ -80,8 +80,16 @@ export function createRambleServer(db, options = {}) {
       let { identity, seed, _derive } = options;
       if (!identity || !seed || !_derive) {
         const mod = await appImport("servers/sharing/identity.js");
-        if (!identity) identity = mod.loadOrCreateIdentity();
-        if (!seed) seed = mod.loadInstanceSeed(resolveDataDir());
+        // A bot sandbox masks the instance identity on purpose (it holds the
+        // master seed every bot key derives from), so these loaders see an empty
+        // file and would fail with pi's JSON parse error. Say what is actually
+        // wrong instead: this tool needs the gateway, not a bot turn.
+        try {
+          if (!identity) identity = mod.loadOrCreateIdentity();
+          if (!seed) seed = mod.loadInstanceSeed(resolveDataDir());
+        } catch {
+          throw new Error("ramble: the instance identity is not available to bots (this Crow's identity file is hidden inside the bot sandbox); run this from the dashboard, not a bot turn");
+        }
         if (!_derive) _derive = mod.deriveBotIdentity;
       }
       // The memoized sessionId is only the FALLBACK for when no gateway has

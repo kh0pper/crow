@@ -911,6 +911,44 @@ export async function runPostListenSetup(server, app, deps) {
     });
   });
 
+  // Bots can't read Crow's identity file (the identity-file containment check,
+  // item-70 channel 3): dry-build every enabled bot's spawn plan in BOTH tiers
+  // and report the answer. Nothing is spawned, no mount point is made and no
+  // file is written — the plan builders are simply asked what they would mask.
+  // The FILE LIST is the bridge's own (identity-candidates.mjs: this instance's
+  // seed dir from identity.js's resolver AND dirname(CROW_DB), every co-hosted
+  // home's data dir, and the repo's backup dirs), so this check cannot answer
+  // about a different file than the spawn masks. It also reads the operator's
+  // sandbox switch and the host's real bwrap probe: a tier that cannot hold the
+  // mask (CROW_PI_SANDBOX=off, no bwrap, or bwrap without a PID namespace) is a
+  // FAIL, not a pass. A plan that REFUSES the spawn counts as safe (nothing
+  // runs) and is reported as a note. A failure also rings the bell
+  // (boot/bot-identity-notice.js), deduped per distinct finding set, because a
+  // journal line is not where an operator looks. A host with NO enabled bots is
+  // a pass with a note (`no bots`): nothing can spawn, so its sandbox tier is
+  // not judged and no bell is raised for it.
+  import("../../../scripts/pi-bots/bot-identity-guard.mjs").then(async ({ runBotIdentityCheck, formatBotIdentityLine }) => {
+    let db = null;
+    try {
+      const { appRoot } = await import("../auto-update.js");
+      db = createDbClient();
+      const result = await runBotIdentityCheck({
+        db,
+        crowHome: resolveCrowHome(),
+        appRoot,
+      });
+      const line = formatBotIdentityLine(result);
+      if (result.ok) console.log(line); else console.error(line);
+      for (const note of result.notes || []) console.log("[containment] " + note);
+      if (!result.ok) {
+        const { notifyBotIdentityFailure } = await import("./bot-identity-notice.js");
+        await notifyBotIdentityFailure({ db, result });
+      }
+    } finally {
+      try { db?.close?.(); } catch {}
+    }
+  }).catch((err) => console.warn(`[bot-identity] check not run: ${err.message}`));
+
   // ntfy autowire (spec 2026-10-03): once, 20 s after listen, give this instance its own
   // login + private push topic when nothing is configured yet and an ntfy server is
   // here (installed by this instance or shared on the host). Kill switch

@@ -172,8 +172,28 @@ test("instance data dir read-write with its secrets masked; the rest of CROW_HOM
   assert.ok(has(args, "--ro-bind", "/dev/null", join(data, "identity.json")), "identity masked by default");
   assert.ok(!pairs(args).some((p) => p[1] === crowHome), "CROW_HOME itself is not bound");
   assert.ok(!pairs(args).some((p) => p[1] && p[1].startsWith(join(crowHome, "secrets"))));
-  const masked = buildContainPlan(base({ unmaskIdentity: true })).args;
-  assert.ok(!has(masked, "--ro-bind", "/dev/null", join(data, "identity.json")), "a sharing bot keeps its identity");
+  // There is no opt-out any more: a def that names crow-sharing tools (or a plan
+  // built with the retired `unmaskIdentity` option) keeps the identity masked.
+  const named = buildContainPlan(base({ mcpServers: [{ command: "node", args: [join(app, "servers", "sharing", "index.js")], cwd: app }] }));
+  assert.ok(has(named.args, "--ro-bind", "/dev/null", join(data, "identity.json")), "a sharing block does not unmask it");
+  const retired = buildContainPlan(base({ unmaskIdentity: true }));
+  assert.ok(has(retired.args, "--ro-bind", "/dev/null", join(data, "identity.json")), "the retired option is inert");
+  // Nor can the operator's keep-list re-expose it (CROW_PI_CONTAIN_DATA_KEEP).
+  const kept = buildContainPlan(base({ dataKeep: ["identity.json", "artifacts"] }));
+  assert.ok(has(kept.args, "--ro-bind", "/dev/null", join(data, "identity.json")), "the keep-list cannot keep the identity");
+});
+
+test("the recorded golden shows the retired unmaskIdentity input no longer changes the plan", () => {
+  // contain-plans.json records two cases for the identity title: the plain plan
+  // and the one the old `unmaskIdentity` input built. With the opt-out gone they
+  // are byte-identical, and the golden says so (see tests/bot-path-golden.test.js
+  // for the one-delta rule this re-record was checked against).
+  const golden = JSON.parse(readFileSync(join(REPO, "tests", "fixtures", "bot-golden", "contain-plans.json"), "utf8"));
+  const title = "instance data dir read-write with its secrets masked; the rest of CROW_HOME is not bound";
+  const first = golden.find((c) => c.name === title + " #1");
+  const second = golden.find((c) => c.name === title + " #2");
+  assert.ok(first && second, "both recorded cases are in the golden");
+  assert.deepEqual(second.plan, first.plan);
 });
 
 test("bot paths: session and cwd rw, workspace rw, write_paths rw, read_paths ro, all realpath'd", () => {

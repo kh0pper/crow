@@ -197,6 +197,32 @@ function artifactsBlock(crowHome, { botId, threadId, gatewayType, port } = {}) {
 /** The catalog name of the credential card's mount (spec §10.2). */
 export const SECRETS_SERVER = "crow-secrets";
 
+/**
+ * Crow servers that exist on this instance but are NEVER handed to a bot.
+ *
+ * `crow-sharing` is the operator's own sharing door: since servers/shared/
+ * bot-owner-only refuses every sharing tool to a bot (all but
+ * crow_list_crosspost_transforms), a bot config that names it can only fail
+ * calls — and the stdio server still reads the instance's identity material to
+ * start. So it is not catalogued for bots at all (mcp_writer disables it even
+ * when the operator's own canonical ~/.pi/agent/mcp.json carries it), while the
+ * REGISTRY entry stays exactly as it is for the operator's own MCP config
+ * (`npm run mcp-config`, unchanged). A narrow bot messaging door comes
+ * separately.
+ */
+export const BOT_EXCLUDED_SERVERS = Object.freeze(["crow-sharing"]);
+
+/**
+ * True for a Crow server a bot's MCP config must never contain. Both spellings
+ * of a per-tool selection reduce to the server name (`crow-sharing/x`, and
+ * `crow-sharing__x` — the shape pi registers a tool under), so neither can slip
+ * a block in.
+ */
+export function isBotExcludedServer(name) {
+  const base = String(name || "").split("/")[0].split("__")[0];
+  return BOT_EXCLUDED_SERVERS.includes(base);
+}
+
 // The secrets token lives in <crowHome>/secrets (the 700 dir the pi sandbox hides from bots),
 // rotated at every gateway boot (local-token.js SECRETS_TOKEN); this runs outside the sandbox.
 function secretsTokenPath(crowHome) { return join(crowHome, "secrets", "secrets-token"); }
@@ -405,11 +431,13 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   if (secrets) { servers[SECRETS_SERVER] = secrets; coreNames.push(SECRETS_SERVER); }
 
   for (const spec of CORE_SERVERS) {
+    if (isBotExcludedServer(spec.name)) continue; // never in a bot's config (BOT_EXCLUDED_SERVERS)
     const { block } = coreBlock(spec, binding, repoEnv, node);
     servers[spec.name] = block;
     coreNames.push(spec.name);
   }
   for (const spec of CONDITIONAL_SERVERS) {
+    if (isBotExcludedServer(spec.name)) continue; // never in a bot's config (BOT_EXCLUDED_SERVERS)
     const { block, missing } = coreBlock(spec, binding, repoEnv, node);
     if (missing.length) unconfigured[spec.name] = `unconfigured: missing ${missing.join(", ")}`;
     else servers[spec.name] = block;

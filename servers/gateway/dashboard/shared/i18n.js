@@ -5952,6 +5952,13 @@ export const translations = {
   "mail.draftSuggestReason": { en: "{project}", es: "{project}" },
   // The instruction a chosen bot's first turn is asked for (the turn route refuses an empty one).
   "mail.draftAsk": { en: "Draft a reply to this thread.", es: "Draft a reply to this thread." }, // operator copy not yet supplied
+  // Bots can't read Crow's identity file (item-70 channel 3): the boot check's
+  // bell. The body is a frame — the check appends its own findings (paths and
+  // reasons only, never content) and the restart sentence.
+  "notif.botIdentity.title": { en: "Bots can read Crow's identity file", es: "Los bots pueden leer el archivo de identidad de Crow" },
+  "notif.botIdentity.body": { en: "A bot spawn would leave the instance's identity file (the master seed every bot key comes from) readable. Turn the bot sandbox on with bubblewrap and PID namespaces (Settings \u203a Bot Runtime). Findings:", es: "Un proceso de bot dejaría legible el archivo de identidad de la instancia (la semilla maestra de la que salen todas las claves de los bots). Activa el entorno aislado con bubblewrap y espacios de nombres de PID (Ajustes \u203a Tiempo de ejecución de bots). Hallazgos:" },
+  // The containment open line identityExposed adds (containment-status.mjs).
+  "settings.containment.openIdentityUnmasked": { en: "the instance's identity file is not hidden (this spawn has no bubblewrap sandbox with its own PID namespace)", es: "el archivo de identidad de la instancia no está oculto (este proceso no tiene el entorno aislado de bubblewrap con su propio espacio de nombres de PID)" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

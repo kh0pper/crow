@@ -19,6 +19,7 @@ import {
   instanceContainment, recordedContainment, unobservedContainment,
   LEVEL_CONTAINED, LEVEL_PARTLY, LEVEL_NOT,
   OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED, OPEN_EXCLUDED,
+  OPEN_IDENTITY_UNMASKED,
 } from "../../../../../scripts/pi-bots/containment-status.mjs";
 import { botSandboxProbe, renderBotSandboxStatus, spawnsOutsideThisProcess } from "../../shared/bot-sandbox-status.js";
 import { secretsAncestorsReport } from "../../../../../servers/shared/secrets-ancestors.js";
@@ -101,6 +102,7 @@ export function containmentLineText(line, lang = "en") {
   if (s === OPEN_EXCLUDED) return t("settings.containment.openExcluded", lang);
   if (s === OPEN_NO_BWRAP) return t("settings.containment.openNoBwrap", lang);
   if (s === OPEN_UNOBSERVED) return t("settings.containment.openUnobserved", lang);
+  if (s === OPEN_IDENTITY_UNMASKED) return t("settings.containment.openIdentityUnmasked", lang);
   let m = /^(.+) runs inside the sandbox with its own credentials$/.exec(s);
   if (m) return fill(t("settings.containment.openAddOnServer", lang), { server: m[1] });
   m = /^provider (.+) has no door$/.exec(s);

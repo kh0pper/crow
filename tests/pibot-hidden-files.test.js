@@ -11,7 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
   GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal,
-  BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName } from "../scripts/pi-bots/hidden_files.mjs";
+  BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName,
+  IDENTITY_FILE_NAME, isIdentityFileName, IDENTITY_HIDDEN_LIMITATION } from "../scripts/pi-bots/hidden_files.mjs";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-files-"));
@@ -47,6 +48,60 @@ test("secretFilesFor: root token files, the appRoot .env and every non-allow-lis
     assert.equal(new Set(files).size, files.length, "deduped");
     assert.deepEqual(BUNDLE_ENV_READABLE, ["browser", "workspace"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("secretFilesFor: the sharing identity and every copy of it, at THIS home's data dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "crow-hidden-identity-"));
+  const crowHome = join(root, ".crow");
+  const dataDir = join(crowHome, "data");
+  try {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, IDENTITY_FILE_NAME), JSON.stringify({ version: 1, seed: "fake-seed" }));
+    writeFileSync(join(dataDir, "identity.json.bak-20260101"), JSON.stringify({ seed: "fake-seed" }));
+    writeFileSync(join(dataDir, "identity.json~"), JSON.stringify({ seed: "fake-seed" }));
+    // The copy scripts/backup.sh writes into the backup dir, here beside the seed:
+    // the same master seed, so it is a candidate wherever it sits.
+    writeFileSync(join(dataDir, "primary-identity-2026-11-05.json"), JSON.stringify({ seed: "fake-seed" }));
+    writeFileSync(join(dataDir, "notes.txt"), "not a secret");
+    const files = secretFilesFor({ crowHome, dataDir });
+    assert.ok(files.includes(join(dataDir, "identity.json")), "the master-seed file is a candidate");
+    assert.ok(files.includes(join(dataDir, "identity.json.bak-20260101")), "a dated copy holds the same seed");
+    assert.ok(files.includes(join(dataDir, "identity.json~")), "an editor copy too");
+    assert.ok(files.includes(join(dataDir, "primary-identity-2026-11-05.json")), "a <stem>-identity-<date>.json backup copy too");
+    assert.ok(!files.includes(join(dataDir, "notes.txt")), "an ordinary data file is not");
+    // The plain name is listed even before it exists: the one file that must never be missed.
+    const fresh = join(root, "fresh");
+    mkdirSync(join(fresh, "data"), { recursive: true });
+    assert.ok(secretFilesFor({ crowHome: fresh }).includes(join(fresh, "data", IDENTITY_FILE_NAME)),
+      "the default <crowHome>/data is the data dir when none is given");
+    // A relocated data dir (CROW_DATA_DIR/CROW_DB_PATH elsewhere) is honoured.
+    const outside = join(root, "srv-data");
+    mkdirSync(outside, { recursive: true });
+    assert.ok(secretFilesFor({ crowHome, dataDir: outside }).includes(join(outside, IDENTITY_FILE_NAME)));
+    assert.equal(secretFilesFor({ crowHome, dataDir: null }).includes(join(crowHome, "data", IDENTITY_FILE_NAME)), false,
+      "dataDir: null skips the identity candidates for a home whose data dir is not known");
+    assert.equal(isIdentityFileName("identity.json"), true);
+    assert.equal(isIdentityFileName("identity.json.bak"), true);
+    // The name rule covers every copy that holds the seed, including the repo's
+    // own backup copies (scripts/backup.sh -> <stem>-identity-<date>.json).
+    assert.equal(isIdentityFileName("my-identity.json"), true, "a *identity*.json copy counts (over-masking is the safe way)");
+    assert.equal(isIdentityFileName("primary-identity-2026-11-05.json"), true, "the backup script's identity copy");
+    assert.equal(isIdentityFileName("primary-crow-r4-1a2b3c-identity-2026-11-05.json"), true, "a tagged instance's copy");
+    assert.equal(isIdentityFileName("notes.json"), false, "an ordinary json is not");
+    assert.equal(isIdentityFileName("identity.txt"), false, "not a json name");
+    assert.equal(isIdentityFileName("crow.db"), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("IDENTITY_HIDDEN_LIMITATION names every bot-run server that reads the identity, data-dashboard included", () => {
+  for (const id of ["crow-storage", "studio", "sunvox-studio", "ramble", "data-dashboard"]) {
+    assert.ok(IDENTITY_HIDDEN_LIMITATION.includes(id), id + " is named in: " + IDENTITY_HIDDEN_LIMITATION);
+  }
+  // The newest entry is not just words: that server really opens the identity,
+  // and really falls back to the env when it is hidden.
+  const src = readFileSync(join(import.meta.dirname, "..", "bundles", "data-dashboard", "server", "server.js"), "utf8");
+  assert.match(src, /loadIdentityIfPresent\(/, "data-dashboard opens the instance identity");
+  assert.match(src, /useDbStorageConfig\(/, "and falls back to the env fallback when it is absent");
 });
 
 test("secretFilesFor: a .env backup at each ROOT is listed (and refused if it is a link), a .env.example at each root and in a bundle is not", () => {
@@ -181,8 +236,9 @@ mkdirSync(SCAN_ENV, { recursive: true });
 const { _setSystemScanDirsForTest } = await import("../servers/shared/secret-values.js");
 _setSystemScanDirsForTest({ unitDirs: [SCAN_UNITS], envFileDirs: [SCAN_ENV] });
 
-const { PiRpc, homeMatchesResolved, logUnhideableOnce, _resetUnhideableLogForTest } = await import("../scripts/pi-bots/bridge.mjs");
+const { PiRpc, homeMatchesResolved, logUnhideableOnce, _resetUnhideableLogForTest, _resetIdentityTierWarningsForTest } = await import("../scripts/pi-bots/bridge.mjs");
 const { probePiSandbox, _resetPiSandboxForTest } = await import("../scripts/pi-bots/pi_sandbox.mjs");
+const { recordedContainment, _resetContainmentForTest, OPEN_IDENTITY_UNMASKED } = await import("../scripts/pi-bots/containment-status.mjs");
 
 _resetPiSandboxForTest();
 const SANDBOX = probePiSandbox({ force: true });
@@ -275,6 +331,75 @@ test("sandboxed spawn: root secrets and other bundles' .env are masked; models-t
     rmSync(dir, { recursive: true, force: true });
   }
 });
+test("the instance identity AND the backup's identity copy read empty inside a sandboxed spawn", { skip: noSandbox }, async () => {
+  // The two anchors are the same dir here (CROW_DATA_DIR is set and CROW_DB_PATH
+  // is not), so this pins the mask itself: the seed file and the copy the repo's
+  // own backup writes into `resolveBackupDir()` both read empty inside.
+  const dataDir = join(CROW, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const dataFile = join(dataDir, "identity.json");
+  const seedShaped = JSON.stringify({ version: 1, seed: "b".repeat(64) });
+  writeFileSync(dataFile, seedShaped, { mode: 0o600 });
+  const backupDir = mkdtempSync(join(tmpdir(), "crow-hidden-backup-"));
+  const backupCopy = join(backupDir, "primary-identity-2026-11-05.json");
+  writeFileSync(backupCopy, seedShaped, { mode: 0o600 });
+  const prevBackup = process.env.CROW_BACKUP_DIR;
+  process.env.CROW_BACKUP_DIR = backupDir;
+  try {
+    const { report, masked } = await spawnReport({ files: { dataFile, backupCopy } });
+    assert.equal(report.len.dataFile, 0, "the seed reads empty inside");
+    assert.equal(report.len.backupCopy, 0, "the backup's identity copy reads empty inside");
+    assert.ok(masked.includes(join(REAL_CROW, "data", "identity.json")), "masked at the seed's own path");
+    assert.ok(masked.includes(realpathSync(backupCopy)), "masked at the backup copy's own path (its dir is a trusted root)");
+    assert.equal(readFileSync(dataFile, "utf8"), seedShaped, "the file on disk keeps its content");
+  } finally {
+    if (prevBackup === undefined) delete process.env.CROW_BACKUP_DIR; else process.env.CROW_BACKUP_DIR = prevBackup;
+    rmSync(backupDir, { recursive: true, force: true });
+    rmSync(dataFile, { force: true });
+  }
+});
+
+test("a tier that cannot hold the identity mask says so: one loud warning per tier, and the [containment] line names it", async () => {
+  // CROW_PI_SANDBOX=off masks nothing at all, so an existing identity file is
+  // readable inside the bot. The bridge does NOT refuse (the operator's switch);
+  // it warns once and records the exposure on the containment line instead.
+  const dataFile = join(CROW, "data", "identity.json");
+  mkdirSync(join(CROW, "data"), { recursive: true });
+  writeFileSync(dataFile, JSON.stringify({ version: 1, seed: "c".repeat(64) }), { mode: 0o600 });
+  const dir = mkdtempSync(join(tmpdir(), "crow-identity-tier-"));
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  const stub = join(dir, "stub-pi.mjs");
+  writeFileSync(stub, 'process.stdout.write(JSON.stringify({ type: "report" }) + "\\n"); setTimeout(() => process.exit(0), 50);');
+  const prev = process.env.CROW_PI_SANDBOX;
+  const lines = [];
+  const orig = console.error;
+  console.error = (...a) => { lines.push(a.map(String).join(" ")); };
+  _resetIdentityTierWarningsForTest();
+  _resetContainmentForTest();
+  process.env.CROW_PI_SANDBOX = "off";
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const pi = new PiRpc({ def: {}, botId: "tier-bot", sessionDir: dir, resolved: { provider: "p", model: "m", key: "p/m" },
+        nodeBin: process.execPath, cliPath: stub, diagLog: () => {} });
+      await pi.waitFor((m) => m.type === "report", 10000, "report");
+      await pi.exited;
+    }
+    const warned = lines.filter((l) => l.includes("without a bubblewrap PID namespace"));
+    assert.equal(warned.length, 1, "one line per tier per process, not one per spawn");
+    assert.match(warned[0], /identity file \(its master seed\) is readable/);
+    assert.ok(!warned[0].includes("c".repeat(64)), "the line never carries a value");
+    const open = recordedContainment("tier-bot").open;
+    assert.ok(open.includes(OPEN_IDENTITY_UNMASKED), "the containment line names the exposure: " + JSON.stringify(open));
+  } finally {
+    console.error = orig;
+    if (prev === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = prev;
+    _resetIdentityTierWarningsForTest();
+    _resetContainmentForTest();
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dataFile, { force: true });
+  }
+});
+
 /** The error a spawn is refused with, or null when it started. */
 async function spawnOutcome() {
   const dir = mkdtempSync(join(tmpdir(), "crow-hidden-refuse-"));

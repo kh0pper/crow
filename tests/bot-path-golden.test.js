@@ -49,6 +49,20 @@
 // `refused` and case order are unchanged; the re-record was diffed case by case
 // against the previous file and the only delta was that ordering.
 //
+// A FOURTH recorded exception (item: bots never read Crow's identity file):
+// re-recorded because the sharing identity is now masked UNCONDITIONALLY. The
+// contain plan used to keep `<dataDir>/identity.json` when a bot's definition
+// named `crow-sharing` tools (`unmaskIdentity`), and that opt-out is gone — the
+// file holds the master seed every instance and bot key derives from. The whole
+// diff is therefore ONE case: the second of the two cases recorded for the
+// "instance data dir read-write with its secrets masked" title (the one built
+// with the retired option) is now byte-identical to the first, i.e. it carries
+// the `--ro-bind /dev/null <data>/identity.json` mask it used to lack. Same case
+// count and order, same names, every other plan untouched. The property itself
+// is pinned directly by tests/pi-contain-plan.test.js, which also asserts the
+// retired option and a keep-list naming the file change nothing, so it is not
+// only golden-derived.
+//
 // The count, so a reviewer knows the `--tmpfs` volume is the intended one and
 // not a leak: 32 masks per case that binds a data dir (34 reserved names minus
 // the two FILE-shaped ones — `identity.json` and `instance-id` are never

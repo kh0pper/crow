@@ -61,6 +61,20 @@ export function botsDbPath() {
   return process.env.CROW_DB_PATH || join(botsDataDir(), "crow.db");
 }
 
+/**
+ * The dir holding the crow.db this process uses (`CROW_DB_PATH`'s dirname, else
+ * resolveDataDir()): bridge.mjs's `dirname(CROW_DB)`.
+ *
+ * This is the DB anchor, and it is NOT the seed anchor — see instanceSeedDir().
+ * The bot sandbox needs BOTH: the seed file lives at the seed anchor, but a
+ * host whose CROW_DB_PATH points into another instance's data dir means the
+ * instance at the DB anchor can have a seed too. identity-candidates.mjs takes
+ * the union, so no anchor is guessed.
+ */
+export function botsDbDir() {
+  return botsDataDir();
+}
+
 /** Absolute path to the tasks.db for this instance. */
 export function tasksDbPath() {
   return process.env.CROW_TASKS_DB_PATH || join(botsDataDir(), "tasks.db");

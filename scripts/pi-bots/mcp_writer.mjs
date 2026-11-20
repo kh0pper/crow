@@ -42,7 +42,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
-import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER, addonKeychainNeeds, withoutKeychainValues } from "./crow-server-catalog.mjs";
+import { crowServerCatalog, instanceBinding, rebindBlock, SECRETS_SERVER, addonKeychainNeeds, withoutKeychainValues, isBotExcludedServer } from "./crow-server-catalog.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyActorEnv, actorEnvFor } from "./actor-env.mjs";
 import { signMailDraftActor } from "./actor-sig.mjs";
@@ -565,6 +565,15 @@ export function buildBotMcp(def, canonical, opts = {}) {
   const noteGuard = (name, block) => { if (touchesCrowDb(block)) journalGuarded.push(name); };
 
   for (const name of want) {
+    // A Crow server a bot may never hold (BOT_EXCLUDED_SERVERS in
+    // crow-server-catalog.mjs): the catalog does not emit it, and the operator's
+    // own canonical mcp.json must not hand it to a bot either. A def that still
+    // names its tools does not break the spawn — the block is simply absent, so
+    // the tools are simply absent.
+    if (isBotExcludedServer(name)) {
+      disable(name, "is not available to bots");
+      continue;
+    }
     if (catalog[name]) {
       out.mcpServers[name] = catalog[name];
       active.push(name);

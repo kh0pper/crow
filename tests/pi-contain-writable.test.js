@@ -51,7 +51,10 @@ const session = mk(T, "session");
 const app = mk(T, "app");
 const cache = mk(crowHome, "bot-cache");
 writeFileSync(join(data, "crow.db"), "");
-writeFileSync(join(data, "identity.json"), "{}");
+// The sharing identity holds the master seed every instance and bot key derives
+// from. A REAL sandbox must not be able to read it (see the identity probe below).
+const IDENTITY_SEED = "c0ffee".repeat(10) + "c0ff";
+writeFileSync(join(data, "identity.json"), JSON.stringify({ version: 1, crowId: "crow:test", seed: IDENTITY_SEED }), { mode: 0o600 });
 writeFileSync(join(theirs, "their-notes.txt"), "theirs");
 // An add-on that IS installed and has no data folder yet: its `<data>/<id>` must not be
 // creatable by the bot (a `.venv` planted there is code the add-on's uv would run).
@@ -71,7 +74,12 @@ function plan(over = {}) {
     sessionDir: session, cwd: session, workspaceDir: mine,
     writePaths: [], readPaths: [],
     mcpServers: [{ command: "node", args: [join(app, "servers", "memory", "index.js")], cwd: app,
-      env: { CROW_DB_PATH: join(data, "crow.db"), CROW_DB: join(data, "crow.db") } }],
+      env: { CROW_DB_PATH: join(data, "crow.db"), CROW_DB: join(data, "crow.db") } },
+    // A bot definition that still names the sharing server (it used to be what
+    // unmasked the identity file, through the retired `unmaskIdentity` input): the
+    // identity mask must not depend on it.
+    { command: "node", args: [join(app, "servers", "sharing", "index.js")], cwd: app,
+      env: { CROW_DB_PATH: join(data, "crow.db") } }],
     systemDirs: ["/usr", "/etc"],
     ...over,
   });
@@ -138,6 +146,15 @@ out.otherProject = w(process.env.CROW_TEST_OTHER);
 out.ownWorkspace = w(process.env.CROW_TEST_MINE);
 out.dataRoot = w(process.env.CROW_TEST_DATA);
 out.maskedFile = w(process.env.CROW_TEST_IDENTITY);
+// The identity probe: READING the sharing identity inside the sandbox. It is
+// masked with /dev/null, so a read answers empty (EACCES/ENOENT are equally
+// good answers on a host that shapes the mask differently) — never the seed.
+out.identityRead = (() => {
+  try { return fs.readFileSync(process.env.CROW_TEST_IDENTITY, "utf8"); } catch (e) { return "ERR:" + (e.code || e.message); }
+})();
+out.identityCopyRead = (() => {
+  try { return fs.readFileSync(process.env.CROW_TEST_IDENTITY_COPY, "utf8"); } catch (e) { return "ERR:" + (e.code || e.message); }
+})();
 // The security-review probe: an installed add-on whose data folder did not exist at
 // spawn, and a reserved name that did not exist either. Both are masked read-only empty
 // mounts, so neither the folder itself (EEXIST is a real answer there: the mount point
@@ -156,6 +173,9 @@ console.log(JSON.stringify(out));
 `;
 
 test("B1/B4 in a real sandbox: crow.db is writable, a masked project folder is NOT", { skip, timeout: 60000 }, async () => {
+  // A copy of the identity beside the file: it holds the same seed, and a present
+  // data-dir entry is masked with the rest (so it must be there BEFORE the plan).
+  writeFileSync(join(data, "identity.json.bak-20260101"), JSON.stringify({ seed: IDENTITY_SEED }));
   const p = plan();
   // What pi_sandbox.mjs's contain branch does before it hands bwrap the argv: the empty
   // mount points of the absent-entry masks are made first (0700, never through a symlink),
@@ -167,6 +187,7 @@ test("B1/B4 in a real sandbox: crow.db is writable, a masked project folder is N
     CROW_TEST_MINE: join(mine, "kept.txt"),
     CROW_TEST_DATA: join(data, "spawn-probe.txt"),
     CROW_TEST_IDENTITY: join(data, "identity.json"),
+    CROW_TEST_IDENTITY_COPY: join(data, "identity.json.bak-20260101"),
     CROW_TEST_ADDON: join(data, ABSENT_ADDON),
     CROW_TEST_ADDON_VENV: join(data, ABSENT_ADDON, ".venv"),
     CROW_TEST_ADDON_FILE: join(data, ABSENT_ADDON, "evil.txt"),
@@ -193,6 +214,18 @@ test("B1/B4 in a real sandbox: crow.db is writable, a masked project folder is N
   assert.throws(() => statSync(join(theirs, "planted.txt")), /ENOENT/);
   // A masked FILE (identity.json) refuses the write too.
   assert.notEqual(out.maskedFile, "ok");
+  // THE IDENTITY INVARIANT (item-70): a contained bot cannot READ the sharing
+  // identity — not even when its definition names crow-sharing, whose block is in
+  // this plan. Masked with /dev/null the read answers empty; an error code
+  // (EACCES, ENOENT) is the same answer. What must never happen is the seed.
+  assert.ok(out.identityRead === "" || String(out.identityRead).startsWith("ERR:"),
+    "identity.json reads empty or fails inside: " + JSON.stringify(String(out.identityRead).slice(0, 40)));
+  assert.ok(!String(out.identityRead).includes(IDENTITY_SEED), "the master seed is never readable");
+  assert.ok(out.identityCopyRead === "" || String(out.identityCopyRead).startsWith("ERR:"),
+    "a copy beside it is masked too: " + JSON.stringify(String(out.identityCopyRead).slice(0, 40)));
+  assert.ok(!String(out.identityCopyRead).includes(IDENTITY_SEED));
+  // …and the host file is untouched (nothing wrote through the mask).
+  assert.ok(readFileSync(join(data, "identity.json"), "utf8").includes(IDENTITY_SEED));
   // The bot's own workspace and the data dir root stay writable.
   assert.equal(out.ownWorkspace, "ok");
   assert.equal(out.dataRoot, "ok");

@@ -54,6 +54,9 @@ import { BOT_GIT_DIRNAME, checkKeyDir, gitAllowedForInstance, isSafeKeyPath, isV
 import { botGitMeta, writeSpawnFiles } from "../../servers/shared/bot-git/store.js";
 import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REFUSAL,
   GCLOUD_DIR_REL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal } from "./hidden_files.mjs";
+import { identityCandidates } from "./identity-candidates.mjs";
+import { identityDataDir } from "../../servers/sharing/identity.js";
+import { resolveBackupDir } from "../../servers/shared/backup-naming.js";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { containSelected, containExcluded, prepareAgentShadow, sweepStaleContainDirs, containOwnWorldRoot, ContainRefused } from "./pi_contain.mjs";
@@ -243,9 +246,9 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
   // bot-writable, so it never decides what gets bound (a server it names that
   // is not bound fails closed inside the sandbox).
   if (opts.mcpConfig) addServers(opts.mcpConfig);
-  // A bot with the sharing server needs the instance identity (messages, invites).
-  const unmaskIdentity = servers.some((b) => [b.command, ...(b.args || []), b.cwd].some((x) => /servers\/sharing\b/.test(String(x || ""))))
-    || ((def && def.tools && def.tools.crow_mcp) || []).some((t) => /^crow-sharing\b|^sharing\b/.test(String(t)));
+  // The instance's sharing identity file is masked unconditionally: no bot
+  // definition, and no `crow-sharing` entry in its config, can ask for it back
+  // (it holds the master seed every instance and bot key derives from).
   const dataDir = dirname(CROW_DB);
   // Per-spawn agent dirs (pi writes lock dirs and session state into them, and
   // nothing here holds a provider key) live in the instance's own 0700 run
@@ -298,7 +301,7 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     home: HOME, uid: process.getuid(), nodeBin, cliPath,
     appRoot: BRIDGE_APP_ROOT,
     piLabDir: findPiLabDir(), piAgentDir, shadowAgentDir: shadow.dir,
-    crowHome, dataDir, botCacheDir, unmaskIdentity,
+    crowHome, dataDir, botCacheDir,
     dataKeep: String(process.env.CROW_PI_CONTAIN_DATA_KEEP || "").split(",").map((x) => x.trim()).filter((x) => x && !x.includes("/")),
     sessionDir, cwd: spawnCwd, workspaceDir: opts.projectWorkspaceDir || null,
     botStateDir,
@@ -609,6 +612,29 @@ export function readPeerGatewayUrls(conn) {
 /** The fd pi-lab reads the card set from (PI_BOT_SECRET_VALUES_FD): 3 is the
  * sandbox's --info-fd, 4 the MCP config. */
 const SECRET_VALUES_FD = 5;
+
+/** Tiers this process already warned about (identity file not maskable). */
+const warnedIdentityTier = new Set();
+/** Test-only: forget the identity-tier warnings. */
+export function _resetIdentityTierWarningsForTest() { warnedIdentityTier.clear(); }
+
+/**
+ * One loud line per tier when a spawn cannot hold the identity-file mask: the
+ * identity file exists, but this spawn's tier is not bwrap with its own PID
+ * namespace (the setpriv/plain fallbacks mask nothing at all, and bwrap without
+ * a PID namespace leaves the host /proc reachable through
+ * /proc/<pid>/root/...). The spawn is NOT refused — running uncontained is the
+ * operator's call (CROW_PI_SANDBOX is their switch) — so the line says what is
+ * exposed, names the switch, and the same fact is on the [containment] line and
+ * in Settings → Bot Runtime. Nothing here names a file's content.
+ */
+function warnIdentityTierOnce(tier) {
+  const t = String(tier || "none");
+  if (warnedIdentityTier.has(t)) return;
+  warnedIdentityTier.add(t);
+  console.error("[pi-bots] WARNING: bots run without a bubblewrap PID namespace (tier " + t + "), so the instance's identity file (its master seed) is readable inside a bot: file masks do not hold there. " +
+    "Crow does not refuse the spawn — that is the operator's choice (CROW_PI_SANDBOX=required/contain, and bubblewrap with PID namespaces) — but the [containment] line says so.");
+}
 
 /** Most other-instance secrets dirs a spawn will hide; past it, it refuses. */
 const MAX_HIDDEN_INSTANCE_DIRS = 512;
@@ -1069,9 +1095,15 @@ export class PiRpc {
       .filter(([, block]) => block && typeof block === "object" && !block.disabled)
       .map(([name]) => name);
     const statusTools = def ? defToolNames(def) : [];
+    // Set below once the spawn's mask inputs are known: an identity file exists
+    // and this spawn's tier cannot hold the mask. Read by reportContainment.
+    let identityUnmasked = false;
     const reportContainment = (tier, refusal = null) => {
       const status = botContainment({
         tier, mcpServers: statusServers,
+        // An identity file exists and this tier cannot hold its mask: the line
+        // names it, because the spawn still runs (the operator's call).
+        identityExposed: identityUnmasked,
         // The operator's exemption (CROW_PI_CONTAIN_EXCLUDE) is not a weaker
         // containment: this bot never entered the tier, and the record says so
         // in the operator's own words rather than "runs with the operator's files".
@@ -1136,7 +1168,25 @@ export class PiRpc {
       }
       const appReal = realRoot(BRIDGE_APP_ROOT);
       const otherHomesReal = otherHomes.map(realRoot).filter(Boolean);
-      const hideFileRoots = [homeReal, appReal, ...otherHomesReal].filter(Boolean);
+      // The instance data dirs holding a sharing identity file, and the repo's
+      // own backup dirs with their `<stem>-identity-<date>.json` copies: from ONE
+      // function (identity-candidates.mjs), the same one the boot check calls, so
+      // the candidates, the anchors and the hidden ROOTS cannot drift apart.
+      // It takes BOTH anchors on purpose — this instance's SEED dir (identity.js's
+      // own resolver) and dirname(CROW_DB) — because they legitimately differ on a
+      // real install (identity-candidates.mjs's header), every co-hosted home's
+      // data dir, and the backup dirs. They are candidates in their own right AND
+      // trusted roots, so a data dir that sits outside the Crow home (a symlinked
+      // or relocated layout) can still have its identity masked.
+      const identity = identityCandidates({
+        crowHome: homeReal,
+        homes: otherHomesReal,
+        seedDir: identityDataDir(process.env),
+        dbDir: dirname(CROW_DB),
+        backupDirs: [resolveBackupDir(process.env)],
+      });
+      const dataDirs = identity.dataDirs;
+      const hideFileRoots = [homeReal, appReal, ...otherHomesReal, ...identity.backupDirs, ...dataDirs].filter(Boolean);
       // Instance secret dirs no code inside the sandbox reads (env/ holds
       // compose env files the gateway reads; android-keystore/ the release
       // keys): hidden as dirs, tmpfs, when they exist.
@@ -1166,19 +1216,26 @@ export class PiRpc {
       hiddenWholeDirs = [...new Set([secretsHere, ...others, ...instanceSecretDirs, ...(gcloudDir ? [gcloudDir] : []),
         ...(homeReal ? [join(homeReal, "secrets")] : []), ...otherHomesReal.map((h) => join(h, "secrets"))])].filter(Boolean);
       // Every home's list is built with the SAME trusted roots (this home, the
-      // repo checkout, the co-hosts' homes): a co-hosted home with a bundle link
-      // into appRoot/bundles is listed at its resolved path (and masked) rather
-      // than refused as "outside the Crow folders".
+      // repo checkout, the co-hosts' homes, and the instance data dirs — where
+      // the sharing identity lives): a co-hosted home with a bundle link into
+      // appRoot/bundles is listed at its resolved path (and masked) rather than
+      // refused as "outside the Crow folders". The identity candidates are NOT
+      // built per home here: identityCandidates() above owns that list (both
+      // anchors, every co-host's data dir, every copy and the backup dirs), so a
+      // home's dataDir argument is null and the identity part cannot drift from
+      // the boot check.
       const hiddenDirsForListing = [...instanceSecretDirs, ...(gcloudDir ? [gcloudDir] : [])];
       const hideFiles = [
-        ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: appReal || undefined, hiddenDirs: hiddenDirsForListing }) : []),
-        ...otherHomesReal.flatMap((h) => secretFilesFor({ crowHome: h, appRoot: appReal || undefined, hiddenDirs: hiddenDirsForListing })),
+        ...(homeReal ? secretFilesFor({ crowHome: homeReal, appRoot: appReal || undefined, hiddenDirs: hiddenDirsForListing, dataDir: null }) : []),
+        ...otherHomesReal.flatMap((h) => secretFilesFor({ crowHome: h, appRoot: appReal || undefined, hiddenDirs: hiddenDirsForListing, dataDir: null })),
+        ...identity.files,
       ];
       // Deduped: the app root's bundles dir and each of its real bundle dirs are
       // pinned for every home, and each root's listing adds the same paths twice.
       const hidePinDirs = [...new Set([homeReal, ...otherHomesReal].filter(Boolean)
         .flatMap((h) => secretPinDirsFor({ crowHome: h, appRoot: appReal || undefined })))];
-      hiddenCandidates = { hideFiles, hideFileRoots, homes: [homeReal, ...otherHomesReal].filter(Boolean), gcloudDir };
+      hiddenCandidates = { hideFiles, hideFileRoots, homes: [homeReal, ...otherHomesReal].filter(Boolean), gcloudDir,
+        identityPresent: identity.present.length > 0 };
       // The operator's ssh keys: no Crow code reads ~/.ssh. Always hidden (a dir,
       // tmpfs), so a bot cannot use the keys, or `ssh localhost`, to leave the
       // sandbox, nor plant authorized_keys under it. Created empty when absent,
@@ -1209,6 +1266,14 @@ export class PiRpc {
       this._runContainCleanup();
       throw e;
     }
+    // An identity file exists and this launch cannot hold its mask (the setpriv
+    // or plain fallback masks nothing, and bwrap without a PID namespace leaves
+    // host /proc reachable): one loud line, and the [containment] line names the
+    // exposure. NOT a refusal — running this way is the operator's switch to
+    // make (docs/developers/bot-engine.md says so).
+    identityUnmasked = Boolean(hiddenCandidates && hiddenCandidates.identityPresent) &&
+      !(launch.tier === "pidns" || String(launch.tier).startsWith("contain"));
+    if (identityUnmasked) warnIdentityTierOnce(launch.tier);
     reportContainment(launch.tier);
     // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
     // dir it cannot stat): otherwise refuse, never run with one visible. In the

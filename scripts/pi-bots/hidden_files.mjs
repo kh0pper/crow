@@ -37,6 +37,94 @@ export const BUNDLE_ENV_READABLE = ["browser", "workspace"];
  */
 export const ROOT_SECRET_FILES = [".keystore-env", "board-token", "phone-token", "artifacts-token"];
 
+/**
+ * The instance's sharing identity file (servers/sharing/identity.js):
+ * `<dataDir>/identity.json` holds the MASTER SEED every instance key and every
+ * bot key is derived from, in the clear on a host without a passphrase. It is
+ * the one file a bot never needs for any tool it is given, so every tier hides
+ * it unconditionally — no bot definition can ask for it back.
+ *
+ * `identity.js` reads and writes exactly ONE file name (IDENTITY_PATH =
+ * resolve(DATA_DIR, "identity.json"), plus loadInstanceSeed(dataDir) reading the
+ * same name out of an instance data dir): there is no sidecar, key file or
+ * `.bak` in the code. The name rule below still covers every copy that holds
+ * the same seed, because over-masking is the safe direction (the same reasoning
+ * as `.env*` and `mcp-addons*`):
+ *  - a copy made beside it by an operator or a backup (`identity.json.bak`,
+ *    `identity.json.bak-<date>`, `identity.json~`, `identity.json-<date>`);
+ *  - the copies THIS REPO'S OWN backup writes: `scripts/backup.sh` (through
+ *    scripts/backup-db.mjs and servers/shared/backup-naming.js's
+ *    identityBackupFileName) copies the seed into the backup directory as
+ *    `<stem>[-<instance tag>]-identity-<date>.json` — e.g.
+ *    `primary-identity-2026-11-05.json`, `primary-crow-r4-1a2b3c-identity-…`.
+ *    Those live in the backup directory, never in a data dir, which is why the
+ *    backup directory is one of the default tier's hidden ROOTS too
+ *    (`resolveBackupDir()`: `CROW_BACKUP_DIR`, else `~/backups/crow`) — see
+ *    identity-candidates.mjs.
+ * Any name carrying the word `identity` and ending in `.json` is therefore
+ * masked. What is deliberately NOT covered: a backup name whose content is not
+ * the seed (the `.owner.json` sidecar of a backup run — it is caught by the
+ * rule anyway, harmlessly).
+ */
+export const IDENTITY_FILE_NAME = "identity.json";
+
+/**
+ * A name whose CONTENT is the master seed: `identity.json`, a copy of it
+ * (`.bak`, `~`, `-<date>`), and the `*identity*.json` copies the repo's own
+ * backup script writes (`<stem>-identity-<date>.json`).
+ */
+export const IDENTITY_FILE_NAME_RE = /^(?:identity\.json([.~-].*)?|.*identity.*\.json)$/;
+
+/** True for a name whose CONTENT is the master seed (see IDENTITY_FILE_NAME). */
+export function isIdentityFileName(n) {
+  return IDENTITY_FILE_NAME_RE.test(String(n));
+}
+
+/**
+ * KNOWN LIMITATION — what a bot still loses when the identity file is hidden.
+ * Written out here because this is the module that decides the mask, and the
+ * honest answer is not "nothing": the mask makes the file read EMPTY inside the
+ * sandbox, and a few of the MCP servers a bot itself runs open it at start-up
+ * or on first use.
+ *
+ *  - `crow-storage` (`servers/storage/s3-client.js` initStorageFromInstance →
+ *    loadIdentityIfPresent) unseals `storage.shared.*` settings with the
+ *    instance identity. Inside a bot's sandbox the identity is absent, so it
+ *    logs one line and keeps the ENV fallback (S3_ENDPOINT/S3_ACCESS_KEY/…):
+ *    a Crow whose shared storage is configured only in the DB, with no env
+ *    credentials, shows no storage from a bot.
+ *  - the `studio` bundle (`bundles/studio/server/index.js` storageModule) wires
+ *    the same S3 client through loadIdentityIfPresent; with no identity it
+ *    keeps the env fallback, and a render save in a bot turn can then report
+ *    "Crow storage is not available on this instance".
+ *  - `sunvox-studio` (`bundles/sunvox-studio/server/server.js`) opens the same
+ *    sealed `storage.shared.*` settings through the instance identity, drops the
+ *    identity at once and hands the opened config to the S3 client. With no
+ *    identity in a bot's sandbox, a render written to Crow storage fails (or
+ *    degrades to the local work dir).
+ *  - the `ramble` bundle (`bundles/ramble/server/server.js` getIdentityState →
+ *    loadOrCreateIdentity / loadInstanceSeed) needs the seed for its bot
+ *    identity. Hidden, the file parses as nothing, so its identity-backed tools
+ *    fail on a bot turn; since bundle 0.26.2 that failure is a plain sentence
+ *    ("ramble: the instance identity is not available to bots …") instead of
+ *    pi's JSON error, and the tool still cannot run there. A gateway door for
+ *    bot identity is the follow-up, not this mask.
+ *  - the `data-dashboard` bundle (`bundles/data-dashboard/server/server.js`
+ *    useInstanceStorage → loadIdentityIfPresent) opens the instance's sealed
+ *    `storage.shared.*` settings with the identity, for the chart and map figure
+ *    PNGs its case-study tools render and upload. With no identity in a bot's
+ *    sandbox it keeps the env fallback (and writes nothing when that env is
+ *    empty), so a case-study publish or a figure re-render from a bot turn fails
+ *    instead of using a storage configured only in the DB.
+ *
+ * None of these is an escape: masking the seed is the point. The follow-up is a
+ * GATEWAY DOOR that serves the few identity-backed operations a bot tool needs
+ * (the gateway holds the identity), so these servers stop reading the file at
+ * all. Until then this is the documented cost of hiding the master seed, and
+ * no bot definition can opt out of it.
+ */
+export const IDENTITY_HIDDEN_LIMITATION = "bot-run MCP servers that read the instance identity (crow-storage, studio, sunvox-studio, ramble, data-dashboard) fall back to env credentials or fail their identity-backed tools";
+
 /** A `.env` name: `.env` or `.env.<anything>` (a .env.bak-2026... copy too). */
 export const BUNDLE_ENV_NAME_RE = /^\.env(\..*)?$/;
 
@@ -109,6 +197,25 @@ export function isAddonsFileName(n) {
  * env/) is already hidden and is not listed; a dangling one is ignored; any
  * other is listed under its own name so the caller refuses.
  *
+ * The DATA DIR of every home (`opts.dataDir`, else `<crowHome>/data`) also
+ * contributes `<dataDir>/identity.json` whether it exists or not, plus every
+ * copy of it directly in there (IDENTITY_FILE_NAME_RE): the sharing identity
+ * holds the master seed every bot key derives from, and no bot tool needs the
+ * file itself. This is the one candidate a bot definition can never ask for
+ * back — the contain tier keeps it masked too, and `unmaskIdentity` no longer
+ * exists.
+ *
+ * NIT, documented rather than fixed: on this (default) tier a seed file that
+ * does not exist YET is listed but not masked, because bwrap creates the mount
+ * point of a `--dev-bind /dev/null <path>` it cannot find — i.e. masking a
+ * missing file would CREATE an empty `identity.json` on the host, which the
+ * gateway's next `JSON.parse` cannot read, and the same mount would hand a seed
+ * a bot had written first to the gateway as its identity. So the default tier
+ * protects a seed that exists (the normal case: a bot only runs after a boot
+ * that has one) and cannot protect a host on which a bot runs before the seed
+ * is created. The contain tier does not have this gap: it masks the reserved
+ * data-dir name `identity.json` whether or not it is there.
+ *
  * The CROW HOME ONLY (never appRoot, a repo checkout that holds no add-on
  * registry) also contributes `<crowHome>/mcp-addons.json` whether it exists or
  * not, plus every regular file or symlink directly in the home root whose name
@@ -123,15 +230,24 @@ export function isAddonsFileName(n) {
  * carry keys and the gateway side reads the file and hands the bot the env in
  * its `.mcp.json` blocks, so the file itself is never needed inside the
  * sandbox.
- * @param {{crowHome:string, appRoot?:string, hiddenDirs?:string[], readdir?:Function}} opts
+ * @param {{crowHome:string, appRoot?:string, hiddenDirs?:string[], dataDir?:string|null, readdir?:Function}} opts
+ *   `dataDir` is that home's instance data dir (this instance's
+ *   `dirname(CROW_DB)`, a co-host's `<its home>/data`); null skips the identity
+ *   candidates for a home whose data dir is not known.
  * @returns {string[]}
  */
-export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = readdirSync }) {
+export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], dataDir = undefined, readdir = readdirSync }) {
   const out = [];
   const add = (p) => { if (!out.includes(p)) out.push(p); };
   for (const n of ROOT_SECRET_FILES) add(join(crowHome, n));
   add(join(crowHome, ".env"));
   add(join(crowHome, "mcp-addons.json"));
+  // This home's sharing identity is listed whether or not it exists (the plain
+  // name is the one file that must never be missed); wrapPiSpawn skips a
+  // candidate it cannot stat. The copies beside it are added below, once the
+  // symlink handling exists.
+  const homeDataDir = dataDir === undefined ? join(crowHome, "data") : dataDir;
+  if (homeDataDir) add(join(homeDataDir, IDENTITY_FILE_NAME));
   if (appRoot) add(join(appRoot, ".env"));
   const roots = [crowHome, appRoot].filter(Boolean);
   const underRoot = (p) => roots.some((r) => p === r || p.startsWith(r + "/"));
@@ -150,6 +266,10 @@ export function secretFilesFor({ crowHome, appRoot, hiddenDirs = [], readdir = r
   // ignored, and one leaving the roots is listed under its own name so the
   // caller refuses the spawn.
   for (const root of roots) for (const n of maskedNamesIn(root, readdir, isSecretEnvName)) addEnv(root, n);
+  // Every copy of this home's identity file beside it (`.bak`, `~`, a dated
+  // name), through the same symlink handling: each one holds the same master
+  // seed.
+  if (homeDataDir) for (const n of maskedNamesIn(homeDataDir, readdir, isIdentityFileName)) addEnv(homeDataDir, n);
   // The add-on registry at the Crow home root only: every name isAddonsFileName
   // accepts (any name starting with `mcp-addons` or `.mcp-addons`, except one
   // whose name ends in `.example.json`) — the file itself, every backup
