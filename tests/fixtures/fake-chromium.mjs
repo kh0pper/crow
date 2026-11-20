@@ -12,8 +12,14 @@
  * Sessions it hands out are distinguishable by their prefix: `S…` for a browser
  * target session, `T…` for Target.attachToTarget, `A…` for an auto-attached child.
  * A session-addressed response echoes `sessionId`, exactly as Chromium does.
+ *
+ * Two extras exist for the crash-restore tests: the profile's Default/Preferences is read
+ * and traced at startup (so "it was already clean when Chromium launched" is provable,
+ * not merely "clean afterwards"), and `Browser.crash` kills this process without a reply,
+ * the way a real crash does.
  */
-import { appendFileSync, createReadStream, createWriteStream } from "node:fs";
+import { appendFileSync, createReadStream, createWriteStream, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const LOG = process.env.FAKE_CHROME_LOG || "";
 const trace = (obj) => { if (LOG) { try { appendFileSync(LOG, JSON.stringify(obj) + "\n"); } catch { /* gone */ } } };
@@ -29,6 +35,22 @@ const VERSION = {
 trace({ t: "argv", argv: process.argv.slice(1) });
 trace({ t: "env", env: { ...process.env } });
 trace({ t: "pid", pid: process.pid });
+
+/**
+ * The profile Chromium is about to open, read AS IT IS NOW — before the browser itself
+ * touches it. `profile` is the parsed file (null when missing or unparseable), `raw` its
+ * text, so a test can tell "already clean at launch" from "cleaned afterwards".
+ */
+const PROFILE_DIR = process.env.CROW_CHROMIUM_PROFILE || "";
+function profileSnapshot() {
+  const path = PROFILE_DIR ? join(PROFILE_DIR, "Default", "Preferences") : "";
+  let raw = null;
+  if (path) { try { raw = readFileSync(path, "utf8"); } catch { raw = null; } }
+  let profile = null;
+  if (typeof raw === "string") { try { profile = JSON.parse(raw); } catch { profile = null; } }
+  return { t: "profile", path, raw: typeof raw === "string" ? raw.slice(0, 500) : null, profile };
+}
+trace(profileSnapshot());
 
 const out = createWriteStream(null, { fd: 4 });
 out.on("error", () => process.exit(0));
@@ -54,11 +76,20 @@ function handle(msg) {
       setTimeout(() => process.exit(0), 20);
       reply({});
       return;
+    case "Browser.crash":
+      // A crash answers NOTHING: the browser is gone the instant the command lands. The
+      // non-zero code is what the relay (and so its caller) must pass through.
+      trace({ t: "browser-crash", sessionId: sid });
+      process.exit(139);
+      return;
     case "Target.attachToBrowserTarget":
       reply({ sessionId: `S${++browserSessions}` });
       return;
     case "Target.attachToTarget":
       reply({ sessionId: `T${++attached}` });
+      return;
+    case "Target.createTarget":
+      reply({ targetId: "TGT1" });
       return;
     case "Target.setAutoAttach": {
       const child = `A${++autoAttached}`;

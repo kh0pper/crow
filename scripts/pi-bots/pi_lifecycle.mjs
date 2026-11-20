@@ -56,6 +56,21 @@ const LEASE_FILENAME = "perch-interactive-leases.json";
 // 0 live pi processes and could fan out unbounded.
 const PI_CLI_MARK = "@earendil-works/pi-coding-agent/dist/cli.js";
 
+/**
+ * How long the reaper gives a SIGTERMed pi before it SIGKILLs it.
+ *
+ * The browser MCP server runs as a child of that pi, and on SIGTERM it cleans up
+ * its pages by spending its own worst case first (bundles/browser/server/
+ * private-address.js: `EXIT_CLEANUP_WORST_CASE_MS`, 3350 ms with today's values —
+ * a 2000 ms budget, then a page's 750 ms unload grace, then two 300 ms crash
+ * graces). A kill grace shorter than that cuts the cleanup off half way, and the
+ * pages it never blanked keep running with the routes that refused private
+ * addresses gone with the process. The reaper signals pi's whole process group
+ * (see reapStalePi), so that group SIGTERM is what the browser MCP gets. 5000 ms
+ * clears the cleanup's 3350 ms worst case by a margin.
+ */
+export const REAP_KILL_GRACE_MS = 5000;
+
 export const LIFECYCLE_DEFAULTS = {
   maxPi: Number(process.env.PIBOT_MAX_PI || 2), // global concurrency cap
   orphanGraceSec: Number(process.env.PIBOT_ORPHAN_GRACE_SEC || 90),
@@ -276,8 +291,10 @@ export function reapStalePi(opts = {}) {
     }
   }
   if (victims.length) {
-    // give SIGTERM a moment, then SIGKILL any survivor in the same sweep
-    const deadline = Date.now() + 3000;
+    // give SIGTERM a moment (REAP_KILL_GRACE_MS: long enough for a supervised
+    // child's own exit cleanup, the browser MCP's pages among them), then SIGKILL
+    // any survivor in the same sweep
+    const deadline = Date.now() + REAP_KILL_GRACE_MS;
     while (Date.now() < deadline) {
       try {
         execFileSync("sleep", ["0.2"]);

@@ -16,6 +16,21 @@ const ENTRYPOINT = read("bundles/browser/entrypoint.sh");
 const COMPOSE = read("bundles/browser/docker-compose.yml");
 const MANIFEST = JSON.parse(read("bundles/browser/manifest.json"));
 
+/**
+ * The floor is the release that introduced what these tests assert, not that
+ * release exactly: parse the dotted version numerically (so 1.10.0 > 1.9.0)
+ * and fail only when `actual` is older than `minimum`.
+ */
+function assertAtLeast(actual, minimum, what) {
+  const parse = (v) => String(v).split(".").map((p) => Number.parseInt(p, 10) || 0);
+  const a = parse(actual), m = parse(minimum);
+  for (let i = 0; i < Math.max(a.length, m.length); i++) {
+    const x = a[i] ?? 0, y = m[i] ?? 0;
+    if (x !== y) return assert.ok(x > y, `${what}: ${actual} is older than ${minimum}`);
+  }
+  assert.ok(true, `${what}: ${actual} is at least ${minimum}`);
+}
+
 /** The entrypoint without its comment lines (assertions are about what runs). */
 const CODE = ENTRYPOINT.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 
@@ -169,7 +184,7 @@ test("compose passes the token (required), no VNC password, and its downloads mo
 });
 
 test("the manifest declares no VNC password and says the viewer is loopback-only behind sign-in", () => {
-  assert.equal(MANIFEST.version, "1.7.1");
+  assertAtLeast(MANIFEST.version, "1.7.1", "the manifest version");
   assert.doesNotMatch(JSON.stringify(MANIFEST), /VNC_PASSWORD/);
   assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN", "CROW_BROWSER_CDP_TOKEN"], "both tokens are required: the viewer's, and the CDP gate's");
   const tok = MANIFEST.env_vars.find((v) => v.name === "CROW_BROWSER_VNC_TOKEN");
@@ -189,7 +204,7 @@ test("the manifest declares no VNC password and says the viewer is loopback-only
   const reg = JSON.parse(read("registry/add-ons.json"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "browser");
   assert.ok(entry, "the registry lists the browser");
-  assert.equal(entry.version, "1.7.1");
+  assertAtLeast(entry.version, "1.7.1", "the registry entry's version");
   assert.doesNotMatch(JSON.stringify(entry), /VNC_PASSWORD/);
   assert.doesNotMatch(read("bundles/browser/.env.example"), /VNC_PASSWORD/);
 });

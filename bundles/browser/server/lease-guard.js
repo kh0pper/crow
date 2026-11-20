@@ -33,6 +33,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { appImport } from "./app-root.js";
 import { stateDir } from "./instance.js";
+import * as sharedExitTasks from "./exit-tasks.js";
 
 let sharedLease = null;
 try {
@@ -137,7 +138,9 @@ function reportEnforced(lease, dir, opts) {
  * @param {object} server  an McpServer (anything with tool(name, ..., handler))
  * @param {object} [opts]  test seams: lease (module, or null for none), dir,
  *   env, pid, now, sleep, getTargetId (async → this process's page target id
- *   or null), proc (signal source), exit (process.exit)
+ *   or null), proc (signal source), exit (process.exit), exitTasks (the shared
+ *   exit promise, exit-tasks.js; its `runExitTasks()` is awaited before
+ *   `exit(code)` so the other cleanups are not cut off)
  * @returns {{ holder, external, enabled, exiting }}
  */
 export function installLeaseGuard(server, opts = {}) {
@@ -148,6 +151,7 @@ export function installLeaseGuard(server, opts = {}) {
   const getTargetId = opts.getTargetId || (async () => null);
   const proc = opts.proc || process;
   const exit = opts.exit || ((code) => process.exit(code));
+  const exitTasks = opts.exitTasks || sharedExitTasks;
   const { holder, external } = leaseIdentity(opts.env || process.env, pid);
   let dir = null;
   if (lease) {
@@ -270,8 +274,19 @@ export function installLeaseGuard(server, opts = {}) {
       return guard.exiting;
     };
     proc.on("beforeExit", () => { releaseNow(); });
+    // A signal listener replaces node's default exit, and `exit(code)` below is a
+    // hard stop: it must not run before the SHARED exit work is done, or
+    // blankPagesOnExit's page cleanup (private-address.js) would be cut off half
+    // way, leaving an open, unguarded page behind. So await BOTH the lease
+    // release and the exit tasks, and only then exit. beforeExit above still
+    // never exits: that event lets the process end on its own.
     for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]]) {
-      proc.on(signal, () => { releaseNow().then(() => exit(code)); });
+      proc.on(signal, () => {
+        Promise.all([releaseNow(), exitTasks.runExitTasks()]).then(
+          () => exit(code),
+          () => exit(code),
+        );
+      });
     }
   }
   return guard;

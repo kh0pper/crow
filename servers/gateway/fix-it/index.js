@@ -13,6 +13,7 @@ import bootGuardDetector from "./detectors/boot-guard.js";
 import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
 import bundleBindDriftDetector from "./detectors/bundle-bind-drift.js";
 import retiredBundleDetector, { SOURCE as RETIRED_BUNDLE_SOURCE, cardTitle as retiredBundleTitle, cardWhy as retiredBundleWhy } from "./detectors/retired-bundle.js";
+import browserImageStaleDetector from "./detectors/browser-image-stale.js";
 import addonWallDetector, {
   SOURCE as ADDON_WALL_SOURCE,
   TITLE as ADDON_WALL_TITLE,
@@ -26,6 +27,9 @@ import restoreBundleCompose, {
   NEEDS_KEY_FLASH,
   OWNER_ONLY_FLASH,
 } from "./remedies/restore-bundle-compose.js";
+import restartBrowserAddon, {
+  ACTION_ID as RESTART_BROWSER_ADDON_ACTION,
+} from "./remedies/restart-browser-addon.js";
 import addonUnwallRemedy, {
   FLASH_ID_RE,
   KEEP_OFF_ACTION,
@@ -60,6 +64,7 @@ export function wireFixIt() {
   registry.registerDetector(dataBackendReapprovalDetector);
   registry.registerDetector(bundleBindDriftDetector);
   registry.registerDetector(retiredBundleDetector);
+  registry.registerDetector(browserImageStaleDetector);
   registry.registerDetector(addonWallDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   // The owner's own copy of a bundle compose, put back with the previous file kept
@@ -69,6 +74,10 @@ export function wireFixIt() {
   // shipped compose, offered when the update would also switch a container's image
   // (bundle-bind-drift.js's image-change card). It never restarts either.
   registry.registerRemedy(APPLY_COMPOSE_UPDATE_ACTION, restoreBundleCompose);
+  // The browser add-on running an image built before the files Crow just installed:
+  // restart it through the SAME Extensions restart route the Restart button calls
+  // (owner only — browser-image-stale.js's card).
+  registry.registerRemedy(RESTART_BROWSER_ADDON_ACTION, restartBrowserAddon);
   // An add-on that could not run inside its wall: run it unwalled by the
   // owner's choice, or answer the card and leave it off.
   registry.registerRemedy("addon-unwall", addonUnwallRemedy);
@@ -87,7 +96,26 @@ export function wireFixIt() {
  * The detectors runBootChecks() drives. A condition no request emits an event for
  * belongs here; the list is exported so the set can be asserted, not grepped.
  */
-export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, caddyAdminSocketDetector, bootGuardDetector, dataBackendReapprovalDetector, bundleBindDriftDetector, retiredBundleDetector]);
+export const BOOT_CHECK_DETECTORS = Object.freeze([
+  caddyProxySocketDetector,
+  caddyAdminSocketDetector,
+  bootGuardDetector,
+  dataBackendReapprovalDetector,
+  bundleBindDriftDetector,
+  retiredBundleDetector,
+  browserImageStaleDetector,
+]);
+
+/**
+ * The detector whose re-run the bundle routes already make for ONE bundle after its
+ * containers changed: routes/bundles.js calls
+ * `runBootCheck(db, "bundle-bind-drift", { only: [id] })` after a Start, a stop and an
+ * install's `up`. A detector that watches a RUNNING container's own state (the
+ * browser add-on's image age) declares `recheckOnContainerChange` and rides that
+ * same pass, so its card clears when the new image is in place — with no second call
+ * site added to the routes, and never on a boot pass (which carries no `only`).
+ */
+const CONTAINER_CHANGE_RECHECK = "bundle-bind-drift";
 
 /**
  * Where a `kind: "link"` remedy may point, held HERE and never read from the
@@ -188,12 +216,26 @@ export async function runBootCheck(db, source, opts = {}) {
   const detector = BOOT_CHECK_DETECTORS.find((d) => d.source === source);
   if (!detector) return null;
   wireFixIt();
+  let result = null;
   try {
-    return await detector.check(boundStore(db), opts);
+    result = await detector.check(boundStore(db), opts);
   } catch (err) {
     console.warn(`[fix-it] boot check "${source}" failed:`, err?.message || err);
-    return null;
   }
+  // A container-change pass (always for ONE bundle) also re-runs the detectors that
+  // watch a running container's own state. Isolated one by one, exactly like the boot
+  // pass: one broken detector never hides another.
+  if (source === CONTAINER_CHANGE_RECHECK && opts.only) {
+    for (const extra of BOOT_CHECK_DETECTORS) {
+      if (extra === detector || extra.recheckOnContainerChange !== true) continue;
+      try {
+        await extra.check(boundStore(db), opts);
+      } catch (err) {
+        console.warn(`[fix-it] boot check "${extra.source}" failed:`, err?.message || err);
+      }
+    }
+  }
+  return result;
 }
 
 /**
@@ -202,7 +244,8 @@ export async function runBootCheck(db, source, opts = {}) {
  * the gateway over loopback (the security audit's finding), and one whose admin
  * API is Caddy's unauthenticated localhost default. The rest are a boot guard
  * that is installed but did not run (N1c-3 L1), a data backend waiting to be
- * approved again, and a bundle bind mount that drifted from its compose file.
+ * approved again, a bundle bind mount that drifted from its compose file, and the
+ * browser add-on running an image built before the files Crow installed.
  * Fire-and-forget: never throws, and one broken detector never hides another.
  */
 export async function runBootChecks(db, opts = {}) {

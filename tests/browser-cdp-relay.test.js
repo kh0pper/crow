@@ -15,7 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,28 @@ const ALL_LOGS = [];
 const ALL_TRACES = [];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The argv contract for the back-forward cache: exactly ONE --disable-features flag, and it
+ * must switch BackForwardCache off. Chromium honours only the last --disable-features flag,
+ * so a second one would silently drop the first's features — "exactly one" is the check,
+ * not "one of them includes it".
+ */
+function backForwardCacheDisabled(argv) {
+  const flags = (argv || []).filter((a) => typeof a === "string" && a.startsWith("--disable-features="));
+  if (flags.length !== 1) return false;
+  const features = flags[0].slice("--disable-features=".length).split(",").map((f) => f.trim());
+  return features.includes("BackForwardCache");
+}
+
+/**
+ * The crash-restore bubble: a crashed Chromium offers "Restore pages?" in the VNC viewer,
+ * which reopens the bot's last pages — a way back into private pages. The switch is exact:
+ * a flag that merely starts with the same characters is a different switch.
+ */
+function crashRestoreBubbleHidden(argv) {
+  return (argv || []).includes("--hide-crash-restore-bubble");
+}
 
 async function startRelay(t, extraEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), "crow-cdp-relay-"));
@@ -457,6 +479,91 @@ test("a sessionId the client does not own is refused at once and never forwarded
   });
 });
 
+// ---------------------------------------------------------------------------
+// a target's initial URL: only an exact about:blank, and never forwarded
+// ---------------------------------------------------------------------------
+
+/** The refusal shape: an error reply with a JSON-RPC code, and no result. */
+function assertRefusedTargetCreate(reply, what) {
+  assert.equal(reply.result, undefined, `${what}: no result rode back (${JSON.stringify(reply).slice(0, 200)})`);
+  assert.ok(reply.error && typeof reply.error === "object", `${what}: an error object (${JSON.stringify(reply).slice(0, 200)})`);
+  assert.equal(typeof reply.error.code, "number", `${what}: an error code`);
+  assert.ok(Number.isInteger(reply.error.code) && reply.error.code < 0, `${what}: a JSON-RPC error code (got ${reply.error.code})`);
+  assert.equal(typeof reply.error.message, "string", `${what}: an error message`);
+  assert.ok(reply.error.message.length > 0, `${what}: a non-empty message`);
+}
+
+test("Target.createTarget is refused for every initial URL but an exact about:blank, and never forwarded", async (t) => {
+  await withRelay(t, {}, async ({ ctx, wsUrl }) => {
+    const a = openClient(wsUrl);
+    await a.opened;
+    // The client's own browser session, so the refusal is proven both sessionless and addressed.
+    const sc = (await a.request(1, "Test.echo", { value: "session" })).result.got;
+    assert.match(sc, /^S\d+$/, "the client has its own browser session (S_c)");
+    const before = ctx.records("recv").filter((r) => r.method === "Target.createTarget").length;
+
+    const cases = [
+      ["a loopback URL", { url: "http://127.0.0.1:9/x" }],
+      ["a loopback URL in a new window", { url: "http://127.0.0.1:9/x", newWindow: true }],
+      ["a file URL", { url: "file:///etc/passwd" }],
+      ["a javascript URL", { url: "javascript:alert(1)" }],
+      ["about:blank with a fragment", { url: "ABOUT:BLANK#x" }],
+      ["about:blank with a query", { url: "about:blank?x" }],
+      ["a numeric url", { url: 5 }],
+      ["an object url", { url: {} }],
+    ];
+    let id = 10;
+    for (const [what, params] of cases) {
+      for (const [how, sessionId] of [["sessionless", undefined], ["addressed to S_c", sc]]) {
+        const reply = await a.request(id, "Target.createTarget", params, sessionId);
+        assertRefusedTargetCreate(reply, `${what} (${how})`);
+        id += 1;
+      }
+    }
+
+    await sleep(150);
+    const forwarded = ctx.records("recv").filter((r) => r.method === "Target.createTarget");
+    assert.equal(forwarded.length, before, `a refused createTarget still reached Chromium: ${JSON.stringify(forwarded).slice(0, 400)}`);
+
+    // The refusal leaves no pending id and does not drop the connection: an ordinary call still works.
+    assert.equal(a.closeInfo(), null, "a refused createTarget did not close the client connection");
+    const echo = await a.request(90, "Test.echo", { value: "still here" });
+    assert.equal(echo.result.value, "still here", "the same connection still relays ordinary calls");
+    a.close();
+  });
+});
+
+test("Target.createTarget with no url or an exact about:blank is forwarded with its params intact", async (t) => {
+  await withRelay(t, {}, async ({ ctx, wsUrl }) => {
+    const a = openClient(wsUrl);
+    await a.opened;
+    const before = ctx.records("recv").filter((r) => r.method === "Target.createTarget").length;
+    const cases = [
+      ["no params", {}],
+      ["an empty url", { url: "" }],
+      ["exact about:blank", { url: "about:blank" }],
+      ["exact about:blank in a new window", { url: "about:blank", newWindow: true }],
+      ["exact about:blank in another context", { url: "about:blank", browserContextId: "CTX1" }],
+    ];
+    let id = 20;
+    for (const [what, params] of cases) {
+      const reply = await a.request(id, "Target.createTarget", params);
+      assert.equal(reply.error, undefined, `${what}: allowed (${JSON.stringify(reply).slice(0, 200)})`);
+      assert.deepEqual(reply.result, { targetId: "TGT1" }, `${what}: the browser's own response reaches the client`);
+      assert.equal(reply.sessionId, undefined, `${what}: S_c is stripped from the response`);
+      id += 1;
+    }
+
+    await sleep(150);
+    const forwarded = ctx.records("recv").filter((r) => r.method === "Target.createTarget");
+    assert.equal(forwarded.length, before + cases.length, "every allowed createTarget was forwarded");
+    for (let i = 0; i < cases.length; i++) {
+      assert.deepEqual(forwarded[before + i].params, cases[i][1], `${cases[i][0]}: the original params reached Chromium`);
+    }
+    a.close();
+  });
+});
+
 test("on disconnect the relay detaches every child session, then S_c", async (t) => {
   await withRelay(t, {}, async ({ ctx, wsUrl }) => {
     const a = openClient(wsUrl);
@@ -621,6 +728,27 @@ test("Chromium's argv carries the pipe and no debugging port; its env carries no
     assert.ok(!argv.some((a) => a.startsWith("--remote-allow-origins")), "the Origin check is not disabled");
     assert.ok(argv.some((a) => a.startsWith("--user-data-dir=")), "the profile is still on the volume");
     assert.ok(argv.includes("--no-sandbox"));
+    // Defence in depth: the WebRTC ICE policy flag is passed, though some Chromium
+    // builds ignore it. The page-side guard removes the WebRTC constructors instead
+    // (bundles/browser/server/private-address.js), and it is that disable which is
+    // relied on.
+    assert.ok(
+      argv.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"),
+      "the WebRTC ICE policy flag is passed: " + argv.join(" "),
+    );
+    // A Back press in the VNC viewer must not restore a page the bot opened out of the
+    // back-forward cache: the exit cleanup leaves a fresh about:blank page, and the flag
+    // closes the cache path. Exactly one --disable-features flag (Chromium honours the last).
+    assert.ok(
+      backForwardCacheDisabled(argv),
+      "exactly one --disable-features flag, naming BackForwardCache: " + argv.join(" "),
+    );
+    // …and the bubble a crashed Chromium would show in the VNC viewer is off: it would
+    // reopen the bot's last pages, which is a way back into private pages.
+    assert.ok(
+      crashRestoreBubbleHidden(argv),
+      "--hide-crash-restore-bubble, so a crashed Chromium offers no Restore-pages bubble: " + argv.join(" "),
+    );
 
     const env = ctx.records("env")[0].env;
     assert.equal(env.CROW_CDP_TOKEN_FILE, undefined, "the token's location is stripped too");
@@ -628,6 +756,45 @@ test("Chromium's argv carries the pipe and no debugging port; its env carries no
     assert.ok(!JSON.stringify(env).includes(TOKEN));
     assert.ok(!JSON.stringify(argv).includes(TOKEN));
   });
+});
+
+// CONTROL: the argv check above is not vacuous — it rejects an argv without the flag, an
+// argv whose flag names other features, and the two-flag case Chromium would misread.
+test("CONTROL: the BackForwardCache argv check fails without it, and on two flags", () => {
+  const base = ["--no-sandbox", "--remote-debugging-pipe", "--user-data-dir=/tmp/profile", "about:blank"];
+  assert.equal(backForwardCacheDisabled(base), false, "an argv with no --disable-features flag does not pass");
+  assert.equal(
+    backForwardCacheDisabled([...base, "--disable-features=Translate"]),
+    false,
+    "a --disable-features flag that does not name BackForwardCache does not pass",
+  );
+  assert.equal(
+    backForwardCacheDisabled([...base, "--disable-features=Translate,BackForwardCache"]),
+    true,
+    "…but a comma-merged single flag does pass",
+  );
+  assert.equal(
+    backForwardCacheDisabled([...base, "--disable-features=BackForwardCache", "--disable-features=Translate"]),
+    false,
+    "two flags: Chromium honours only the last, so the cache would stay live",
+  );
+});
+
+// CONTROL: the crash-restore-bubble check is not vacuous either — it rejects the base
+// argv, and a flag that only shares the prefix.
+test("CONTROL: the crash-restore-bubble argv check fails without it", () => {
+  const base = ["--no-sandbox", "--remote-debugging-pipe", "--user-data-dir=/tmp/profile", "about:blank"];
+  assert.equal(crashRestoreBubbleHidden(base), false, "an argv without --hide-crash-restore-bubble does not pass");
+  assert.equal(
+    crashRestoreBubbleHidden([...base, "--hide-crash-restore-bubble"]),
+    true,
+    "…but the exact switch does",
+  );
+  assert.equal(
+    crashRestoreBubbleHidden([...base, "--hide-crash-restore-bubble=1"]),
+    false,
+    "a flag that only starts with the same characters is a different switch",
+  );
 });
 
 test("the ready file says the port and the browser, and never the token", async (t) => {
@@ -1213,4 +1380,372 @@ test("a 33 MB message from the browser reaches its client and never stops the br
     assert.equal(await alive(ctx, 500), true, `the relay is still running; log:\n${ctx.logs()}`);
     c.close();
   });
+});
+
+// ---------------------------------------------------------------------------
+// r4 #10: Browser.crash through the relay — a crash answers nothing
+// ---------------------------------------------------------------------------
+//
+// The MCP server's exit cleanup, when it cannot blank a page, asks the browser to die with
+// `Browser.crash` over a browser-level CDP session that goes THROUGH this relay. A crashed
+// Chromium never answers, so the relay must neither hang on the missing reply nor invent
+// one: Chromium's exit is the only outcome, and the relay must share it — code and all.
+
+test("Browser.crash through the relay: forwarded unmodified, never answered, and the relay exits with Chromium's crash code", async (t) => {
+  await withRelay(t, {}, async ({ ctx, wsUrl }) => {
+    const c = openClient(wsUrl);
+    await c.opened;
+    // Playwright's newBrowserCDPSession: attach to the browser target, flat, and address
+    // every later command to the session it hands back.
+    const attach = await c.request(100, "Target.attachToBrowserTarget", { flatten: true });
+    const sid = attach.result?.sessionId;
+    assert.equal(typeof sid, "string", "the client got a browser session of its own: " + JSON.stringify(attach));
+
+    // CONTROL: that session is a working one — a normal command through it is answered.
+    const version = await c.request(101, "Browser.getVersion", {}, sid);
+    assert.equal(version.result?.product, "FakeChrome/1.0.0", "Browser.getVersion through the opened session is answered");
+
+    // The crash, addressed to that session, the way the cleanup sends it.
+    c.send({ id: 102, method: "Browser.crash", params: {}, sessionId: sid });
+
+    const { code } = await Promise.race([ctx.exited, sleep(15000).then(() => ({ code: "timeout" }))]);
+    assert.notEqual(code, "timeout", `the relay does not hang on a crash nobody answers: ${ctx.logs()}`);
+    assert.equal(code, 139, `the relay exits with Chromium's own crash code: ${ctx.logs()}`);
+
+    const crash = ctx.records("recv").find((r) => r.method === "Browser.crash");
+    assert.ok(crash, "Browser.crash reached Chromium over the pipe");
+    assert.equal(crash.sessionId, sid, "…addressed to the very session the client opened, unmodified");
+    assert.deepEqual(crash.params, {}, "…with its params untouched");
+    assert.equal(ctx.records("browser-crash").length, 1, "Chromium crashed on it");
+
+    const closed = await c.waitClosed(10000);
+    assert.ok(closed, "the client socket was closed");
+    assert.equal(c.messages.some((m) => m.id === 102), false, "Browser.crash is never answered: " + JSON.stringify(c.messages));
+    assert.equal(c.messages.some((m) => m.error), false, "…and nothing answered on its behalf");
+  });
+});
+
+// CONTROL: the test above would pass vacuously if the session simply could not be used.
+// The same session, with no crash sent, leaves the browser (and the relay) running.
+test("CONTROL: a client that never sends Browser.crash leaves Chromium running", async (t) => {
+  await withRelay(t, {}, async ({ ctx, wsUrl }) => {
+    const c = openClient(wsUrl);
+    await c.opened;
+    const attach = await c.request(100, "Target.attachToBrowserTarget", { flatten: true });
+    const version = await c.request(101, "Browser.getVersion", {}, attach.result?.sessionId);
+    assert.equal(version.result?.product, "FakeChrome/1.0.0");
+    await sleep(500);
+    assert.equal(await alive(ctx, 500), true, `the relay is still running: ${ctx.logs()}`);
+    const pid = ctx.records("pid")[0].pid;
+    assert.doesNotThrow(() => process.kill(pid, 0), "Chromium is still alive");
+    assert.equal(ctx.records("browser-crash").length, 0, "nothing crashed");
+    c.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// r4 #9: the crash-restore bubble, and the profile Chromium reads "Crashed" from
+// ---------------------------------------------------------------------------
+//
+// After a crash Chromium offers "Restore pages?" in the VNC viewer, which reopens the
+// bot's own pages — a way back into private pages. Two properties: the argv switch (asserted
+// in the argv test above, with its CONTROL), and the profile's own verdict, which Chromium
+// reads at launch — so the profile must be cleaned BEFORE Chromium is started.
+
+/** A fresh profile DIRECTORY (no Default/ inside unless a case writes one). */
+function makeProfile(t) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-cdp-profile-"));
+  t.after(() => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ } });
+  return dir;
+}
+
+/** The file Chromium records its last exit in (and offers the bubble for). */
+const prefsFile = (profile) => join(profile, "Default", "Preferences");
+
+/** The crashed shape Chromium leaves behind — and the clean one the rewrite must leave. */
+const DIRTY_PREFS = {
+  profile: { exit_type: "Crashed", exited_cleanly: false, name: "Person 1" },
+  foo: 1,
+  browser: { has_seen_welcome_page: true },
+};
+const CLEAN_PREFS = {
+  profile: { exit_type: "Normal", exited_cleanly: true, name: "Person 1" },
+  foo: 1,
+  browser: { has_seen_welcome_page: true },
+};
+
+/** The profile as Chromium saw it the moment it started (the fake's own startup read). */
+function profileAtLaunch(ctx) {
+  const snap = ctx.records("profile")[0];
+  assert.ok(snap, "the fake Chromium read the profile when it started");
+  return snap;
+}
+
+function assertCleaned(ctx, profile, expected) {
+  const at = profileAtLaunch(ctx);
+  assert.equal(at.path, prefsFile(profile), "the fake read the profile under its --user-data-dir");
+  assert.deepEqual(at.profile, expected, `the profile was ALREADY clean when Chromium launched (saw ${at.raw})`);
+  assert.deepEqual(JSON.parse(readFileSync(prefsFile(profile), "utf8")), expected, "and it is what is on disk");
+}
+
+test("crash-restore: the supervisor cleans a crashed profile's Default/Preferences before Chromium starts", async (t) => {
+  const profile = makeProfile(t);
+  mkdirSync(join(profile, "Default"), { recursive: true });
+  writeFileSync(prefsFile(profile), JSON.stringify(DIRTY_PREFS));
+  const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+  await waitReady(ctx);
+
+  assertCleaned(ctx, profile, CLEAN_PREFS);
+  const at = profileAtLaunch(ctx);
+  assert.equal(at.profile.foo, 1, "the other top-level key survives");
+  assert.equal(at.profile.profile.name, "Person 1", "the other keys of the profile object survive");
+  assert.equal(at.profile.browser?.has_seen_welcome_page, true, "and a nested object is kept as it was");
+});
+
+// The in-process shape (no --supervise) starts Chromium itself too, so it must clean the
+// profile on the same path.
+test("crash-restore: the in-process relay cleans the profile as well", async (t) => {
+  const profile = makeProfile(t);
+  mkdirSync(join(profile, "Default"), { recursive: true });
+  writeFileSync(prefsFile(profile), JSON.stringify(DIRTY_PREFS));
+  const ctx = await startRelay(t, { CROW_CHROMIUM_PROFILE: profile });
+  await waitReady(ctx);
+  assertCleaned(ctx, profile, CLEAN_PREFS);
+});
+
+// CONTROL: the three ways the rewrite must NOT invent anything — an already-clean profile
+// (content semantics unchanged), an unparseable one (bytes untouched, no throw), and a
+// profile with no Default directory (no file created out of nowhere).
+test("CONTROL: crash-restore profile hygiene — clean stays clean, garbage is untouched, a missing Default dir makes no file", async (t) => {
+  // (1) already clean: same content semantics, and no bubble either way.
+  {
+    const profile = makeProfile(t);
+    mkdirSync(join(profile, "Default"), { recursive: true });
+    const already = { profile: { exit_type: "Normal", exited_cleanly: true }, foo: 1 };
+    writeFileSync(prefsFile(profile), JSON.stringify(already, null, 2));
+    const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+    await waitReady(ctx);
+    assert.deepEqual(profileAtLaunch(ctx).profile, already, "an already-clean profile reads back identical at launch");
+    assert.deepEqual(JSON.parse(readFileSync(prefsFile(profile), "utf8")), already, "…and stays semantically identical");
+  }
+  // (2) garbage: untouched, and no FATAL (waitReady would have thrown).
+  {
+    const profile = makeProfile(t);
+    mkdirSync(join(profile, "Default"), { recursive: true });
+    const garbage = "{not json at all";
+    writeFileSync(prefsFile(profile), garbage);
+    const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+    await waitReady(ctx);
+    assert.equal(readFileSync(prefsFile(profile), "utf8"), garbage, "an unparseable Preferences is left byte for byte alone");
+    assert.equal(profileAtLaunch(ctx).raw, garbage, "…and was still garbage when Chromium launched");
+    assert.equal(profileAtLaunch(ctx).profile, null, "Chromium had nothing to parse either");
+  }
+  // (3) no Default directory: nothing is created, nothing throws.
+  {
+    const profile = makeProfile(t);
+    const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+    await waitReady(ctx);
+    assert.equal(existsSync(prefsFile(profile)), false, "no Default dir, so no Preferences file is created for it");
+    assert.equal(profileAtLaunch(ctx).raw, null, "there was nothing for Chromium to read");
+    assert.equal(profileAtLaunch(ctx).profile, null);
+  }
+});
+
+// A clean record is not enough on its own: a profile set to "Continue where you left off"
+// (session.restore_on_startup 1) reopens the crashed session's tabs with no bubble at all,
+// reading them out of the profile's own session files. So the rewrite also points the
+// setting at the new tab page (5) and deletes what a launch would have restored.
+const CONTINUE_WHERE_YOU_LEFT_OFF = {
+  profile: { exit_type: "Crashed", exited_cleanly: false, name: "Person 1" },
+  session: { restore_on_startup: 1, startup_urls: "https://operator.example/start" },
+  foo: 1,
+};
+
+test("crash-restore: a Continue-where-you-left-off profile is switched to the new tab page and its saved session deleted before Chromium starts", async (t) => {
+  const profile = makeProfile(t);
+  const def = join(profile, "Default");
+  mkdirSync(join(def, "Sessions"), { recursive: true });
+  writeFileSync(prefsFile(profile), JSON.stringify(CONTINUE_WHERE_YOU_LEFT_OFF));
+  const savedSession = join(def, "Sessions", "Session_13300000000000001");
+  const savedSession2 = join(def, "Sessions", "Session_13300000000000002");
+  const currentSession = join(def, "Current Session");
+  const currentTabs = join(def, "Current Tabs");
+  const lastSession = join(def, "Last Session");
+  const lastTabs = join(def, "Last Tabs");
+  const sessionFiles = [savedSession, savedSession2, currentSession, currentTabs, lastSession, lastTabs];
+  for (const p of sessionFiles) writeFileSync(p, "the crashed session's pages");
+  // CONTROL: a neighbour of those files that is not part of the session.
+  const cookies = join(def, "Cookies");
+  writeFileSync(cookies, "the operator's cookies");
+
+  const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+  await waitReady(ctx);
+
+  const at = profileAtLaunch(ctx);
+  assert.equal(at.profile?.session?.restore_on_startup, 5, `the profile was still set to continue where it left off when Chromium launched (saw ${at.raw})`);
+  assert.equal(at.profile?.profile?.exit_type, "Normal", "…and the exit record is clean in the same launch");
+  assert.equal(at.profile?.session?.startup_urls, "https://operator.example/start", "the other keys of `session` survive");
+  assert.equal(at.profile?.foo, 1, "and so does the rest of the file");
+  const onDisk = JSON.parse(readFileSync(prefsFile(profile), "utf8"));
+  assert.equal(onDisk.session.restore_on_startup, 5, "the setting on disk is the new tab page");
+  assert.equal(onDisk.session.startup_urls, "https://operator.example/start");
+  for (const p of sessionFiles) assert.equal(existsSync(p), false, `${p} was deleted`);
+  assert.equal(readFileSync(cookies, "utf8"), "the operator's cookies", "CONTROL: a file that is not part of the session is untouched");
+  assert.equal(existsSync(join(def, "Sessions")), true, "the Sessions directory itself is kept (only its contents go)");
+});
+
+// CONTROL: nothing may be deleted for a profile this rewrite does not touch at all.
+test("CONTROL: crash-restore session hygiene — an unparseable Preferences leaves the saved session untouched", async (t) => {
+  const profile = makeProfile(t);
+  const def = join(profile, "Default");
+  mkdirSync(join(def, "Sessions"), { recursive: true });
+  const garbage = "{not json at all";
+  writeFileSync(prefsFile(profile), garbage);
+  const saved = join(def, "Sessions", "Session_13300000000000003");
+  const current = join(def, "Current Session");
+  writeFileSync(saved, "still here");
+  writeFileSync(current, "still here");
+
+  const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+  await waitReady(ctx);
+
+  assert.equal(readFileSync(prefsFile(profile), "utf8"), garbage, "the unparseable Preferences is still byte for byte alone");
+  assert.equal(readFileSync(saved, "utf8"), "still here", "CONTROL: a session file is not deleted for a Preferences that was not rewritten");
+  assert.equal(readFileSync(current, "utf8"), "still here");
+});
+
+// ---------------------------------------------------------------------------
+// T15-7: the profile rewrite acts ON A CRASHED RECORD ONLY
+// ---------------------------------------------------------------------------
+//
+// The rewrite exists for exactly one situation: the exit cleanup killed the browser,
+// so the profile says "Crashed" and the next launch would offer to restore the bot's
+// pages. A profile whose last exit was CLEAN has nothing to restore — and rewriting it
+// is destructive in its own right: it re-serialises the operator's file, it overrides
+// "Continue where you left off", and it deletes session files that belong to a clean
+// exit. So the whole rewrite (the clean record, the restore_on_startup switch and the
+// saved-session deletion) is gated on `profile.exit_type === "Crashed"` — and the
+// control below is that a crashed profile is still handled exactly as before.
+//
+test("T15-7: crash-restore acts only on a Crashed exit record — Normal and an absent record are left byte for byte alone", async (t) => {
+  /**
+   * A fresh profile whose Preferences is `prefs` (pretty-printed on purpose: a rewrite
+   * RE-SERIALISES the file, so "it was not rewritten" is a byte comparison and not only
+   * a JSON one), plus the saved session a launch could restore beside it.
+   */
+  const profileWith = (prefs) => {
+    const profile = makeProfile(t);
+    const def = join(profile, "Default");
+    mkdirSync(join(def, "Sessions"), { recursive: true });
+    const raw = JSON.stringify(prefs, null, 4);
+    writeFileSync(prefsFile(profile), raw);
+    const saved = join(def, "Sessions", "Session_13300000000000005");
+    const current = join(def, "Current Session");
+    writeFileSync(saved, "a saved session a launch could restore");
+    writeFileSync(current, "the current session beside it");
+    return { profile, def, raw, saved, current };
+  };
+
+  /** Everything that must hold for a profile the rewrite must NOT touch. */
+  const assertLeftAlone = async (at, why) => {
+    assert.ok(at.raw.length < 500, "the fixture's launch snapshot holds the whole Preferences file, so the byte check below is complete");
+    assert.equal(at.raw, why.raw, `${why.what}: the file was already untouched when Chromium launched`);
+    assert.equal(readFileSync(prefsFile(why.profile), "utf8"), why.raw, `${why.what}: the Preferences is left byte for byte alone`);
+    const onDisk = JSON.parse(readFileSync(prefsFile(why.profile), "utf8"));
+    assert.equal(
+      onDisk.session.restore_on_startup,
+      1,
+      `${why.what}: session.restore_on_startup stays 1 — only a crashed session is switched off`,
+    );
+    assert.equal(existsSync(why.saved), true, `${why.what}: the saved session file is left alone`);
+    assert.equal(
+      readFileSync(why.current, "utf8"),
+      "the current session beside it",
+      `${why.what}: Current Session is left alone`,
+    );
+    assert.equal(existsSync(join(why.def, "Sessions")), true, `${why.what}: the Sessions directory is still there`);
+  };
+
+  /**
+   * Run `assertLeftAlone` and KEEP its failure instead of throwing it: the two records
+   * that must be left alone are then both reported in one run, even though the gate is
+   * missing for both of them today.
+   */
+  const problems = [];
+  const checkLeftAlone = async (at, why) => {
+    try {
+      await assertLeftAlone(at, why);
+    } catch (err) {
+      problems.push(`${why.what}: ${(err && err.message) || String(err)}`);
+    }
+  };
+
+  // The CONTROL runs FIRST, so it is measured even while the cases below are red: it is
+  // what makes the red mean "the gate is missing" rather than "the rewrite is gone".
+  //
+  // (c) profile.exit_type === "Crashed" keeps today's behaviour exactly — the record
+  // is made clean, "Continue where you left off" is switched to the new tab page, and
+  // the saved session a launch would have restored is deleted.
+  {
+    const profile = makeProfile(t);
+    const def = join(profile, "Default");
+    mkdirSync(join(def, "Sessions"), { recursive: true });
+    writeFileSync(prefsFile(profile), JSON.stringify(CONTINUE_WHERE_YOU_LEFT_OFF));
+    const saved = join(def, "Sessions", "Session_13300000000000006");
+    const current = join(def, "Current Session");
+    const cookies = join(def, "Cookies");
+    writeFileSync(saved, "the crashed session's pages");
+    writeFileSync(current, "the crashed session's pages");
+    writeFileSync(cookies, "the operator's cookies");
+
+    const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: profile });
+    await waitReady(ctx);
+
+    const at = profileAtLaunch(ctx);
+    assert.equal(at.profile?.profile?.exit_type, "Normal", `CONTROL: a crashed record is made clean before Chromium starts (saw ${at.raw})`);
+    assert.equal(at.profile?.profile?.exited_cleanly, true, "CONTROL: …and exited_cleanly is set");
+    assert.equal(
+      at.profile?.session?.restore_on_startup,
+      5,
+      "CONTROL: a crashed Continue-where-you-left-off profile is switched to the new tab page in the same launch",
+    );
+    assert.equal(at.profile?.session?.startup_urls, "https://operator.example/start", "CONTROL: the other keys of `session` survive");
+    assert.equal(at.profile?.foo, 1, "CONTROL: and so does the rest of the file");
+    assert.equal(existsSync(saved), false, "CONTROL: the saved session the crash left behind is deleted");
+    assert.equal(existsSync(current), false, "CONTROL: …and Current Session too");
+    assert.equal(readFileSync(cookies, "utf8"), "the operator's cookies", "CONTROL: a file that is not part of the session is untouched");
+  }
+
+  // (b) No profile.exit_type key at all: nothing says "Crashed", so nothing is touched.
+  {
+    const why = profileWith({
+      profile: { name: "Person 1" },
+      session: { restore_on_startup: 1 },
+      foo: 1,
+    });
+    const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: why.profile });
+    await waitReady(ctx);
+    await checkLeftAlone(profileAtLaunch(ctx), { ...why, what: "a record with no exit_type at all" });
+  }
+
+  // (a) profile.exit_type === "Normal": the last exit was clean. Nothing to rewrite,
+  // nothing switched, nothing deleted.
+  {
+    const why = profileWith({
+      profile: { exit_type: "Normal", exited_cleanly: true, name: "Person 1" },
+      session: { restore_on_startup: 1, startup_urls: "https://operator.example/start" },
+      foo: 1,
+    });
+    const ctx = await startSupervised(t, { CROW_CHROMIUM_PROFILE: why.profile });
+    await waitReady(ctx);
+    await checkLeftAlone(profileAtLaunch(ctx), { ...why, what: 'a "Normal" exit record' });
+  }
+
+  assert.deepEqual(
+    problems,
+    [],
+    "the crash-restore rewrite acts only on a Crashed exit record: a clean (or absent) record has nothing to " +
+      "restore, so its Preferences must stay byte for byte identical, session.restore_on_startup must stay 1, and " +
+      `the saved session files must be left alone (${JSON.stringify(problems)})`,
+  );
 });

@@ -20,10 +20,36 @@ const DOCKERFILE = read("bundles/browser/Dockerfile");
 const MANIFEST = JSON.parse(read("bundles/browser/manifest.json"));
 const REGISTRY = JSON.parse(read("registry/add-ons.json"));
 
+/**
+ * The floor is the release that shipped these files, not that release exactly:
+ * parse the dotted version numerically (so 1.10.0 > 1.9.0) and fail only when
+ * `actual` is older than `minimum`.
+ */
+function assertAtLeast(actual, minimum, what) {
+  const parse = (v) => String(v).split(".").map((p) => Number.parseInt(p, 10) || 0);
+  const a = parse(actual), m = parse(minimum);
+  for (let i = 0; i < Math.max(a.length, m.length); i++) {
+    const x = a[i] ?? 0, y = m[i] ?? 0;
+    if (x !== y) return assert.ok(x > y, `${what}: ${actual} is older than ${minimum}`);
+  }
+  assert.ok(true, `${what}: ${actual} is at least ${minimum}`);
+}
+
 /** Shell lines that are not comments: assertions are about what runs. */
 const SHELL = ENTRYPOINT.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
 /** JS lines that are not comments (whole-line `//`, `/*`, `*`). */
 const JS = RELAY.split("\n").filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join("\n");
+
+/**
+ * The static half of the argv contract: exactly ONE --disable-features flag in the launch
+ * args, and it names BackForwardCache. Chromium honours only the last such flag, so a
+ * second one would silently drop the first's features; a later feature is comma-merged.
+ */
+function sourceDisablesBackForwardCache(source) {
+  const flags = source.match(/--disable-features=[^"\s]+/g) ?? [];
+  if (flags.length !== 1) return false;
+  return flags[0].slice("--disable-features=".length).split(",").map((f) => f.trim()).includes("BackForwardCache");
+}
 
 test("neither the entrypoint nor the relay ever passes a debugging port or reopens the Origin check", () => {
   for (const [name, code] of [["entrypoint.sh", SHELL], ["cdp-relay.mjs", JS]]) {
@@ -37,6 +63,40 @@ test("neither the entrypoint nor the relay ever passes a debugging port or reope
   assert.match(JS, /method: "Browser\.close"/, "the relay closes Chromium itself");
   // The regexes above really do see the flags when they are there (a self-check).
   assert.match(RELAY, /--remote-debugging-pipe/);
+});
+
+test("the relay passes the WebRTC policy flag as defence in depth", () => {
+  // --force-webrtc-ip-handling-policy=disable_non_proxied_udp is passed, but some
+  // Chromium builds ignore it, so it is not relied on alone: the page-side guard
+  // (bundles/browser/server/private-address.js) removes the WebRTC constructors in
+  // every frame, and a UDP egress filter for the container is the follow-up.
+  assert.match(JS, /"--force-webrtc-ip-handling-policy=disable_non_proxied_udp"/);
+});
+
+test("the relay disables the back-forward cache in Chromium's launch args", () => {
+  // A Back press in the VNC viewer must not restore a page the bot opened out of the
+  // back-forward cache: the exit cleanup leaves a fresh about:blank page, and this flag
+  // closes the cache path. Chromium honours only the LAST --disable-features flag, so
+  // there must be exactly one — a later feature is comma-merged into it.
+  assert.match(JS, /"--disable-features=BackForwardCache"/);
+  assert.ok(sourceDisablesBackForwardCache(JS), "exactly one --disable-features flag, naming BackForwardCache");
+});
+
+// CONTROL: the check above is not vacuous — it fails on source without the flag, on a flag
+// naming other features, and on the two-flag shape Chromium would misread.
+test("CONTROL: the static BackForwardCache check fails without the flag, and on two flags", () => {
+  assert.equal(sourceDisablesBackForwardCache('args.push("--remote-debugging-pipe")'), false, "no flag at all");
+  assert.equal(sourceDisablesBackForwardCache('args.push("--disable-features=Translate")'), false, "a flag without BackForwardCache");
+  assert.equal(
+    sourceDisablesBackForwardCache('args.push("--disable-features=BackForwardCache", "--disable-features=Translate")'),
+    false,
+    "two flags: only the last is honoured, so the cache would stay live",
+  );
+  assert.equal(
+    sourceDisablesBackForwardCache('args.push("--disable-features=Translate,BackForwardCache")'),
+    true,
+    "…a comma-merged single flag passes (so the check is not vacuous)",
+  );
 });
 
 test("the relay spawns Chromium in its own process group, and dies with it", () => {
@@ -164,8 +224,8 @@ test("the CDP token arrives as a 0400 file, is checked before the browser starts
   assert.doesNotMatch(SHELL, /export CROW_BROWSER_CDP_TOKEN/);
 });
 
-test("the manifest bumps to 1.7.1, refreshes the four files, requires the token, and drops 9222 from ports", () => {
-  assert.equal(MANIFEST.version, "1.7.1", "the uid split changes the container, so installed copies must refresh");
+test("the manifest is at least 1.7.1, refreshes the four files, requires the token, and drops 9222 from ports", () => {
+  assertAtLeast(MANIFEST.version, "1.7.1", "the manifest version (the uid split changes the container, so installed copies must refresh)");
   assert.deepEqual(
     MANIFEST.refreshFiles,
     ["docker-compose.yml", "Dockerfile", "entrypoint.sh", "cdp-relay.mjs"],

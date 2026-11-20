@@ -22,6 +22,21 @@ import { installLeaseGuard, TEXTS } from "../bundles/browser/server/lease-guard.
 import { waitingForUserResult } from "../bundles/browser/server/wait-for-user.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * The floor is the release that introduced the lease, not that release exactly:
+ * parse the dotted version numerically (so 1.10.0 > 1.9.0) and fail only when
+ * `actual` is older than `minimum`.
+ */
+function assertAtLeast(actual, minimum, what) {
+  const parse = (v) => String(v).split(".").map((p) => Number.parseInt(p, 10) || 0);
+  const a = parse(actual), m = parse(minimum);
+  for (let i = 0; i < Math.max(a.length, m.length); i++) {
+    const x = a[i] ?? 0, y = m[i] ?? 0;
+    if (x !== y) return assert.ok(x > y, `${what}: ${actual} is older than ${minimum}`);
+  }
+  assert.ok(true, `${what}: ${actual} is at least ${minimum}`);
+}
 const { readLease, acquire, takeOperator, handBack } = leaseMod;
 
 const BUSY = "The browser is busy: another bot is using it. Try again in a minute.";
@@ -58,13 +73,26 @@ function fakeClock() {
   return clock;
 }
 
+/** Let pending microtasks and immediates run (the exit path uses real timers). */
+async function ticks(n = 5) {
+  for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
+}
+
+/** Poll `pred` on real time until it holds (or the budget runs out). */
+async function waitFor(pred, ms = 2000) {
+  const deadline = Date.now() + ms;
+  while (!pred() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+  return pred();
+}
+
 /** Install the guard on a fake server with one stub tool `name`; returns helpers. */
-function setup({ name = "crow_browser_navigate", env = PERCH_ENV, action, lease = leaseMod, dir = tmpLeaseDir(), proc, exit } = {}) {
+function setup({ name = "crow_browser_navigate", env = PERCH_ENV, action, lease = leaseMod, dir = tmpLeaseDir(), proc, exit, exitTasks } = {}) {
   const clock = fakeClock();
   const server = fakeServer();
   const guard = installLeaseGuard(server, {
     lease, dir, env, pid: process.pid, now: clock.now, sleep: clock.sleep,
     getTargetId: async () => "TARGET1", proc: proc || new EventEmitter(), exit: exit || (() => {}),
+    ...(exitTasks ? { exitTasks } : {}),
   });
   const calls = [];
   server.tool(name, "stub", {}, async (args) => {
@@ -220,6 +248,137 @@ test("an external client releases on exit", async () => {
   assert.equal(proc.listenerCount("SIGTERM"), 0);
 });
 
+test("exit-tasks: runExitTasks runs a registered task once, returns the same promise, never rejects", async () => {
+  const mod = await import("../bundles/browser/server/exit-tasks.js");
+  assert.equal(typeof mod.createExitTasks, "function", "the module exports the factory");
+  assert.equal(typeof mod.addExitTask, "function", "and a default instance's addExitTask");
+  assert.equal(typeof mod.runExitTasks, "function", "and its runExitTasks");
+
+  const tasks = mod.createExitTasks();
+  let runs = 0;
+  let release;
+  tasks.addExitTask(() => { runs++; return new Promise((r) => { release = r; }); });
+  const p1 = tasks.runExitTasks();
+  const p2 = tasks.runExitTasks();
+  assert.equal(p1, p2, "runExitTasks returns the identical promise on every call");
+  await ticks();
+  assert.equal(runs, 1, "the registered task started once");
+  tasks.runExitTasks();
+  await ticks();
+  assert.equal(runs, 1, "a third call does not start the task again");
+  assert.equal(typeof release, "function", "the task was given its chance to run");
+  release();
+  await p1;
+  assert.equal(runs, 1, "the task ran exactly once");
+  assert.equal(tasks.runExitTasks(), p1, "the settled promise is still the same one");
+  // An instance with nothing registered has nothing to wait for.
+  await mod.createExitTasks().runExitTasks();
+});
+
+test("exit-tasks: a rejecting or throwing task neither rejects runExitTasks nor stops the other tasks", async () => {
+  const { createExitTasks } = await import("../bundles/browser/server/exit-tasks.js");
+  const tasks = createExitTasks();
+  const ran = [];
+  tasks.addExitTask(async () => { ran.push("rejects"); throw new Error("the cleanup failed"); });
+  tasks.addExitTask(() => { ran.push("throws"); throw new Error("a cleanup that throws synchronously"); });
+  tasks.addExitTask(async () => { ran.push("ok"); });
+  const p = tasks.runExitTasks();
+  assert.equal(tasks.runExitTasks(), p);
+  await p; // must resolve, not reject
+  assert.deepEqual(ran.slice().sort(), ["ok", "rejects", "throws"], "every task still ran");
+});
+
+test("a SIGTERM/SIGINT waits for a pending exit task before exiting", async () => {
+  const { createExitTasks } = await import("../bundles/browser/server/exit-tasks.js");
+  for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]]) {
+    const proc = new EventEmitter();
+    const exits = [];
+    const exitTasks = createExitTasks();
+    let release;
+    const ctx = setup({ env: {}, proc, exit: (c) => exits.push(c), exitTasks });
+    exitTasks.addExitTask(() => new Promise((r) => { release = r; }));
+    assert.equal(text(await ctx.call()), "acted");
+    proc.emit(signal);
+    await ctx.guard.exiting;
+    assert.equal((await readLease(ctx.dir)).holder, null, `${signal} released the lease`);
+    await ticks();
+    assert.equal(typeof release, "function", `${signal} started the exit task`);
+    assert.deepEqual(exits, [], `${signal} does not exit while the exit task still runs`);
+    release();
+    await waitFor(() => exits.length > 0);
+    assert.deepEqual(exits, [code], `${signal} exits with ${code} once the exit task is done`);
+  }
+});
+
+test("with no pending exit task the signal handler exits right after the lease release, as before", async () => {
+  const { createExitTasks } = await import("../bundles/browser/server/exit-tasks.js");
+  for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]]) {
+    const proc = new EventEmitter();
+    const exits = [];
+    const exitTasks = createExitTasks();
+    let ran = 0;
+    exitTasks.addExitTask(async () => { ran++; }); // a task that settles at once holds nothing
+    const ctx = setup({ env: {}, proc, exit: (c) => exits.push(c), exitTasks });
+    assert.equal(text(await ctx.call()), "acted");
+    proc.emit(signal);
+    await ctx.guard.exiting;
+    await waitFor(() => exits.length > 0);
+    assert.deepEqual(exits, [code], `${signal} still exits with ${code}`);
+    assert.equal(ran, 1, "the exit task ran first");
+  }
+});
+
+test("beforeExit never calls exit, even with a pending exit task", async () => {
+  const { createExitTasks } = await import("../bundles/browser/server/exit-tasks.js");
+  const proc = new EventEmitter();
+  const exits = [];
+  const exitTasks = createExitTasks();
+  let release;
+  const ctx = setup({ env: {}, proc, exit: (c) => exits.push(c), exitTasks });
+  exitTasks.addExitTask(() => new Promise((r) => { release = r; }));
+  proc.emit("beforeExit");
+  await ctx.guard.exiting;
+  await ticks();
+  assert.deepEqual(exits, [], "beforeExit lets the process end on its own");
+  if (typeof release === "function") release();
+  await ticks();
+  assert.deepEqual(exits, [], "no exit even once the exit task finished");
+});
+
+test("a task registered after install is still awaited by a later SIGTERM", async () => {
+  const { createExitTasks } = await import("../bundles/browser/server/exit-tasks.js");
+  const proc = new EventEmitter();
+  const exits = [];
+  const exitTasks = createExitTasks();
+  const ctx = setup({ env: {}, proc, exit: (c) => exits.push(c), exitTasks });
+  assert.equal(text(await ctx.call()), "acted");
+  // Like blankPagesOnExit: registered only once the browser has connected.
+  let release;
+  await ticks();
+  exitTasks.addExitTask(() => new Promise((r) => { release = r; }));
+  proc.emit("SIGTERM");
+  await ctx.guard.exiting;
+  await ticks();
+  assert.equal(typeof release, "function", "the late task started");
+  assert.deepEqual(exits, [], "the late task holds the exit");
+  release();
+  await waitFor(() => exits.length > 0);
+  assert.deepEqual(exits, [143]);
+});
+
+test("private-address.js registers blankPagesOnExit's cleanup with the shared exit tasks", () => {
+  const src = readFileSync(join(ROOT, "bundles/browser/server/private-address.js"), "utf8");
+  assert.ok(
+    /import\s*\{[^}]*\baddExitTask\b[^}]*\}\s*from\s*"\.\/exit-tasks\.js"/.test(src),
+    "private-address.js imports addExitTask from ./exit-tasks.js",
+  );
+  const start = src.indexOf("export function blankPagesOnExit");
+  assert.ok(start > 0, "blankPagesOnExit is still exported");
+  const end = src.indexOf("The node-side fetch", start);
+  const body = src.slice(start, end > start ? end : src.length);
+  assert.ok(body.includes("addExitTask("), "blankPagesOnExit registers its cleanup with addExitTask()");
+});
+
 test("identity comes from env only; a malformed session id falls back to external", () => {
   const a = setup({ env: { PI_BOT_PERCH_SESSION_ID: "perch-9", PI_BOT_ID: "b9" } });
   assert.deepEqual(a.guard.holder, { kind: "bot", sessionId: "perch-9", botId: "b9" });
@@ -255,9 +414,9 @@ test("the guard's texts are the exact constraint texts", () => {
   assert.deepEqual(TEXTS, { busy: BUSY, held: HELD, handedBack: HANDED_BACK, genChanged: GEN_CHANGED, taken: TAKEN });
 });
 
-test("manifest is 1.7.1 and the registry is in sync", () => {
+test("manifest is at least 1.7.1 and the registry is in sync", () => {
   const mf = JSON.parse(readFileSync(join(ROOT, "bundles/browser/manifest.json"), "utf8"));
-  assert.equal(mf.version, "1.7.1");
+  assertAtLeast(mf.version, "1.7.1", "the manifest version");
   execFileSync(process.execPath, ["scripts/build-registry.mjs", "--check"], { cwd: ROOT, stdio: "pipe" });
 });
 

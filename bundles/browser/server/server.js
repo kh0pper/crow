@@ -23,6 +23,41 @@ import { fileInDir, writeFileNoFollow, readFileNoFollow, MAX_FILE_NAME } from ".
 import { installLeaseGuard } from "./lease-guard.js";
 import { waitingForUserResult } from "./wait-for-user.js";
 import { BLOCKED_URL_PATTERNS, isBlockedUrl, blockedResult } from "./blocked-hosts.js";
+import { createPageOwnership, wrapToolWithBotAction, DEFAULT_MAX_TOOL_ACTION_MS } from "./page-ownership.js";
+import {
+  checkUrl,
+  refusalResult,
+  installPrivateAddressGuard,
+  blankPagesOnExit,
+  closeGuardedPages,
+  blankPageSafely,
+  exceptionsFromEnv,
+  guardedFetch,
+} from "./private-address.js";
+import { closePagesBeforeRestart } from "./safe-restart.js";
+
+/** Browser contexts this process already guards: the guard is installed once per context. */
+const GUARDED_CONTEXTS = new WeakSet();
+/** context -> its guard, so a later connection to the same browser reuses it. */
+const CONTEXT_GUARDS = new WeakMap();
+
+/**
+ * The margin every wait/timeout schema keeps BELOW the tool action limit, in ms. A call asked
+ * to wait the full limit would still be running when the bot-action bracket around it has to
+ * close, and the tab its slow click produces would then arrive with no action to claim it.
+ *
+ * The `.max()` bounds below are written out as `DEFAULT_MAX_TOOL_ACTION_MS - 5000` rather than
+ * `- TOOL_WAIT_MARGIN_MS`: the schema caps are read STATICALLY (a test can only vouch for a
+ * literal number of milliseconds), so this constant and the literal have to agree. Keep them
+ * the same — the describe strings compute their limit from THIS constant, which is how a drift
+ * shows up in the tool description a model reads.
+ */
+const TOOL_WAIT_MARGIN_MS = 5000;
+
+/** The host a URL names — for a log line or a refusal, never the whole URL. */
+function hostLabel(url) {
+  try { return new URL(String(url)).hostname.replace(/\.$/, ""); } catch { return ""; }
+}
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -151,6 +186,18 @@ export function createBrowserServer(options = {}) {
   let page = null;        // Active Page
   let cdpSession = null;  // CDP session for low-level control
 
+  // Whose tab is it (page-ownership.js): the pages this MCP opened or drove are
+  // the bot's, everything else in this shared browser is the operator's and is
+  // never blanked or closed. One record per process, handed to the exit cleanup:
+  // the browser's window is the operator's VNC screen, so a cleanup that touched
+  // every page would destroy the operator's own work on every server restart.
+  const ownership = createPageOwnership({ log: (line) => console.error(line) });
+
+  // The private-address rule: the guard on this context, and the owner's
+  // exception list (read from the add-on's own settings, re-read per connect).
+  let privateGuard = null;
+  let privateExceptions = exceptionsFromEnv();
+
   // Pending user signal for wait_for_user
   let userWaitResolve = null;
 
@@ -170,6 +217,14 @@ export function createBrowserServer(options = {}) {
     },
   });
 
+  // Every tool HANDLER runs between beginBotAction() and endBotAction() (page-ownership.js):
+  // the bot-action window is anchored to the whole call, so a tab the bot's own slow click
+  // produces — which arrives at the END of the call, after the last mark — is still claimed
+  // as the bot's. Installed AFTER the lease guard above (both replace the registration
+  // function, and the lease has to be taken before the action starts), and BEFORE the first
+  // tool registration below.
+  wrapToolWithBotAction(server, ownership);
+
   // Ensure session directory exists
   if (!existsSync(sessionDir)) {
     mkdirSync(sessionDir, { recursive: true });
@@ -183,8 +238,55 @@ export function createBrowserServer(options = {}) {
     browser = await chromium.connectOverCDP(cdpUrl, cdpConnectOptions());
     const contexts = browser.contexts();
     context = contexts[0] || await browser.newContext(getContextOptions());
+
+    // The pages that are already open are the operator's; the ones that appear
+    // from here on are classified through their opener. This has to happen BEFORE
+    // the first page is made or adopted (and once per (re)connected context: a
+    // reconnect hands out new Page objects, and attachContext re-marks the tabs the
+    // bot already owns by their CDP target id).
+    await ownership.attachContext(context);
+
+    // Refuse private and local-network destinations before anything navigates.
+    // Installed once per context; a guard that cannot be installed is fatal for
+    // the tools (fail closed: nothing runs unguarded).
+    privateExceptions = exceptionsFromEnv();
+    if (!GUARDED_CONTEXTS.has(context)) {
+      try {
+        privateGuard = await installPrivateAddressGuard(context, {
+          exceptions: privateExceptions,
+          log: (line) => console.error(line),
+        });
+      } catch (err) {
+        console.error("[browser] could not install the private-address guard:", err?.message || err);
+        throw err;
+      }
+      GUARDED_CONTEXTS.add(context);
+      CONTEXT_GUARDS.set(context, privateGuard);
+      // The guard lives in this connection: when this process goes away its routes
+      // go with it and a page left open keeps running unguarded. Blank the bot's
+      // pages on the way out (a crash that runs no handler cannot be cleaned up
+      // here) and leave the operator's tabs exactly as they are.
+      blankPagesOnExit(() => context, { ownership });
+    } else {
+      privateGuard = CONTEXT_GUARDS.get(context) || privateGuard;
+    }
+
     const pages = context.pages();
-    page = pages[0] || await context.newPage();
+    // WHOSE TAB. Only a leftover BLANK tab is adopted. Driving a page makes it the
+    // bot's for good (getPage marks it touched) and the exit cleanup then blanks and
+    // closes it, so adopting whatever tab was first meant the bot drove — and at exit
+    // destroyed — one of the operator's own tabs per turn. `about:blank` is nobody's
+    // work yet, so it is safe to reuse; anything else gets a page of the bot's own,
+    // made through the ownership so it is marked opened and a reconnect can claim it by
+    // its CDP target id (an unmarked page of the bot's would be left running at exit).
+    const first = pages[0];
+    let firstIsBlankTab = false;
+    try {
+      firstIsBlankTab = Boolean(first) && first.url() === "about:blank";
+    } catch {
+      firstIsBlankTab = false; // a page that cannot report its url is nobody's to adopt
+    }
+    page = firstIsBlankTab ? first : await ownership.newPage(context);
     cdpSession = await page.context().newCDPSession(page);
     // Blocked hosts, enforced in the page too (links, scripts, redirects).
     try {
@@ -222,6 +324,19 @@ export function createBrowserServer(options = {}) {
    */
   async function getPage() {
     await ensureConnected();
+    // The bot is about to drive this page: from here on it is the bot's, so the
+    // exit cleanup may blank and close it (and never blank or close any other).
+    // The mark itself is synchronous; what it returns is the CDP lookup that
+    // remembers the page's target id, so a reconnect can claim this tab by id. It is
+    // awaited — only the first mark of a page does any work, and the lookup is
+    // bounded inside the ownership (1000 ms per lookup) so a stuck CDP session cannot
+    // hang a tool call; a lookup that cannot answer in time counts as unresolved, which
+    // only makes a later reconnect fail closed. It never throws.
+    if (page) {
+      try {
+        await ownership.markTouched(page);
+      } catch { /* the ownership never rejects: belt and braces */ }
+    }
     return page;
   }
 
@@ -230,7 +345,7 @@ export function createBrowserServer(options = {}) {
   // ==========================================
   server.tool(
     "crow_browser_launch",
-    "Start/restart the browser and connect via CDP. Returns the VNC URL. Pass proxy_url to route through a proxy (recreates the container — set BEFORE navigating; save sessions first).",
+    "Start/restart the browser and connect via CDP. Returns the VNC URL. A launch is a RESTART of the browser: do not run other browser calls while it runs (a page opened during the restart's own safe close is disconnected unguarded). Pass proxy_url to route through a proxy (recreates the container — set BEFORE navigating; save sessions first).",
     {
       restart: z.boolean().optional().describe("Force restart the container"),
       proxy_url: z.string().optional().describe("Proxy to route through, e.g. http://host:port or socks5://host:port. Empty string clears it. Recreates the container: the open page is lost; the profile (cookies, logins) is kept on its volume."),
@@ -241,7 +356,37 @@ export function createBrowserServer(options = {}) {
 
         if (changingProxy) {
           // Proxy is a container-launch flag, so a new proxy needs a recreate (not just restart).
-          if (browser) { await browser.close().catch(() => {}); browser = null; context = null; page = null; cdpSession = null; }
+          if (browser) {
+            // The pages this MCP drove go through the exit path's own order (deny-all
+            // session, about:blank, close after the grace) BEFORE the browser is closed: a
+            // bare close of the browser fires every one of their pagehide/unload beacons with
+            // nothing in front of them. closePagesBeforeRestart is what tells "the pages were
+            // closed" from "the browser is gone" from "the browser is still there with its
+            // pages possibly unguarded", and only its `proceed` may be acted on.
+            const outcome = await closePagesBeforeRestart({
+              closeGuardedPages,
+              getContext: () => context,
+              ownership,
+              isConnected: () => browser.isConnected(),
+            });
+            if (!outcome.proceed) {
+              // Nothing is restarted and nothing is closed. The connection is dropped ONLY
+              // when the browser is really gone (a crash, a stopping container); a browser
+              // that is still there keeps browser/context/page so a retry runs the safe
+              // close again over the pages nobody proved were closed.
+              if (outcome.dropConnection) {
+                browser = null; context = null; page = null; cdpSession = null;
+              }
+              const why = outcome.dropConnection
+                ? "the browser is gone, so the next launch starts from a fresh connection"
+                : "the browser is still running, and its pages were not closed safely; retry the launch to close them";
+              return { content: [{ type: "text", text: `Crow could not close the browser's pages safely, so nothing was restarted (${why}).` }], isError: true };
+            }
+            if (outcome.dropConnection) {
+              await browser.close().catch(() => {});
+              browser = null; context = null; page = null; cdpSession = null;
+            }
+          }
           // No VNC password to carry over (1.4.0: loopback VNC behind the Crow
           // sign-in). An older compose file that still demands one reads it from
           // its own .env, next to that file.
@@ -272,11 +417,32 @@ export function createBrowserServer(options = {}) {
           await waitForCdp(cdpUrl, { headers: cdpHeaders() });
         } else if (restart) {
           if (browser) {
-            await browser.close().catch(() => {});
-            browser = null;
-            context = null;
-            page = null;
-            cdpSession = null;
+            // Same rule as the proxy branch: the pages are closed through the exit path's own
+            // order before the browser goes, and a cleanup that could not finish safely stops
+            // the restart here — with the connection kept when the browser is still there —
+            // instead of reading as a clean one.
+            const outcome = await closePagesBeforeRestart({
+              closeGuardedPages,
+              getContext: () => context,
+              ownership,
+              isConnected: () => browser.isConnected(),
+            });
+            if (!outcome.proceed) {
+              if (outcome.dropConnection) {
+                browser = null; context = null; page = null; cdpSession = null;
+              }
+              const why = outcome.dropConnection
+                ? "the browser is gone, so the next launch starts from a fresh connection"
+                : "the browser is still running, and its pages were not closed safely; retry the launch to close them";
+              return { content: [{ type: "text", text: `Crow could not close the browser's pages safely, so nothing was restarted (${why}).` }], isError: true };
+            }
+            if (outcome.dropConnection) {
+              await browser.close().catch(() => {});
+              browser = null;
+              context = null;
+              page = null;
+              cdpSession = null;
+            }
           }
           try {
             if (doorTokenFile()) {
@@ -386,10 +552,35 @@ export function createBrowserServer(options = {}) {
       }
       try {
         const p = await getPage();
+        // Start each navigation with a clean slate: a refusal left by an earlier
+        // tool call must not be reported as this one's.
+        privateGuard?.clearRefusals?.();
+        const chk = await checkUrl(url, { exceptions: privateExceptions });
+        if (!chk.ok) {
+          console.error(`[browser] refused a navigation to ${chk.host}: ${chk.reason}`);
+          return refusalResult(chk);
+        }
         const response = await p.goto(url, {
           waitUntil: wait_until || "domcontentloaded",
           timeout: 30000,
         });
+
+        // Where the answer actually came from: a name can resolve differently in
+        // the browser than in our own lookup (DNS rebinding).
+        let served = null;
+        try { served = await response?.serverAddr?.(); } catch { served = null; }
+        if (served?.ipAddress) {
+          const verdict = privateGuard ? privateGuard.checkAddress(String(served.ipAddress), hostLabel(url)) : { ok: true };
+          if (!verdict.ok) {
+            // The page has just loaded a document served from a private address:
+            // its pagehide/unload requests have to be failed at its own CDP
+            // session first, or they ride this blanking navigation out.
+            await blankPageSafely(p).catch(() => {});
+            console.error(`[browser] refused a page served from ${served.ipAddress}: ${verdict.reason}`);
+            return refusalResult({ ok: false, reason: verdict.reason, host: hostLabel(url), address: String(served.ipAddress) });
+          }
+        }
+
         await delay(500, 1500); // Human-like pause after navigation
 
         return {
@@ -403,6 +594,11 @@ export function createBrowserServer(options = {}) {
           }],
         };
       } catch (err) {
+        // A refused request (a redirect hop, a popup, a rebound name) aborts the
+        // navigation: report the rule rather than the aborted-load error. `any`
+        // because a redirect hop may have been refused on another host.
+        const r = privateGuard?.takeRefusal(undefined, { any: true });
+        if (r) return refusalResult(r);
         return {
           content: [{ type: "text", text: `Navigation failed: ${err.message}` }],
           isError: true,
@@ -523,7 +719,10 @@ export function createBrowserServer(options = {}) {
     "Click an element with position randomization for stealth.",
     {
       selector: z.string().describe("CSS selector of element to click"),
-      wait_after: z.number().optional().describe("Extra wait time in ms after click"),
+      wait_after: z.number().int().min(0).max(DEFAULT_MAX_TOOL_ACTION_MS - 5000).optional().describe(
+        `Extra wait time in ms after the click (default: none; at most ${DEFAULT_MAX_TOOL_ACTION_MS - TOOL_WAIT_MARGIN_MS}, ` +
+        "the tool action limit minus its margin — a longer wait would outlive the call's own action)",
+      ),
     },
     async ({ selector, wait_after }) => {
       try {
@@ -707,6 +906,11 @@ export function createBrowserServer(options = {}) {
 
         // Navigate to saved URL first (needed for storage access)
         if (sessionData.url && sessionData.url !== "about:blank") {
+          const chk = await checkUrl(sessionData.url, { exceptions: privateExceptions });
+          if (!chk.ok) {
+            console.error(`[browser] refused a saved session URL on ${chk.host}: ${chk.reason}`);
+            return refusalResult(chk);
+          }
           await p.goto(sessionData.url, { waitUntil: "domcontentloaded" });
         }
 
@@ -1191,7 +1395,10 @@ export function createBrowserServer(options = {}) {
     "Wait for an element to reach a state (appear, hide, attach, detach). Robust alternative to fixed sleeps for flaky/dynamic pages.",
     {
       selector: z.string().describe("CSS selector to wait on"),
-      timeout_ms: z.number().optional().describe("Max wait in ms (default: 10000)"),
+      timeout_ms: z.number().int().min(0).max(DEFAULT_MAX_TOOL_ACTION_MS - 5000).optional().describe(
+        `Max wait in ms (default: 10000; at most ${DEFAULT_MAX_TOOL_ACTION_MS - TOOL_WAIT_MARGIN_MS}, ` +
+        "the tool action limit minus its margin — a longer wait would outlive the call's own action)",
+      ),
       state: z.enum(["visible", "hidden", "attached", "detached"]).optional().describe("Target state (default: visible)"),
     },
     async ({ selector, timeout_ms, state }) => {
@@ -1211,7 +1418,9 @@ export function createBrowserServer(options = {}) {
     "Auto-scroll an infinite-scroll / lazy-load page, collecting items each pass. Stops when no new items load or max_scrolls is hit.",
     {
       extract_selector: z.string().describe("CSS selector for the repeating items to collect (textContent)"),
-      scroll_pause_ms: z.number().optional().describe("Pause between scrolls in ms (default: 1200)"),
+      scroll_pause_ms: z.number().int().min(0).max(10000).optional().describe(
+        "Pause between scrolls in ms (default: 1200; at most 10000, so a scroll pass cannot stall the call)",
+      ),
       max_scrolls: z.number().optional().describe("Max scroll iterations (default: 20)"),
       container_selector: z.string().optional().describe("Scrollable container selector (default: window)"),
     },
@@ -1347,6 +1556,8 @@ export function createBrowserServer(options = {}) {
         for (const m of order) {
           try {
             if (isBlockedUrl(candidateUrl(m))) { attempts.push(`${m}: blocked host`); continue; }
+            const chk = await checkUrl(candidateUrl(m), { exceptions: privateExceptions });
+            if (!chk.ok) { attempts.push(`${m}: private address`); continue; }
             await p.goto(candidateUrl(m), { waitUntil: "domcontentloaded", timeout: 30000 });
             await delay(800, 1600);
             const html = await p.content();
@@ -1408,7 +1619,13 @@ export function createBrowserServer(options = {}) {
         let data;
         if (/^https?:\/\//i.test(url_or_path)) {
           if (isBlockedUrl(url_or_path)) return blockedResult(url_or_path);
-          const res = await fetch(url_or_path);
+          let res;
+          try {
+            // Every redirect hop is judged before it is followed (node-side fetch).
+            res = await guardedFetch(url_or_path, { exceptions: privateExceptions });
+          } catch (e) {
+            return { content: [{ type: "text", text: String(e?.message || e) }], isError: true };
+          }
           if (!res.ok) return { content: [{ type: "text", text: `Fetch failed: HTTP ${res.status}` }], isError: true };
           data = new Uint8Array(await res.arrayBuffer());
         } else {
@@ -1569,7 +1786,10 @@ export function createBrowserServer(options = {}) {
     "Trigger a file download by clicking an element, and save it to this instance's browser-downloads/ directory on the host (see crow_browser_status for the resolved path). Uses a container bind mount + CDP download behavior.",
     {
       selector: z.string().describe("CSS selector of the link/button that starts the download"),
-      timeout_ms: z.number().optional().describe("Max wait for the file to finish (default: 30000)"),
+      timeout_ms: z.number().int().min(0).max(DEFAULT_MAX_TOOL_ACTION_MS - 5000).optional().describe(
+        `Max wait for the file to finish in ms (default: 30000; at most ${DEFAULT_MAX_TOOL_ACTION_MS - TOOL_WAIT_MARGIN_MS}, ` +
+        "the tool action limit minus its margin — a longer wait would outlive the call's own action)",
+      ),
     },
     async ({ selector, timeout_ms }) => {
       try {

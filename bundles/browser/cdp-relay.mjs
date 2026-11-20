@@ -63,7 +63,7 @@
  */
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { constants, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { constants, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { basename, dirname, join } from "node:path";
@@ -634,10 +634,44 @@ export async function createRelay(config) {
     pipeSend({ id, method: "Target.attachToBrowserTarget", params: {} });
   }
 
+  /**
+   * Would this message make Chromium open a target AT a URL?
+   *
+   * `Target.createTarget {url}` hands the URL to the browser with the request: Chromium
+   * starts fetching it before any Playwright-side guard (the page-side private-address
+   * guard, a route interceptor) can be attached to that target, so a client could reach a
+   * private address through a target the guard never sees. Playwright's `newPage()` is not
+   * affected: it creates the target as `about:blank` and navigates it afterwards, with the
+   * guard already in place — which is exactly the shape this allows through. Only an
+   * absent/undefined url, an exact `""` and an exact `"about:blank"` pass; anything else,
+   * a non-string included, is refused. The operator's own new tab is opened through
+   * Chrome's UI over VNC (a click in the browser window), not through CDP, so it is
+   * unaffected by this rule.
+   */
+  function refusesInitialUrl(msg) {
+    if (!msg || msg.method !== "Target.createTarget") return false;
+    const params = msg.params;
+    if (!params || typeof params !== "object" || Array.isArray(params)) return false;
+    if (!Object.prototype.hasOwnProperty.call(params, "url")) return false;
+    const url = params.url;
+    return !(url === undefined || url === "" || url === "about:blank");
+  }
+
   function forwardText(client, text) {
     let msg;
     try { msg = JSON.parse(text); } catch { debug(`client ${client.id}: a frame that is not JSON, dropped`); return; }
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
+    if (refusesInitialUrl(msg)) {
+      // Refused before anything is forwarded: an initial-URL target would fetch its URL
+      // before the guard could attach (see refusesInitialUrl). The client's own id comes
+      // back, so it sees a normal CDP error and the connection stays open; nothing is
+      // queued and no pending entry is created.
+      debug(`client ${client.id}: a Target.createTarget with an initial URL was refused`);
+      if (msg.id !== undefined) {
+        send(client, { id: msg.id, error: { code: -32602, message: "Target.createTarget with a URL is refused: create the page as about:blank and navigate it" } });
+      }
+      return;
+    }
     const asked = typeof msg.sessionId === "string" ? msg.sessionId : null;
     if (asked && sessionOwner.get(asked) !== client) {
       // Another client's session (or one that never was): refuse, never forward. Forwarding
@@ -941,18 +975,129 @@ export async function createRelay(config) {
   };
 }
 
+/** The profile Chromium is given: the argv below and the pre-launch rewrite both use it. */
+function chromiumProfileDir(env = process.env) {
+  return env.CROW_CHROMIUM_PROFILE || "/root/.config/chromium-crow";
+}
+
+/**
+ * Delete a profile's saved-session files, best effort.
+ *
+ * `Default/Sessions/` holds the session's own files and `Default/` keeps four beside it
+ * (`Current Session`, `Current Tabs`, `Last Session`, `Last Tabs`). They are the crashed
+ * session's pages, so they go with the rewrite. A missing directory or file is normal (a
+ * profile that never crashed has none) and a failed delete is not this caller's problem:
+ * neither case throws, and nothing here ever creates a file or a directory.
+ */
+function removeSavedSessions(defaultDir) {
+  const sessionsDir = join(defaultDir, "Sessions");
+  let entries = [];
+  try { entries = readdirSync(sessionsDir); } catch { entries = []; } // no Sessions dir: nothing inside it
+  for (const name of entries) {
+    try { rmSync(join(sessionsDir, name), { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  for (const name of ["Current Session", "Current Tabs", "Last Session", "Last Tabs"]) {
+    try { rmSync(join(defaultDir, name), { force: true }); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * Record the last exit as clean in the profile Chromium is about to open — but ONLY when
+ * that profile says the last exit CRASHED. After the exit cleanup kills the browser
+ * (`Browser.crash`, on purpose), the profile says "Crashed", and the next launch offers to
+ * restore that session's pages in the VNC viewer — which can reopen a page the bot loaded.
+ * The switch (--hide-crash-restore-bubble) hides the bubble; this makes the record itself
+ * clean, so there is nothing to restore. Called BEFORE the spawn: Chromium reads it at
+ * startup. A missing file, an unparseable one, or no Default directory does nothing at all
+ * (never creates a file, never throws); the rewrite is atomic (temp file in the same
+ * directory + rename, same mode), so Chromium never reads half a Preferences.
+ *
+ * A CLEAN record is left alone, byte for byte (exit_type "Normal", "None", or no
+ * `profile.exit_type` at all): the bubble and the crashed-session restore are only a
+ * problem AFTER A CRASH, and a crash is exactly what the exit cleanup's `Browser.crash`
+ * causes on purpose. Rewriting a clean profile would be destructive in its own right — it
+ * re-serialises the operator's own file, overrides a "continue where you left off" they
+ * chose deliberately, and deletes session files that belong to a clean exit — so the whole
+ * rewrite below is gated on `profile.exit_type === "Crashed"`.
+ *
+ * The bubble is not the only way a crashed session comes back: a profile whose startup
+ * setting is "Continue where you left off" (session.restore_on_startup 1, or 4 on some
+ * builds) reopens the crashed tabs by itself, bubble or no bubble. So the same rewrite
+ * points that setting at the new tab page (5) — the other keys of `session` are kept, and
+ * any other value (the default, "open the new tab page", "open a specific page") is left
+ * exactly as the operator set it — and then deletes the saved session it would have
+ * restored. Nothing is deleted before the profile is known to be parsable and crashed: a
+ * Preferences this function will not touch leaves its session files alone too.
+ */
+export function markProfileExitClean(profileDir) {
+  if (typeof profileDir !== "string" || !profileDir) return;
+  const prefs = join(profileDir, "Default", "Preferences");
+  let raw;
+  let mode;
+  try {
+    mode = statSync(prefs).mode & 0o777;
+    raw = readFileSync(prefs, "utf8");
+  } catch { return; } // no file (or no Default dir): nothing to rewrite, nothing to create
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return; } // unparseable: leave the bytes alone
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const profile = parsed.profile && typeof parsed.profile === "object" && !Array.isArray(parsed.profile) ? parsed.profile : {};
+  // ACT ON A CRASHED RECORD ONLY. A clean profile has nothing to restore, so its file,
+  // its restore_on_startup setting and its saved session are none of this function's
+  // business — and "None" or a missing key says nothing about a crash either.
+  if (profile.exit_type !== "Crashed") return;
+  profile.exit_type = "Normal";
+  profile.exited_cleanly = true;
+  parsed.profile = profile;
+  // "Continue where you left off" restores the crashed session on its own, bubble or not:
+  // only that setting is changed, and only to the new tab page. 3 ("open a specific page")
+  // names the operator's own start pages and is none of this rewrite's business.
+  const session = parsed.session && typeof parsed.session === "object" && !Array.isArray(parsed.session) ? parsed.session : null;
+  if (session && (session.restore_on_startup === 1 || session.restore_on_startup === 4)) {
+    session.restore_on_startup = 5;
+    parsed.session = session;
+  }
+
+  const dir = dirname(prefs);
+  const temp = join(dir, `.Preferences.${randomBytes(8).toString("hex")}.tmp`);
+  let fd;
+  try {
+    fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode);
+    writeSync(fd, JSON.stringify(parsed));
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, prefs);
+  } catch (err) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* gone */ } }
+    try { rmSync(temp, { force: true }); } catch { /* gone */ }
+    throw err;
+  }
+  // The profile is clean and points at the new tab page; the pages themselves are the one
+  // thing left that a launch could reopen, so they go now (after the rewrite: a profile this
+  // function refused to touch keeps its session files).
+  removeSavedSessions(dir);
+}
+
 /** The Chromium argv: the entrypoint's flags, minus the debugging port, plus the pipe. */
 export function chromiumArguments(env = process.env) {
-  const profileDir = env.CROW_CHROMIUM_PROFILE || "/root/.config/chromium-crow";
+  const profileDir = chromiumProfileDir(env);
   const args = [
     "--no-sandbox", "--disable-setuid-sandbox",
     // No --remote-debugging-port and no --remote-allow-origins: with a pipe there is no
     // port to open and no Origin check to disable; the relay's bearer is the control.
     "--remote-debugging-pipe",
     "--disable-blink-features=AutomationControlled",
+    // Defence in depth next to the page-level WebRTC disable in server/private-address.js;
+    // a live test found some Chromium builds ignore the switch, so it is not relied on alone.
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    // A Back press in the VNC viewer must not restore a page the bot opened from the back-forward cache: the exit cleanup leaves a fresh about:blank page, and a later feature must be comma-merged into this one flag (Chromium honours only the last --disable-features).
+    "--disable-features=BackForwardCache",
     "--window-size=1920,1080", "--start-maximized",
     "--no-first-run", "--no-default-browser-check",
     "--disable-infobars", "--disable-extensions",
+    // The exit cleanup kills the browser, so a restart would offer to restore the crashed
+    // session's pages in the VNC viewer — a way back into a page the bot loaded.
+    "--hide-crash-restore-bubble",
     `--user-data-dir=${profileDir}`,
   ];
   if (env.CHROME_PROXY) args.push(`--proxy-server=${env.CHROME_PROXY}`);
@@ -1031,6 +1176,8 @@ async function serveInProcess() {
   const port = readPort();
   const chromiumArgv = chromiumCommand();
   debug(`Chromium: ${chromiumArgv[0]}`);
+  // Before the browser reads the profile: an unclean last exit is what the bubble is for.
+  try { markProfileExitClean(chromiumProfileDir()); } catch (err) { debug(`could not mark the profile clean: ${(err && err.message) || err}`); }
 
   let relay;
   try {
@@ -1176,6 +1323,8 @@ async function supervise() {
   const readyFile = process.env.CROW_CDP_READY_FILE || DEFAULT_READY_FILE;
   const chromiumArgv = chromiumCommand();
   debug(`Chromium: ${chromiumArgv[0]}`);
+  // The profile belongs to root, and this is the root process: clean it before the spawn.
+  try { markProfileExitClean(chromiumProfileDir()); } catch (err) { debug(`could not mark the profile clean: ${(err && err.message) || err}`); }
 
   // Chromium keeps this process's environment minus every secret-shaped name (the token's
   // location included), exactly as before the split.
