@@ -26,6 +26,14 @@
  * that could read the seed: the guard records its "no bots" note and this module
  * sends nothing, so a host that runs no bots never rings for its sandbox tier.
  *
+ * A check that could NOT RUN (`couldNotRun`: a programming error in the check —
+ * a path option that is not a path, or an internal failure) rings too, because a
+ * security check that cannot answer is not a pass — but with its OWN title and
+ * body: the words say the CHECK failed and that Crow cannot say yet whether the
+ * files are readable. It never gets the exposure frame ("a bot spawn would leave
+ * the identity file readable"), which no measurement supports, and never the
+ * restart step (findingsFromPlans is empty for it).
+ *
  * Dedupe without a new settings key (a `bot_*` dashboard_settings row would need
  * instance-scope registration and would sync like an ordinary setting): the
  * module reads the newest `source: "bot-identity"` notification and keeps the
@@ -38,12 +46,21 @@
  */
 import { createNotification } from "../../shared/notifications.js";
 import { t } from "../dashboard/shared/i18n.js";
-import { BOT_IDENTITY_TEXT, RESTART_HOSTS_HINT, findingsFromPlans } from "../../../scripts/pi-bots/bot-identity-guard.mjs";
+import {
+  BOT_IDENTITY_TEXT, COULD_NOT_RUN_PREFIX, RESTART_HOSTS_HINT, findingsFromPlans,
+} from "../../../scripts/pi-bots/bot-identity-guard.mjs";
 
 /** The notification source (queried for the dedupe row). */
 export const NOTICE_SOURCE = "bot-identity";
 export const NOTICE_TITLE_KEY = "notif.botIdentity.title";
 export const NOTICE_BODY_KEY = "notif.botIdentity.body";
+/**
+ * The check-failed pair: a check that could not run is not an exposure, so it
+ * must not borrow the title above (which asserts "Bots can read Crow's identity
+ * file") or the body's focus-the-browser frame.
+ */
+export const NOTICE_CHECK_FAILED_TITLE_KEY = "notif.botIdentity.checkFailedTitle";
+export const NOTICE_CHECK_FAILED_BODY_KEY = "notif.botIdentity.checkFailedBody";
 /** Settings → Bot Runtime shows the sandbox status and the containment list. */
 export const NOTICE_ACTION_URL = "/dashboard/settings?section=bot-runtime";
 /** Same findings within this window do not ring again. */
@@ -139,22 +156,32 @@ export async function notifyBotIdentityFailure({
 
   const language = lang || (await readLanguage(db));
   const found = (Array.isArray(r.findings) ? r.findings : []).filter(Boolean);
+  // A check that could not run says so in its own words: the exposure frame and
+  // the restart step both claim something the check never measured.
+  const couldNotRun = r.couldNotRun === true;
   // The restart step belongs to a finding a bot's plan produced: a host-tier
   // finding is the operator's switch or the host itself, which a bot host's
   // restart does not change (the same rule as formatBotIdentityLine).
-  const hint = findingsFromPlans(r).length ? " " + RESTART_HOSTS_HINT : "";
-  const body = t(NOTICE_BODY_KEY, language) +
-    (found.length ? " " + found.join("; ") : "") +
-    hint;
+  const hint = !couldNotRun && findingsFromPlans(r).length ? " " + RESTART_HOSTS_HINT : "";
+  const reasons = found.map((f) => {
+    const text = String(f);
+    return text.startsWith(COULD_NOT_RUN_PREFIX) ? text.slice(COULD_NOT_RUN_PREFIX.length) : text;
+  });
+  const body = couldNotRun
+    ? t(NOTICE_CHECK_FAILED_BODY_KEY, language) + (reasons.length ? " " + reasons.join("; ") : "")
+    : t(NOTICE_BODY_KEY, language) + (found.length ? " " + found.join("; ") : "") + hint;
   try {
     await notify(db, {
-      title: t(NOTICE_TITLE_KEY, language),
+      title: t(couldNotRun ? NOTICE_CHECK_FAILED_TITLE_KEY : NOTICE_TITLE_KEY, language),
       body,
       type: "system",
       source: NOTICE_SOURCE,
       priority: "high",
       action_url: NOTICE_ACTION_URL,
-      metadata: { kind: "bot-identity", signature, invariant: BOT_IDENTITY_TEXT, findings: found },
+      metadata: {
+        kind: "bot-identity", signature, invariant: BOT_IDENTITY_TEXT, findings: found,
+        couldNotRun: couldNotRun || undefined,
+      },
     });
   } catch (err) {
     log.warn("[bot-identity] notice could not be sent: " + (err && err.message ? err.message : String(err)));

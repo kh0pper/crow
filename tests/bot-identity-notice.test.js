@@ -12,7 +12,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  NOTICE_ACTION_URL, NOTICE_BODY_KEY, NOTICE_COOLDOWN_MS, NOTICE_SOURCE, NOTICE_TITLE_KEY,
+  NOTICE_ACTION_URL, NOTICE_BODY_KEY, NOTICE_CHECK_FAILED_BODY_KEY, NOTICE_CHECK_FAILED_TITLE_KEY,
+  NOTICE_COOLDOWN_MS, NOTICE_SOURCE, NOTICE_TITLE_KEY,
   botIdentitySignature, notifyBotIdentityFailure,
 } from "../servers/gateway/boot/bot-identity-notice.js";
 import { BOT_IDENTITY_TEXT, NO_BOTS_NOTE, RESTART_HOSTS_HINT } from "../scripts/pi-bots/bot-identity-guard.mjs";
@@ -34,6 +35,18 @@ const TIER_FAIL = {
   ok: false,
   findings: ["bubblewrap is unavailable here (not installed), so the setpriv fallback applies no masks and /x/identity.json is readable"],
   tierFindings: ["bubblewrap is unavailable here (not installed), so the setpriv fallback applies no masks and /x/identity.json is readable"],
+  notes: [],
+};
+/**
+ * A check that could NOT RUN (the bug this pins): a path option that is not a
+ * path, or an internal failure. Nothing was measured, so the bell must say the
+ * CHECK failed — never that the file is exposed.
+ */
+const COULD_NOT_RUN = {
+  ok: false,
+  couldNotRun: true,
+  findings: ["the check could not run: appRoot must be a string (got function)"],
+  tierFindings: ["the check could not run: appRoot must be a string (got function)"],
   notes: [],
 };
 
@@ -97,6 +110,23 @@ test("no enabled bots: nothing rings, not even for a host tier that cannot mask"
   const noBotsFail = { ...TIER_FAIL, noBots: true };
   assert.deepEqual(await notifyBotIdentityFailure({ db: makeDb(), notify, result: noBotsFail }), { sent: false, reason: "no-bots" });
   assert.equal(sent.length, 0);
+});
+
+test("a check that could NOT run rings, and says the CHECK failed — never that the file is exposed", async () => {
+  const { sent, notify } = collector();
+  const r = await notifyBotIdentityFailure({ db: makeDb(), notify, result: COULD_NOT_RUN, lang: "en" });
+  assert.deepEqual(r, { sent: true, reason: "sent" }, "a check that cannot answer is not a pass");
+  const n = sent[0];
+  assert.equal(n.title, t(NOTICE_CHECK_FAILED_TITLE_KEY, "en"));
+  assert.notEqual(n.title, t(NOTICE_TITLE_KEY, "en"), "not the 'bots can read it' title");
+  assert.ok(n.body.includes(t(NOTICE_CHECK_FAILED_BODY_KEY, "en")), "the check-failed frame");
+  assert.ok(!n.body.includes(t(NOTICE_BODY_KEY, "en")), "not the exposure frame: " + n.body);
+  assert.ok(n.body.includes("appRoot must be a string (got function)"), "the reason is named: " + n.body);
+  assert.ok(!n.body.includes("the check could not run: "), "the prefix is not doubled in the body");
+  assert.ok(!/would leave .* readable/.test(n.body), "no exposure claimed by a check that did not run");
+  assert.ok(!n.body.includes(RESTART_HOSTS_HINT), "no restart step for a bug in the check");
+  assert.equal(n.metadata.couldNotRun, true);
+  assert.deepEqual(n.metadata.findings, COULD_NOT_RUN.findings, "the reason travels in metadata, unedited");
 });
 
 test("a HOST-TIER failure carries no restart step: restarting the bot hosts does not change the tier", async () => {

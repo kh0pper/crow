@@ -5957,6 +5957,11 @@ export const translations = {
   // reasons only, never content) and the restart sentence.
   "notif.botIdentity.title": { en: "Bots can read Crow's identity file", es: "Los bots pueden leer el archivo de identidad de Crow" },
   "notif.botIdentity.body": { en: "A bot spawn would leave the instance's identity file (the master seed every bot key comes from) readable. Turn the bot sandbox on with bubblewrap and PID namespaces (Settings \u203a Bot Runtime). Findings:", es: "Un proceso de bot dejaría legible el archivo de identidad de la instancia (la semilla maestra de la que salen todas las claves de los bots). Activa el entorno aislado con bubblewrap y espacios de nombres de PID (Ajustes \u203a Tiempo de ejecución de bots). Hallazgos:" },
+  // The same bell when the check could not RUN (a bug in the check, not an
+  // exposure): its own title and frame, so a broken check never reads as
+  // "bots can read the identity file".
+  "notif.botIdentity.checkFailedTitle": { en: "Crow could not check whether bots can read its identity file", es: "Crow no pudo comprobar si los bots pueden leer su archivo de identidad" },
+  "notif.botIdentity.checkFailedBody": { en: "The identity check could not run, so Crow cannot say yet whether a bot could read the instance's identity file (the master seed every bot key comes from). This is a problem in the check itself, not a finding about the file. Reason:", es: "La comprobación de identidad no se pudo ejecutar, así que Crow todavía no puede decir si un bot podría leer el archivo de identidad de la instancia (la semilla maestra de la que salen todas las claves de los bots). Es un problema de la propia comprobación, no un hallazgo sobre el archivo. Motivo:" },
   // The containment open line identityExposed adds (containment-status.mjs).
   "settings.containment.openIdentityUnmasked": { en: "the instance's identity file is not hidden (this spawn has no bubblewrap sandbox with its own PID namespace)", es: "el archivo de identidad de la instancia no está oculto (este proceso no tiene el entorno aislado de bubblewrap con su propio espacio de nombres de PID)" },
 };

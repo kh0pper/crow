@@ -45,6 +45,18 @@
  * Nothing here creates, writes or spawns anything: no mount point is made, no
  * bwrap runs, no pi starts. A plan that REFUSES the spawn is not a failure (a
  * refused spawn runs nothing at all); it is reported as a note.
+ *
+ * What the check does with a path that is NOT a path: every path-shaped option
+ * is validated before anything is measured (pathOptionProblem). A caller that
+ * hands this module something that cannot be a path — the boot path once passed
+ * `appRoot` as the FUNCTION auto-update.js exports, and the hidden-file builder
+ * then threw "The 'path' argument must be of type string" — is a programming
+ * error in the CHECK, never a finding about the files. So it answers with the
+ * distinct "could not run" result (couldNotRunResult): no per-bot "would leave
+ * … readable" findings are computed from a list that could not be built, and
+ * the line and the bell say the CHECK failed. Sweeping that under a pass would
+ * hide a broken check; reporting it as exposure would be a false alarm about
+ * files nothing measured.
  */
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -54,9 +66,63 @@ import { buildContainPlan, ContainRefused } from "./pi_contain.mjs";
 import { probePiSandbox, piSandboxMode, wrapPiSpawn } from "./pi_sandbox.mjs";
 import { secretFilesFor } from "./hidden_files.mjs";
 import { identityAnchors, identityCandidates } from "./identity-candidates.mjs";
+import { BOT_IDENTITY_TEXT, COULD_NOT_RUN_PREFIX } from "./bot-identity-text.mjs";
 
-/** The exact sentence, with the answer appended by formatBotIdentityLine. */
-export const BOT_IDENTITY_TEXT = "Bots can't read Crow's identity file";
+/**
+ * The identity check's exact words, re-exported from bot-identity-text.mjs (a
+ * module with no imports of its own, so the boot wiring can print the sentence
+ * even when this module cannot be loaded at all).
+ */
+export { BOT_IDENTITY_TEXT, COULD_NOT_RUN_PREFIX };
+
+/**
+ * The one shape a check that could not RUN answers with — a bug in the check,
+ * never an exposure. `couldNotRun` is what the line (`check could not run (…)`)
+ * and the bell (its check-failed wording) key on, and the finding is also a
+ * TIER finding, so findingsFromPlans() stays empty: no bot-host restart step is
+ * ever appended to a failure no bot's plan produced.
+ *
+ * @param {string} reason what went wrong, in one sentence
+ * @returns {{ok:false, couldNotRun:true, text:string, findings:string[], tierFindings:string[], notes:string[], checked:0}}
+ */
+export function couldNotRunResult(reason) {
+  const failed = COULD_NOT_RUN_PREFIX + reason;
+  return {
+    ok: false, couldNotRun: true, text: BOT_IDENTITY_TEXT,
+    findings: [failed], tierFindings: [failed], notes: [], checked: 0,
+  };
+}
+
+/** Every option this module reads as a PATH (a single value). */
+const PATH_OPTIONS = ["home", "crowHome", "dataDir", "seedDir", "dbDir", "appRoot", "nodeBin"];
+/** Every option this module reads as a LIST of paths. */
+const PATH_LIST_OPTIONS = ["otherHomes", "otherDataDirs", "backupDirs"];
+
+/**
+ * The first path option that is not a path, or null when they all are. Absent
+ * (undefined / null) is fine — every one of them has a default. Anything else
+ * that is not a string is a programming error: a function, a number, an object
+ * or an array reaching a `join()`/`realpath()` is what turned a boot check into
+ * a false FAIL, so it is refused before a single file is listed.
+ *
+ * @param {object} o
+ * @returns {string|null}
+ */
+export function pathOptionProblem(o = {}) {
+  for (const name of PATH_OPTIONS) {
+    const v = o[name];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== "string") return name + " must be a string (got " + typeof v + ")";
+  }
+  for (const name of PATH_LIST_OPTIONS) {
+    const v = o[name];
+    if (v === undefined || v === null) continue;
+    if (!Array.isArray(v)) return name + " must be an array of paths (got " + typeof v + ")";
+    const bad = v.find((x) => x !== undefined && x !== null && typeof x !== "string");
+    if (bad !== undefined) return name + " must hold only strings (got " + typeof bad + ")";
+  }
+  return null;
+}
 
 /**
  * The one next step a failure needs, appended to the boot line and put in the
@@ -171,9 +237,16 @@ function noBotsResult() {
  *   file readable; an empty list is the pass. `tierFindings` is the subset that
  *   no bot's PLAN produced — the host's own tier, and a check that could not run
  *   at all — which is what keeps the stale-bridge restart step off them (see
- *   findingsFromPlans).
+ *   findingsFromPlans). A result with `couldNotRun: true` is the distinct third
+ *   answer: the check could not run, so nothing was measured and no exposure is
+ *   claimed (its one finding is the reason, in `findings` and in `tierFindings`).
  */
 export function checkBotIdentityExposure(o = {}) {
+  // A path that is not a path (the boot path once passed auto-update's
+  // `appRoot` FUNCTION here): a bug in the caller, so the check says so and
+  // measures nothing — never a list built from a value that is not a path.
+  const badOption = pathOptionProblem(o);
+  if (badOption) return couldNotRunResult(badOption);
   const home = o.home || homedir();
   const crowHome = o.crowHome || null;
   const otherHomes = Array.isArray(o.otherHomes) ? o.otherHomes.filter(Boolean) : [];
@@ -199,6 +272,8 @@ export function checkBotIdentityExposure(o = {}) {
   // No ENABLED bots: nothing can spawn, so nothing can read the seed. The tier is
   // not judged and the bell stays silent for it (a host that runs no bots must
   // not ring for a sandbox nothing uses).
+  // (A programming error was already answered above: a broken check is louder
+  // than a host with nothing to check, and it must never read as a pass.)
   if (Array.isArray(o.bots) && o.bots.length === 0) return noBotsResult();
 
   // What there is to protect, from the one shared candidate list. The anchors
@@ -356,6 +431,17 @@ export function findingsFromPlans(result) {
  */
 export function formatBotIdentityLine(result) {
   const r = result || {};
+  // The third answer, and neither of the other two: nothing was measured, so
+  // the line says the CHECK could not run — never that a file is readable, and
+  // never with the restart step (no bot's plan produced this).
+  if (r.couldNotRun === true) {
+    const reasons = (Array.isArray(r.findings) ? r.findings : []).filter(Boolean).map((f) => {
+      const text = String(f);
+      return text.startsWith(COULD_NOT_RUN_PREFIX) ? text.slice(COULD_NOT_RUN_PREFIX.length) : text;
+    });
+    return "[containment] " + BOT_IDENTITY_TEXT + ": check could not run" +
+      (reasons.length ? " (" + reasons.join("; ") + ")" : "");
+  }
   if (r.ok) return "[containment] " + BOT_IDENTITY_TEXT + ": pass";
   const found = (Array.isArray(r.findings) ? r.findings : []).filter(Boolean);
   const why = found.length ? found : (Array.isArray(r.notes) ? r.notes : []).filter(Boolean);
@@ -393,7 +479,8 @@ export async function readEnabledBotDefs(db) {
 /**
  * The boot entry point: read this instance's bots and run the check with this
  * instance's own roots. Never throws — a check that cannot run says so in its
- * findings rather than breaking boot.
+ * findings rather than breaking boot, and a path option that is not a path is
+ * answered as a check that could not run BEFORE a bot row or an anchor is read.
  *
  * The anchors are resolved HERE, through identityAnchors() — identity.js's own
  * seed resolver and dirname(CROW_DB) (botsDbDir), the two anchors the bridge
@@ -402,9 +489,16 @@ export async function readEnabledBotDefs(db) {
  * caller has to know an anchor and the two sides cannot drift.
  *
  * @param {{db?: object, env?: object, home?: string, crowHome?: string, dataDir?: string, seedDir?: string, dbDir?: string, appRoot?: string, nodeBin?: string, otherHomes?: string[], otherDataDirs?: string[], backupDirs?: string[], identityAnchors?: Function, seams?: object}} o
- * @returns {Promise<{ok:boolean, text:string, findings:string[], tierFindings:string[], notes:string[], checked:number, noBots?:boolean}>}
+ * @returns {Promise<{ok:boolean, couldNotRun?:boolean, text:string, findings:string[], tierFindings:string[], notes:string[], checked:number, noBots?:boolean}>}
+ *   `couldNotRun: true` is the third answer: nothing was measured (a path
+ *   option that is not a path, or an internal failure), so no exposure is
+ *   claimed — see couldNotRunResult.
  */
 export async function runBotIdentityCheck(o = {}) {
+  // Before the bot list is read or an anchor is resolved: a path option that is
+  // not a path is the caller's bug, and it answers as such (see couldNotRunResult).
+  const badOption = pathOptionProblem(o);
+  if (badOption) return couldNotRunResult(badOption);
   try {
     const bots = await readEnabledBotDefs(o.db);
     // No enabled bots: no spawn is possible, so nothing is judged and no anchor
@@ -443,12 +537,10 @@ export async function runBotIdentityCheck(o = {}) {
     }
     return checkBotIdentityExposure({ ...o, ...anchors, bots, otherHomes, otherDataDirs });
   } catch (err) {
-    // Not a bot's plan either: an internal failure names itself and asks for no
-    // restart step (findingsFromPlans keeps it out of the hint).
-    const failed = "the check could not run: " + (err && err.message ? err.message : String(err));
-    return {
-      ok: false, text: BOT_IDENTITY_TEXT, notes: [], checked: 0,
-      findings: [failed], tierFindings: [failed],
-    };
+    // Not a bot's plan either: an internal failure names itself, carries
+    // `couldNotRun` (so the bell says the CHECK failed, not that files are
+    // exposed) and asks for no restart step (findingsFromPlans keeps it out of
+    // the hint).
+    return couldNotRunResult(err && err.message ? err.message : String(err));
   }
 }

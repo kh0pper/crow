@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { upgradeLocalMarksAtBoot } from "./admin-api.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
 import { startMailSync } from "./mail-boot.js";
+import { APP_ROOT, runBotIdentityBootCheck } from "./bot-identity-boot.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
 // --no-auth (e.g. the home server's loopback companion MCP bridge) is never the
@@ -738,9 +739,11 @@ export async function runPostListenSetup(server, app, deps) {
   // this restart, if there was one.
   import("../convergence.js").then(async (conv) => {
     const { healthSnapshot, addonsSettled } = await import("../proxy.js");
-    const { dirname, join } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    const { join } = await import("node:path");
+    // The checkout every pass in this callback runs against: ONE value
+    // (APP_ROOT, from boot/bot-identity-boot.js), so the migration pass, the
+    // convergence verification and the identity check cannot drift apart.
+    const appRoot = APP_ROOT;
     const inst = await conv.resolveInstance();
 
     // Wait for addon loading to finish, but never forever: a loader that hangs
@@ -927,27 +930,23 @@ export async function runPostListenSetup(server, app, deps) {
   // journal line is not where an operator looks. A host with NO enabled bots is
   // a pass with a note (`no bots`): nothing can spawn, so its sandbox tier is
   // not judged and no bell is raised for it.
-  import("../../../scripts/pi-bots/bot-identity-guard.mjs").then(async ({ runBotIdentityCheck, formatBotIdentityLine }) => {
-    let db = null;
-    try {
-      const { appRoot } = await import("../auto-update.js");
-      db = createDbClient();
-      const result = await runBotIdentityCheck({
-        db,
-        crowHome: resolveCrowHome(),
-        appRoot,
-      });
-      const line = formatBotIdentityLine(result);
-      if (result.ok) console.log(line); else console.error(line);
-      for (const note of result.notes || []) console.log("[containment] " + note);
-      if (!result.ok) {
-        const { notifyBotIdentityFailure } = await import("./bot-identity-notice.js");
-        await notifyBotIdentityFailure({ db, result });
-      }
-    } finally {
-      try { db?.close?.(); } catch {}
-    }
-  }).catch((err) => console.warn(`[bot-identity] check not run: ${err.message}`));
+  //
+  // The wiring is boot/bot-identity-boot.js, and this call is UNCONDITIONAL on
+  // purpose — every gateway prints exactly one `[containment]` verdict line,
+  // whatever the answer (pass, FAIL, or "check could not run"), on every
+  // CROW_PI_SANDBOX value including `contain` (the check itself has no
+  // contain-tier skip: it is asked for both tiers, every time).
+  //
+  // `appRoot` is passed as the STRING APP_ROOT — the same checkout the migration
+  // and convergence passes above use. It is NOT auto-update.js's `appRoot`
+  // export: that is a FUNCTION (the tree auto-update pulls into), and handing
+  // the function to the check as if it were a path made the hidden-file builder
+  // throw and reported every identity file as readable on every install.
+  runBotIdentityBootCheck({
+    dbFactory: createDbClient,
+    crowHome: resolveCrowHome(),
+    appRoot: APP_ROOT,
+  });
 
   // ntfy autowire (spec 2026-10-03): once, 20 s after listen, give this instance its own
   // login + private push topic when nothing is configured yet and an ntfy server is

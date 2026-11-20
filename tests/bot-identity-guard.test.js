@@ -32,8 +32,8 @@ import { join } from "node:path";
 
 import {
   BOT_IDENTITY_TEXT, DRY_PROBE, NO_BOTS_NOTE, RESTART_HOSTS_HINT, checkBotIdentityExposure, containPlanReaches,
-  containTierMasks, defaultTierMasks, findingsFromPlans, formatBotIdentityLine, readEnabledBotDefs,
-  runBotIdentityCheck,
+  containTierMasks, couldNotRunResult, defaultTierMasks, findingsFromPlans, formatBotIdentityLine, pathOptionProblem,
+  readEnabledBotDefs, runBotIdentityCheck,
 } from "../scripts/pi-bots/bot-identity-guard.mjs";
 import { identityCandidates } from "../scripts/pi-bots/identity-candidates.mjs";
 import { wrapPiSpawn } from "../scripts/pi-bots/pi_sandbox.mjs";
@@ -249,6 +249,65 @@ test("findingsFromPlans: everything but the host-tier findings, order kept", () 
   assert.deepEqual(findingsFromPlans(null), []);
 });
 
+test("a path option that is not a path is a check that could not run — never a set of exposure findings", async () => {
+  // The production bug: post-listen passed auto-update's `appRoot()` (a FUNCTION)
+  // as if it were a path. The hidden-file builder then threw and the check
+  // reported every identity file as readable. A broken check must say so instead.
+  for (const [bad, got] of [[() => "/repo", "function"], [42, "number"], [{ root: "/repo" }, "object"], [["/repo"], "object"]]) {
+    const r = checkBotIdentityExposure(base({ bots: [{ botId: "plain", def: {} }], appRoot: bad }));
+    assert.equal(r.ok, false, "not a pass");
+    assert.equal(r.couldNotRun, true);
+    assert.equal(r.checked, 0, "nothing was measured");
+    assert.deepEqual(r.findings, ["the check could not run: appRoot must be a string (got " + got + ")"]);
+    assert.deepEqual(findingsFromPlans(r), [], "no bot's plan produced this");
+    const line = formatBotIdentityLine(r);
+    assert.equal(line, "[containment] " + BOT_IDENTITY_TEXT + ": check could not run (appRoot must be a string (got " + got + "))");
+    assert.ok(!/readable/.test(line), "a file is never called readable by a check that did not run: " + line);
+    assert.ok(!line.includes(RESTART_HOSTS_HINT), line);
+  }
+
+  // Any path-shaped option, not only appRoot.
+  assert.equal(pathOptionProblem({ appRoot: "/repo" }), null);
+  assert.equal(pathOptionProblem({ home: 7 }), "home must be a string (got number)");
+  assert.equal(pathOptionProblem({ dbDir: () => "/data" }), "dbDir must be a string (got function)");
+  assert.equal(pathOptionProblem({ otherHomes: "/one" }), "otherHomes must be an array of paths (got string)");
+  assert.equal(pathOptionProblem({ backupDirs: ["/a", 3] }), "backupDirs must hold only strings (got number)");
+
+  // The boot entry point refuses it BEFORE reading a bot row or resolving an
+  // anchor — a failed list is never turned into per-bot findings.
+  let reads = 0;
+  const db = { async execute() { reads += 1; return { rows: [{ bot_id: "plain", definition: "{}", enabled: 1 }] }; } };
+  const whole = await runBotIdentityCheck({
+    db, crowHome: CROW_HOME, appRoot: () => APP, env: {},
+    identityAnchors: async () => { throw new Error("anchors must not be resolved for a bug in the caller"); },
+    seams: { probe: DRY_PROBE, mode: "auto" },
+  });
+  assert.equal(whole.couldNotRun, true);
+  assert.equal(reads, 0, "the bot list was not even read");
+  assert.deepEqual(whole.findings, ["the check could not run: appRoot must be a string (got function)"]);
+  assert.deepEqual(findingsFromPlans(whole), []);
+  // An internal failure gets the same shape, so the bell never reads as exposure.
+  assert.equal(couldNotRunResult("boom").couldNotRun, true);
+  assert.deepEqual(couldNotRunResult("boom").findings, ["the check could not run: boom"]);
+});
+
+test("CROW_PI_SANDBOX=contain is not a skip: the check still answers both tiers, and the line is one verdict", () => {
+  // crow's gateway runs with `contain`. Nothing in the boot path branches on it
+  // (the default-tier dry build is asked with mode "auto" and no contain
+  // inputs), so the check answers exactly as it does on any other tier — this
+  // pins that, because a silent boot on a contain host is what looked like a
+  // skipped check.
+  const r = checkBotIdentityExposure(base({
+    bots: [{ botId: "plain", def: {} }],
+    env: { CROW_PI_SANDBOX: "contain" },
+    seams: { mode: undefined },
+  }));
+  assert.equal(r.ok, true, r.findings.join(" | "));
+  assert.equal(r.couldNotRun, undefined);
+  assert.ok(r.checked >= 2, "both tiers were really built (got " + r.checked + ")");
+  assert.equal(formatBotIdentityLine(r), "[containment] " + BOT_IDENTITY_TEXT + ": pass");
+});
+
 test("a check that could not run names itself and asks for no bot-host restart", async () => {
   const db = { async execute() { return { rows: [{ bot_id: "plain", definition: "{}", enabled: 1 }] }; } };
   const r = await runBotIdentityCheck({
@@ -258,10 +317,12 @@ test("a check that could not run names itself and asks for no bot-host restart",
   });
   assert.equal(r.ok, false);
   assert.ok(r.findings.some((f) => /the check could not run: boom/.test(f)), r.findings.join(" | "));
+  assert.equal(r.couldNotRun, true, "the distinct third answer");
   assert.deepEqual(findingsFromPlans(r), [], "an internal failure is not a bot plan's finding");
   const line = formatBotIdentityLine(r);
-  assert.ok(line.includes("the check could not run: boom"), line);
+  assert.match(line, /^\[containment\] Bots can't read Crow's identity file: check could not run \(boom\)$/);
   assert.ok(!line.includes("pibot-gateways"), "no restart step for a bug in the check: " + line);
+  assert.ok(!/readable/.test(line), line);
 });
 
 test("NO enabled bots: a note, a pass and no tier finding — on a host that could not mask at all", () => {
