@@ -92,9 +92,12 @@ export function createSharingServer(dbPath, options = {}) {
   // registration order; do not reorder these calls (tool-surface harness asserts it).
   // fullCtx fields: db/identity/peerManager/syncManager/nostrManager are tool-consumed;
   // instanceSyncManager + applyProjectCloneBundle ride along for shape-completeness (boot-only).
+  // internalSendGuard is the CONSTRUCTION-TIME delivery guard a strict caller (a Crow Messages draft
+  // send) builds and shares by reference: it rides in the context, never in a tool argument, so no
+  // MCP client can set, weaken or forge it. Absent for every ordinary caller.
   // tools/contacts.js — crow_generate_invite, crow_accept_invite, crow_generate_short_invite,
   // crow_accept_short_invite, crow_add_contact, crow_accept_bot_invite, crow_list_contacts (#1-7)
-  const fullCtx = { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager, buildProjectCloneBundle, applyProjectCloneBundle };
+  const fullCtx = { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager, buildProjectCloneBundle, applyProjectCloneBundle, internalSendGuard: options.internalSendGuard ?? null };
   registerContactsTools(server, fullCtx);
 
   // tools/share-inbox.js — crow_share, crow_inbox (#8-9)

@@ -196,16 +196,21 @@ function buildAppendBubble(lang = "en", activeItem = { type: "peer" }) {
   const relativeTimeSrc = extractFunction(script, "relativeTime");
   const appendBubbleSrc = extractFunction(script, "appendBubble");
   const markBubbleFailedSrc = extractFunction(script, "markBubbleFailed");
+  // appendBubble asks the draft helpers whether the open draft holds a failed row's words (one retry
+  // path: the reopened draft, not a second button on the bubble), so they come along with it.
+  const msgDraftActiveIdSrc = extractFunction(script, "msgDraftActiveId");
+  const msgDraftHoldsTextSrc = extractFunction(script, "msgDraftHoldsText");
 
   const context = {
     document: makeFakeDocument(),
     _activeItem: activeItem,
     _messages: [],
+    _draft: null,
     console,
   };
   vm.createContext(context);
   vm.runInContext(
-    `${elSrc}\n${relativeTimeSrc}\n${appendBubbleSrc}\n${markBubbleFailedSrc}\nglobalThis.__appendBubble = appendBubble;`,
+    `${elSrc}\n${relativeTimeSrc}\n${msgDraftActiveIdSrc}\n${msgDraftHoldsTextSrc}\n${appendBubbleSrc}\n${markBubbleFailedSrc}\nglobalThis.__appendBubble = appendBubble;`,
     context,
   );
   return context.__appendBubble;

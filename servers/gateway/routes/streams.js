@@ -25,6 +25,7 @@ import { Router } from "express";
 import { createDbClient } from "../../db.js";
 import bus from "../../shared/event-bus.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
+import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 // THE board lock predicate (job rail + session rail). This tick's snapshot is
 // diffed against the SSR render's data-locked attribute by the panel client, so
 // a second, narrower predicate here does not just mis-draw a badge — it makes
@@ -43,21 +44,53 @@ import { resolveBoardDef, resolveSlugBoardDef } from "./board-defs.js";
 // join in dashboard/panels/bot-board/html.js both fold the SAME way).
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { liveBirdsByCard } from "../dashboard/panels/bot-board/data-queries.js";
+// The draft store's own event name (servers/gateway/messages/drafts-store.js). Every draft write —
+// create, autosave, send, discard, the boot pass's reopen/park, from any view — pokes it with ids
+// only, and the route below is its only SSE consumer.
+import { AUDIT_ACTIONS, DRAFT_CHANGED_EVENT, MESSAGE_DRAFT_ID_RE } from "../messages/drafts-store.js";
 
 /**
  * @param {Function} dashboardAuth
- * @param {{interactiveEngine?: Function|object}} [seams] test seam (Track 3
- *   Task 11), same accessor-or-object shape as routes/perch.js's own —
- *   defaults to `getInteractiveEngine({createIfMissing:false})`: a gateway
+ * @param {{interactiveEngine?: Function|object, draftsOwnerCheck?: Function}} [seams] test seams
+ *   (Track 3 Task 11), same accessor-or-object shape as routes/perch.js's own — defaults to
+ *   `getInteractiveEngine({createIfMissing:false})`: a gateway
  *   that has never spawned an interactive session must fail soft to "no live
  *   birds", never conjure the engine singleton into existence just because a
- *   board tab is open.
+ *   board tab is open. `draftsOwnerCheck` is the Messages drafts stream's owner rule (below); it
+ *   defaults to the real one and a test injects its own.
  */
-export default function streamsRouter(dashboardAuth, { interactiveEngine = () => getInteractiveEngine({ createIfMissing: false }) } = {}) {
+export default function streamsRouter(dashboardAuth, {
+  interactiveEngine = () => getInteractiveEngine({ createIfMissing: false }),
+  draftsOwnerCheck = defaultDraftsOwnerCheck,
+} = {}) {
   const router = Router();
 
   function resolveInteractiveEngine() {
     return typeof interactiveEngine === "function" ? interactiveEngine() : interactiveEngine;
+  }
+
+  /**
+   * Is this request the OWNER at this machine's own dashboard? The same rule the drafts API applies
+   * (`isLocalPasswordSessionOn`: a local password session from off-box, never a peer's SSO session,
+   * never this machine's own console). A draft stream names which conversations have unsent words in
+   * them, so it is not something a peer's session may watch, even though `dashboardAuth` let that
+   * session onto the dashboard. The caller's db client is opened here and closed before the stream
+   * opens, so the long-lived connection holds no handle.
+   */
+  async function isDraftsOwner(req) {
+    let db = null;
+    try {
+      db = createDbClient();
+      return (await draftsOwnerCheck(db, req)) === true;
+    } catch {
+      return false;
+    } finally {
+      try {
+        db?.close?.();
+      } catch {
+        // Already closed is the only failure a per-request client has here.
+      }
+    }
   }
 
   router.use("/dashboard/streams", dashboardAuth);
@@ -616,5 +649,59 @@ export default function streamsRouter(dashboardAuth, { interactiveEngine = () =>
     tick();
   });
 
+  // --- Crow Messages drafts (bot-door plan, PR A part 2) ---
+  //
+  // The Messages page has two live halves: this stream keeps the Drafts list and the open thread's
+  // composer in step with every other view of the same draft (the Perch card in PR B, a second tab).
+  //
+  // OWNER ONLY, on top of `dashboardAuth`: the same rule the drafts API applies
+  // (`isLocalPasswordSessionOn`). A peer's single-sign-on session is signed into the dashboard but is
+  // not the owner, and which conversations hold unsent words is the owner's business — it gets 403
+  // `owner_only` before a stream is opened, so no bus handler is ever registered for it.
+  //
+  // The payload is an ALLOW-LISTED, ids-only frame: the draft id, the conversation kind and local
+  // id, and the action word. It is deliberately a named event (`crow-draft`) rather than a Turbo
+  // Stream frame: the panel's own EventSource re-reads the drafts API and redraws, so nothing about
+  // a message's text — which the store never puts on the bus anyway — can reach a page through
+  // this channel. A frame whose fields are not the expected shapes is dropped, not coerced.
+  router.get("/dashboard/streams/message-drafts", async (req, res) => {
+    // Owner only (see isDraftsOwner): a peer's SSO session is on the dashboard but is not the owner,
+    // and which conversations hold unsent words is the owner's own business.
+    if (!(await isDraftsOwner(req))) {
+      res.status?.(403);
+      res.json?.({ error: "owner_only", message: "Only the owner can see this." });
+      return;
+    }
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
+
+    const handler = (payload) => {
+      try {
+        const draftId = typeof payload?.draftId === "string" && MESSAGE_DRAFT_ID_RE.test(payload.draftId)
+          ? payload.draftId
+          : null;
+        if (!draftId) return;
+        const kind = payload?.conversationKind === "room" ? "room" : payload?.conversationKind === "contact" ? "contact" : null;
+        if (!kind) return;
+        const conversationId = Number(payload?.conversationId);
+        if (!Number.isInteger(conversationId) || conversationId <= 0) return;
+        const action = AUDIT_ACTIONS.includes(payload?.action) ? payload.action : "edit";
+        sendRaw(`event: crow-draft\ndata: ${JSON.stringify({ draftId, conversationKind: kind, conversationId, action })}\n\n`);
+      } catch {
+        // Subscriber isolation — a render/write error never kills a sibling stream.
+      }
+    };
+
+    bus.on(DRAFT_CHANGED_EVENT, handler);
+    res.on("close", () => bus.off(DRAFT_CHANGED_EVENT, handler));
+    res.on("error", () => bus.off(DRAFT_CHANGED_EVENT, handler));
+  });
+
   return router;
+}
+
+/** The real owner rule for the drafts stream: this instance's own password session, from off-box. */
+function defaultDraftsOwnerCheck(db, req) {
+  return isLocalPasswordSessionOn(db, req);
 }

@@ -730,6 +730,32 @@ export const translations = {
   "messages.requestsHelp": { en: "People who messaged you but aren't contacts yet.", es: "Personas que te escribieron pero aún no son contactos." },
   "messages.acceptRequest": { en: "Accept", es: "Aceptar" },
   "messages.declineRequest": { en: "Decline", es: "Rechazar" },
+  // ─── Messages: saved drafts (bot-door plan, PR A part 2) ───
+  // The operator-approved copy table, verbatim. {n} is the open-draft count, {bot} a bot's display
+  // name, {name} the person a message is for. The bot-door/Sharing keys (botbuilder.sharing.*,
+  // messages.draft.errNotAllowed/errGroupChanged/bellTitle/cardHead/sentByLine) belong to PR B and
+  // are deliberately absent here. `unverified`, `errPubkey` and `errBlocked` ARE part of PR A: the
+  // send path checks the seal, the audience and each recipient's key and blocked state before anything
+  // leaves, and these are the approved sentences for those refusals (errPubkey's wording talks about
+  // Bot Builder because that is where a bot's own allow-list is fixed; an owner's draft with a changed
+  // contact key reads the same sentence, and the contact itself is what needs checking).
+  "messages.draft.draftsHeading": { en: "Drafts ({n})", es: "Borradores ({n})" },
+  "messages.draft.draftsEmpty": { en: "No saved drafts", es: "No hay borradores guardados" },
+  "messages.draft.draftBy": { en: "by {bot}", es: "de {bot}" },
+  "messages.draft.draftBanner": { en: "Draft by {bot}. The first line will read: Sent by {bot}", es: "Borrador de {bot}. La primera línea dirá: Enviado por {bot}" },
+  "messages.draft.send": { en: "Send", es: "Enviar" },
+  "messages.draft.discard": { en: "Discard", es: "Descartar" },
+  "messages.draft.discardConfirm": { en: "Discard this draft? It cannot be recovered.", es: "¿Descartar este borrador? No se puede recuperar." },
+  "messages.draft.saved": { en: "Saved", es: "Guardado" },
+  "messages.draft.saving": { en: "Saving…", es: "Guardando…" },
+  "messages.draft.changedElsewhere": { en: "This draft changed somewhere else.", es: "Este borrador cambió en otro lugar." },
+  "messages.draft.reload": { en: "Reload", es: "Recargar" },
+  "messages.draft.sentReceipt": { en: "Sent to {name}", es: "Enviado a {name}" },
+  "messages.draft.discardedReceipt": { en: "Draft discarded", es: "Borrador descartado" },
+  "messages.draft.unverified": { en: "This draft could not be verified, so it cannot be sent. Discard it and ask again.", es: "No se pudo verificar este borrador, así que no se puede enviar. Descártalo y vuelve a pedirlo." },
+  "messages.draft.errPubkey": { en: "{name}'s key changed since this bot was allowed to message them. Check the contact, then allow them again in Bot Builder.", es: "La clave de {name} cambió desde que se le permitió a este bot escribirle. Revisa el contacto y vuelve a permitirlo en Bot Builder." },
+  "messages.draft.errBlocked": { en: "{name} is blocked.", es: "{name} está bloqueado." },
+  "messages.draft.errSendFailed": { en: "Not sent. Your draft is still here; try again.", es: "No se envió. Tu borrador sigue aquí; inténtalo de nuevo." },
 
   // ─── Chat — native model runtime (Item G, Task 10) ───
   "chat.native_model_loading": { en: "Loading local model \"{provider}\" — this can take a few minutes for larger models.", es: "Cargando el modelo local \"{provider}\" — esto puede tardar varios minutos en modelos más grandes." },

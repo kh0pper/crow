@@ -14,11 +14,12 @@ import { messagesCSS } from "./messages/css.js";
 import { buildMessagesHTML } from "./messages/html.js";
 import { messagesClientJS } from "./messages/client.js";
 import { handlePostAction } from "./messages/api-handlers.js";
-import { getUnifiedConversationList, getBotDirectory, getMessageRequests } from "./messages/data-queries.js";
+import { getUnifiedConversationList, getBotDirectory, getMessageRequests, getOpenDrafts } from "./messages/data-queries.js";
 import { csrfInput } from "../shared/csrf.js";
 import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { extractInviteCode } from "../../../sharing/invite-url.js";
 import { findUsableProviderRow } from "../../../shared/providers-db.js";
+import { isLocalPasswordSessionOn } from "../local-session.js";
 
 /**
  * True if the `providers` table — the modern provider registry, same table
@@ -105,6 +106,24 @@ export default {
     let requests = [];
     try { requests = await getMessageRequests(db); } catch {}
 
+    // The Drafts section above the hub: open message drafts, newest first. A bot's draft is named by
+    // its definition's display name (looked up server-side — never in the browser). Never throws; a
+    // failed read leaves the Messages page drawable without the section's rows.
+    //
+    // OWNER ONLY, by the same rule the drafts API applies (`isLocalPasswordSessionOn`, step 3 of
+    // servers/gateway/routes/messages-drafts-api.js): a peer's single-sign-on session may browse the
+    // dashboard but is answered 403 `owner_only` by that API, so the SERVER RENDER must not hand it
+    // the same text in the page instead — the section's rows, their previews and the
+    // `msg-drafts-data` block the live redraw reads. A non-owner session gets `drafts = []` and no
+    // section at all (html.js renders it only for `draftsOwner`). The check is done here, on the
+    // request, BEFORE anything about a draft is read; a failed check is a refusal, never a pass.
+    let draftsOwner = false;
+    try { draftsOwner = (await isLocalPasswordSessionOn(db, req)) === true; } catch { draftsOwner = false; }
+    let drafts = [];
+    if (draftsOwner) {
+      try { drafts = await getOpenDrafts(db); } catch {}
+    }
+
     // --- Bot-invite landing: a shared link opened on THIS instance (?bot_invite=<code>).
     // Parse here (we have `req`) so the still-sync HTML builder just renders strings.
     let botInvite = null;
@@ -156,6 +175,8 @@ export default {
       botInvite,
       botDirectory,
       requests,
+      drafts,
+      draftsOwner,
       csrf: csrfInput(req),
       inviteShare,
       personInvite,

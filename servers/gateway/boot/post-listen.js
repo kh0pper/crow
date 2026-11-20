@@ -1253,6 +1253,23 @@ export async function runPostListenSetup(server, app, deps) {
     setInterval(() => { runSyncConflictExpirySweep(createDbClient); }, SYNC_CONFLICT_EXPIRY_INTERVAL_MS).unref();
   }
 
+  // Crow Messages saved drafts: a send interrupted between `sending` and `sent` (the process died)
+  // leaves a row nobody can send or edit again, because every composer write is a compare-and-set on
+  // `open`. The store's sweep puts it back (`send_interrupted`, one `reopened` audit row each).
+  //
+  // ONCE AT BOOT, and deliberately NOT an interval: a process that has just started is the only
+  // observer that can tell a stuck row from an in-flight one. A periodic pass cannot — it would reopen
+  // a send that is still being delivered (in this process, or in another gateway sharing this
+  // crow.db), and when that delivery then lands, the row sits `open` again holding text that already
+  // went out: one more tap sends it twice. A send that hangs inside a live process costs one stuck row
+  // until the next boot; a double send cannot be taken back. Its own db client, closed inside; never
+  // throws.
+  setImmediate(() => {
+    import("./message-drafts-sweep.js")
+      .then(({ runStuckDraftSweep }) => runStuckDraftSweep({ dbFactory: createDbClient }))
+      .catch((err) => console.warn("[message-drafts] stuck-send sweep skipped:", err?.message || err));
+  });
+
   // Card offers (redesign P5): the recovery sweep, every 10 minutes after the boot pass in
   // index.js. Idempotent; tasks.db is opened only when an accept was left with no card, and a busy
   // store skips the pass. Never throws.

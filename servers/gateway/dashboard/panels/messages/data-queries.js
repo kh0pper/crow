@@ -8,6 +8,48 @@ import { getPeerAdvertisedBots } from "../../advertised-bots-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { contactName } from "../../../../sharing/contact-display.js";
+import { listDrafts } from "../../../messages/drafts-store.js";
+import { DRAFT_PREVIEW_CHARS, draftRowViews } from "../../../messages/drafts-rows.js";
+
+// The preview width has one home (messages/drafts-rows.js); re-exported here for the panel's own
+// callers and tests that read it from the panel's data layer.
+export { DRAFT_PREVIEW_CHARS };
+
+/**
+ * The open message drafts, newest first, as the Messages panel draws them: the recipient by name, a
+ * one-line preview of the body, who wrote it and when.
+ *
+ * The rows themselves are built by `draftRowViews` (servers/gateway/messages/drafts-rows.js), which is
+ * ALSO what `GET /dashboard/messages/api/drafts` answers: the server render and the client's live
+ * redraw must be the same shape, or a refreshed list loses its names and a room draft's row opens a
+ * contact thread. The recipient's name comes from `resolveConversation` — the same resolver the draft
+ * routes seal an audience with, so the name on the row and the people a send re-checks can never be
+ * two different notions of "who this message is for". A draft whose conversation has gone (its
+ * contact or room was deleted) is skipped rather than drawn against a name nobody can open.
+ *
+ * `botName` is filled for a bot's own draft (the sealed snapshot, else the definition's display name,
+ * else its id) and null for the operator's. `preview` is one line, control characters removed and cut
+ * to DRAFT_PREVIEW_CHARS code points: it is text, never markup, and each caller escapes it per
+ * context (the panel's server render escapes; the client sets textContent).
+ *
+ * Never throws: a missing table, a failed query or an odd row leaves the panel drawable without a
+ * Drafts list rather than taking the Messages page down.
+ *
+ * @param {object} db
+ * @param {{limit?: number}} [opts]
+ * @returns {Promise<Array<{id: string, kind: string, conversationId: number, label: string,
+ *   body: string, preview: string, origin: string, botId: string|null, botName: string|null,
+ *   version: number, updatedAt: number}>>}
+ */
+export async function getOpenDrafts(db, { limit = 20 } = {}) {
+  let rows;
+  try {
+    rows = await listDrafts(db, { state: "open", limit });
+  } catch {
+    return [];
+  }
+  return draftRowViews(db, rows);
+}
 
 /**
  * Get a unified conversation list merging AI chats and peer contacts.

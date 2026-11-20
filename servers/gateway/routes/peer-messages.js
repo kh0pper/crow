@@ -16,6 +16,7 @@ import { createDbClient } from "../../db.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../sharing/server.js";
+import { verifyDeliveryTargets } from "../messages/conversations.js";
 
 // R1-I1: loadOrCreateIdentity() does a sync disk read + full keypair
 // re-derivation (identity.js:119-133) — far too heavy for the per-message
@@ -57,14 +58,67 @@ export async function withSafetyNumber(contact) {
 /**
  * Create a connected sharing MCP client (the real in-memory transport). This is
  * the default factory; tests inject a stub so no live Nostr runtime starts.
+ *
+ * `options.internalSendGuard` is handed to the sharing server at CONSTRUCTION, not to the tool as an
+ * argument: `crow_send_message`'s input schema stays `{contact, message}`, so no MCP client — the
+ * dashboard's, a bot's, an installed bundle's — can set, weaken or forge the guard. Only a strict
+ * send (below) passes one.
  */
-async function makePeerSharingClient() {
-  const server = createSharingServer();
+async function makePeerSharingClient(options = {}) {
+  const server = options.internalSendGuard
+    ? createSharingServer(undefined, { internalSendGuard: options.internalSendGuard })
+    : createSharingServer();
   const client = new Client({ name: "peer-messages-api", version: "0.1.0" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
   await client.connect(ct);
   return client;
+}
+
+/**
+ * The contact row a send is for. Fetched by PRIMARY KEY ONLY: the identifier search
+ * (`crow_id = ? OR display_name = ?`) lives one level down in the sharing server's
+ * `crow_send_message` tool, and a caller that must deliver to an EXACT person never leaves the choice
+ * of row to a name.
+ */
+async function contactRowById(db, contactId) {
+  const { rows } = await db.execute({
+    sql: `SELECT id, crow_id, display_name, secp256k1_pubkey, is_blocked, request_status
+            FROM contacts WHERE id = ?`,
+    args: [contactId],
+  });
+  return rows[0] || null;
+}
+
+/**
+ * The strict handoff check: the row this send is about to hand text to must BE the row the caller
+ * verified. `strictRecipient` is that row's snapshot — `{contactId, crowId, pubkey}`, exactly what a
+ * Crow Messages draft sealed — and any difference is a refusal, never a best guess:
+ *
+ *   - a different row, or a different crow id → `recipients_changed`;
+ *   - blocked → `blocked`;
+ *   - the same person with a different secp256k1 key → `pubkey_changed`.
+ *
+ * A still-'pending' request is refused too (`recipients_changed`) instead of being reported as
+ * blocked: `crow_send_message` filters pending rows out, and a filtered row would leave the tool free
+ * to resolve the same word to somebody else.
+ *
+ * Answers null when the row is the person the snapshot names.
+ */
+function strictHandoffRefusal(row, strictRecipient) {
+  const verdict = verifyDeliveryTargets([{
+    contactId: strictRecipient.contactId,
+    crowId: strictRecipient.crowId,
+    pubkey: strictRecipient.pubkey,
+  }], [{
+    contactId: Number(row.id),
+    crowId: String(row.crow_id ?? "").trim(),
+    pubkey: String(row.secp256k1_pubkey ?? "").trim(),
+    blocked: Number(row.is_blocked ?? 0) === 1,
+  }]);
+  if (!verdict.ok) return verdict.reason;
+  if (row.request_status != null && String(row.request_status) !== "accepted") return "recipients_changed";
+  return null;
 }
 
 /**
@@ -75,9 +129,32 @@ async function makePeerSharingClient() {
  * old unconditional { ok:true }. This is what lets the dashboard mark the
  * optimistic bubble as failed at send time.
  *
+ * STRICT MODE (`strictRecipient`): the normal route names a contact the way a person does — a
+ * display name or a crow id — and leaves `crow_send_message` to find the row. A caller that has
+ * ALREADY checked one specific row (a Crow Messages draft send, whose audience is sealed with the
+ * recipient's key) must not be re-routed by a name, so it passes the snapshot it checked: this
+ * function reads the row BY PRIMARY ID, refuses unless that row is still the same person holding the
+ * same key (409 `recipients_changed` / `pubkey_changed` / `blocked`, before anything is handed off),
+ * and names the tool by the row's UNIQUE crow id rather than by a display name. The normal route is
+ * unchanged: no snapshot, same lookup, same identifier.
+ *
+ * THE LAST WINDOW IS INSIDE THE TOOL, and it is closed by the internal delivery guard: between the
+ * primary-key read above and the tool's own `crow_id = ? OR display_name = ?` SELECT the row can be
+ * re-pointed, and then the crow id this function names matches nothing while some other contact's
+ * display_name spells it. So a strict send takes ONE object — `{sealed, refusal: null}`, built here
+ * and shared by reference with the sharing server through the client factory's
+ * `options.internalSendGuard` (never a tool argument) — and the tool, immediately before
+ * publishing, compares the row its lookup resolved with `sealed` and writes the refusal code on
+ * `refusal`. Anything other than the same row, the same crow id and the same key is that 409
+ * refusal, not a delivery to whoever now answers to the name.
+ *
  * Exported for unit tests (drive it with a stub db + sharingClientFactory).
  */
-export async function handlePeerSend(req, res, { db, sharingClientFactory = makePeerSharingClient } = {}) {
+export async function handlePeerSend(req, res, {
+  db,
+  sharingClientFactory = makePeerSharingClient,
+  strictRecipient = null,
+} = {}) {
   const contactId = parseInt(req.params.contactId);
   if (!contactId) return res.status(400).json({ error: "Invalid contact ID" });
 
@@ -86,17 +163,39 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     return res.status(400).json({ error: "Message content is required" });
   }
 
-  // Get contact identifier for crow_send_message
-  const { rows: contactRows } = await db.execute({
-    sql: "SELECT crow_id, display_name FROM contacts WHERE id = ?",
-    args: [contactId],
-  });
-  if (contactRows.length === 0) {
+  const contact = await contactRowById(db, contactId);
+  if (!contact) {
     return res.status(404).json({ error: "Contact not found" });
   }
 
-  const contact = contactRows[0];
-  const contactIdentifier = contact.display_name || contact.crow_id;
+  if (strictRecipient) {
+    const refusal = strictHandoffRefusal(contact, strictRecipient);
+    if (refusal) return res.status(409).json({ ok: false, error: refusal });
+  }
+
+  // The internal delivery guard a strict send carries into the tool (see the JSDoc above): the sealed
+  // snapshot, copied so the draft's own row is never written to, plus the slot the tool records a
+  // refusal in. Null for the owner's normal send, which keeps exactly the lookup it always had.
+  const sendGuard = strictRecipient
+    ? {
+      sealed: {
+        contactId: Number(strictRecipient.contactId),
+        crowId: String(strictRecipient.crowId ?? "").trim(),
+        pubkey: String(strictRecipient.pubkey ?? "").trim(),
+      },
+      refusal: null,
+    }
+    : null;
+
+  // Get contact identifier for crow_send_message. A strict send names the row by its UNIQUE crow id
+  // (the tool prefers an exact crow id match, so no other row's display name can win the lookup);
+  // the normal route keeps the human-readable name.
+  const contactIdentifier = strictRecipient
+    ? String(contact.crow_id || "").trim()
+    : (contact.display_name || contact.crow_id);
+  if (!contactIdentifier) {
+    return res.status(409).json({ ok: false, error: "recipients_changed" });
+  }
 
   // Read back the row sendMessage just wrote (success → relayed/…, 0-relay →
   // failed) so the client can key its optimistic bubble to the real row
@@ -126,7 +225,7 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
   // Send via MCP sharing server — CAPTURE the result (a 0-relay send is a
   // failure the client must see).
   let toolResult;
-  const client = await sharingClientFactory();
+  const client = await sharingClientFactory(sendGuard ? { internalSendGuard: sendGuard } : {});
   try {
     toolResult = await client.callTool({
       name: "crow_send_message",
@@ -134,6 +233,13 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     });
   } finally {
     await client.close();
+  }
+
+  // The tool's lookup landed on a row other than the one this send verified (the race the sealed
+  // snapshot closes): it wrote the reason on the guard and published nothing. Answer the same 409 the
+  // pre-check answers — a refusal, not a failed delivery — so the client keeps the draft.
+  if (sendGuard?.refusal) {
+    return res.status(409).json({ ok: false, error: sendGuard.refusal });
   }
 
   const resultText = (toolResult?.content || [])

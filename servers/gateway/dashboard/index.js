@@ -117,6 +117,7 @@ import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
 import stagedPageRouter from "../routes/staged-page.js";
 import mailApiRouter from "../routes/mail-api.js";
+import messagesDraftsRouter from "../routes/messages-drafts-api.js";
 import reportsApiRouter from "../routes/reports-api.js";
 import widgetsRouter from "../routes/widgets.js";
 import { shellRouter, resolveRequestMode, resolveShellPage, nestIsExplicit } from "./shell/request.js";
@@ -962,6 +963,14 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // Crow Mail's private JSON API (`CROW_MAIL`): the same slot and rails as the staged page above
   // (session + CSRF, Funnel refused upstream), owner-only on its own prefix — see routes/mail-api.js.
   router.use(mailApiRouter(dashboardAuth));
+
+  // Crow Messages' draft API (bot-door plan, PR A): the owner's own surface for a draft of a message
+  // to a conversation — read, autosave (compare-and-set on the version), send and discard. The same
+  // slot and rails as the mail API above (session + CSRF, Funnel refused upstream), owner-only on its
+  // own prefix, no-store on every answer, and it parses its own 64kb body (index.js `_hasOwnParser`).
+  // Mounted HERE and not in boot/feature-mounts.js: a feature-mounts router runs at app root, BEFORE
+  // this file's csrfMiddleware, so an autosave or a send there would skip the CSRF rail entirely.
+  router.use(messagesDraftsRouter(dashboardAuth));
 
   // Crow Recurring Reports' private JSON API: the same slot and rails as the mail API above
   // (session + CSRF, Funnel refused upstream), owner-only on its own prefix, and no-store on every

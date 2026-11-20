@@ -206,7 +206,9 @@ export const SYNCED_TABLES = [
 // family: the Crow Artifacts tables live
 // in crow.db but are not in SYNCED_TABLES at all (nothing about an artifact, its versions or its links
 // replicates), and artifact_version_holds — the retention state that keeps a sent version rendering — is
-// named here so a hold can never be read as something to replicate;
+// named here so a hold can never be read as something to replicate; the message draft tables: a draft of a
+// message holds who it is for and the words of it, and its recipient seal is keyed to this machine's
+// keychain, so neither the draft nor its audit trail (which carries the body's hash) leaves it;
 // project_bot_shares: a bot's grant to reach one project is this instance's own decision, keyed to
 // local ids and to a bot that lives here). The keychain has its own key file, but its rows are
 // still never replicated. Checked at load.
@@ -221,6 +223,7 @@ export const LOCAL_ONLY_TABLES = Object.freeze([
   "report_runs", "report_run_requests", "report_versions",
   "report_recipients", "report_sends",
   "artifact_version_holds",
+  "message_drafts", "message_draft_audit",
   "project_bot_shares",
 ]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {

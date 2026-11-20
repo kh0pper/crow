@@ -599,6 +599,8 @@ app.use("/dashboard/login", dashboardLoginLimiter);
 // router parses its own body (256kb) only AFTER the editor token was verified.
 // /dashboard/services/api/ (project Services): its connect route parses its own 16kb body so a
 // malformed one (it may hold a pasted secret) is refused without its parser message being logged.
+// /dashboard/messages/api/ (Crow Messages' drafts): its routes parse their own 64kb body, so a
+// malformed or oversized draft body is refused by that router's fixed answer, never by the global one.
 // Express routes case-insensitively, so /llm is compared in lower case too: a
 // /LLM/C/... body must not be parsed here before the cloud door's gate.
 const _jsonParser = express.json({ limit: "1mb" });
@@ -614,7 +616,7 @@ const _jsonParser = express.json({ limit: "1mb" });
 // 4 MiB file, and the router's own json({limit:"60mb"}) parses it before its own 4 MiB text cap answers 413.
 // TWO LINES, always (a test reads this predicate out of this file with a two-line regex).
 const _hasOwnParser = (p) => p.toLowerCase().startsWith("/llm") || p.toLowerCase().startsWith("/api/workspace/live/v1/") || /^\/s\/[^/]+\/feedback$/.test(p) ||
-  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p) || p.toLowerCase().startsWith("/artifacts/upload/") || /^\/api\/artifacts\/[^/]+\/import\/?$/i.test(p);
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p) || p.toLowerCase().startsWith("/dashboard/services/api/") || /^\/dashboard\/perch-api\/secret\/[^/]+\/?$/i.test(p) || /^\/dashboard\/perch-api\/staged\/[^/]+\/(send|edit|discard)\/?$/i.test(p) || /^\/dashboard\/mail\/api\//i.test(p) || /^\/dashboard\/messages\/api\//i.test(p) || p.toLowerCase().startsWith("/artifacts/upload/") || /^\/api\/artifacts\/[^/]+\/import\/?$/i.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---

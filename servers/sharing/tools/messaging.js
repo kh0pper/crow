@@ -10,8 +10,42 @@ import { z } from "zod";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
 import { emitGroupUpsert } from "../group-sync.js";
 
+/**
+ * The INTERNAL delivery guard: the row a strict caller (`handlePeerSend` in strict mode, i.e. a Crow
+ * Messages draft send) already verified, checked one last time against the row THIS tool's own lookup
+ * resolved — the gap between the caller's read and the SELECT below is where a name-based lookup can
+ * land somewhere else.
+ *
+ * It arrives on the sharing server's CONSTRUCTION options (`createSharingServer(_, {internalSendGuard})`
+ * -> `ctx.internalSendGuard`), never as a tool argument, so no MCP client can set, weaken or forge it
+ * — `crow_send_message`'s input schema is still exactly `{contact, message}`. The guard is one object
+ * shared by reference with the caller: the caller builds it (`{sealed, refusal: null}`), this tool
+ * writes the refusal on it before answering an error, and the caller turns that into its own refusal
+ * code. Absent (every ordinary caller), nothing below changes.
+ *
+ * Answers the refusal code the row earns, or null when it is the row the guard sealed:
+ *
+ *   - no row at all — gone, or blocked/pending, which the SELECT below filters out, so such a row
+ *     arrives here as no row — or a different row, or the same row under a different crow id →
+ *     `recipients_changed`;
+ *   - the same person holding a different secp256k1 key → `pubkey_changed`.
+ *
+ * The blocked/pending verdicts are the SELECT's, not this function's: by the time a row is compared
+ * here it has already passed `is_blocked = 0 AND (request_status IS NULL OR 'accepted')`, which is
+ * exactly why "the contact was blocked just now" reads as `recipients_changed` on this path.
+ */
+function internalSendRefusal(row, sealed) {
+  // A guard with no snapshot names nobody: fail closed rather than deliver to whatever resolved.
+  if (!sealed) return "recipients_changed";
+  if (!row) return "recipients_changed";
+  if (Number(row.id) !== Number(sealed.contactId)) return "recipients_changed";
+  if (String(row.crow_id ?? "").trim() !== String(sealed.crowId ?? "").trim()) return "recipients_changed";
+  if (String(row.secp256k1_pubkey ?? "").trim() !== String(sealed.pubkey ?? "").trim()) return "pubkey_changed";
+  return null;
+}
+
 export function registerMessagingTools(server, ctx) {
-  const { db, identity, nostrManager } = ctx;
+  const { db, identity, nostrManager, internalSendGuard = null } = ctx;
 
   // --- Tool: crow_send_message ---
 
@@ -24,22 +58,48 @@ export function registerMessagingTools(server, ctx) {
     },
     async ({ contact, message }) => {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_send_message");
-      // Find contact
+      // Find contact. AN EXACT CROW ID WINS THE LOOKUP: `crow_id` is UNIQUE, so when the caller names
+      // a crow id the row it names is the row it means — even if some other contact's display_name is
+      // that same string. The display-name branch stays (a person, or the assistant, names a contact
+      // by name), but it can never outrank the exact id: a strict caller (a Messages draft send,
+      // servers/gateway/routes/peer-messages.js) hands over the crow id of the row it just verified
+      // by primary key, and delivery to that row must not depend on insertion order.
       const result = await db.execute({
         // Messaging surface = NULL + 'accepted'. A still-'pending' request cannot
         // be messaged by guessing its req:<pubkey> id; an accepted one can.
-        sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0 AND (request_status IS NULL OR request_status = 'accepted')",
-        args: [contact, contact],
+        sql: `SELECT * FROM contacts
+               WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0 AND (request_status IS NULL OR request_status = 'accepted')
+               ORDER BY CASE WHEN crow_id = ? THEN 0 ELSE 1 END, id ASC`,
+        args: [contact, contact, contact],
       });
 
-      if (result.rows.length === 0) {
+      const contactRow = result.rows[0] || null;
+
+      // THE STRICT HANDOFF, LAST LOOK (item: internalSendGuard above): the caller named a row by
+      // primary id and the lookup above may still have resolved a different one. Refuse BEFORE
+      // anything is published, and tell the caller which refusal it is by writing it on the guard.
+      if (internalSendGuard) {
+        const refusal = internalSendRefusal(contactRow, internalSendGuard.sealed);
+        if (refusal) {
+          internalSendGuard.refusal = refusal;
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Message NOT sent — the contact this send was checked against is no longer that contact. Nothing was delivered.",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      if (!contactRow) {
         return {
           content: [{ type: "text", text: `Contact not found: ${contact}` }],
           isError: true,
         };
       }
-
-      const contactRow = result.rows[0];
 
       try {
         const delivery = await nostrManager.sendMessage(contactRow, message);

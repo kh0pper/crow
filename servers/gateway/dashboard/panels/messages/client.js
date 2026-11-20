@@ -102,6 +102,28 @@ export function messagesClientJS(opts) {
   var _pendingAttachments = []; // [{ s3_key, name, mime_type, size }]
   var _pollInterval = null;
   var _messages = []; // loaded messages cache for threading lookups
+  // Saved drafts (bot-door plan, PR A part 2). One open draft per conversation; these hold the one
+  // the open thread is showing, the Drafts list's data, and the autosave/confirm state around them.
+  var _draft = null;            // { id, version, body, origin, botName, botId } of the open draft
+  var _draftRows = null;        // the Drafts list rows (parsed once from the server's JSON)
+  var _draftTimer = null;       // the 800 ms autosave debounce
+  var _draftPending = null;     // { kind, conversationId, text } captured when the debounce armed
+  var _draftStatus = '';        // '', 'saving', 'saved', 'error'
+  var _draftReceipt = '';       // one line after a send/discard (kept across the thread reload)
+  var _draftChanged = false;    // the row moved under us: offer Reload, never overwrite
+  var _draftSending = false;
+  // A fixed sentence for a refusal the person cannot fix by reloading (a seal that does not verify, a
+  // recipient's key that changed, a blocked contact). Shown in the draft bar INSTEAD of Saved/Saving.
+  var _draftNotice = '';
+  // The server refused this draft's seal: Send is disabled here and would be refused there anyway.
+  var _draftUnverified = false;
+  // Bumped whenever the thread, the draft or the message on screen is replaced (a switch, a send, a
+  // discard, a reload). An autosave or create that lands afterwards carries the old number and is
+  // IGNORED, so a create still in flight when Enter sent the message can never re-adopt the sent text
+  // into the composer (see msgDraftSave).
+  var _draftEpoch = 0;
+  var _draftConfirmCtx = null;  // { draftId, version, rowEl }
+  var _draftConfirmReturnFocus = null;
 
   // === Popover ===
   function msgTogglePopover() {
@@ -240,9 +262,1003 @@ export function messagesClientJS(opts) {
     });
   }
 
+  // === Saved drafts (bot-door plan, PR A part 2) ===
+  //
+  // A draft is one row for one conversation. The thread's composer pre-fills from it, an autosave
+  // 800 ms after the last keystroke keeps it in step, and Send/Discard end it. Every write carries
+  // the version the screen was drawn from, so two views of the same draft can never overwrite each
+  // other: the loser is answered 409 and shows "changed elsewhere" with a Reload button.
+  //
+  // The Drafts list above the hub is drawn server-side and redrawn here from the same data; the
+  // live stream (/dashboard/streams/message-drafts) says only that SOMETHING about a draft changed
+  // (ids and an action word), so every redraw re-reads the API. No draft text is ever written into
+  // an attribute, an onclick or a URL — only into textContent and a JSON data block.
+  var API_DRAFTS = '/dashboard/messages/api/drafts';
+  var DRAFT_STR = {
+    send: '${tJs("messages.draft.send", lang)}',
+    discard: '${tJs("messages.draft.discard", lang)}',
+    saved: '${tJs("messages.draft.saved", lang)}',
+    saving: '${tJs("messages.draft.saving", lang)}',
+    changedElsewhere: '${tJs("messages.draft.changedElsewhere", lang)}',
+    reload: '${tJs("messages.draft.reload", lang)}',
+    sentReceipt: '${tJs("messages.draft.sentReceipt", lang)}',
+    discardedReceipt: '${tJs("messages.draft.discardedReceipt", lang)}',
+    errSendFailed: '${tJs("messages.draft.errSendFailed", lang)}',
+    unverified: '${tJs("messages.draft.unverified", lang)}',
+    errPubkey: '${tJs("messages.draft.errPubkey", lang)}',
+    errBlocked: '${tJs("messages.draft.errBlocked", lang)}',
+    draftBanner: '${tJs("messages.draft.draftBanner", lang)}',
+    draftsHeading: '${tJs("messages.draft.draftsHeading", lang)}',
+    draftsEmpty: '${tJs("messages.draft.draftsEmpty", lang)}',
+    draftBy: '${tJs("messages.draft.draftBy", lang)}',
+    justNow: '${tJs("time.justNow", lang)}',
+    mAgo: '${tJs("time.mAgo", lang)}',
+    hAgo: '${tJs("time.hAgo", lang)}',
+  };
+
+  /** {placeholder} interpolation that inserts values verbatim (split/join, so $& and $$ stay literal). */
+  function msgFmtDraft(str, params) {
+    var map = params || {};
+    return String(str).split(/\\{([a-zA-Z0-9_]+)\\}/).map(function (part, i) {
+      if (i % 2 === 1) return Object.prototype.hasOwnProperty.call(map, part) ? String(map[part]) : '{' + part + '}';
+      return part;
+    }).join('');
+  }
+
+  /** The CSRF double-submit token the drafts API needs on every unsafe method. The token comes from
+   *  window.crowCsrf() when the page provides it (the header's own accessor — the shape PR #11 is
+   *  moving every caller to), and falls back to the crow_csrf cookie for a page built before it. */
+  function msgDraftHeaders() {
+    var token = '';
+    try {
+      if (typeof window.crowCsrf === 'function') token = String(window.crowCsrf() || '');
+    } catch (e) { token = ''; }
+    if (!token) {
+      try {
+        var m = document.cookie ? String(document.cookie).match(/(?:^|;\\s*)crow_csrf=([^;]*)/) : null;
+        token = m ? m[1] : '';
+      } catch (e) { token = ''; }
+    }
+    return { 'Content-Type': 'application/json', 'X-Crow-Csrf': token };
+  }
+
+  /** The name the thread's header shows: what the approved refusal sentences fill {name} with. */
+  function msgDraftRecipientName() {
+    return String((_activeItem && _activeItem.name) || '');
+  }
+
+  /**
+   * One refusal from the drafts API, mapped to what the composer shows. Only the codes PR A's routes
+   * can answer are here, and each uses the operator-approved copy:
+   *
+   *   - seal_invalid / seal_unavailable — the draft could not be verified (or this Crow has no usable
+   *     key to verify it with): the approved "unverified" sentence, and Send is disabled for a draft
+   *     that exists (the server would refuse it anyway).
+   *   - pubkey_changed / blocked — the recipient is not who the draft was written for: errPubkey /
+   *     errBlocked, naming the person.
+   *   - changed / not_open — "This draft changed somewhere else." + Reload.
+   *   - no_recipients — nobody in the conversation to seal or send to: the approved "not sent, your
+   *     draft is still here" line (there is nothing to reload, and nothing was lost).
+   *   - recipients_changed / conversation_gone — NO PR-A sentence of its own exists for these (PR B
+   *     adds errGroupChanged and the recipient picker); the closest approved line is changedElsewhere,
+   *     so that is what is shown, with Discard beside it, and Reload is not offered because re-reading
+   *     the same row cannot fix either.
+   *
+   * Answers false for anything else (a 502, a dead network), which the caller shows as the approved
+   * "not sent, your draft is still here" line.
+   */
+  function msgDraftApplyRefusal(out) {
+    var code = out && typeof out.error === 'string' ? out.error : '';
+    if (code === 'seal_invalid' || code === 'seal_unavailable') {
+      // Only a draft that exists can be un-sendable: a create refused for a missing key has nothing
+      // for Send to be disabled on, so that one just shows the line.
+      _draftUnverified = !!_draft;
+      _draftNotice = DRAFT_STR.unverified;
+      _draftStatus = '';
+      return true;
+    }
+    if (code === 'pubkey_changed') {
+      _draftNotice = msgFmtDraft(DRAFT_STR.errPubkey, { name: msgDraftRecipientName() });
+      _draftStatus = '';
+      return true;
+    }
+    if (code === 'blocked') {
+      _draftNotice = msgFmtDraft(DRAFT_STR.errBlocked, { name: msgDraftRecipientName() });
+      _draftStatus = '';
+      return true;
+    }
+    if (code === 'no_recipients') {
+      _draftNotice = '';
+      _draftStatus = 'error';
+      return true;
+    }
+    if (code === 'recipients_changed' || code === 'conversation_gone') {
+      _draftNotice = DRAFT_STR.changedElsewhere;
+      _draftStatus = '';
+      return true;
+    }
+    if (code === 'changed' || code === 'not_open') {
+      _draftChanged = true;
+      _draftStatus = '';
+      return true;
+    }
+    return false;
+  }
+
+  /** 'contact' | 'room' for the open thread, or null (an AI chat holds no message draft). */
+  function msgDraftActiveKind() {
+    if (!_activeItem) return null;
+    if (_activeItem.type === 'peer') return 'contact';
+    if (_activeItem.type === 'room') return 'room';
+    return null;
+  }
+
+  /** The open thread's conversation id (a contact id or a room's group id), or null. */
+  function msgDraftActiveId() {
+    if (!_activeItem) return null;
+    var n = parseInt(String(_activeItem.id), 10);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+
+  /**
+   * Does the OPEN THREAD'S draft hold exactly these words? A send that came from a draft leaves its
+   * text in the reopened draft when the delivery fails, so that draft IS the retry path for it; the
+   * failed bubble of the same message must not offer a second one (see appendBubble).
+   */
+  function msgDraftHoldsText(text) {
+    if (!_draft) return false;
+    // The draft row's own conversation id (the API's display row carries conversationId; it does not
+    // carry the store's conversationKind spelling). The bubbles on screen belong to the open thread.
+    if (Number(_draft.conversationId) !== msgDraftActiveId()) return false;
+    return String(_draft.body == null ? '' : _draft.body).trim()
+      === String(text == null ? '' : text).trim();
+  }
+
+  /** The same rule, applied to bubbles that were already drawn: a thread's messages render BEFORE its
+   *  draft is read (loadPeerConversation/loadRoomConversation draw, then msgDraftLoad fetches), so a
+   *  failed row whose words the draft still holds had its Retry added before the draft was known.
+   *  Whenever the draft changes, that button goes away — one retry path, never two. */
+  function msgDraftSettleFailedBubbles() {
+    if (!_draft) return;
+    var bubbles = document.querySelectorAll('.msg-bubble-failed');
+    for (var i = 0; i < bubbles.length; i++) {
+      var ctx = bubbles[i]._retryCtx || null;
+      if (!ctx || !msgDraftHoldsText(ctx.content)) continue;
+      var btn = bubbles[i].querySelector('.msg-retry-btn');
+      if (btn) btn.remove();
+      bubbles[i]._retryCtx = null;
+    }
+  }
+
+  /** The Drafts list's rows: the server's JSON on first use, then whatever the last refresh read. */
+  function msgDraftRowsData() {
+    if (_draftRows) return _draftRows;
+    _draftRows = [];
+    try {
+      var node = document.getElementById('msg-drafts-data');
+      var arr = node ? JSON.parse(node.textContent || '[]') : [];
+      if (arr && arr.length) _draftRows = arr;
+    } catch (e) { _draftRows = []; }
+    return _draftRows;
+  }
+
+  function msgDraftRowById(id) {
+    var rows = msgDraftRowsData();
+    for (var i = 0; i < rows.length; i++) if (rows[i] && rows[i].id === id) return rows[i];
+    return null;
+  }
+
+  /** The row element a click landed in (works for the server's onclick="...this" and the redraw). */
+  function msgDraftRowOf(node) {
+    var n = node;
+    while (n && n !== document) {
+      if (n.classList && n.classList.contains && n.classList.contains('msg-drafts-row')) return n;
+      n = n.parentNode;
+    }
+    return null;
+  }
+
+  /** One line of a draft's text for the list: control characters gone, cut at 80 code points. */
+  function msgDraftPreview(text) {
+    var s = String(text == null ? '' : text).replace(/[\\r\\n\\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+    return s.length > 80 ? s.slice(0, 80) : s;
+  }
+
+  /** The same buckets relativeTime() uses, for a draft's last change. */
+  function msgDraftAgo(ms) {
+    var diff = Date.now() - Number(ms || 0);
+    if (!isFinite(diff) || diff < 0) return '';
+    if (diff < 60000) return DRAFT_STR.justNow;
+    if (diff < 3600000) return Math.floor(diff / 60000) + DRAFT_STR.mAgo;
+    if (diff < 86400000) return Math.floor(diff / 3600000) + DRAFT_STR.hAgo;
+    return new Date(Number(ms)).toLocaleDateString();
+  }
+
+  /** One Drafts row, built the same way the server draws it (same classes and data attributes). */
+  function msgDraftRowEl(d) {
+    var row = el('div', {
+      className: 'msg-drafts-row',
+      'data-draft-id': String(d.id || ''),
+      'data-kind': String(d.kind || ''),
+      'data-conversation-id': String(d.conversationId == null ? '' : d.conversationId),
+    });
+    var open = el('button', { type: 'button', className: 'msg-drafts-open' });
+    var head = el('span', { className: 'msg-drafts-row-head' });
+    head.appendChild(el('span', { className: 'msg-drafts-name', text: String(d.label || '') }));
+    head.appendChild(el('span', { className: 'msg-drafts-time', text: msgDraftAgo(d.updatedAt) }));
+    open.appendChild(head);
+    var preview = msgDraftPreview(d.body);
+    if (preview) open.appendChild(el('span', { className: 'msg-drafts-preview', text: preview }));
+    if (d.origin === 'bot' && d.botName) {
+      open.appendChild(el('span', { className: 'msg-drafts-by', text: msgFmtDraft(DRAFT_STR.draftBy, { bot: String(d.botName) }) }));
+    }
+    open.addEventListener('click', function () { msgOpenDraftRow(row); });
+    row.appendChild(open);
+    var actions = el('div', { className: 'msg-drafts-actions' });
+    var sendBtn = el('button', { type: 'button', className: 'msg-draft-send', text: DRAFT_STR.send });
+    sendBtn.addEventListener('click', function () { msgDraftRowSend(row); });
+    var discardBtn = el('button', { type: 'button', className: 'msg-draft-discard', text: DRAFT_STR.discard });
+    discardBtn.addEventListener('click', function () { msgDraftRowDiscard(row); });
+    actions.appendChild(sendBtn);
+    actions.appendChild(discardBtn);
+    row.appendChild(actions);
+    return row;
+  }
+
+  /** Redraw the Drafts section from the current rows: the count, the rows, the empty line. A section
+   *  that was empty and now has a row opens itself (that is a draft the person just wrote); one they
+   *  folded away themselves stays folded. */
+  function msgRenderDraftsList() {
+    var rows = msgDraftRowsData();
+    var countEl = document.getElementById('msg-drafts-count');
+    if (countEl) countEl.textContent = msgFmtDraft(DRAFT_STR.draftsHeading, { n: rows.length });
+    var section = document.getElementById('msg-drafts');
+    if (section) {
+      if (rows.length && section.getAttribute('data-count') === '0') section.setAttribute('open', 'open');
+      section.setAttribute('data-count', String(rows.length));
+    }
+    var list = document.getElementById('msg-drafts-list');
+    if (!list) return;
+    list.textContent = '';
+    if (!rows.length) {
+      list.appendChild(el('div', { className: 'msg-drafts-empty', id: 'msg-drafts-empty', text: DRAFT_STR.draftsEmpty }));
+      return;
+    }
+    for (var i = 0; i < rows.length; i++) list.appendChild(msgDraftRowEl(rows[i]));
+  }
+
+  /** Re-read the open drafts and redraw the list. The ACTIVE draft's version and text are NOT touched
+   *  here — a live frame while somebody is typing must not make a stale composer look current. The
+   *  open thread is settled by msgDraftReconcile(), which compares against what the composer holds. */
+  async function msgRefreshDrafts() {
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '?state=open');
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    if (!res || !res.ok || !out || !out.drafts) return;
+    _draftRows = out.drafts;
+    msgRenderDraftsList();
+    if (!_draft) return;
+    var fresh = null;
+    for (var i = 0; i < _draftRows.length; i++) if (_draftRows[i] && _draftRows[i].id === _draft.id) fresh = _draftRows[i];
+    if (fresh) return;
+    // Gone: sent or discarded, here or in another view. The text it held is no longer a draft.
+    var ta = document.getElementById('msg-input');
+    if (ta && ta.value === _draft.body) ta.value = '';
+    _draft = null;
+    _draftStatus = '';
+    _draftChanged = false;
+    _draftNotice = '';
+    _draftUnverified = false;
+    msgRenderDraftBar();
+  }
+
+  /** Show/hide and fill the thread's draft bar: bot banner, Saving/Saved, Discard, changed line,
+   *  and a refusal notice the person cannot reload their way out of (a failed seal, a changed key, a
+   *  blocked contact). Send is disabled while the draft is unverified: the server would refuse it. */
+  function msgRenderDraftBar() {
+    var bar = document.getElementById('msg-draft-bar');
+    if (!bar) return;
+    // A failed bubble the open draft still holds keeps only the draft's retry (see the helper).
+    msgDraftSettleFailedBubbles();
+    var banner = document.getElementById('msg-draft-banner');
+    if (banner) {
+      if (_draft && _draft.origin === 'bot') {
+        banner.textContent = msgFmtDraft(DRAFT_STR.draftBanner, { bot: String(_draft.botName || _draft.botId || '') });
+        banner.classList.add('visible');
+      } else {
+        banner.textContent = '';
+        banner.classList.remove('visible');
+      }
+    }
+    var status = document.getElementById('msg-draft-status');
+    if (status) {
+      var text = '';
+      var cls = 'msg-draft-status';
+      if (_draftNotice) {
+        text = _draftNotice;
+        cls += ' error';
+      } else if (!_draftChanged) {
+        if (_draftStatus === 'saving') text = DRAFT_STR.saving;
+        else if (_draftStatus === 'saved') { text = DRAFT_STR.saved; cls += ' saved'; }
+        else if (_draftStatus === 'error') { text = DRAFT_STR.errSendFailed; cls += ' error'; }
+      }
+      if (!text && _draftReceipt) text = _draftReceipt;
+      status.textContent = text;
+      status.className = cls;
+    }
+    var discard = document.getElementById('msg-draft-bar-discard');
+    if (discard) {
+      if (_draft) discard.removeAttribute('hidden');
+      else discard.setAttribute('hidden', 'hidden');
+    }
+    var changed = document.getElementById('msg-draft-changed');
+    if (changed) {
+      if (_draftChanged) changed.classList.add('visible');
+      else changed.classList.remove('visible');
+    }
+    // Send: a draft whose seal did not verify can never be sent, so the button says so by being off.
+    var sendBtn = document.getElementById('msg-send-btn');
+    if (sendBtn) sendBtn.disabled = !!_draftUnverified || !!_draftSending;
+    if (_draft) {
+      var rows = document.querySelectorAll('.msg-drafts-row');
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].getAttribute('data-draft-id') !== _draft.id) continue;
+        var rowSend = rows[i].querySelector('.msg-draft-send');
+        if (rowSend) rowSend.disabled = !!_draftUnverified || !!_draftSending;
+      }
+    }
+    var show = !!(_draft || _draftNotice || _draftReceipt || _draftChanged || _draftStatus === 'saving' ||
+      _draftStatus === 'saved' || _draftStatus === 'error');
+    if (show) bar.classList.add('visible');
+    else bar.classList.remove('visible');
+  }
+
+  /** Leaving a conversation: keep the words being typed (flush the debounce), drop the row state. */
+  function msgDraftResetForSwitch() {
+    msgDraftFlushPending();
+    // Anything still in flight belongs to the thread being left; the epoch makes it inert.
+    _draftEpoch += 1;
+    _draft = null;
+    _draftStatus = '';
+    _draftChanged = false;
+    _draftReceipt = '';
+    _draftNotice = '';
+    _draftUnverified = false;
+    msgRenderDraftBar();
+  }
+
+  function msgDraftClearTimer() {
+    if (_draftTimer) { try { clearTimeout(_draftTimer); } catch (e) {} }
+    _draftTimer = null;
+    _draftPending = null;
+  }
+
+  /** Arm the 800 ms autosave for what is in the composer right now. */
+  function msgDraftScheduleAutosave() {
+    var kind = msgDraftActiveKind();
+    if (!kind) return;
+    var ta = document.getElementById('msg-input');
+    if (!ta) return;
+    _draftPending = { kind: kind, conversationId: msgDraftActiveId(), text: ta.value };
+    if (_draftTimer) { try { clearTimeout(_draftTimer); } catch (e) {} }
+    _draftTimer = setTimeout(function () {
+      var p = _draftPending;
+      _draftTimer = null;
+      _draftPending = null;
+      if (p) msgDraftSave(p.kind, p.conversationId, p.text);
+    }, 800);
+  }
+
+  /** Fire the armed autosave now (a send, or leaving the conversation). */
+  function msgDraftFlushPending() {
+    var p = _draftPending;
+    msgDraftClearTimer();
+    if (!p) return Promise.resolve();
+    return msgDraftSave(p.kind, p.conversationId, p.text);
+  }
+
+  /**
+   * The autosave itself. Three cases, each with the one guard that makes it safe:
+   *
+   *   - NO DRAFT YET and something typed: create it, CREATE-ONLY (expectVersion 0). An open draft
+   *     the client did not know about — another tab, the other view, a bot — answers 409 with that
+   *     row, and it is ADOPTED (offering Reload when its words differ from what is here) instead of
+   *     being overwritten by words typed in ignorance of it.
+   *   - A DRAFT AND THE BOX CLEARED: the draft is DISCARDED, not saved as an empty body. An empty
+   *     draft in the Drafts list is a row nobody can act on.
+   *   - A DRAFT AND NEW WORDS: a PATCH with the version this screen was drawn from. A 409 means
+   *     somebody else moved the row — that is the Reload line, never a blind retry with a fresher
+   *     version.
+   *
+   * Every reply is checked against the draft epoch first: if the thread, the draft or the message on
+   * screen changed while the request was in flight (Enter sent it, the person switched threads,
+   * another view discarded it), the answer is inert — and a create that DID land is cancelled, so a
+   * draft of already-sent words never reappears.
+   */
+  async function msgDraftSave(kind, conversationId, text) {
+    var body = String(text == null ? '' : text);
+    if (!kind || !isFinite(Number(conversationId))) return;
+    var convId = Number(conversationId);
+    var epoch = _draftEpoch;
+    if (!_draft) {
+      if (body.trim() === '') return;
+      _draftStatus = 'saving';
+      _draftNotice = '';
+      msgRenderDraftBar();
+      var createRes = null, createOut = null;
+      try {
+        createRes = await fetch(API_DRAFTS, {
+          method: 'PUT',
+          headers: msgDraftHeaders(),
+          body: JSON.stringify({
+            conversationKind: kind,
+            conversationId: convId,
+            body: body,
+            expectVersion: 0,
+          }),
+        });
+        try { createOut = await createRes.json(); } catch (e) { createOut = null; }
+      } catch (e) { createRes = null; }
+      if (epoch !== _draftEpoch) {
+        if (createRes && createRes.ok && createOut && createOut.created && createOut.draft) {
+          msgDraftCancelLateCreate(createOut.draft, body);
+        }
+        _draftStatus = '';
+        msgRenderDraftBar();
+        msgRefreshDrafts();
+        return;
+      }
+      // Only adopt it for the conversation that is still on screen.
+      if (msgDraftActiveKind() === kind && msgDraftActiveId() === convId) {
+        if (createRes && createRes.ok && createOut && createOut.draft) {
+          _draft = createOut.draft;
+          _draftStatus = 'saved';
+          _draftChanged = false;
+          _draftNotice = '';
+          _draftUnverified = false;
+        } else if (createRes && createRes.status === 409 && createOut && createOut.draft) {
+          // Somebody opened this conversation's draft first. Adopt theirs: the local words stay in the
+          // box, and Reload is offered because they are not what the row now holds.
+          _draft = createOut.draft;
+          _draftNotice = '';
+          _draftUnverified = false;
+          var box = document.getElementById('msg-input');
+          var local = box ? box.value : body;
+          _draftStatus = '';
+          _draftChanged = local !== String(createOut.draft.body || '');
+        } else if (createRes && createRes.status === 409 && msgDraftApplyRefusal(createOut)) {
+          // A refusal with its own approved sentence and no row to adopt: seal_unavailable, or a
+          // conversation with nobody in it to seal (no_recipients). Never "changed elsewhere" —
+          // nothing changed, and reloading would only re-read nothing.
+        } else {
+          _draftStatus = 'error';
+        }
+        msgRenderDraftBar();
+      }
+      msgRefreshDrafts();
+      return;
+    }
+    if (body === _draft.body) {
+      _draftStatus = '';
+      msgRenderDraftBar();
+      return;
+    }
+    var draftId = _draft.id;
+    var expectVersion = Number(_draft.version) || 1;
+    // Clearing the box by hand discards the draft: an empty draft is a row nobody can act on, and the
+    // plan's "an empty draft is discarded when the page unloads" is only the tail of this rule.
+    if (body.trim() === '') {
+      _draftStatus = 'saving';
+      _draftNotice = '';
+      msgRenderDraftBar();
+      var discardRes = null;
+      try {
+        discardRes = await fetch(API_DRAFTS + '/' + encodeURIComponent(draftId) + '/discard', {
+          method: 'POST',
+          headers: msgDraftHeaders(),
+          body: JSON.stringify({ expectVersion: expectVersion }),
+        });
+      } catch (e) { discardRes = null; }
+      if (epoch !== _draftEpoch) { _draftStatus = ''; msgRenderDraftBar(); msgRefreshDrafts(); return; }
+      if (!_draft || _draft.id !== draftId) { msgRefreshDrafts(); return; }
+      if (discardRes && discardRes.ok) {
+        _draft = null;
+        _draftStatus = '';
+        _draftChanged = false;
+        _draftNotice = '';
+        _draftUnverified = false;
+        _draftReceipt = DRAFT_STR.discardedReceipt;
+        msgRenderDraftBar();
+      } else if (discardRes && discardRes.status === 409) {
+        var discardOut = null;
+        try { discardOut = await discardRes.json(); } catch (e) { discardOut = null; }
+        if (!msgDraftApplyRefusal(discardOut)) _draftChanged = true;
+        msgRenderDraftBar();
+      } else {
+        _draftStatus = 'error';
+        msgRenderDraftBar();
+      }
+      msgRefreshDrafts();
+      return;
+    }
+    _draftStatus = 'saving';
+    _draftNotice = '';
+    msgRenderDraftBar();
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '/' + encodeURIComponent(draftId) + '/body', {
+        method: 'PATCH',
+        headers: msgDraftHeaders(),
+        body: JSON.stringify({ body: body, expectVersion: expectVersion }),
+      });
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    if (epoch !== _draftEpoch) { _draftStatus = ''; msgRenderDraftBar(); msgRefreshDrafts(); return; }
+    if (!_draft || _draft.id !== draftId) { msgRefreshDrafts(); return; }
+    if (res && res.ok && out && out.draft) {
+      _draft = out.draft;
+      _draftStatus = 'saved';
+      _draftChanged = false;
+      _draftNotice = '';
+    } else if (res && res.status === 409) {
+      if (!msgDraftApplyRefusal(out)) _draftChanged = true;
+    } else {
+      _draftStatus = 'error';
+    }
+    msgRenderDraftBar();
+    msgRefreshDrafts();
+  }
+
+  /**
+   * A create that landed after the world moved on (Enter sent the message while the first save was in
+   * flight). The row it made holds words that have already gone out, so it is discarded — but only
+   * after re-reading it, because a later save may have put newer words in the same row, and those are
+   * somebody's draft. Never adopts anything into the composer.
+   */
+  async function msgDraftCancelLateCreate(draft, sentText) {
+    if (!draft || !draft.id) return;
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '/' + encodeURIComponent(draft.id));
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    var row = res && res.ok && out && out.draft ? out.draft : null;
+    if (!row || row.state !== 'open') return;
+    if (String(row.body || '') !== String(sentText == null ? '' : sentText)) return;
+    try {
+      await fetch(API_DRAFTS + '/' + encodeURIComponent(row.id) + '/discard', {
+        method: 'POST',
+        headers: msgDraftHeaders(),
+        body: JSON.stringify({ expectVersion: Number(row.version) || 1 }),
+      });
+    } catch (e) { /* the next refresh shows whatever state it ended in */ }
+    msgRefreshDrafts();
+  }
+
+  /** Pre-fill this thread's composer from its open draft (on opening a conversation). */
+  async function msgDraftLoad(kind, conversationId) {
+    var convId = Number(conversationId);
+    if (!kind || !isFinite(convId)) return;
+    _draft = null;
+    _draftStatus = '';
+    _draftChanged = false;
+    _draftNotice = '';
+    _draftUnverified = false;
+    msgDraftClearTimer();
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '?conversation=' + encodeURIComponent(kind + ':' + convId));
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    if (msgDraftActiveKind() !== kind || msgDraftActiveId() !== convId) return;
+    var d = res && res.ok && out && out.drafts && out.drafts[0] ? out.drafts[0] : null;
+    if (d && d.id) {
+      _draft = d;
+      var ta = document.getElementById('msg-input');
+      if (ta && ta.value.trim() === '') {
+        ta.value = String(d.body || '');
+        ta.style.height = 'auto';
+      }
+    }
+    msgRenderDraftBar();
+  }
+
+  /**
+   * Re-read the open thread's draft and settle it against what the composer holds: adopt the newer
+   * row when there are no unsaved local words, offer Reload when there are. Never overwrites text
+   * somebody is typing.
+   */
+  async function msgDraftReconcile() {
+    var kind = msgDraftActiveKind();
+    var convId = msgDraftActiveId();
+    if (!kind || convId == null) return;
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '?conversation=' + encodeURIComponent(kind + ':' + convId));
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    if (msgDraftActiveKind() !== kind || msgDraftActiveId() !== convId) return;
+    var server = res && res.ok && out && out.drafts ? (out.drafts[0] || null) : null;
+    var ta = document.getElementById('msg-input');
+    var local = ta ? ta.value : '';
+    if (!server) {
+      if (_draft) {
+        if (ta && local === _draft.body) ta.value = '';
+        _draft = null;
+        _draftStatus = '';
+        _draftChanged = false;
+        _draftNotice = '';
+        _draftUnverified = false;
+        msgRenderDraftBar();
+      }
+      return;
+    }
+    if (!_draft) {
+      if (!ta) return;
+      _draft = server;
+      _draftNotice = '';
+      _draftUnverified = false;
+      if (local === '') {
+        ta.value = String(server.body || '');
+        ta.style.height = 'auto';
+        _draftStatus = '';
+        _draftChanged = false;
+      } else if (local === String(server.body || '')) {
+        _draftChanged = false;
+      } else {
+        _draftChanged = true;
+      }
+      msgRenderDraftBar();
+      return;
+    }
+    if (Number(server.version) === Number(_draft.version)) {
+      _draft = server;
+      msgRenderDraftBar();
+      return;
+    }
+    if (local === _draft.body) {
+      // The row moved and nothing local is at risk: adopt it, and forget a refusal that belonged to
+      // the row this one replaces.
+      _draft = server;
+      _draftNotice = '';
+      _draftUnverified = false;
+      if (ta) { ta.value = String(server.body || ''); ta.style.height = 'auto'; }
+      _draftStatus = 'saved';
+      _draftChanged = false;
+    } else {
+      _draftChanged = true;
+    }
+    msgRenderDraftBar();
+  }
+
+  /** The Reload button: take the server's row and drop the local words (never a blind re-POST). */
+  async function msgReloadDraft() {
+    var kind = msgDraftActiveKind();
+    var convId = msgDraftActiveId();
+    if (!kind || convId == null) return;
+    msgDraftClearTimer();
+    _draftEpoch += 1;
+    _draftChanged = false;
+    _draftStatus = '';
+    _draftNotice = '';
+    _draftUnverified = false;
+    _draft = null;
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '?conversation=' + encodeURIComponent(kind + ':' + convId));
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    if (msgDraftActiveKind() !== kind || msgDraftActiveId() !== convId) return;
+    var server = res && res.ok && out && out.drafts ? (out.drafts[0] || null) : null;
+    var ta = document.getElementById('msg-input');
+    if (server && server.id) {
+      _draft = server;
+      if (ta) { ta.value = String(server.body || ''); ta.style.height = 'auto'; }
+    } else if (ta) {
+      ta.value = '';
+    }
+    msgRenderDraftBar();
+    msgRefreshDrafts();
+  }
+
+  /** Open the thread a Drafts row belongs to (and fold the list away on a phone). The row's data-kind
+   *  decides which thread: a room draft opens the ROOM, a contact draft opens that contact. A row
+   *  whose kind is neither (a malformed redraw) opens nothing — never a peer thread guessed from a
+   *  room's group id. */
+  function msgOpenDraftRow(node) {
+    var row = msgDraftRowOf(node);
+    if (!row) return;
+    var kind = row.getAttribute('data-kind');
+    var id = parseInt(row.getAttribute('data-conversation-id'), 10);
+    if (!isFinite(id) || id <= 0) return;
+    try {
+      var section = document.getElementById('msg-drafts');
+      if (section && window.innerWidth < 769) section.removeAttribute('open');
+    } catch (e) {}
+    if (kind === 'room') msgSelectRoom(id);
+    else if (kind === 'contact') msgSelectItem('peer', id);
+  }
+
+  /** The Send button on a Drafts row: the stored text is what it sends — unless this row IS the open
+   *  thread's draft, in which case the composer's words are the ones the person means. */
+  function msgDraftRowSend(node) {
+    var row = msgDraftRowOf(node);
+    if (!row) return;
+    var d = msgDraftRowById(row.getAttribute('data-draft-id'));
+    if (!d) return;
+    if (_draft && _draft.id === d.id) { msgSendDraft(); return; }
+    msgSendDraftRow(d);
+  }
+
+  async function msgSendDraftRow(d) {
+    if (_draftSending) return;
+    _draftSending = true;
+    msgDraftRowBusy(d.id, true);
+    var res = null, out = null;
+    var epoch = _draftEpoch;
+    try {
+      res = await fetch(API_DRAFTS + '/' + encodeURIComponent(d.id) + '/send', {
+        method: 'POST',
+        headers: msgDraftHeaders(),
+        body: JSON.stringify({ body: String(d.body || ''), expectVersion: Number(d.version) || 1 }),
+      });
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    _draftSending = false;
+    msgDraftRowBusy(d.id, false);
+    var active = !!(_draft && _draft.id === d.id);
+    if (res && res.ok && out && out.ok) {
+      if (active && epoch === _draftEpoch) {
+        _draftEpoch += 1;
+        _draft = null;
+        _draftStatus = '';
+        _draftChanged = false;
+        _draftNotice = '';
+        _draftUnverified = false;
+        _draftReceipt = msgFmtDraft(DRAFT_STR.sentReceipt, { name: String((_activeItem && _activeItem.name) || d.label || '') });
+        var ta = document.getElementById('msg-input');
+        if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+        msgRenderDraftBar();
+        msgReloadThread();
+      }
+      msgRefreshDrafts();
+    } else if (res && res.status === 409) {
+      if (active && epoch === _draftEpoch) {
+        if (!msgDraftApplyRefusal(out)) _draftChanged = true;
+        msgRenderDraftBar();
+      }
+      msgRefreshDrafts();
+    } else {
+      // A delivery that did not land answers WITH the reopened row; the thread's own draft adopts it
+      // (so a retry carries the current version instead of colliding), a row send just redraws.
+      if (active && epoch === _draftEpoch) {
+        if (out && out.draft && out.draft.id === d.id && out.draft.state === 'open') _draft = out.draft;
+        _draftStatus = 'error';
+        msgRenderDraftBar();
+      }
+      msgRefreshDrafts();
+    }
+  }
+
+  function msgDraftRowBusy(id, busy) {
+    var rows = document.querySelectorAll('.msg-drafts-row');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-draft-id') !== id) continue;
+      var btns = rows[i].querySelectorAll('button');
+      for (var j = 0; j < btns.length; j++) btns[j].disabled = !!busy;
+    }
+  }
+
+  /** The Discard button on a Drafts row: ask first. */
+  function msgDraftRowDiscard(node) {
+    var row = msgDraftRowOf(node);
+    if (!row) return;
+    var d = msgDraftRowById(row.getAttribute('data-draft-id'));
+    if (d) msgAskDiscard(d.id, Number(d.version) || 1, row);
+  }
+
+  /** The Discard button in the thread's draft bar: ask first. */
+  function msgAskDiscardDraft() {
+    if (!_draft) return;
+    msgAskDiscard(_draft.id, Number(_draft.version) || 1, null);
+  }
+
+  /** Open the Discard confirmation. Escape closes it and focus goes back where it came from. */
+  function msgAskDiscard(draftId, version, rowEl) {
+    var dialog = document.getElementById('msg-draft-confirm');
+    if (!dialog) return;
+    _draftConfirmCtx = { draftId: draftId, version: version, rowEl: rowEl || null };
+    var back = document.getElementById('msg-draft-bar-discard');
+    _draftConfirmReturnFocus = (rowEl && rowEl.querySelector('.msg-draft-discard')) || back || null;
+    dialog.removeAttribute('hidden');
+    var cancel = document.getElementById('msg-draft-confirm-cancel');
+    if (cancel && cancel.focus) { try { cancel.focus(); } catch (e) {} }
+  }
+
+  function msgCloseDraftConfirm() {
+    var dialog = document.getElementById('msg-draft-confirm');
+    if (dialog) dialog.setAttribute('hidden', 'hidden');
+    var back = _draftConfirmReturnFocus;
+    _draftConfirmCtx = null;
+    _draftConfirmReturnFocus = null;
+    if (back && back.focus) { try { back.focus(); } catch (e) {} }
+  }
+
+  async function msgConfirmDraftDiscard() {
+    var ctx = _draftConfirmCtx;
+    if (!ctx) { msgCloseDraftConfirm(); return; }
+    var yes = document.getElementById('msg-draft-confirm-yes');
+    if (yes) yes.disabled = true;
+    var res = null;
+    try {
+      res = await fetch(API_DRAFTS + '/' + encodeURIComponent(ctx.draftId) + '/discard', {
+        method: 'POST',
+        headers: msgDraftHeaders(),
+        body: JSON.stringify({ expectVersion: ctx.version }),
+      });
+    } catch (e) { res = null; }
+    if (yes) yes.disabled = false;
+    var active = !!(_draft && _draft.id === ctx.draftId);
+    msgCloseDraftConfirm();
+    if (res && res.ok) {
+      if (active) {
+        _draftEpoch += 1;
+        _draft = null;
+        _draftStatus = '';
+        _draftChanged = false;
+        _draftNotice = '';
+        _draftUnverified = false;
+        _draftReceipt = DRAFT_STR.discardedReceipt;
+        var ta = document.getElementById('msg-input');
+        if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+        msgRenderDraftBar();
+      }
+      msgRefreshDrafts();
+    } else if (res && res.status === 409) {
+      if (active) {
+        var out = null;
+        try { out = await res.json(); } catch (e) { out = null; }
+        if (!msgDraftApplyRefusal(out)) _draftChanged = true;
+        msgRenderDraftBar();
+      }
+      msgRefreshDrafts();
+    } else {
+      msgRefreshDrafts();
+    }
+  }
+
+  if (!window.__msgDraftConfirmBound) {
+    window.__msgDraftConfirmBound = true;
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      var dialog = document.getElementById('msg-draft-confirm');
+      if (!dialog || dialog.hasAttribute('hidden')) return;
+      e.preventDefault();
+      msgCloseDraftConfirm();
+    });
+  }
+
+  (function msgBindDraftConfirm() {
+    var dialog = document.getElementById('msg-draft-confirm');
+    var cancel = document.getElementById('msg-draft-confirm-cancel');
+    var yes = document.getElementById('msg-draft-confirm-yes');
+    if (cancel) cancel.addEventListener('click', function () { msgCloseDraftConfirm(); });
+    if (yes) yes.addEventListener('click', function () { msgConfirmDraftDiscard(); });
+    if (dialog) dialog.addEventListener('click', function (e) { if (e.target === dialog) msgCloseDraftConfirm(); });
+  })();
+
+  /** The Send button's draft half: post the exact text the composer shows, with its version. A refusal
+   *  is mapped to its approved sentence (msgDraftApplyRefusal), and a delivery that did not land
+   *  answers WITH the reopened row — adopted here, so Retry carries the current version instead of
+   *  colliding with a row that never left the open state. */
+  async function msgSendDraft() {
+    if (!_draft || _draftSending) return;
+    if (_draftUnverified) {
+      // The seal does not verify: the server refuses this draft, and so does the button.
+      msgRenderDraftBar();
+      return;
+    }
+    if (_draftChanged) {
+      // The row moved under this screen (another tab, another view): the composer's words and the
+      // row's version no longer agree, so sending would either be answered 409 or put one view's
+      // words out under the other's seal. The changed-elsewhere line and Reload are the way out.
+      msgRenderDraftBar();
+      return;
+    }
+    var ta = document.getElementById('msg-input');
+    var text = ta ? ta.value : String(_draft.body || '');
+    if (String(text).trim() === '') return;
+    msgDraftClearTimer();
+    _draftSending = true;
+    var btn = document.getElementById('msg-send-btn');
+    if (btn) btn.disabled = true;
+    var draftId = _draft.id;
+    var epoch = _draftEpoch;
+    var res = null, out = null;
+    try {
+      res = await fetch(API_DRAFTS + '/' + encodeURIComponent(draftId) + '/send', {
+        method: 'POST',
+        headers: msgDraftHeaders(),
+        body: JSON.stringify({ body: String(text), expectVersion: Number(_draft.version) || 1 }),
+      });
+      try { out = await res.json(); } catch (e) { out = null; }
+    } catch (e) { res = null; }
+    _draftSending = false;
+    if (btn) btn.disabled = !!_draftUnverified;
+    if (epoch !== _draftEpoch) { msgRefreshDrafts(); return; }
+    if (!_draft || _draft.id !== draftId) { msgRefreshDrafts(); return; }
+    if (res && res.ok && out && out.ok) {
+      _draftEpoch += 1;
+      _draft = null;
+      _draftStatus = '';
+      _draftChanged = false;
+      _draftNotice = '';
+      _draftUnverified = false;
+      _draftReceipt = msgFmtDraft(DRAFT_STR.sentReceipt, { name: String((_activeItem && _activeItem.name) || '') });
+      if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+      msgRenderDraftBar();
+      msgReloadThread();
+      msgRefreshDrafts();
+    } else if (res && res.status === 409) {
+      if (!msgDraftApplyRefusal(out)) _draftChanged = true;
+      msgRenderDraftBar();
+      msgRefreshDrafts();
+    } else {
+      if (out && out.draft && out.draft.id === draftId && out.draft.state === 'open') {
+        _draft = out.draft;
+        _draftChanged = false;
+      }
+      _draftStatus = 'error';
+      msgRenderDraftBar();
+      msgRefreshDrafts();
+    }
+  }
+
+  /** Re-open the thread that is on screen (after a send, so the new bubble is the real row). */
+  function msgReloadThread() {
+    if (!_activeItem) return;
+    if (_activeItem.type === 'peer') loadPeerConversation(msgDraftActiveId());
+    else if (_activeItem.type === 'room') loadRoomConversation(String(_activeItem.id));
+  }
+
+  /** The live stream: ids and an action word; every frame just says "re-read". */
+  function startDraftStream() {
+    if (window.__crowDraftStream) { try { window.__crowDraftStream.close(); } catch (e) {} window.__crowDraftStream = null; }
+    try {
+      var es = new EventSource('/dashboard/streams/message-drafts');
+      window.__crowDraftStream = es;
+      es.addEventListener('crow-draft', function (evt) {
+        // Self-cancel once the Messages panel is not the page any more (a Turbo nav away leaves the
+        // connection open otherwise, re-reading the drafts API for a section nobody is looking at).
+        if (!document.getElementById('msg-drafts')) {
+          try { es.close(); } catch (e) {}
+          window.__crowDraftStream = null;
+          return;
+        }
+        var data = null;
+        try { data = JSON.parse(evt.data); } catch (e) { return; }
+        try { msgRefreshDrafts(); } catch (e) {}
+        try {
+          var kind = msgDraftActiveKind();
+          if (kind && data && data.conversationKind === kind && Number(data.conversationId) === Number(msgDraftActiveId())) {
+            msgDraftReconcile();
+          }
+        } catch (e) {}
+      });
+      es.addEventListener('session-expired', function () {
+        try { es.close(); } catch (e) {}
+        window.__crowDraftStream = null;
+      });
+      es.onerror = function () { /* EventSource auto-reconnects */ };
+    } catch (e) { /* no EventSource — the next action still re-reads */ }
+  }
+
   // === Avatar Strip Selection ===
   function msgSelectItem(type, id) {
     if (_activeItem && _activeItem.type === type && _activeItem.id === id) return;
+    msgDraftResetForSwitch();
     _activeItem = { type: type, id: id };
     _replyingTo = null;
     _pendingAttachments = [];
@@ -267,6 +1283,7 @@ export function messagesClientJS(opts) {
   function msgSelectRoom(groupId) {
     var gid = String(groupId);
     if (_activeItem && _activeItem.type === 'room' && String(_activeItem.id) === gid) return;
+    msgDraftResetForSwitch();
     _activeItem = { type: 'room', id: gid };
     _replyingTo = null;
     _pendingAttachments = [];
@@ -747,6 +1764,9 @@ export function messagesClientJS(opts) {
 
       showPeerInfo(contact);
 
+      // The thread's open draft pre-fills the composer (and its bot banner, if a bot wrote it).
+      msgDraftLoad('contact', Number(contactId));
+
       // Mark received messages as read
       for (var i = 0; i < msgs.length; i++) {
         if (msgs[i].direction === 'received' && !msgs[i].is_read) {
@@ -804,6 +1824,9 @@ export function messagesClientJS(opts) {
         if (body && body.id) sentBubble.dataset.msgId = body.id;
         markBubbleFailed(sentBubble, body && body.error, { id: body && body.id, content: content });
       } else if (body && body.id) {
+        // The words left the box: an autosave or a create still in flight belongs to a message that
+        // has already gone out, so its answer is made inert (and a create that lands is cancelled).
+        _draftEpoch += 1;
         // F-UI-5: reconcile the optimistic bubble with the real row.
         var existing = document.querySelector('.msg-bubble[data-msg-id="' + body.id + '"]');
         if (existing && existing !== sentBubble) {
@@ -865,6 +1888,7 @@ export function messagesClientJS(opts) {
         room: room,
         members: data.members || [],
       }, msgs);
+      msgDraftLoad('room', Number(groupId));
     } catch(e) { console.error('Failed to load room conversation:', e); }
   }
 
@@ -880,9 +1904,11 @@ export function messagesClientJS(opts) {
     document.getElementById('msg-send-btn').disabled = true;
 
     try {
-      await fetch('/api/messages/room/' + encodeURIComponent(_activeItem.id) + '/send', {
+      var roomRes = await fetch('/api/messages/room/' + encodeURIComponent(_activeItem.id) + '/send', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }),
       });
+      // The words left the box: make any in-flight draft save inert (see sendPeerMessage).
+      if (roomRes && roomRes.ok) _draftEpoch += 1;
     } catch(e) { console.error('Failed to send room message:', e); }
 
     _sending = false;
@@ -958,6 +1984,10 @@ export function messagesClientJS(opts) {
   // === Shared Chat UI Rendering ===
   function renderChatUI(container, headerData, msgs) {
     container.textContent = '';
+    // The receipt line needs the person a draft was sent to; the header already knows the name.
+    if (_activeItem && (headerData.type === 'peer' || headerData.type === 'room')) {
+      _activeItem.name = headerData.name;
+    }
 
     // Header
     var header = el('div', { className: 'msg-chat-header' });
@@ -1124,6 +2154,35 @@ export function messagesClientJS(opts) {
     var attPreview = el('div', { className: 'msg-attachment-preview', id: 'msg-att-preview' });
     container.appendChild(attPreview);
 
+    // Draft bar: the bot banner, Saving…/Saved, Discard, and the "changed elsewhere" + Reload line.
+    // Only peer and room conversations hold drafts (an AI chat does not).
+    if (headerData.type === 'peer' || headerData.type === 'room') {
+      var draftBar = el('div', { className: 'msg-draft-bar', id: 'msg-draft-bar' });
+      draftBar.appendChild(el('div', { className: 'msg-draft-banner', id: 'msg-draft-banner' }));
+      var draftRowBar = el('div', { className: 'msg-draft-row' });
+      draftRowBar.appendChild(el('span', { className: 'msg-draft-status', id: 'msg-draft-status' }));
+      var discardBtn = el('button', {
+        type: 'button',
+        className: 'msg-draft-bar-discard',
+        id: 'msg-draft-bar-discard',
+        text: DRAFT_STR.discard,
+        onclick: function () { msgAskDiscardDraft(); },
+      });
+      draftRowBar.appendChild(discardBtn);
+      draftBar.appendChild(draftRowBar);
+      var changedRow = el('div', { className: 'msg-draft-changed', id: 'msg-draft-changed' });
+      changedRow.appendChild(el('span', { text: DRAFT_STR.changedElsewhere }));
+      changedRow.appendChild(el('button', {
+        type: 'button',
+        className: 'msg-draft-reload',
+        id: 'msg-draft-reload',
+        text: DRAFT_STR.reload,
+        onclick: function () { msgReloadDraft(); },
+      }));
+      draftBar.appendChild(changedRow);
+      container.appendChild(draftBar);
+    }
+
     // Input area
     var inputArea = el('div', { className: 'msg-chat-input' });
 
@@ -1148,6 +2207,7 @@ export function messagesClientJS(opts) {
     textarea.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+      msgDraftScheduleAutosave();
     });
     inputArea.appendChild(textarea);
 
@@ -1189,8 +2249,26 @@ export function messagesClientJS(opts) {
 
   function sendCurrentMessage() {
     if (!_activeItem) return;
-    if (_activeItem.type === 'ai') sendAiMessage();
-    else if (_activeItem.type === 'peer') sendPeerMessage();
+    if (_activeItem.type === 'ai') { sendAiMessage(); return; }
+    if (_activeItem.type !== 'peer' && _activeItem.type !== 'room') return;
+    // Attachments ride the normal send path (a draft holds words only). A draft from earlier typing
+    // stays in the Drafts list to finish or discard.
+    if (_pendingAttachments.length > 0) {
+      if (_activeItem.type === 'peer') sendPeerMessage();
+      else sendRoomMessage();
+      return;
+    }
+    if (_draftTimer) {
+      // Words are still inside the 800 ms autosave window: save them first, then send the draft, so
+      // a keystroke-then-Enter never leaves a stale draft behind a message that already went out.
+      msgDraftFlushPending().then(function () {
+        if (_draft) msgSendDraft();
+        else sendCurrentMessage();
+      });
+      return;
+    }
+    if (_draft) { msgSendDraft(); return; }
+    if (_activeItem.type === 'peer') sendPeerMessage();
     else if (_activeItem.type === 'room') sendRoomMessage();
   }
 
@@ -1303,8 +2381,13 @@ export function messagesClientJS(opts) {
     // surfaces a live send-time failure; reuse it here for consistency ('failed'
     // gets the same 'msg-bubble-failed' class + note). 'relayed'/'delivered' get a
     // small muted check; 'pending'/null render nothing.
+    //
+    // ONE RETRY PATH: a send that came from a draft leaves its text in the reopened draft when the
+    // delivery fails, and that draft (in the bar below, carrying the row's current version) is the
+    // retry. So a failed row holding the draft's own words gets the note and no Retry button; any
+    // other failed row (a typed send) keeps its own.
     if (isSent && msg.delivery_status === 'failed') {
-      markBubbleFailed(div, null, { id: msg.id, content: msg.content });
+      markBubbleFailed(div, null, msgDraftHoldsText(msg.content) ? {} : { id: msg.id, content: msg.content });
     } else if (isSent && (msg.delivery_status === 'relayed' || msg.delivery_status === 'delivered')) {
       div.appendChild(el('span', {
         className: 'msg-delivery' + (msg.delivery_status === 'delivered' ? ' delivered' : ''),
@@ -1734,12 +2817,14 @@ export function messagesClientJS(opts) {
     _pollInterval = setInterval(pollStatus, 300000);
     window.__msgPollInterval = _pollInterval;
     startMessagesStream();
+    startDraftStream();
   }
 
   function stopPolling() {
     if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
     if (window.__msgPollInterval) { clearInterval(window.__msgPollInterval); window.__msgPollInterval = null; }
     if (window.__crowMsgStream) { try { window.__crowMsgStream.close(); } catch (e) {} window.__crowMsgStream = null; }
+    if (window.__crowDraftStream) { try { window.__crowDraftStream.close(); } catch (e) {} window.__crowDraftStream = null; }
   }
 
   async function pollStatus() {

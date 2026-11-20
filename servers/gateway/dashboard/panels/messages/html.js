@@ -6,7 +6,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { fill, t } from "../../shared/i18n.js";
 import { buildBotDirectory } from "../../shared/bot-directory.js";
 import { renderInviteShare, renderPeerInviteForms, renderShortCodeShare, renderShortCodeForms } from "../../shared/peer-invite-ui.js";
 
@@ -27,11 +27,99 @@ function initials(name) {
   return name.substring(0, 2).toUpperCase();
 }
 
+/** "2m ago" / "3h ago" — the same buckets the client's relativeTime() uses, in the panel's language. */
+function draftAgo(ms, lang) {
+  const diff = Date.now() - Number(ms || 0);
+  if (!Number.isFinite(diff) || diff < 0) return "";
+  if (diff < 60_000) return t("time.justNow", lang);
+  if (diff < 3_600_000) return Math.floor(diff / 60_000) + t("time.mAgo", lang);
+  if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + t("time.hAgo", lang);
+  return new Date(Number(ms)).toLocaleDateString();
+}
+
+/**
+ * One row of the Drafts list. The recipient's name, a one-line preview of the text, the bot chip
+ * for a bot's own draft and how long ago it last changed — plus Send and Discard, so a draft can be
+ * dealt with without opening its thread. Every value is escaped here; the row carries ids only in
+ * its data attributes (the body is in the panel's msg-drafts-data JSON, so it is never written into
+ * an attribute).
+ */
+function draftRow(draft, lang) {
+  const id = escapeHtml(String(draft.id || ""));
+  const label = escapeHtml(String(draft.label || ""));
+  const preview = escapeHtml(String(draft.preview || ""));
+  const ago = escapeHtml(draftAgo(draft.updatedAt, lang));
+  const bot = draft.origin === "bot" && draft.botName
+    ? `<span class="msg-drafts-by">${escapeHtml(fill(t("messages.draft.draftBy", lang), { bot: String(draft.botName) }))}</span>`
+    : "";
+  return (
+    `<div class="msg-drafts-row" data-draft-id="${id}" data-kind="${escapeHtml(String(draft.kind || ""))}" data-conversation-id="${escapeHtml(String(draft.conversationId ?? ""))}">` +
+    `<button type="button" class="msg-drafts-open" onclick="msgOpenDraftRow(this)">` +
+    `<span class="msg-drafts-row-head"><span class="msg-drafts-name">${label}</span>` +
+    `<span class="msg-drafts-time">${ago}</span></span>` +
+    (preview ? `<span class="msg-drafts-preview">${preview}</span>` : "") +
+    bot +
+    `</button>` +
+    `<div class="msg-drafts-actions">` +
+    `<button type="button" class="msg-draft-send" onclick="msgDraftRowSend(this)">${escapeHtml(t("messages.draft.send", lang))}</button>` +
+    `<button type="button" class="msg-draft-discard" onclick="msgDraftRowDiscard(this)">${escapeHtml(t("messages.draft.discard", lang))}</button>` +
+    `</div>` +
+    `</div>`
+  );
+}
+
+/**
+ * The Drafts section at the top of the Messages view: how many drafts are waiting, one row each, and
+ * an empty line when there are none. A <details> so a phone can fold it away and give the whole
+ * screen back to the thread (the client folds it when a row opens a thread). Ids are stable —
+ * `#msg-drafts` is the section, `#msg-drafts-count` the count line and `#msg-drafts-list` the rows —
+ * because the live stream's client redraws exactly those.
+ */
+function renderDraftsSection(drafts, lang) {
+  const list = Array.isArray(drafts) ? drafts : [];
+  const rows = list.map((draft) => draftRow(draft, lang)).join("");
+  return (
+    `<details class="msg-drafts" id="msg-drafts" data-count="${list.length}"${list.length ? " open" : ""}>` +
+    `<summary class="msg-drafts-head"><span id="msg-drafts-count">${escapeHtml(fill(t("messages.draft.draftsHeading", lang), { n: list.length }))}</span></summary>` +
+    `<div class="msg-drafts-list" id="msg-drafts-list">` +
+    (list.length
+      ? rows
+      : `<div class="msg-drafts-empty" id="msg-drafts-empty">${escapeHtml(t("messages.draft.draftsEmpty", lang))}</div>`) +
+    `</div>` +
+    `</details>`
+  );
+}
+
+/**
+ * The Discard confirmation. One dialog for both places a draft can be discarded from (its list row
+ * and the thread's composer): the client fills it in, shows it and puts focus back where it came
+ * from when it closes, Escape included. Markup only — no draft text is ever inside it.
+ */
+function draftConfirmDialog(lang) {
+  return (
+    `<div class="msg-draft-confirm" id="msg-draft-confirm" hidden>` +
+    `<div class="msg-draft-confirm-card" role="dialog" aria-modal="true" aria-labelledby="msg-draft-confirm-text">` +
+    `<p class="msg-draft-confirm-text" id="msg-draft-confirm-text">${escapeHtml(t("messages.draft.discardConfirm", lang))}</p>` +
+    `<div class="msg-draft-confirm-actions">` +
+    `<button type="button" class="msg-btn-secondary msg-draft-confirm-cancel" id="msg-draft-confirm-cancel">${escapeHtml(t("common.cancel", lang))}</button>` +
+    `<button type="button" class="msg-btn-primary msg-draft-confirm-yes" id="msg-draft-confirm-yes">${escapeHtml(t("messages.draft.discard", lang))}</button>` +
+    `</div></div></div>`
+  );
+}
+
 /**
  * Build the full messages panel HTML.
  */
 export function buildMessagesHTML(data) {
   const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, csrf, inviteShare, personInvite, shortCodeShare } = data;
+  const drafts = Array.isArray(data.drafts) ? data.drafts : [];
+  // WHOSE DRAFTS THESE ARE. A draft holds the words somebody was about to send and who they were
+  // for, and the drafts API answers only this machine's own password session
+  // (isLocalPasswordSessionOn). The server render must refuse exactly what the API refuses, or a
+  // peer's single-sign-on session would read the text (and the previews) here while being told 403
+  // there. The panel passes `draftsOwner` from that same rule; anything else — including a caller
+  // that forgets it — gets no section, no rows and no data block. Fail closed.
+  const draftsOwner = data.draftsOwner === true;
 
   const peerForms = renderPeerInviteForms({ lang, csrf: csrf || "" });
   const shortCodeForms = renderShortCodeForms({ lang, csrf: csrf || "" });
@@ -184,9 +272,20 @@ export function buildMessagesHTML(data) {
   }
 
   const noChatsLabel = escapeHtml(t("messages.noChats", lang));
+  // The Drafts section's client-side source of truth. The rows are the DISPLAY rows
+  // (servers/gateway/messages/drafts-rows.js): `kind`, `label`, `body`, `preview`, `botName`,
+  // `version`, `updatedAt`, `conversationId`. The server render above and the drafts API's list
+  // (`GET /dashboard/messages/api/drafts`, which the client re-reads on every live frame) answer the
+  // SAME shape, because the live redraw feeds that answer straight into the row builder — a row
+  // without `kind` or `label` would draw blank and a room draft's row would open a contact thread.
+  // Nothing about a draft's text rides in a data attribute or an onclick: the body is here, in this
+  // JSON block, and is only ever set with textContent.
+  const draftsJson = JSON.stringify(drafts).replace(/</g, "\\u003c");
 
   return botInviteCard + personInviteCard + requestsBlock + browseEntry + `
-    <div class="msg-hub" style="position:relative">
+    <div class="msg-shell">
+      ${draftsOwner ? renderDraftsSection(drafts, lang) : ""}
+      <div class="msg-hub" style="position:relative">
       ${inviteBanner}
       ${botDirModal}
       <!-- Live peer-badge updates via Turbo Stream (Phase C.3). The
@@ -291,6 +390,7 @@ export function buildMessagesHTML(data) {
         <div id="msg-info-details"></div>
         <div class="msg-info-actions" id="msg-info-actions"></div>
       </div>
+      </div>
     </div>
 
     <input type="file" id="msg-file-input" style="display:none" multiple accept="image/*,application/pdf,audio/*,video/*,text/*,application/json,application/zip">
@@ -298,5 +398,8 @@ export function buildMessagesHTML(data) {
     <!-- Contact roster (people + bots) for the room "add member" picker. Same
          normalized source as the New Group dialog; read client-side, no extra fetch. -->
     <script id="msg-contacts-data" type="application/json">${JSON.stringify(contactsForPicker || []).replace(/</g, "\\u003c")}</script>
+    ${draftsOwner ? `<!-- Open drafts (the Drafts section's rows), for the panel's live redraw. -->
+    <script id="msg-drafts-data" type="application/json">${draftsJson}</script>
+    ${draftConfirmDialog(lang)}` : ""}
   `;
 }

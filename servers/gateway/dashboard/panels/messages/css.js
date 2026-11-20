@@ -841,5 +841,262 @@ export function messagesCSS() {
   .msg-room-chip { display: inline-flex; align-items: center; gap: 3px; background: var(--crow-bg-surface, #222); border-radius: 10px; padding: 1px 8px; font-size: 0.75rem; }
   .msg-room-hint, .msg-room-mode { font-size: 0.75rem; opacity: 0.7; margin-top: 6px; }
   .msg-bubble-sender { font-size: 0.7rem; opacity: 0.7; margin-bottom: 2px; }
+
+  /* === Saved drafts (bot-door plan, PR A part 2) ===
+     The Drafts section sits above the hub: a foldable list of the messages waiting to be sent, one
+     row each (recipient, a one-line preview, the bot chip, when it last changed) plus Send and
+     Discard, so a draft can be finished without opening its thread. Every control here is a 44 px
+     target and every row wraps instead of overflowing — the list is read at 390 px as often as on a
+     desktop. */
+  .msg-shell {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 140px);
+    min-height: 480px;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+  .msg-shell .msg-hub {
+    height: auto;
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+
+  .msg-drafts {
+    flex: 0 0 auto;
+    max-height: 34%;
+    overflow-y: auto;
+    margin-bottom: 8px;
+    border: 1px solid var(--crow-border);
+    border-radius: 10px;
+    background: var(--crow-bg-surface, #ffffff);
+  }
+  .msg-drafts-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 12px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--crow-text-primary);
+    list-style-position: inside;
+  }
+  .msg-drafts-head:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: -2px;
+  }
+  .msg-drafts-list { display: flex; flex-direction: column; }
+  .msg-drafts-empty {
+    padding: 4px 12px 12px;
+    font-size: 0.82rem;
+    color: var(--crow-text-muted);
+  }
+  .msg-drafts-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px 8px;
+    padding: 4px 12px 8px;
+    border-top: 1px solid var(--crow-border);
+  }
+  .msg-drafts-open {
+    flex: 1 1 200px;
+    min-width: 0;
+    min-height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 6px 0;
+    background: none;
+    border: none;
+    color: var(--crow-text-primary);
+    font-family: var(--crow-body-font);
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  .msg-drafts-open:hover .msg-drafts-name { color: var(--crow-accent); }
+  .msg-drafts-open:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
+  .msg-drafts-row-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+    width: 100%;
+  }
+  .msg-drafts-name { font-weight: 600; overflow-wrap: anywhere; }
+  .msg-drafts-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--crow-text-muted);
+  }
+  .msg-drafts-preview {
+    display: block;
+    max-width: 100%;
+    font-size: 0.78rem;
+    color: var(--crow-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .msg-drafts-by {
+    display: inline-block;
+    font-size: 0.7rem;
+    color: var(--crow-accent);
+    background: var(--crow-accent-muted, #dcecea);
+    border-radius: var(--crow-radius-pill, 999px);
+    padding: 1px 8px;
+  }
+  .msg-drafts-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .msg-draft-send,
+  .msg-draft-discard {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 14px;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-family: var(--crow-body-font);
+    cursor: pointer;
+  }
+  .msg-draft-send {
+    border: none;
+    background: var(--crow-accent);
+    color: var(--crow-accent-contrast);
+  }
+  .msg-draft-send:hover { filter: brightness(1.08); }
+  .msg-draft-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .msg-draft-discard {
+    border: 1px solid var(--crow-border);
+    background: transparent;
+    color: var(--crow-text-secondary);
+  }
+  .msg-draft-discard:hover {
+    border-color: var(--crow-error, #b04a2b);
+    color: var(--crow-error, #b04a2b);
+  }
+
+  /* The thread's draft bar: the bot banner, Saving…/Saved, Discard, and the "changed elsewhere"
+     line. It sits directly above the composer, inside .msg-chat, so it belongs to the open thread. */
+  .msg-draft-bar {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--crow-border);
+    background: color-mix(in srgb, var(--crow-accent) 5%, var(--crow-bg-surface));
+    flex-shrink: 0;
+  }
+  .msg-draft-bar.visible { display: flex; }
+  .msg-draft-banner {
+    display: none;
+    font-size: 0.78rem;
+    color: var(--crow-accent);
+  }
+  .msg-draft-banner.visible { display: block; }
+  .msg-draft-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .msg-draft-status {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.75rem;
+    color: var(--crow-text-muted);
+    overflow-wrap: anywhere;
+  }
+  .msg-draft-status.saved { color: var(--crow-success, #1d7048); }
+  .msg-draft-status.error { color: var(--crow-error, #b04a2b); }
+  .msg-draft-bar-discard {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--crow-border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--crow-text-secondary);
+    font-size: 0.8rem;
+    font-family: var(--crow-body-font);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .msg-draft-bar-discard:hover {
+    border-color: var(--crow-error, #b04a2b);
+    color: var(--crow-error, #b04a2b);
+  }
+  .msg-draft-changed {
+    display: none;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.78rem;
+    color: var(--crow-warning, #8f5606);
+  }
+  .msg-draft-changed.visible { display: flex; }
+  .msg-draft-reload {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--crow-warning, #8f5606);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--crow-warning, #8f5606);
+    font-size: 0.8rem;
+    font-family: var(--crow-body-font);
+    cursor: pointer;
+  }
+
+  /* The Discard confirmation: one dialog for the list row and the composer. */
+  .msg-draft-confirm {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .msg-draft-confirm[hidden] { display: none; }
+  .msg-draft-confirm-card {
+    width: min(420px, 100%);
+    background: var(--crow-bg-elevated, #f5f7f8);
+    border: 1px solid var(--crow-border);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .msg-draft-confirm-text {
+    margin: 0 0 12px;
+    font-size: 0.9rem;
+    color: var(--crow-text-primary);
+  }
+  .msg-draft-confirm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .msg-draft-confirm-actions .msg-btn-primary,
+  .msg-draft-confirm-actions .msg-btn-secondary {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 16px;
+  }
+
+  @media (max-width: 768px) {
+    .msg-shell { height: 100%; min-height: 0; }
+    .msg-drafts { max-height: 42%; }
+    .msg-drafts-open { flex-basis: 100%; }
+  }
 </style>`;
 }
