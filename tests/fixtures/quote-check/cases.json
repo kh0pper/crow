@@ -1,0 +1,1019 @@
+[
+  {
+    "name": "exact-quote",
+    "answer": "The rule says \"the board must publish a draft plan before the first public hearing\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "The board must publish a draft plan before the first public hearing.\nThe plan must stay open for comment for ten days.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the board must publish a draft plan before the first public hearing",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "The board must publish a draft plan before the first public hearing"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "exact-curly-quotes-and-em-dash",
+    "answer": "The memo states “the pilot — which ran for two terms — wasn’t renewed without review”.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Pilot note: the pilot - which ran for two terms - wasn't renewed without review.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the pilot — which ran for two terms — wasn’t renewed without review",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "the pilot - which ran for two terms - wasn't renewed without review"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "quote-across-source-lines",
+    "answer": "The rule says \"the board must approve every grant award before the close of each quarter\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Intro line.\nThe board must approve every grant award\nbefore the close of each quarter.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the board must approve every grant award before the close of each quarter",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 2,
+          "best_match": "The board must approve every grant award before the close of each quarter"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "hyphenated-line-break-in-source",
+    "answer": "The policy states \"the board adopted an enrollment review policy for every child in the district\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "The board adopted an enroll-\nment review policy for every child in the district.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the board adopted an enrollment review policy for every child in the district",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "The board adopted an enroll- ment review policy for every child in the district"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "near-quote-093-verified",
+    "answer": "The draft says \"the office must publish each draft rule before the council votes and keep a list\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "The office must post each draft rule before the council votes and keep a list.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the office must publish each draft rule before the council votes and keep a list",
+          "status": "verified",
+          "score": 0.9333,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "The office must post each draft rule before the council votes and keep a list",
+          "note": "Q (15 tokens) = [the, office, must, publish, each, draft, rule, before, the, council, votes, and, keep, a, list]. Best window is length 15 at start 0 = [the, office, must, post, each, draft, rule, before, the, council, votes, and, keep, a, list]. d = 1 (publish -> post). similarity = 1 - 1/max(15,15) = 14/15 = 0.9333, above the 0.90 threshold."
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "near-quote-080-not-found",
+    "answer": "Another memo says \"the bureau must print each draft rule after the council votes and keep a list\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "The office must post each draft rule before the council votes and keep a list.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the bureau must print each draft rule after the council votes and keep a list",
+          "status": "not_found",
+          "score": 0.8,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "The office must post each draft rule before the council votes and keep a list",
+          "note": "Q (15 tokens) = [the, bureau, must, print, each, draft, rule, after, the, council, votes, and, keep, a, list]. Best window is length 15 at start 0 = [the, office, must, post, each, draft, rule, before, the, council, votes, and, keep, a, list]. d = 3 (office -> bureau, post -> print, before -> after). similarity = 1 - 3/max(15,15) = 12/15 = 0.8, below the 0.90 threshold. Shorter windows do worse: length 14 gives d = 4 -> 0.7333, length 13 gives d = 5 -> 0.6667, length 12 gives d = 6 -> 0.6."
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 0,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "quote-in-second-source",
+    "answer": "The report says \"the panel will review each application within thirty days of receipt\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Unrelated notes about the eastern span.\n"
+      },
+      {
+        "id": "s2",
+        "text": "The panel will review each application within thirty days of receipt.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the panel will review each application within thirty days of receipt",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s2",
+          "page": 1,
+          "line": 1,
+          "best_match": "The panel will review each application within thirty days of receipt"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "quote-on-second-page",
+    "answer": "The notes say \"the committee approved the revised budget for the winter term\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Day one notes about the intake queue.\fDay two notes: the committee approved the revised budget for the winter term.\fDay three notes about staffing.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the committee approved the revised budget for the winter term",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 2,
+          "line": 1,
+          "best_match": "the committee approved the revised budget for the winter term"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "quote-line-number",
+    "answer": "It reads \"the clerk recorded that the hearing closed at noon on the ninth\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "First line of the summary.\nSecond line of the summary.\nThe clerk recorded that the hearing closed at noon on the ninth.\nFourth line.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the clerk recorded that the hearing closed at noon on the ninth",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 3,
+          "best_match": "The clerk recorded that the hearing closed at noon on the ninth"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "short-quote-ignored",
+    "answer": "As they said, \"short notes only\", and that is all.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Short notes only, nothing more.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "duplicate-quote-listed-once",
+    "answer": "The memo says \"the agency must publish the grant list every quarter\" and again \"the agency must publish the grant list every quarter\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "The agency must publish the grant list every quarter.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the agency must publish the grant list every quarter",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "The agency must publish the grant list every quarter"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "blockquote-line",
+    "answer": "Intro paragraph.\n\n> the review board must post every decision within five business days\n\nClosing words.\n",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Policy note: the review board must post every decision within five business days.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the review board must post every decision within five business days",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "the review board must post every decision within five business days"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "statute-citations-verified",
+    "answer": "Under Section 722(g)(3)(A)(i)(II) and 42 U.S.C. 11432(g) and 42 USC § 11434a and TEC §37.005(b) and section 1112(b)(6), the agency acts.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Section 722(g)(3)(A)(i)(II) applies. See 42 U.S.C. 11432(g) and 42 USC § 11434a. Also TEC §37.005(b) and section 1112(b)(6).\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 722(g)(3)(A)(i)(II)",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "42 U.S.C. 11432(g)",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "42 USC § 11434a",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "TEC §37.005(b)",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "section 1112(b)(6)",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 5,
+        "citations_verified": 5,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "statute-citation-not-found",
+    "answer": "The rule at Section 909(b)(2) does not appear here.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "General notes without that provision.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 909(b)(2)",
+          "kind": "statute",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "regulation-citations-verified",
+    "answer": "See 2 C.F.R. § 200.405 and 34 CFR 99.31 for the details.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Rules: 2 C.F.R. § 200.405. Also 34 CFR 99.31.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "2 C.F.R. § 200.405",
+          "kind": "regulation",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "34 CFR 99.31",
+          "kind": "regulation",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 2,
+        "citations_verified": 2,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "regulation-citation-not-found",
+    "answer": "See 9 C.F.R. § 555.777 for the rule.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Rules about other things entirely.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "9 C.F.R. § 555.777",
+          "kind": "regulation",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "section-citations-verified",
+    "answer": "The manual at Section 3.3.8 and § 3.3.8 and SAAH 3.3.8 all agree.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Manual: Section 3.3.8; § 3.3.8; SAAH 3.3.8.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 3.3.8",
+          "kind": "section",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "§ 3.3.8",
+          "kind": "section",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "SAAH 3.3.8",
+          "kind": "section",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 3,
+        "citations_verified": 3,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "section-citation-not-found",
+    "answer": "See Section 9.9.9 for the answer.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Nothing relevant here.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 9.9.9",
+          "kind": "section",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "section-heading-without-the-word-section",
+    "answer": "The handbook heading Section 4.2.7 and also § 4.2.7 point to enrollment.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "4.2.7 Enrollment\nThe intake desk opens at nine.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 4.2.7",
+          "kind": "section",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "§ 4.2.7",
+          "kind": "section",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 2,
+        "citations_verified": 2,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "section-short-label-not-inside-longer-label",
+    "answer": "See Section 4.2 for the rule.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "4.2.7 Enrollment\nThe intake desk opens at nine.\n"
+      }
+    ],
+    "opts": {
+      "patterns": [
+        {
+          "kind": "section",
+          "regex": "\\bsections?\\s+\\d+(?:\\.\\d+)+",
+          "flags": "i"
+        }
+      ]
+    },
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 4.2",
+          "kind": "section",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "section-label-not-a-suffix-of-a-longer-number",
+    "answer": "See Section 4.2.7 for the rule.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "14.2.7 Enrollment\nThe intake desk opens at nine.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 4.2.7",
+          "kind": "section",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "question-citations-verified",
+    "answer": "Answer to question K-8 and also Q J-5 and Q.13.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Question K-8: allowed. Q J-5 was withdrawn. Q.13 remains open.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "question K-8",
+          "kind": "question",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "Q J-5",
+          "kind": "question",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "Q.13",
+          "kind": "question",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 3,
+        "citations_verified": 3,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "question-label-absent",
+    "answer": "Answer to question K-8 only.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Question M-4 covers the intake rule.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "question K-8",
+          "kind": "question",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "page-citations-verified",
+    "answer": "See p. 2 and pp. 1-2 in the handout.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Cover note refers to p. 2.\fCross-reference pp. 1-2 on the second page.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "p. 2",
+          "kind": "page",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "pp. 1-2",
+          "kind": "page",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 2,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 2,
+        "citations_verified": 2,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "page-citation-beyond-count",
+    "answer": "See page 9 for the appendix.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Cover note refers to p. 2.\fCross-reference pp. 1-2 on the second page.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "page 9",
+          "kind": "page",
+          "status": "not_found",
+          "source_id": null,
+          "page": null,
+          "line": null
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 1,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "citation-overlap-rule",
+    "answer": "See Section 3.3.8(a)(b) and TEC § 3.3.8.",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Section 3.3.8(a)(b) applies; TEC § 3.3.8 too.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [],
+      "citations": [
+        {
+          "text": "Section 3.3.8(a)(b)",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        },
+        {
+          "text": "TEC § 3.3.8",
+          "kind": "statute",
+          "status": "verified",
+          "source_id": "s1",
+          "page": 1,
+          "line": 1
+        }
+      ],
+      "summary": {
+        "quotes_total": 0,
+        "quotes_verified": 0,
+        "citations_total": 2,
+        "citations_verified": 2,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "double-section-sign",
+    "answer": "The rule says \"the code sections §§ 5.101 through 5.109 apply to every filing\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Note: the code sections § 5.101 through 5.109 apply to every filing.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the code sections §§ 5.101 through 5.109 apply to every filing",
+          "status": "verified",
+          "score": 1.0,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "the code sections § 5.101 through 5.109 apply to every filing"
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 1,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 0
+      }
+    }
+  },
+  {
+    "name": "quote-without-token-overlap",
+    "answer": "The memo claims \"the zoo keeper fed every otter before the evening count\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "Unrelated note about bridge paint.\n"
+      }
+    ],
+    "opts": {},
+    "expect": {
+      "quotes": [
+        {
+          "text": "the zoo keeper fed every otter before the evening count",
+          "status": "not_found",
+          "score": 0.0,
+          "source_id": null,
+          "page": null,
+          "line": null,
+          "best_match": null
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 0,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  },
+  {
+    "name": "near-quote-093-threshold-raised",
+    "answer": "The draft says \"the office must publish each draft rule before the council votes and keep a list\".",
+    "sources": [
+      {
+        "id": "s1",
+        "text": "The office must post each draft rule before the council votes and keep a list.\n"
+      }
+    ],
+    "opts": {
+      "threshold": 0.95
+    },
+    "expect": {
+      "quotes": [
+        {
+          "text": "the office must publish each draft rule before the council votes and keep a list",
+          "status": "not_found",
+          "score": 0.9333,
+          "source_id": "s1",
+          "page": 1,
+          "line": 1,
+          "best_match": "The office must post each draft rule before the council votes and keep a list",
+          "note": "Same tokens as near-quote-093-verified: Q (15 tokens) = [the, office, must, publish, each, draft, rule, before, the, council, votes, and, keep, a, list], best window length 15 at start 0 = [the, office, must, post, each, draft, rule, before, the, council, votes, and, keep, a, list], d = 1 (publish -> post), similarity = 1 - 1/max(15,15) = 0.9333. With threshold 0.95 that score is below the bar."
+        }
+      ],
+      "citations": [],
+      "summary": {
+        "quotes_total": 1,
+        "quotes_verified": 0,
+        "citations_total": 0,
+        "citations_verified": 0,
+        "not_found": 1
+      }
+    }
+  }
+]

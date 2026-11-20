@@ -1,0 +1,62 @@
+[
+  {
+    "kind": "statute",
+    "regex": "\\bsections?\\s+\\d+(?:\\.\\d+)*(?:\\([a-z0-9]+\\))+",
+    "flags": "i"
+  },
+  {
+    "kind": "statute",
+    "regex": "\\b\\d+\\s+u\\.?\\s?s\\.?\\s?c\\.?\\s*(?:§\\s*)?\\d+[a-z0-9]*(?:\\([a-z0-9]+\\))*",
+    "flags": "i"
+  },
+  {
+    "kind": "statute",
+    "regex": "\\btec\\s*§+\\s*\\d+(?:\\.\\d+)*(?:\\([a-z0-9]+\\))*",
+    "flags": "i"
+  },
+  {
+    "kind": "regulation",
+    "regex": "\\b\\d+\\s+c\\.?\\s?f\\.?\\s?r\\.?\\s*(?:§\\s*)?\\d+(?:\\.\\d+)+(?:\\([a-z0-9]+\\))*",
+    "flags": "i"
+  },
+  {
+    "kind": "section",
+    "regex": "\\bsections?\\s+\\d+(?:\\.\\d+){2,}(?:\\([a-z0-9]+\\))*",
+    "flags": "i"
+  },
+  {
+    "kind": "section",
+    "regex": "§\\s*\\d+(?:\\.\\d+){2,}",
+    "flags": ""
+  },
+  {
+    "kind": "section",
+    "regex": "\\b[A-Z][A-Z0-9]{1,5}\\s+\\d+(?:\\.\\d+){2,}",
+    "flags": ""
+  },
+  {
+    "kind": "question",
+    "regex": "\\bquestion\\s+[a-z0-9]+-[a-z0-9]+",
+    "flags": "i"
+  },
+  {
+    "kind": "question",
+    "regex": "\\bq\\.?\\s*[a-z]+-[a-z0-9]+",
+    "flags": "i"
+  },
+  {
+    "kind": "question",
+    "regex": "\\bq\\.\\s*\\d+(?:\\.\\d+)*",
+    "flags": "i"
+  },
+  {
+    "kind": "page",
+    "regex": "\\bpp?\\.\\s*\\d+(?:\\s*[-–—]\\s*\\d+)?",
+    "flags": "i"
+  },
+  {
+    "kind": "page",
+    "regex": "\\bpages?\\s+\\d+(?:\\s*[-–—]\\s*\\d+)?",
+    "flags": "i"
+  }
+]
