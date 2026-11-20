@@ -1,0 +1,98 @@
+#!/bin/sh
+# Crow — turn HTTP/2 OFF in Frigate's bundled nginx. Unconditionally, at every start.
+#
+# Why: CVE-2026-123007 and CVE-2026-123633 are only exploitable while HTTP/2 is on.
+# Frigate's image ships `http2 on;` in a STATIC /usr/local/nginx/conf/nginx.conf —
+# there is no config or environment switch for it — so its plain-HTTP listener (8971)
+# accepts cleartext HTTP/2 from any process on this machine. Frigate does not need
+# HTTP/2 (the UI is proxied through Crow over HTTP/1.1), so it goes off for every
+# install. There is deliberately NO version check and NO opt-out: the switch exists
+# to be removed, and a later bundle version removes this hook on purpose.
+#
+# How it runs: this file is bind-mounted READ-ONLY at /etc/cont-init.d/10-crow-http2-off
+# by the bundle's docker-compose.yml. s6-overlay 3.x runs every legacy cont-init hook
+# to completion before it starts any service, so this lands before nginx.
+#
+# What it rewrites, in place, in nginx.conf and every other *.conf beside it:
+#   http2 on;                 ->  http2 off;
+#   listen 8971 http2;        ->  listen 8971;
+#   listen 443 ssl http2;     ->  listen 443 ssl;
+#   listen 443 ssl http2 x;   ->  listen 443 ssl x;
+# Every other line is passed through byte for byte, and a second run changes nothing
+# ("already off"). It never fails the container: a problem is one warning line on
+# stderr and exit 0 — an NVR that will not start is worse than the thing it guards.
+#
+# CROW_NGINX_CONF_DIR overrides the directory for tests only; production always uses
+# the image's own path.
+#
+# POSIX sh only: the image is Alpine-based (busybox sh, sed, cmp, chmod).
+
+CONF_DIR="${CROW_NGINX_CONF_DIR:-/usr/local/nginx/conf}"
+CVE="CVE-2026-123007, CVE-2026-123633"
+
+warn() {
+    printf '[crow] warning: %s\n' "$1" >&2
+}
+
+# Rewrite one file. Returns 0 = changed, 1 = already clean, 2 = could not rewrite.
+# The replacement rules are anchored on the line's first token (`http2`, `listen`), so
+# nothing else in the file can match; the listen rules are pinned by the literal
+# `http2` parameter, so which whitespace separates the other parameters is irrelevant.
+rewrite_conf() {
+    file="$1"
+    tmp="${file}.crow-http2.$$"
+
+    if ! sed \
+        -e 's/^\([[:space:]]*\)http2[[:space:]][[:space:]]*on[[:space:]]*;/\1http2 off;/' \
+        -e 's/^\([[:space:]]*listen[[:space:]][^;]*[^[:space:];]\)[[:space:]][[:space:]]*http2[[:space:]]*;/\1;/' \
+        -e 's/^\([[:space:]]*listen[[:space:]]\)http2[[:space:]][[:space:]]*\([^;]*;\)/\1\2/' \
+        -e 's/^\([[:space:]]*listen[[:space:]][^;]*[^[:space:];]\)[[:space:]][[:space:]]*http2[[:space:]][[:space:]]*\([^;]*;\)/\1 \2/' \
+        "$file" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 2
+    fi
+
+    cmp -s "$tmp" "$file"
+    if [ $? -eq 0 ]; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    # Renamed into place, never truncated in place: a half-written nginx.conf would
+    # take Frigate's UI down. 0644 matches what the image ships (root reads it).
+    chmod 0644 "$tmp" 2>/dev/null || :
+    if ! mv "$tmp" "$file" 2>/dev/null; then
+        rm -f "$tmp"
+        return 2
+    fi
+    return 0
+}
+
+if [ ! -d "$CONF_DIR" ]; then
+    warn "no nginx config directory at $CONF_DIR — nothing to turn off here"
+    exit 0
+fi
+
+changed=""
+failed=""
+for file in "$CONF_DIR"/*.conf; do
+    [ -f "$file" ] || continue
+    rewrite_conf "$file"
+    case $? in
+        0) changed="$changed $file" ;;
+        2) failed="$failed $file" ;;
+    esac
+done
+
+if [ -n "$failed" ]; then
+    warn "could not rewrite${failed} — HTTP/2 is still on in them"
+fi
+
+if [ -n "$changed" ]; then
+    printf '[crow] nginx HTTP/2 disabled (%s)\n' "$CVE"
+else
+    printf '[crow] nginx HTTP/2 already off (%s)\n' "$CVE"
+fi
+
+# Never fail the container start, whatever happened above.
+exit 0

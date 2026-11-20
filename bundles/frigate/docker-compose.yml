@@ -19,6 +19,11 @@ services:
       - ${FRIGATE_CONFIG_PATH:-frigate-config}:/config
       - ${FRIGATE_MEDIA_PATH:-frigate-media}:/media/frigate
       - /etc/localtime:/etc/localtime:ro
+      # HTTP/2 off (CVE-2026-123007, CVE-2026-123633): Frigate's image ships `http2 on;`
+      # in a static nginx.conf, so its plain-HTTP listener accepts cleartext HTTP/2. This
+      # s6-overlay legacy cont-init hook (from this bundle's own folder, read-only) rewrites
+      # that before nginx starts. Frigate needs no HTTP/2; a later version removes the hook.
+      - ./cont-init/10-crow-http2-off:/etc/cont-init.d/10-crow-http2-off:ro
     environment:
       - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD:-}
     shm_size: "512mb"

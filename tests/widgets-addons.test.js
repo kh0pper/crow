@@ -624,11 +624,31 @@ test("the grid: an add-on's cell is drawn hidden, and the picker lists its liter
 
 const FRIGATE = await import("../bundles/frigate/widgets/cameras.js");
 
+/** `v` is at least `floor`, compared part by part as numbers (so 1.3.10 is above 1.3.9). */
+function versionAtLeast(v, floor) {
+  const a = String(v).split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const b = String(floor).split(".").map((n) => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
 test("frigate: the manifest declares the widget, and the contract accepts it", () => {
   const manifest = JSON.parse(readFileSync(join(REPO, "bundles", "frigate", "manifest.json"), "utf8"));
   const r = validateManifest(manifest, join(REPO, "bundles", "frigate"));
   assert.equal(r.ok, true, r.errors.join("; "));
-  assert.equal(manifest.version, "1.3.1");
+  // Not a literal pin: the version must be the registry's (the two ship in step), and no lower
+  // than 1.3.1, which is the bundle version that introduced the widget asserted below. A plain
+  // bump like this PR's therefore needs no change here; a version that went backwards still fails.
+  const registry = JSON.parse(readFileSync(join(REPO, "registry", "add-ons.json"), "utf8"));
+  const entry = registry["add-ons"].find((a) => a && a.id === "frigate");
+  assert.ok(entry, "the registry publishes frigate");
+  assert.equal(manifest.version, entry.version, "the manifest version is the registry's version");
+  assert.ok(versionAtLeast(manifest.version, "1.3.1"),
+    `${manifest.version} is at least 1.3.1, the version that introduced the widget`);
   assert.deepEqual(manifest.widgets, [
     { id: "cameras", title: { en: "Cameras", es: "Cámaras" }, sizes: [[2, 2], [4, 2]] },
   ], "the cameras widget, in both languages, two sizes");
