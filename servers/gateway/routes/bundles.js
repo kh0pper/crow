@@ -45,7 +45,7 @@ import { join, dirname, resolve as resolvePath, relative as relativePath, isAbso
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
-import { checkGpuArchCompatible } from "../gpu-arch.js";
+import { checkGpuArchCompatible, ensureGpuProbed } from "../gpu-arch.js";
 import { forwardBundleAction } from "../../shared/peer-forward.js";
 import { auditCrossHostCall, crossHostVerifyMiddleware } from "../../shared/cross-host-auth.js";
 import { getOrCreateLocalInstanceId, getInstance } from "../instance-registry.js";
@@ -3691,6 +3691,8 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
   // GPU arch gate — refuse install if the bundle's required GPU architecture
   // family doesn't match what the host actually has (e.g. CUDA-only bundle on
   // an AMD ROCm box). No force_install bypass: the install would crash anyway.
+  // The probe is async and bounded, so await it here rather than on a render path.
+  await ensureGpuProbed();
   {
     const gpuCheck = checkGpuArchCompatible(manifest);
     if (!gpuCheck.ok) {
@@ -5329,6 +5331,12 @@ export default function bundlesRouter() {
 
     const v = validateCollectionServerSide(collection);
     if (!v.ok) return res.status(400).json({ error: v.error });
+
+    // planInstallSet is sync, so the GPU probe is awaited here — otherwise a
+    // cold cache would plan every GPU-gated member as incompatible. It runs
+    // BEFORE the busy check: the probe can take up to its 5s deadline, and a
+    // second install starting during that await would race this set.
+    await ensureGpuProbed();
 
     // Refuse to start while ANY install/uninstall job is running: a single install
     // finishing mid-set fires its own immediate restart and would kill this runner.

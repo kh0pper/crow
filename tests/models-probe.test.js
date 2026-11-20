@@ -993,3 +993,23 @@ test("F2 catalog fit: a unified probe that is not GTT-expanded never gets the VR
   // judged on RAM alone — 8000 MB, far below the quant's floor.
   assert.equal(fitBadge(probe, quant), "wont_fit");
 });
+
+// Round 2 (review): the execFile callback only fires once the child has CLOSED,
+// so a child wedged in uninterruptible sleep never calls it. Without the hard
+// deadline in run() this test would hang instead of failing.
+test("probeHardware: an execFile whose callback never fires still settles (cpu, no throw)", { timeout: 30000 }, async () => {
+  // Every probe call pays its own 5s deadline; probeHardware runs up to three
+  // of them sequentially (vulkaninfo -> nvidia-smi -> rocminfo).
+  const execFile = () => {}; // deliberately ignores its callback
+  const fs = fakeFs({ readFiles: { "/proc/meminfo": MEMINFO_HUGE_SWAP } });
+
+  const started = Date.now();
+  const probe = await probeHardware({ execFile, fs, platform: "linux", release: "6.8.0-generic" });
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 20000, `settled after ${elapsed}ms`);
+  assert.equal(probe.accel, "cpu");
+  assert.equal(probe.gpuName, null);
+  assert.equal(probe.vramMb, null);
+  assert.ok(probe.unknown.includes("gpu"));
+});

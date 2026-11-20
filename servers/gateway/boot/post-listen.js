@@ -427,6 +427,11 @@ function sendAddonWallChangeNote(diff) {
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
+  // Warm the GPU arch/VRAM cache in the background: the dashboard and the
+  // install gates read it synchronously, and the probe is bounded and async so
+  // it can never hold this callback (or the event loop) up.
+  import("../gpu-arch.js").then((m) => m.probeGpuHost()).catch(() => {});
+
   // Boot hardening (audit N1c-18): this instance's home, its data dir and
   // crow.db (+ the WAL/SHM SQLite keeps beside it) must be owner-only — they
   // hold the bundle .env secrets, the keychain key, peer tokens and every

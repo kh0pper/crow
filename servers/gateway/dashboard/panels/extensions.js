@@ -165,6 +165,10 @@ export default {
       addonWallStatusHtml = renderAddonWallStatus({ lang, entries: wallEntries });
     } catch { /* no line rather than no page */ }
 
+    // The GPU probe is async and bounded; settle it before the pure, sync page
+    // builder reads the arch/VRAM cache. Never fails the page.
+    try { await (await import("../../gpu-arch.js")).ensureGpuProbed(); } catch { /* provisional host tags */ }
+
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
       installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, legacyAccounts, dockerOk, keychainPending, vaultSecure, localModels, lang,
       firstAdminPending,

@@ -85,17 +85,36 @@ export const DARWIN_DEFAULT_WORKING_SET_DEN = 3;
 // execFile helper — always resolves (never throws/rejects); a command that
 // errors or is missing resolves to null so callers can treat every
 // detection path uniformly as "did this signal come back or not".
+//
+// The callback form of execFile only fires once the child has CLOSED, so a
+// child wedged in uninterruptible sleep (a stuck GPU driver) never calls it and
+// the promise would hang forever. `timeout` alone cannot help: it asks the
+// child to go away, which a D-state process cannot do. The race against a hard
+// deadline is what makes this bounded — the timer resolves null and the hung
+// callback is ignored (the promise settles once).
 // ---------------------------------------------------------------------------
+
+const PROBE_DEADLINE_MS = 5000;
 
 function run(execFile, cmd, args) {
   return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      resolve(value);
+    };
+    timer = setTimeout(() => finish(null), PROBE_DEADLINE_MS);
     try {
-      execFile(cmd, args, { encoding: "utf8", timeout: 5000 }, (err, stdout) => {
-        if (err) resolve(null);
-        else resolve(typeof stdout === "string" ? stdout : String(stdout ?? ""));
+      execFile(cmd, args, { encoding: "utf8", timeout: PROBE_DEADLINE_MS }, (err, stdout) => {
+        if (err) finish(null);
+        else finish(typeof stdout === "string" ? stdout : String(stdout ?? ""));
       });
     } catch {
-      resolve(null);
+      finish(null);
     }
   });
 }

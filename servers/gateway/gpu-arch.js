@@ -3,8 +3,11 @@
  *
  * Bundles can declare `requires.gpu_arch` as an array of accepted arch tags.
  * A host's actual arch is detected once at gateway start (cached) by probing
- * `rocminfo` and `nvidia-smi`. Each manifest tag is matched against the host
- * tags via a small alias table that lets bundles target either a specific
+ * `rocminfo`, `nvidia-smi` and (on darwin) `system_profiler`. Every probe is
+ * asynchronous and bounded (`runBoundedProbe`): a wedged GPU driver can leave
+ * its child unkillable, so no code path here spawns a child synchronously or
+ * waits on one past its deadline. Each manifest tag is matched against the
+ * host tags via a small alias table that lets bundles target either a specific
  * arch (e.g. `gfx1151`) or a family (e.g. `rocm`, `cuda`, `metal`, `cpu`).
  *
  * Manifest examples:
@@ -22,8 +25,8 @@
  *   - `cpu` always matches (every host has a CPU).
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
+import { runBoundedProbe } from "../shared/bounded-probe.js";
 
 /**
  * Resolve a binary by trying PATH first, then a list of common absolute paths.
@@ -130,102 +133,229 @@ export function parseNvidiaSmiVramGb(text) {
   return Math.round(maxMib / 1024); // MiB -> GB
 }
 
-/** Cached host VRAM (GB), populated on first call. null = no GPU / unknown. */
+/** Default per-command deadline for one probe. */
+export const PROBE_DEADLINE_MS = 5000;
+
+/**
+ * How long an unknown (deadline) result stands before the host is probed
+ * again. A wedged GPU is never re-probed in a hot path, and never more than
+ * once per window.
+ */
+export const RETRY_AFTER_MS = 10 * 60 * 1000;
+
+/** The provisional, fail-open answer used before any probe has answered. */
+const PROVISIONAL_ARCHES = ["cpu"];
+
+/** Cached host arches; null until a probe has answered. */
+let cachedHostArches = null;
+/** Cached host VRAM (GB). null = no GPU / unknown. */
 let cachedVramGb = null;
-let vramProbed = false;
+/**
+ * Earliest time a populated cache may be probed again. Date.now() +
+ * RETRY_AFTER_MS for a deadline (unknown) result, Number.POSITIVE_INFINITY for
+ * a normal result, which stands for the process lifetime.
+ */
+let cacheRetryAt = 0;
+/** The single in-flight probe, shared by every concurrent caller. */
+let inFlightProbe = null;
+/** Probe implementation seam (tests inject a stub instead of spawning). */
+let probeImpl = runBoundedProbe;
+
+/** Test seam: replace the probe implementation (null restores the real one). */
+export function _setProbeImplForTest(fn) {
+  probeImpl = fn || runBoundedProbe;
+}
+
+/** Test seam: forget every cached result and the in-flight probe. */
+export function _resetGpuProbeForTest() {
+  cachedHostArches = null;
+  cachedVramGb = null;
+  cacheRetryAt = 0;
+  inFlightProbe = null;
+}
+
+/** True once a probe (normal, miss or deadline) has populated the cache. */
+function cachePopulated() {
+  return cachedHostArches !== null;
+}
+
+/** True when a new probe may run now: cache empty, or its retry window lapsed. */
+function mayProbe() {
+  return !cachePopulated() || Date.now() >= cacheRetryAt;
+}
+
+/**
+ * Run one probe implementation call. The implementation is expected to never
+ * throw and never reject; a stub that does is treated as a spawn error.
+ */
+async function callProbe(impl, cmd, args, deadlineMs) {
+  try {
+    const r = await impl(cmd, args, { deadlineMs });
+    if (!r || typeof r !== "object") return { ok: false, stdout: "", reason: "spawn-error" };
+    return { ok: r.ok === true, stdout: typeof r.stdout === "string" ? r.stdout : "", reason: r.reason };
+  } catch {
+    return { ok: false, stdout: "", reason: "spawn-error" };
+  }
+}
+
+/**
+ * One full probe, sequential and fully asynchronous. ONE rocminfo answers both
+ * arches and VRAM; nvidia-smi answers compute capability (arch) and, only when
+ * rocm had no GPU pool, memory.total (VRAM); system_profiler runs on darwin
+ * only. A deadline on any command stops the remaining probes: the GPU is
+ * wedged, so asking it anything else is pointless.
+ *
+ * @returns {Promise<{ok: boolean, arches: string[], vramGb: number|null, reason?: string}>}
+ */
+async function runProbe(impl, deadlineMs) {
+  const tags = new Set(PROVISIONAL_ARCHES);
+  let vramGb = null;
+  let timedOut = false;
+
+  // ROCm: rocminfo lists each agent's `Name:` line. CPU agents have a marketing
+  // name (e.g. "AMD RYZEN AI MAX+ 395 ..."), GPU agents have an arch name
+  // (e.g. "gfx1151"). The arch never appears in CPU agent metadata, so a bare
+  // text match for `Name: gfxNNNN` is unambiguous.
+  const rocm = await callProbe(impl, ROCMINFO, [], deadlineMs);
+  if (rocm.reason === "deadline") {
+    timedOut = true;
+  } else if (rocm.ok) {
+    for (const tag of parseRocminfoArches(rocm.stdout)) {
+      tags.add(tag);
+      tags.add("rocm");
+    }
+    vramGb = parseRocminfoVramGb(rocm.stdout);
+  }
+
+  // CUDA: nvidia-smi reports compute capability per GPU as "X.Y" (e.g. "8.6").
+  // Convert to sm_XY form to match CUDA convention.
+  if (!timedOut) {
+    const nvArch = await callProbe(impl, NVIDIASMI, ["--query-gpu=compute_cap", "--format=csv,noheader"], deadlineMs);
+    if (nvArch.reason === "deadline") {
+      timedOut = true;
+    } else if (nvArch.ok) {
+      for (const line of nvArch.stdout.split("\n")) {
+        const m = line.trim().match(/^(\d+)\.(\d+)$/);
+        if (m) {
+          tags.add(`sm_${m[1]}${m[2]}`);
+          tags.add("cuda");
+        }
+      }
+    }
+  }
+
+  // VRAM keeps its rocm-first-then-nvidia rule: nvidia-smi is asked about
+  // memory.total only when rocminfo reported no GPU pool.
+  if (!timedOut && vramGb === null) {
+    const nvVram = await callProbe(
+      impl,
+      NVIDIASMI,
+      ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+      deadlineMs,
+    );
+    if (nvVram.reason === "deadline") {
+      timedOut = true;
+    } else if (nvVram.ok) {
+      vramGb = parseNvidiaSmiVramGb(nvVram.stdout);
+    }
+  }
+
+  // Apple Silicon detection: present if `system_profiler SPHardwareDataType`
+  // reports an "Apple" chip. We don't ship for macOS in the gateway today, so
+  // just probe quietly.
+  if (!timedOut && process.platform === "darwin") {
+    const mac = await callProbe(impl, "system_profiler", ["SPHardwareDataType"], deadlineMs);
+    if (mac.reason === "deadline") {
+      timedOut = true;
+    } else if (mac.ok) {
+      const m = mac.stdout.match(/Chip:\s*Apple\s+(\S+)/);
+      if (m) {
+        tags.add(`apple_${m[1].toLowerCase()}`);
+        tags.add("metal");
+      }
+    }
+  }
+
+  if (timedOut) {
+    cachedHostArches = [...PROVISIONAL_ARCHES];
+    cachedVramGb = null;
+    cacheRetryAt = Date.now() + RETRY_AFTER_MS;
+    return { ok: false, arches: cachedHostArches, vramGb: null, reason: "deadline" };
+  }
+
+  cachedHostArches = Array.from(tags);
+  cachedVramGb = vramGb;
+  cacheRetryAt = Number.POSITIVE_INFINITY;
+  return { ok: true, arches: cachedHostArches, vramGb };
+}
+
+/**
+ * Probe this host's GPU, sharing one in-flight probe between every concurrent
+ * caller. A normal result (success or a definite miss: missing binary,
+ * non-zero exit) is cached for the process lifetime; a deadline result is
+ * cached as unknown for RETRY_AFTER_MS.
+ *
+ * @param {{refresh?: boolean, deadlineMs?: number, probeImpl?: Function}} [opts]
+ * @returns {Promise<{ok: boolean, arches: string[], vramGb: number|null, reason?: string}>}
+ */
+export async function probeGpuHost({ refresh = false, deadlineMs = PROBE_DEADLINE_MS, probeImpl: impl } = {}) {
+  if (inFlightProbe) return inFlightProbe;
+  if (!refresh && !mayProbe()) {
+    return { ok: true, arches: cachedHostArches ?? [...PROVISIONAL_ARCHES], vramGb: cachedVramGb };
+  }
+  const use = impl || probeImpl;
+  inFlightProbe = runProbe(use, deadlineMs).finally(() => {
+    inFlightProbe = null;
+  });
+  return inFlightProbe;
+}
+
+/**
+ * Schedule a background probe: fire-and-forget, at most one in flight, never
+ * inside a retry window (unless `refresh` asks for one).
+ */
+function scheduleBackgroundProbe({ refresh = false } = {}) {
+  if (inFlightProbe) return;
+  if (!refresh && !mayProbe()) return;
+  probeGpuHost({ refresh }).catch(() => {});
+}
+
+/**
+ * Await the probe when the cached answer is still missing or stale, so an async
+ * caller sees the real answer on a cold cache or after a deadline result's
+ * retry window has lapsed. A no-op once a normal result is cached (its
+ * cacheRetryAt is Infinity) or while a deadline result is still inside its
+ * window; only a lapsed window re-probes, and that is bounded by the deadline.
+ */
+export async function ensureGpuProbed() {
+  if (cachePopulated() && !mayProbe()) return;
+  await probeGpuHost();
+}
 
 /**
  * Detect total host GPU VRAM in GB (ROCm first, then NVIDIA). Returns null when
- * no GPU is present or detection fails — callers MUST treat null as "unknown"
- * and fail open (do not block install on a probe miss).
+ * no GPU is present, detection fails, or no probe has answered yet — callers
+ * MUST treat null as "unknown" and fail open (do not block install on a probe
+ * miss). Never forks or blocks: a cold cache schedules a background probe and
+ * returns null immediately. `refresh` schedules a background re-probe.
  */
 export function detectGpuVramGb({ refresh = false } = {}) {
-  if (vramProbed && !refresh) return cachedVramGb;
-  let gb = null;
-  try {
-    const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
-    gb = parseRocminfoVramGb(out);
-  } catch { /* rocminfo missing or no AMD GPU */ }
-  if (gb === null) {
-    try {
-      const out = execFileSync(
-        NVIDIASMI,
-        ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-        { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" },
-      );
-      gb = parseNvidiaSmiVramGb(out);
-    } catch { /* nvidia-smi missing or no NVIDIA GPU */ }
-  }
-  cachedVramGb = gb;
-  vramProbed = true;
+  scheduleBackgroundProbe({ refresh });
   return cachedVramGb;
 }
-
-/** Cached host arches, populated on first call. */
-let cachedHostArches = null;
 
 /**
  * Detect the host's GPU architectures. Returns an array of tags, e.g.
  * ["gfx1151", "rocm", "cpu"] or ["sm_86", "cuda", "cpu"].
  *
  * Family tags are added alongside specific arches so manifests can target
- * either level. "cpu" is always included.
+ * either level. "cpu" is always included. Never forks or blocks: a cold cache
+ * schedules a background probe and returns the provisional ["cpu"] without
+ * caching it. `refresh` schedules a background re-probe.
  */
 export function detectGpuArch({ refresh = false } = {}) {
-  if (cachedHostArches && !refresh) return cachedHostArches;
-  const tags = new Set(["cpu"]);
-
-  // ROCm: rocminfo lists each agent's `Name:` line. CPU agents have a marketing
-  // name (e.g. "AMD RYZEN AI MAX+ 395 ..."), GPU agents have an arch name
-  // (e.g. "gfx1151"). The arch never appears in CPU agent metadata, so a bare
-  // text match for `Name: gfxNNNN` is unambiguous and avoids state machines.
-  try {
-    const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
-    for (const tag of parseRocminfoArches(out)) {
-      tags.add(tag);
-      tags.add("rocm");
-    }
-  } catch {
-    // rocminfo missing or no AMD GPU — fine, fall through.
-  }
-
-  // CUDA: nvidia-smi reports compute capability per GPU as "X.Y" (e.g. "8.6").
-  // Convert to sm_XY form to match CUDA convention.
-  try {
-    const out = execFileSync(
-      NVIDIASMI,
-      ["--query-gpu=compute_cap", "--format=csv,noheader"],
-      { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" },
-    );
-    for (const line of out.split("\n")) {
-      const m = line.trim().match(/^(\d+)\.(\d+)$/);
-      if (m) {
-        tags.add(`sm_${m[1]}${m[2]}`);
-        tags.add("cuda");
-      }
-    }
-  } catch {
-    // nvidia-smi missing or no NVIDIA GPU — fine.
-  }
-
-  // Apple Silicon detection: present if `system_profiler SPHardwareDataType`
-  // reports an "Apple" chip. We don't ship for macOS in the gateway today, so
-  // just probe quietly.
-  if (process.platform === "darwin") {
-    try {
-      const out = execFileSync("system_profiler", ["SPHardwareDataType"], { timeout: 5000, encoding: "utf8" });
-      const m = out.match(/Chip:\s*Apple\s+(\S+)/);
-      if (m) {
-        tags.add(`apple_${m[1].toLowerCase()}`);
-        tags.add("metal");
-      }
-    } catch {
-      // Fine.
-    }
-  }
-
-  cachedHostArches = Array.from(tags);
-  return cachedHostArches;
+  scheduleBackgroundProbe({ refresh });
+  return cachedHostArches ?? [...PROVISIONAL_ARCHES];
 }
 
 /**
