@@ -16,13 +16,11 @@ export function shellClientJs() {
   return `
     // ─── New shell: drawer + avatar sheet ───
     (function () {
+      // The server-bound CSRF token (window.crowCsrf — the page's <meta
+      // name="crow-csrf"> tag or GET /dashboard/csrf). NEVER a cookie: crow_csrf
+      // is retired, and a same-site host on the tailnet could toss one.
       function readCsrf() {
-        var parts = document.cookie.split(';');
-        for (var i = 0; i < parts.length; i++) {
-          var kv = parts[i].trim().split('=');
-          if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
-        }
-        return '';
+        try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
       }
       // Works for both paths: a modal dialog, and the open-attribute
       // fallback where close() may be missing.

@@ -184,6 +184,7 @@ test("compose passes the token (required), no VNC password, and its downloads mo
 });
 
 test("the manifest declares no VNC password and says the viewer is loopback-only behind sign-in", () => {
+  // 1.7.1 shipped this (no password, loopback-only viewer); any later bump keeps it.
   assertAtLeast(MANIFEST.version, "1.7.1", "the manifest version");
   assert.doesNotMatch(JSON.stringify(MANIFEST), /VNC_PASSWORD/);
   assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN", "CROW_BROWSER_CDP_TOKEN"], "both tokens are required: the viewer's, and the CDP gate's");
@@ -204,6 +205,7 @@ test("the manifest declares no VNC password and says the viewer is loopback-only
   const reg = JSON.parse(read("registry/add-ons.json"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "browser");
   assert.ok(entry, "the registry lists the browser");
+  assert.equal(entry.version, MANIFEST.version, "the registry mirrors the manifest (rerun `npm run build-registry`)");
   assertAtLeast(entry.version, "1.7.1", "the registry entry's version");
   assert.doesNotMatch(JSON.stringify(entry), /VNC_PASSWORD/);
   assert.doesNotMatch(read("bundles/browser/.env.example"), /VNC_PASSWORD/);

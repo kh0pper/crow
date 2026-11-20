@@ -93,14 +93,14 @@ function mount({ innerWidth = 390, io = true, newMode = false } = {}) {
   const handlers = {};
   const doc = {
     visibilityState: "visible",
-    cookie: "crow_csrf=tok-123",
     createElement: (t) => makeEl(t),
     addEventListener: (...a) => docT.addEventListener(...a),
     dispatchEvent(ev) { events.push(ev); return docT.dispatchEvent(ev); },
   };
   const HUB = { streams: {} };
+  const win = { innerWidth, crowCsrf: () => "tok-123" };
   const sandbox = {
-    console, document: doc, window: { innerWidth }, API, HUB,
+    console, document: doc, window: win, API, HUB,
     current: { sid: SID },
     el: (id) => (id === "perch-transcript" ? transcript : id === "perch-browser-status" ? status : null),
     live: () => !sandbox.__retired,

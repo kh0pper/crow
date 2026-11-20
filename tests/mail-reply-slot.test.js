@@ -56,7 +56,9 @@ const { upsertFolders, upsertMessage } = await import("../servers/gateway/mail/s
 
 const DRAFTS = `${MAIL_API_PREFIX}/drafts`;
 const OWNER = "owner-local-password-session";
-const CSRF = "csrf-token-value";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWNER);
 const ADDRESS = "alex@example.com";
 const SAM = "sam@example.com";
 const NOW = 1_767_225_600_000;
@@ -160,7 +162,7 @@ const DRAFT_ID = "md-0123456789abcdef";
  */
 function boot(html, { answers = {} } = {}) {
   const { window: dom, document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
-  Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=abc; crow_csrf=tok%2042" });
+  Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=abc" });
   Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
 
   const calls = [];
@@ -480,7 +482,7 @@ async function setup() {
 
   const call = (method, path, { body } = {}) => {
     const payload = body === undefined ? null : JSON.stringify(body);
-    const headers = { cookie: "crow_session=" + OWNER + "; crow_csrf=" + CSRF, "x-crow-csrf": CSRF, "x-test-from": "laptop" };
+    const headers = { cookie: "crow_session=" + OWNER, "x-crow-csrf": CSRF, "x-test-from": "laptop" };
     if (payload !== null) {
       headers["content-type"] = "application/json";
       headers["content-length"] = String(Buffer.byteLength(payload));

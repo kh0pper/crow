@@ -17,6 +17,9 @@ import {
   setSessionCookie,
   clearSessionCookie,
   parseCookies,
+  sessionFromCookies,
+  sessionTokenFromRequest,
+  requestIsSecure,
   validatePasswordStrength,
   isAllowedNetwork,
   loginNetworkAllowed,
@@ -52,7 +55,7 @@ import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { allowFirstRun, clearSetupToken, isDirectLoopback } from "./setup-token.js";
-import { isSameOriginRequest, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } from "./same-origin.js";
+import { isSameOriginRequest, isSameOriginNavigation, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } from "./same-origin.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -61,7 +64,7 @@ import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getP
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting } from "./settings/registry.js";
 import { healthAttentionRouter } from "./panels/health.js";
-import { csrfMiddleware, csrfRefusal } from "./shared/csrf.js";
+import { csrfMiddleware, csrfRefusal, csrfTokenForRequest } from "./shared/csrf.js";
 import { createOAuthConsentRouter, isConsentNext } from "../oauth-consent.js";
 import secretSubmitRouter from "../routes/secret-submit.js";
 import { twoFactorSetupGate } from "./two-factor-setup-gate.js";
@@ -316,11 +319,15 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     // Check if managed hosting requires 2FA setup
     if (await needs2faSetup()) {
       // Issue session first so they can access the setup page
-      setSessionCookie(res, result.token);
+      setSessionCookie(res, result.token, undefined, { secure: requestIsSecure(req), expirePlain: true, req });
       return res.redirectAfterPost("/dashboard/login/2fa/setup");
     }
 
-    setSessionCookie(res, result.token);
+    // `expirePlain` (queue item #51 review F1): signing in over HTTPS also
+    // expires any plain `crow_session` this jar still holds — host-only and at
+    // the request host's parent domain — because a sibling host's tossed
+    // `Domain=<tailnet>.ts.net` copy is not the cookie we just replaced.
+    setSessionCookie(res, result.token, undefined, { secure: requestIsSecure(req), expirePlain: true, req });
 
     // W3-3: redirect to onboarding only on first-ever setup AND only when the
     // completion flag has never been set (so existing operators who reset their
@@ -409,7 +416,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       cookieHeaders.push(`${TRUSTED_2FA_COOKIE}=${trustToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`);
     }
 
-    setSessionCookie(res, result.token, sessionMaxAge);
+    setSessionCookie(res, result.token, sessionMaxAge, { secure: requestIsSecure(req), expirePlain: true, req });
     // Append our extra cookies
     const existing = res.getHeader("Set-Cookie") || [];
     res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), ...cookieHeaders]);
@@ -473,7 +480,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       : (consentNext || "/dashboard");
 
     const cookieHeaders = [`${PENDING_2FA_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
-    setSessionCookie(res, result.token, sessionMaxAge);
+    setSessionCookie(res, result.token, sessionMaxAge, { secure: requestIsSecure(req), expirePlain: true, req });
     const existing = res.getHeader("Set-Cookie") || [];
     res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), ...cookieHeaders]);
     res.redirectAfterPost(redirectTo);
@@ -748,7 +755,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
         await audit({ hmacValid: true, nonce: result.ticket.nonce, error: `peer_not_trusted:${err.reason}` });
         return res.status(401).type("text/plain").send("Single sign-on refused.");
       }
-      setSessionCookie(res, token, SSO_SESSION_MAX_AGE);
+      setSessionCookie(res, token, SSO_SESSION_MAX_AGE, { secure: requestIsSecure(req), expirePlain: true, req });
       await audit({ hmacValid: true, nonce: result.ticket.nonce });
       return res.redirect(303, dest);
     } catch (err) {
@@ -806,12 +813,12 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // was rendered with a token that has since been replaced (a second tab logged
   // in again, say), and answering the plain-text 403 would leave the viewer
   // stuck on "CSRF token mismatch." So this ONE route sends them back (303) to
-  // the GET confirm page, which renders whatever token the cookie carries now.
+  // the GET confirm page, which renders the token the session yields now.
   //
   // Mounted BEFORE csrfMiddleware and scoped to POST /dashboard/logout; every
   // other route keeps csrfMiddleware's plain 403. dashboardAuth has already run
   // (so this only ever sees a live session), and on anything but a mismatch —
-  // no crow_csrf cookie at all, no token echoed, or a matching token — it calls
+  // no token at all, no token echoed, or a matching token — it calls
   // next(), so the real chain (csrfMiddleware, then the POST handler below)
   // makes the decision. The comparison is csrf.js's own (csrfRefusal), not a
   // second implementation of it.
@@ -828,6 +835,21 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
 
+  // GET /dashboard/csrf — the token, as JSON, for a page that has been open
+  // since before the session's token changed (or one rendered without the
+  // layout's <meta name="crow-csrf">, like the kiosk, Studio and the staged
+  // page). Server-bound (HMAC over the session id), never cached, and reachable
+  // only from this origin: a cross-site reader gets no token.
+  router.get("/dashboard/csrf", (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!isSameOriginRequest(req)) {
+      return res.status(403).json({ error: "cross-site" });
+    }
+    const token = csrfTokenForRequest(req);
+    if (!token) return res.status(403).json({ error: "no session" });
+    return res.json({ token });
+  });
+
   // --- Logout: POST only, and CSRF-checked (session-authed by dashboardAuth
   // and token-checked by csrfMiddleware, both above; a STALE token is answered
   // by the 303-to-the-confirm-page handler in front of csrfMiddleware).
@@ -839,9 +861,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // the request as the viewer and signed them out on read. The GET now only
   // confirms; nothing changes until the form's POST arrives.
   router.post("/dashboard/logout", async (req, res) => {
-    const cookies = parseCookies(req);
-    await destroySession(cookies.crow_session);
-    clearSessionCookie(res);
+    await destroySession(sessionTokenFromRequest(req));
+    clearSessionCookie(res, { secure: requestIsSecure(req) });
     res.redirect("/dashboard/login");
   });
 
@@ -876,7 +897,16 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   });
 
   // Make tab: open a tile (marks it seen, then redirects). Session-gated by dashboardAuth above.
+  //
+  // A GET with a side effect (queue item #51 PR-1): it marks the tile seen. A
+  // browser may only reach it as a PAGE of this origin — a navigation of our own
+  // (Sec-Fetch-Site same-origin | none, Origin absent or our own) and a top-level
+  // document (Sec-Fetch-Mode: navigate / Sec-Fetch-Dest: document, review F5), so
+  // an `<img src="…/make/open/…">` in a bot's markdown cannot mark anything. Any
+  // other shape gets a 403 and nothing is marked. Kept as a GET because it is a
+  // navigation target the Make panel and notifications link to.
   router.get("/dashboard/make/open/:kind/:ref", async (req, res) => {
+    if (!isSameOriginNavigation(req)) return res.status(403).type("text/plain").send("Refused: this request came from another site.");
     const db = createDbClient();
     try { await openMakeItem(req, res, db); } finally { db.close(); }
   });
@@ -1093,7 +1123,15 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // signed ticket for a paired+trusted target and 302s the browser to the
   // target's /dashboard/sso/accept. Falls back to a direct link (which will
   // prompt for the target's password) when SSO isn't possible.
+  //
+  // A GET that mints a credential (queue item #51 PR-1): only a PAGE of this
+  // origin — a top-level document navigation, Sec-Fetch-Mode: navigate /
+  // Sec-Fetch-Dest: document included (review F5) — may reach it. Anything else
+  // gets a 403 and no ticket (`<img src>`/`<link>` from a page of ours or a
+  // foreign one, a cross-site top-level navigation, or a same-site sibling host on
+  // the tailnet).
   router.get("/dashboard/sso/launch", async (req, res) => {
+    if (!isSameOriginNavigation(req)) return res.status(403).type("text/plain").send("Refused: this request came from another site.");
     const db = createDbClient();
     try {
       const target = String(req.query.target || "");
@@ -1321,7 +1359,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
           lang,
           // The sidebar's logout form needs the viewer's CSRF token. It comes
           // from csrfMiddleware (above), which populates it on every request
-          // that carries the crow_csrf cookie.
+          // that carries a session cookie (HMAC of that session id).
           csrf: req.csrfToken || "",
           headerIcons: activeHeaderHtml,
           afterContent: playerBarHtml(lang),

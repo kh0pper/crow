@@ -173,7 +173,9 @@ async function get(path, jar) {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: cookieHeader(jar) } });
   return { status: r.status, location: r.headers.get("location"), cookies: r.headers.getSetCookie(), body: await r.text() };
 }
-const jarNew = (extra = {}) => ({ crow_session: "new-sess", crow_csrf: "tok", [MODE]: "new", ...extra });
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1) and delivered in the page;
+// these requests are reads, so the jar carries only the session.
+const jarNew = (extra = {}) => ({ crow_session: "new-sess", [MODE]: "new", ...extra });
 const scopeCookies = (cookies) => cookies.filter((c) => c.startsWith(SCOPE + "=") || /^crow_scope/.test(c));
 /** The page's visible text: tags and their attributes removed. */
 const textOf = (html) => html.replace(/<script[\s\S]*?<\/script>/g, " ").replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]*>/g, " ");

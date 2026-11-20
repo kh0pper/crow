@@ -38,6 +38,7 @@ const { setPassword } = await import("../servers/gateway/dashboard/auth.js");
 const { createOAuthProvider } = await import("../servers/gateway/auth.js");
 const { setInterfaceTableForTests } = await import("../servers/shared/ip-classify.js");
 const { isConsentNext, pendingAuthorizations, setOAuthProvider } = await import("../servers/gateway/oauth-consent.js");
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
 
 // Approving a sign-in is the owner's own turn (dashboard/local-session.js), so
 // the origin rule (servers/shared/self-origin.js) is in play. Pin the interface
@@ -63,8 +64,9 @@ const PW = "correct horse battery staple";
 const SESSION = randomBytes(32).toString("hex");
 const SSO_SESSION = randomBytes(32).toString("hex");
 const ONHOST_SESSION = randomBytes(32).toString("hex");
-const CSRF = randomBytes(16).toString("hex");
-const cookieFor = (session) => `crow_session=${session}; crow_csrf=${CSRF}`;
+// The consent forms carry the SERVER-BOUND token: HMAC(secret, session id).
+const CSRF = csrfTokenFor(SESSION);
+const cookieFor = (session) => `crow_session=${session}`;
 const COOKIE = cookieFor(SESSION);
 const sha256 = (t) => createHash("sha256").update(t).digest("hex");
 
@@ -75,12 +77,16 @@ const CHALLENGE = createHash("sha256").update(VERIFIER).digest("base64url");
 // uses, which does not look at scopes): the owner's own password session, a
 // peer sign-in (dashboard sso), and one minted by a login from this machine
 // (dashboard onhost). Only the first may approve a sign-in.
-for (const [token, scopes] of [[SESSION, "dashboard"], [SSO_SESSION, "dashboard sso src:peer"], [ONHOST_SESSION, "dashboard onhost"]]) {
-  await db.execute({
-    sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
-    args: [sha256(token), scopes, new Date(Date.now() + 3_600_000).toISOString()],
-  });
+const SESSION_ROWS = [[SESSION, "dashboard"], [SSO_SESSION, "dashboard sso src:peer"], [ONHOST_SESSION, "dashboard onhost"]];
+async function seedSessions() {
+  for (const [token, scopes] of SESSION_ROWS) {
+    await db.execute({
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)",
+      args: [sha256(token), scopes, new Date(Date.now() + 3_600_000).toISOString()],
+    });
+  }
 }
+await seedSessions();
 
 /** A LAN peer: the real connection is loopback, the peer address is not. */
 let server;
@@ -215,7 +221,7 @@ test("5. the consent page: escaped client name, redirect origin, CSRF-carrying f
   assert.ok(html.includes("Allowing gives this app full access"), "the blunt warning");
   assert.equal((html.match(/name="_csrf"/g) || []).length, 2, "both forms carry the CSRF token");
   assert.equal((html.match(/name="decision"/g) || []).length, 2, "one form per decision");
-  assert.ok(html.includes(`value="${CSRF}"`), "the CSRF value is the crow_csrf cookie");
+  assert.ok(html.includes(`value="${CSRF}"`), "the CSRF value is the session's server-bound token");
   assert.equal(r.headers.get("x-frame-options"), "DENY");
   assert.match(String(r.headers.get("content-security-policy")), /frame-ancestors 'none'/);
   assert.equal(r.headers.get("cache-control"), "no-store");
@@ -324,6 +330,9 @@ test("12. a password login returns to the consent page for a good next, and to /
   const bad = await post("/dashboard/login", { password: PW, next: "//evil.example" });
   assert.equal(bad.status, 303);
   assert.equal(bad.headers.get("location"), "/dashboard", "an invalid next cannot redirect anywhere");
+  // PR-1: setPassword revokes every dashboard session. Re-seed the ones the
+  // owner-only cases below need (each is a real session row).
+  await seedSessions();
 });
 
 // --- 13 --------------------------------------------------------------------

@@ -37,7 +37,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -160,10 +160,20 @@ function cookieOf(header, name) {
   return null;
 }
 
-/** The stand-in dashboard layout: a bare document around the panel content. */
+/**
+ * The stand-in dashboard layout: a bare document around the panel content.
+ *
+ * It carries the two things the real layout
+ * (servers/gateway/dashboard/shared/layout.js) puts in every page's head: the
+ * SERVER-BOUND token in `<meta name="crow-csrf">` and /csrf-client.js, which
+ * exposes it as `window.crowCsrf()`. The Studio client echoes that token in its
+ * WebSocket hello frame, so a stand-in without them is refused with 4401 and
+ * the page never receives its song.
+ */
 function minimalLayout({ title, content }) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title></head>`
-    + `<body>${content}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">`
+    + `<meta name="crow-csrf" content="csrf-ok"><script src="/csrf-client.js"></script>`
+    + `<title>${title}</title></head><body>${content}</body></html>`;
 }
 
 before(async () => {
@@ -286,6 +296,12 @@ before(async () => {
     if (!cookieOf(req.headers.cookie, "crow_session")) return res.status(401).json({ error: "unauthorized" });
     return next();
   };
+  // The dashboard's CSRF helper, served for real: the page's token is the
+  // layout's <meta name="crow-csrf"> tag read through it, never a cookie.
+  app.get("/csrf-client.js", (_req, res) => {
+    res.setHeader("content-type", "application/javascript");
+    res.end(readFileSync(new URL("../servers/gateway/public/csrf-client.js", import.meta.url).pathname, "utf8"));
+  });
   app.use(web.router(dashboardAuth));
   app.get("/dashboard/studio", async (req, res, next) => {
     try {
@@ -400,9 +416,9 @@ async function openPage(url) {
   await send("Page.enable");
   await send("Network.enable");
   await send("Runtime.enable");
-  for (const [name, value] of [["crow_session", "good"], ["crow_csrf", "csrf-ok"]]) {
-    await send("Network.setCookie", { name, value, url: `${base}/` });
-  }
+  // The session cookie, and deliberately NOT a CSRF cookie: crow_csrf is
+  // retired, and the token the page echoes comes from the layout's meta tag.
+  await send("Network.setCookie", { name: "crow_session", value: "good", url: `${base}/` });
   await send("Page.addScriptToEvaluateOnNewDocument", { source: INPUT_SCRIPT });
   await send("Page.navigate", { url });
 

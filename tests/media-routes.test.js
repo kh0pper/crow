@@ -19,7 +19,9 @@ import { rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 import { resolveAudioDir } from "../bundles/media/server/speech.js";
 
 let db, voice, server, base, publicBase, mediaRouter, routesModule;
-const AUTH_HEADER = { Cookie: "crow_session=s1; crow_csrf=tok123" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const AUTH_HEADER = { Cookie: "crow_session=s1" };
 // The dashboard's auth, as far as these routes can tell: the session token from the cookie, which
 // is what the router's owner check reads (servers/gateway/dashboard/local-session.js).
 const auth = (req, res, next) => {
@@ -63,7 +65,7 @@ after(async () => {
 });
 
 const get = (path, headers = {}) => fetch(base + path, { headers: { ...AUTH_HEADER, ...headers } });
-const post = (path, body, headers = {}) => fetch(base + path, { method: "POST", headers: { ...AUTH_HEADER, "Content-Type": "application/json", "X-Crow-Csrf": "tok123", ...headers }, body: JSON.stringify(body || {}) });
+const post = (path, body, headers = {}) => fetch(base + path, { method: "POST", headers: { ...AUTH_HEADER, "Content-Type": "application/json", "X-Crow-Csrf": csrfTokenForSession("s1"), ...headers }, body: JSON.stringify(body || {}) });
 const until = async (fn, ms = 8000) => { const t0 = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t0 > ms) throw new Error("timed out waiting"); await new Promise((ok) => setTimeout(ok, 50)); } };
 
 test("every route in the panel router starts with the dashboard's auth, and answers 401 without a session", async () => {

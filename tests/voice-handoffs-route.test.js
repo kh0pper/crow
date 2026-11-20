@@ -34,6 +34,7 @@ const { createVoiceBotLoader } = await import("../servers/gateway/voice/crow-voi
 const { HANDOFF_PHONE_TTL_MS, HANDOFF_START_BUDGET_MS } = await import("../servers/gateway/voice/handoff-constants.js");
 const { CROW_VOICE_BOT_ID } = await import("../servers/shared/voice-bot.js");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
 const { hashToken } = await import("../servers/gateway/dashboard/auth.js");
 const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
 const { voiceHandoffsRouter } = await import("../servers/gateway/routes/voice-handoffs.js");
@@ -46,7 +47,9 @@ const ASK = "have writer research radio history and write it up";
 const T0 = 1_800_000_000_000;
 const OWN = "own-session-token";
 const SSO = "sso-session-token";
-const CSRF = "csrf-tok-123";
+const CSRF = csrfTokenFor(OWN);
+/** The token a page rendered for `session` echoes: the SERVER-BOUND HMAC, never a cookie value. */
+const csrfFor = (session) => (session ? csrfTokenFor(session) : null);
 const flush = () => new Promise((r) => setImmediate(r));
 function deferred() { let res; const promise = new Promise((a) => { res = a; }); return { promise, res }; }
 
@@ -187,13 +190,15 @@ async function setup({ avail = "up", coreOver = null } = {}) {
     task: TASK, asked: ASK, status: "awaiting_phone", model_key: "prov/model-a", start_now: 1, lang: "en", ...over,
   });
   const get = (id, { session = OWN, lang = null } = {}) => fetch(base + phoneConfirmPath(id), {
-    redirect: "manual", headers: { cookie: [session && `crow_session=${session}`, `crow_csrf=${CSRF}`, lang && `crow_lang=${lang}`].filter(Boolean).join("; ") },
+    redirect: "manual", headers: { cookie: [session && `crow_session=${session}`, lang && `crow_lang=${lang}`].filter(Boolean).join("; ") },
   });
-  const decide = (id, decision, { session = OWN, csrf = CSRF, body = null } = {}) => {
+  const decide = (id, decision, { session = OWN, csrf = csrfFor(session), body = null } = {}) => {
     const form = body ?? new URLSearchParams({ ...(decision === undefined ? {} : { decision }), ...(csrf ? { _csrf: csrf } : {}) }).toString();
     return fetch(base + phoneConfirmPath(id) + "/decide", {
       method: "POST", redirect: "manual",
-      headers: { "content-type": "application/x-www-form-urlencoded", cookie: [session && `crow_session=${session}`, `crow_csrf=${CSRF}`].filter(Boolean).join("; ") },
+      // The phone page's own form submit: its session cookie, that session's server-bound token
+      // in `_csrf`, and the fetch-metadata header a browser writes on a same-origin submit.
+      headers: { "content-type": "application/x-www-form-urlencoded", "sec-fetch-site": "same-origin", cookie: [session && `crow_session=${session}`].filter(Boolean).join("; ") },
       body: form,
     });
   };
@@ -382,7 +387,7 @@ test("a decision that is not exactly confirm or decline is 400, never a yes", as
     assert.equal((await s.decide(id, d)).status, 400, JSON.stringify(d));
   }
   assert.equal((await s.decide(id, undefined)).status, 400, "missing");
-  const twice = new URLSearchParams([["decision", "confirm"], ["decision", "confirm"], ["_csrf", CSRF]]).toString();
+  const twice = new URLSearchParams([["decision", "confirm"], ["decision", "confirm"], ["_csrf", csrfFor(OWN)]]).toString();
   assert.equal((await s.decide(id, null, { body: twice })).status, 400, "repeated field");
   assert.deepEqual(s.confirms, []);
   assert.equal((await s.row(id)).status, "awaiting_phone");

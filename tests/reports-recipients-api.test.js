@@ -2,10 +2,17 @@
 // `.../:rid/approve|refuse|revoke`, `.../sends` and `.../runs/:runId/send-rest`.
 //
 // Harness: a real init-db'd scratch crow.db copied per test (CROW_DATA_DIR under a temp dir), an
-// ephemeral express app wired the way servers/gateway/index.js + dashboard/index.js wire it (a session
-// stub, the dashboard's real CSRF middleware, then the real reports API router), the real report store
-// and approvals module with an injected seed and clock, real run rows through `startRun`, and the
-// owner rule taken from the request's own classification (tests/helpers/off-box.js).
+// ephemeral express app wired the way servers/gateway/index.js + dashboard/index.js wire it (the real
+// fetch-metadata gate, a session stub, the dashboard's real CSRF middleware, then the real reports API
+// router), the real report store and approvals module with an injected seed and clock, real run rows
+// through `startRun`, and the owner rule taken from the request's own classification
+// (tests/helpers/off-box.js).
+//
+// Every request is shaped like the owner's own browser, because that is what the routes see in
+// production: the SERVER-BOUND CSRF token for its own session (tests/helpers/csrf-token.mjs — the
+// retired `crow_csrf` cookie is gone, and a made-up value is a 403) and same-origin fetch metadata
+// (`Sec-Fetch-Site`, a matching `Origin`). Both gates pass, so the reports owner guard is what answers
+// each request and the owner_only / no-data assertions below test it rather than a gate in front.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -16,6 +23,7 @@ import { join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
 import { markFromLaptop } from "./helpers/off-box.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "reports-recipients-api-"));
 process.env.CROW_DATA_DIR = join(root, "master");
@@ -29,6 +37,7 @@ const MASTER = join(root, "master", "crow.db");
 const { default: express } = await import("express");
 const { createDbClient } = await import("../servers/db.js");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const { fetchMetadataGate } = await import("../servers/gateway/dashboard/fetch-metadata.js");
 const { reportsApiRouter, REPORTS_API_PREFIX, OWNER_LABEL } = await import(
   "../servers/gateway/routes/reports-api.js"
 );
@@ -41,7 +50,6 @@ const { SEND_LIST_LIMIT } = await import("../servers/gateway/reports/send-log.js
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
-const CSRF = "csrf-token-value";
 const SEED = Buffer.alloc(32, 19);
 const T0 = 1_700_000_000_000;
 const PROJECT = 7;
@@ -90,13 +98,25 @@ function parseCookies(header) {
   return out;
 }
 
-/** One request. `token: null` sends no session cookie; `csrf: null` sends no CSRF header; `laptop:
- *  false` leaves the request classified as coming from this machine. */
-function call(method, path, { body, headers = {}, token = OWNER, csrf = CSRF, laptop = true } = {}) {
+/** One request, shaped like a page of this origin making it. The cookie carries the session and
+ *  nothing else (the CSRF token is server-bound: HMAC(secret, session), delivered to the page, never a
+ *  cookie); `X-Crow-Csrf` echoes that token for THIS session — `csrf: true` (the default) computes it
+ *  through the real module, a string sends that value instead, `null` sends none; and the fetch
+ *  metadata names this origin (`Sec-Fetch-Site: same-origin`, `Origin` = the URL asked on), which is
+ *  what a browser on the dashboard sends and what the fetch-metadata gate admits. `token: null` sends
+ *  no session cookie; `laptop: false` leaves the request classified as coming from this machine. */
+function call(method, path, { body, headers = {}, token = OWNER, csrf = true, laptop = true } = {}) {
+  const origin = `http://127.0.0.1:${server.address().port}`;
   const payload = body === undefined ? null : (typeof body === "string" ? body : JSON.stringify(body));
-  const h = { ...(payload === null ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }) };
-  if (token) h.cookie = "crow_session=" + token + "; crow_csrf=" + CSRF;
-  if (token && csrf) h["x-crow-csrf"] = csrf;
+  const h = {
+    ...(payload === null ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }),
+    origin,
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
+  };
+  if (token) h.cookie = "crow_session=" + token;
+  if (token && csrf) h["x-crow-csrf"] = csrf === true ? csrfTokenFor(token) : String(csrf);
   if (laptop) h["x-test-from"] = "laptop";
   Object.assign(h, headers);
   return new Promise((resolve, reject) => {
@@ -151,6 +171,9 @@ async function setup({ ownerCheck = undefined } = {}) {
     next();
   };
   const dash = express.Router();
+  // index.js mounts the fetch-metadata gate app-wide, before the routers: a request a browser wrote on
+  // another site is refused there and never reaches csrfMiddleware or the reports owner guard.
+  dash.use(fetchMetadataGate({ log: () => {} }));
   dash.use("/dashboard", csrfMiddleware);
   dash.use(reportsApiRouter(sessionGate, {
     openDb,

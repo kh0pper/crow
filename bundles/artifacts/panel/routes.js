@@ -153,7 +153,12 @@ export default function artifactsRouter(dashboardAuth, seams = {}) {
       // An older core without the module renders the viewer with no bar.
       let shellHtml = "";
       try { shellHtml = (await appImport("servers/gateway/dashboard/shared/player-shell.js")).playerShellHtml(lang); } catch { shellHtml = ""; }
-      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, laneLabel, shellHtml }));
+      // The SERVER-BOUND CSRF token: this standalone page renders no dashboard
+      // layout, so it carries the token in its own <meta name="crow-csrf"> (the
+      // client's request must not race the /dashboard/csrf fallback fetch).
+      let csrf = "";
+      try { csrf = (await appImport("servers/gateway/dashboard/shared/csrf.js")).csrfTokenForRequest(req); } catch { csrf = ""; }
+      res.type("html").send(page.renderViewerPage({ lang, id: req.params.id, v, thread, back, card, laneLabel, shellHtml, csrf }));
     } catch {
       res.status(500).type("text/plain").send("error");
     }

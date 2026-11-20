@@ -43,9 +43,11 @@ const SESS = {
   header: "logout-header-sess",
   sidebar: "logout-sidebar-sess",
 };
-const CSRF = "logout-csrf-token";
+// The CSRF token is SERVER-BOUND (HMAC over the session id, dashboard/shared
+// csrf.js) — there is no cookie to read, so each session has its own token.
+const tokenFor = (session) => csrfTokenForSession(session);
 
-let server, base, verifySession, hashToken, MODE, renderLayout, layoutModule;
+let server, base, verifySession, hashToken, MODE, renderLayout, layoutModule, csrfTokenForSession;
 
 /** The per-instance cookie name ("crow_mode_<instance id hash>"). */
 async function modeCookieName() {
@@ -65,10 +67,9 @@ function seedSession(token) {
   }
 }
 
-async function req(method, path, { session = SESS.confirm, csrf = CSRF, mode = null, body = null } = {}) {
+async function req(method, path, { session = SESS.confirm, body = null, mode = null } = {}) {
   const jar = [];
   if (session) jar.push(`crow_session=${session}`);
-  if (csrf) jar.push(`crow_csrf=${csrf}`);
   if (mode) jar.push(`${MODE}=${mode}`);
   const headers = { ...NET };
   if (jar.length) headers.cookie = jar.join("; ");
@@ -84,6 +85,7 @@ async function req(method, path, { session = SESS.confirm, csrf = CSRF, mode = n
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env }, stdio: "pipe", cwd: REPO });
   ({ hashToken, verifySession } = await import("../servers/gateway/dashboard/auth.js"));
+  ({ csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js"));
   for (const token of Object.values(SESS)) seedSession(token);
 
   MODE = await modeCookieName();
@@ -115,7 +117,7 @@ test("GET /dashboard/logout shows a confirm page and changes NOTHING", async () 
   const r = await req("GET", "/dashboard/logout", { session: SESS.confirm });
   assert.equal(r.status, 200, r.text.slice(0, 200));
   assert.match(r.text, /<form method="POST" action="\/dashboard\/logout"/, "the confirm page carries the POST form");
-  assert.match(r.text, /<input type="hidden" name="_csrf" value="logout-csrf-token">/, "with the viewer's CSRF token");
+  assert.match(r.text, new RegExp(`<input type="hidden" name="_csrf" value="${tokenFor(SESS.confirm)}">`), "with the viewer's CSRF token (server-bound: HMAC of the session)");
   assert.match(r.text, /<button type="submit">/, "and a submit button");
   assert.ok(!r.setCookie.some((c) => /crow_session=;/.test(c)), "the GET does not clear the session cookie");
   assert.equal(await verifySession(SESS.confirm), true, "the session is STILL valid after the GET");
@@ -142,7 +144,7 @@ test("POST without a CSRF token is refused with the plain 403, and the session s
 
 test("POST with the WRONG CSRF token goes back to the confirm page, and the session survives", async () => {
   // A stale token is a stale PAGE, not an attack: the 303 lands on the GET
-  // confirm page, which renders the token the cookie carries now, so the
+  // confirm page, which renders the token this session's HMAC yields now, so the
   // viewer can finish the logout instead of reading "CSRF token mismatch."
   const r = await req("POST", "/dashboard/logout", { session: SESS.wrong, body: "_csrf=not-the-token" });
   assert.equal(r.status, 303, r.text);
@@ -151,24 +153,25 @@ test("POST with the WRONG CSRF token goes back to the confirm page, and the sess
   // The page it points at is the confirm page, carrying the current token.
   const page = await req("GET", "/dashboard/logout", { session: SESS.wrong });
   assert.equal(page.status, 200, page.text.slice(0, 200));
-  assert.match(page.text, /<input type="hidden" name="_csrf" value="logout-csrf-token">/);
+  assert.match(page.text, new RegExp(`<input type="hidden" name="_csrf" value="${tokenFor(SESS.wrong)}">`));
   assert.equal(await verifySession(SESS.wrong), true);
 });
 
 test("POST with the right CSRF token destroys the session and redirects to the login page", async () => {
   assert.equal(await verifySession(SESS.post), true, "session valid before");
-  const r = await req("POST", "/dashboard/logout", { session: SESS.post, body: `_csrf=${CSRF}` });
+  const r = await req("POST", "/dashboard/logout", { session: SESS.post, body: `_csrf=${tokenFor(SESS.post)}` });
   assert.equal(r.status, 302, r.text);
   assert.equal(r.location, "/dashboard/login");
   assert.ok(r.setCookie.some((c) => /^crow_session=;/.test(c)), "the session cookie is cleared: " + r.setCookie.join(" | "));
-  assert.ok(r.setCookie.some((c) => /^crow_csrf=;/.test(c)), "and so is the CSRF cookie");
+  assert.ok(r.setCookie.some((c) => /^__Host-crow_session=;/.test(c)), "and the __Host- one too (whichever this browser held)");
+  assert.ok(r.setCookie.some((c) => /^crow_csrf=;/.test(c)), "and any leftover pre-PR-1 CSRF cookie is expired");
   assert.equal(await verifySession(SESS.post), false, "the session row is gone");
 });
 
 test("the Turbo header form of the same token works too", async () => {
   const token = SESS.header;
   assert.equal(await verifySession(token), true);
-  const headers = { ...NET, cookie: `crow_session=${token}; crow_csrf=${CSRF}`, "x-crow-csrf": CSRF };
+  const headers = { ...NET, cookie: `crow_session=${token}`, "x-crow-csrf": tokenFor(token) };
   const r = await fetch(base + "/dashboard/logout", { method: "POST", redirect: "manual", headers });
   assert.equal(r.status, 302);
   assert.equal(r.headers.get("location"), "/dashboard/login");
@@ -178,11 +181,11 @@ test("the Turbo header form of the same token works too", async () => {
 // ---- no session: dashboardAuth decides -------------------------------------
 
 test("without a valid session both methods go to the login page", async () => {
-  const get = await req("GET", "/dashboard/logout", { session: null, csrf: null });
+  const get = await req("GET", "/dashboard/logout", { session: null });
   assert.equal(get.status, 303, "dashboardAuth redirects");
   assert.equal(get.location, "/dashboard/login");
 
-  const post = await req("POST", "/dashboard/logout", { session: null, csrf: null, body: `_csrf=${CSRF}` });
+  const post = await req("POST", "/dashboard/logout", { session: null, body: `_csrf=${tokenFor(SESS.post)}` });
   assert.equal(post.status, 303, "auth answers before CSRF is ever consulted");
   assert.equal(post.location, "/dashboard/login");
 
@@ -199,9 +202,11 @@ test("the sidebar's logout is a POST form carrying the viewer's token, never a s
   assert.match(r.text, /<div class="sidebar-footer">/, "the classic sidebar rendered");
   assert.match(
     r.text,
-    /<form method="post" action="\/dashboard\/logout" data-turbo="false"[^>]*><input type="hidden" name="_csrf" value="logout-csrf-token"><button type="submit" class="nav-item logout"/,
+    new RegExp(`<form method="post" action="/dashboard/logout" data-turbo="false"[^>]*><input type="hidden" name="_csrf" value="${tokenFor(SESS.sidebar)}"><button type="submit" class="nav-item logout"`),
     "the nav item posts to /dashboard/logout with the CSRF field"
   );
+  assert.match(r.text, new RegExp(`<meta name="crow-csrf" content="${tokenFor(SESS.sidebar)}">`), "and the page carries the token for window.crowCsrf");
+  assert.match(r.text, /<script src="\/csrf-client\.js"><\/script>/, "and loads the shared client helper");
   assert.doesNotMatch(r.text, /<a href="\/dashboard\/logout"/, "no link that logs out on a GET");
 });
 

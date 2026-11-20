@@ -203,7 +203,8 @@ test("B11: the message box is labelled with the same string as its placeholder",
 test("B9: hello carries the stored voice-off choice, on the session socket and on the paired one", () => {
   const src = read("kiosk.js");
   const connect = src.slice(src.indexOf("function connect()"), src.indexOf("const send = "));
-  assert.match(connect, /const hello = SESSION \? \{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS, tz: TZ, owner: barOwner \} : \{ type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ \};/, "one hello object for both sockets");
+  assert.match(connect, /const hello = \{ type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ \};/, "the paired hello");
+  assert.match(connect, /const hello = \{ type: "hello", mode: "session", csrf, caps: CAPS, tz: TZ, owner: barOwner \};/, "the session hello, carrying the CSRF token from GET /dashboard/csrf");
   assert.match(connect, /if \(voiceOff\) hello\.voice_off = true;/, "the stored choice rides it");
   assert.ok(connect.indexOf("hello.voice_off") < connect.indexOf("sock.send(JSON.stringify(hello))"), "set before it is sent");
 });

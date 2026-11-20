@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 actAsServe();
 const dir = mkdtempSync(join(tmpdir(), "make-scope-"));
@@ -18,7 +19,9 @@ writeFileSync(join(dir, "instance-id"), "instance-make-scope");
 const REPO = new URL("..", import.meta.url).pathname;
 
 let server, base, make, seen = [];
-const NEW = { crow_session: "new-sess", crow_csrf: "tok" };
+/** The page's session, and that session's SERVER-BOUND CSRF token (HMAC of the session id). */
+const NEW = { crow_session: "new-sess" };
+const CSRF = csrfTokenFor("new-sess");
 const NET = serveHeaders("operator@example.com");
 const OK = { artifacts: "installed", workspace: "installed" };
 const item = (o) => ({
@@ -275,7 +278,7 @@ test("a blank document started on This card lands on the card, filed under the C
     assert.match(page.body, /<span class="mk-project-chip" data-mk-chip>Kitchen<\/span>/);
     assert.match(page.body, /This card has no documents yet/);
     // The client posts the card with the blank document; the server validates and links it.
-    const post = (body) => fetch(base + "/dashboard/make-api/blank", { method: "POST", headers: { ...NET, "content-type": "application/json", cookie: "crow_session=new-sess; crow_csrf=tok", "x-crow-csrf": "tok" }, body: JSON.stringify(body) });
+    const post = (body) => fetch(base + "/dashboard/make-api/blank", { method: "POST", headers: { ...NET, "content-type": "application/json", "sec-fetch-site": "same-origin", cookie: "crow_session=new-sess", "x-crow-csrf": CSRF }, body: JSON.stringify(body) });
     const bad = await post({ kind: "docx", title: "Nope", project_id: garden, card_id: 99999 });
     assert.equal(bad.status, 400);
     assert.equal((await bad.json()).error, "bad_card");

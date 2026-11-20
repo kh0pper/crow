@@ -160,7 +160,7 @@ function cardHtml(T, card, thread, laneLabel = "") {
  * card: the route's `{ id, title, lane, href, thread }` or null. laneLabel: core's label for card.lane (route-resolved), "" for no chip. viewer-client.js moves both
  * into its bar and header; nothing is built from them on the client.
  */
-export function renderViewerPage({ lang = "en", id, v = null, thread = null, back = null, card = null, laneLabel = "", shellHtml = "" }) {
+export function renderViewerPage({ lang = "en", id, v = null, thread = null, back = null, card = null, laneLabel = "", shellHtml = "", csrf = "" }) {
   const L = lang === "es" ? "es" : "en";
   const T = VIEWER_STRINGS[L];
   const links = backHtml(T, back, thread) + cardHtml(T, card, thread, laneLabel);
@@ -171,6 +171,8 @@ export function renderViewerPage({ lang = "en", id, v = null, thread = null, bac
 <meta name="referrer" content="same-origin">
 <title>${esc(T.title)}</title>
 <link rel="stylesheet" href="/artifacts/static/viewer.css">
+${csrf ? `<meta name="crow-csrf" content="${esc(csrf)}">` : ""}
+<script src="/csrf-client.js"></script>
 </head><body>
 ${links ? `<div id="cv-links" hidden>${links}</div>\n` : ""}<div id="crow-artifact-viewer" data-lang="${L}" data-artifact="${esc(id)}" data-version="${v == null ? "" : esc(v)}" data-thread="${thread == null ? "" : esc(thread)}" data-strings="${esc(JSON.stringify(T))}"></div>
 <button type="button" class="cv-fs-open" id="cv-full-screen">${esc(T.fullscreen)}</button>

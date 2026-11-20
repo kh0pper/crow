@@ -74,6 +74,8 @@ after(() => { if (server) server.close(); rmSync(dir, { recursive: true, force: 
 
 const NET = serveHeaders("operator@example.com"); // what Tailscale Serve sends for a tailnet user
 const cookieHeader = (jar) => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
 
 async function get(path, jar = {}) {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: cookieHeader(jar) } });
@@ -82,7 +84,7 @@ async function get(path, jar = {}) {
 
 async function post(path, form, { jar = {}, csrfHeader = true } = {}) {
   const headers = { ...NET, "content-type": "application/x-www-form-urlencoded", cookie: cookieHeader(jar) };
-  if (csrfHeader) headers["x-crow-csrf"] = jar.crow_csrf;
+  if (csrfHeader) headers["x-crow-csrf"] = csrfTokenForSession(jar.crow_session);
   const r = await fetch(base + path, { method: "POST", redirect: "manual", headers, body: new URLSearchParams(form).toString() });
   return { status: r.status, location: r.headers.get("location"), cookies: r.headers.getSetCookie() };
 }
@@ -92,8 +94,8 @@ const cookieValue = (cookies, name) => {
   return c ? decodeURIComponent(c.slice(name.length + 1).split(";")[0]) : undefined;
 };
 const chip = (html) => (html.match(/class="shell-scope-name">([^<]*)</) || [])[1];
-const OLD = { crow_session: "old-sess", crow_csrf: "tok" };
-const NEW = { crow_session: "new-sess", crow_csrf: "tok" };
+const OLD = { crow_session: "old-sess" };
+const NEW = { crow_session: "new-sess" };
 
 test("a device with no cookie whose session predates shell_since gets classic and a cookie", async () => {
   const r = await get("/dashboard/memory", OLD);
@@ -125,7 +127,7 @@ test("the mode route flips the device", async () => {
   assert.equal(toNew.location, "/dashboard/perch");
   assert.equal(cookieValue(toNew.cookies, MODE), "new");
 
-  const toClassic = await post("/dashboard/mode", { mode: "classic", _csrf: "tok" }, { jar: NEW, csrfHeader: false });
+  const toClassic = await post("/dashboard/mode", { mode: "classic", _csrf: csrfTokenForSession(NEW.crow_session) }, { jar: NEW, csrfHeader: false });
   assert.equal(toClassic.status, 303, "the client's _csrf body field is accepted too");
   assert.equal(toClassic.location, "/dashboard");
   assert.equal(cookieValue(toClassic.cookies, MODE), "classic");
@@ -438,16 +440,14 @@ test("Settings offers the way back in the new shell", async () => {
   assert.doesNotMatch(r.body, /Use the new Crow/);
 });
 
-test("the CSRF fill script finds crow_csrf when it is not the first cookie", async () => {
+test("the CSRF fill script takes the SERVER-BOUND token (window.crowCsrf), never a cookie", async () => {
   const pages = [
     (await get("/dashboard/settings?section=crow-mode", { ...OLD, [MODE]: "classic" })).body,
     (await get("/dashboard/memory", OLD)).body,
   ];
   for (const body of pages) {
     const raw = body.match(/onsubmit="([^"]*)"/)[1].replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-    const re = raw.match(/document\.cookie\.match\(\/(.*?)\/\)/)[1];
-    assert.ok(!re.includes("\\\\"), "no doubled backslash in the emitted regex");
-    const m = "theme=dark; crow_csrf=abc123; other=1".match(new RegExp(re));
-    assert.equal(m && m[1], "abc123");
+    assert.match(raw, /window\.crowCsrf/, "the fill reads the page's token helper (queue item #51 PR-1)");
+    assert.doesNotMatch(raw, /document\.cookie/, "and never the retired crow_csrf cookie");
   }
 });

@@ -17,8 +17,15 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 process.env.PIBOT_PI_CLI = "/nonexistent/pi-never-spawned-by-this-file.js";
+
+// The dashboard session this page is served under, and the CSRF token it yields: server-bound
+// (HMAC of the session id, shared/csrf.js — queue item #51 PR-1), delivered in the page's
+// <meta name="crow-csrf">, echoed by the card's Send.
+const SESSION = "live-staged-session";
+const CSRF = csrfTokenFor(SESSION);
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SID = "perchlive-44444444";
@@ -100,6 +107,7 @@ before(async () => {
   CDP = chrome.cdp; HOST = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+  const { csrfTokenForRequest } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { tamagotchiHtml, tamagotchiTrayHtml } = await import("../servers/gateway/dashboard/shared/notifications.js");
   const turbo = readFileSync(join(REPO, "servers/gateway/public/vendor/turbo-8.0.5.umd.js"));
   server = http.createServer(async (req, res) => {
@@ -117,12 +125,15 @@ before(async () => {
     req.crowMode = { mode: "new" };
     const scope = { all: true };
     req.crowScope = scope;
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang,
+    // What csrfMiddleware + the panel dispatcher do for a real panel request: the token is derived
+    // from this request's session and handed to layout(), which renders the page's meta tag.
+    req.csrfToken = csrfTokenForRequest(req);
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang, csrf: req.csrfToken,
       headerIcons: tamagotchiHtml(lang, { sheet: true }),
       variant: "shell", shell: { scope, projects: [], tab: "chat", getPanel: () => null, tray: tamagotchiTrayHtml(lang) } });
     const db = { execute: async () => ({ rows: [] }) };
     const html = await perchHubPanel.handler(req, res, { lang, layout, db });
-    if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html", "set-cookie": "crow_csrf=tok; Path=/" }); res.end(html); }
+    if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
   await new Promise((r) => server.listen(0, BIND_HOST, r));
   port = server.address().port;
@@ -178,6 +189,8 @@ async function tab({ width, height }) {
   await cdp("Runtime.enable");
   await cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
   await cdp("Page.enable");
+  await cdp("Network.enable");
+  await cdp("Network.setCookie", { name: "crow_session", value: SESSION, url: `http://${HOST}:${port}`, path: "/" });
   await cdp("Page.navigate", { url: `http://${HOST}:${port}/dashboard/perch#${SID}` });
   await waitFor("!!document.querySelector('#perch-transcript .staged-card')", "the staged card");
   await evalIn(SETTLED);
@@ -250,7 +263,7 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
       await s.evalIn(SETTLED);
       assert.equal(posts.length, 1, "one POST");
       assert.equal(posts[0].url, `/dashboard/perch-api/staged/${ID}/send`);
-      assert.equal(posts[0].csrf, "tok", "the X-Crow-Csrf header");
+      assert.equal(posts[0].csrf, CSRF, "the X-Crow-Csrf header");
       assert.deepEqual(JSON.parse(posts[0].body), { content_hash: HASH });
       m = await s.json(CARD);
       assert.match(m.status, /^Sent .+ to alex@example\.com, bob@example\.com, cara@example\.com$/, m.status);

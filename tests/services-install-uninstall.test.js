@@ -380,7 +380,9 @@ test("review M1: the boot pass restores paused connections of installed bundles,
 
 // ---- The preflight route ----------------------------------------------------------------------
 
-const COOKIE = "crow_session=s1; crow_csrf=tok9";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const COOKIE = "crow_session=s1";
 const stubGate = (req, res, next) => {
   if (!String(req.headers.cookie || "").includes("crow_session=s1")) return res.status(401).json({ error: "Not authenticated" });
   req.dashboardSession = "s1";
@@ -456,7 +458,9 @@ function boot({ lang = "en", route, pageData } = {}) {
     return Promise.resolve({ status: r.status, ok: r.status >= 200 && r.status < 300, json: () => (r.body === undefined ? Promise.reject(new Error("no json")) : Promise.resolve(r.body)) });
   };
   const location = { href: "https://crow.example.ts.net/dashboard/project/spring/services", reload() { reloads++; } };
-  document.cookie = "crow_csrf=csrf-abc";
+  document.cookie = "crow_session=abc";
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page.
+  window.crowCsrf = () => "csrf-abc";
   window.location = location;
   const focusedEls = [];
   window.HTMLElement.prototype.focus = function () { focusedEls.push(this); };

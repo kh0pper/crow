@@ -96,13 +96,10 @@ export function makeClientJs(lang) {
   var bots = null;      // Perch-attached bots, loaded once
   var busy = false;
 
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var kv = parts[i].trim().split('=');
-      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function show(el, on) { if (!el) return; if (on) el.removeAttribute('hidden'); else el.setAttribute('hidden', ''); }
   function say(text) { if (status) status.textContent = text || ''; }
@@ -254,13 +251,10 @@ export function makeClientJs(lang) {
   var suppress = false; // a long press just fired: swallow the click that follows
   var timer = null, sx = 0, sy = 0;
 
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var kv = parts[i].trim().split('=');
-      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function hide(el, on) { if (on) el.setAttribute('hidden', ''); else el.removeAttribute('hidden'); }
 

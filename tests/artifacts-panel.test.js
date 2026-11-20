@@ -24,10 +24,13 @@ import artifactsRouter from "../bundles/artifacts/panel/routes.js";
 import artifactsPanel, { ARTIFACTS_STRINGS } from "../bundles/artifacts/panel/artifacts.js";
 import { VIEWER_STRINGS, viewerHeaders, viewerParams, renderViewerPage, ARTIFACT_ID_RE } from "../bundles/artifacts/panel/viewer-page.js";
 import { renderLayout } from "../servers/gateway/dashboard/shared/layout.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OWNER = { kind: "session" };
+// The server-bound token for the harness's owner session (`crow_session=good`).
+const CSRF = csrfTokenFor("good");
 
 // ─── static: string parity (same rule as tests/workspace-panel.test.js) ────
 
@@ -216,7 +219,6 @@ before(async () => {
   const app = express();
   app.use((_req, res, next) => {
     res.append("set-cookie", "crow_session=good; Path=/");
-    res.append("set-cookie", "crow_csrf=tok; Path=/");
     next();
   });
   // A fake Perch engine for the send sheet (never the real one in a test).
@@ -232,7 +234,14 @@ before(async () => {
     res.setHeader("content-type", "application/javascript");
     res.end(readFileSync(join(ROOT, "servers/gateway/public/vendor/turbo-8.0.5.umd.js")));
   });
-  const layout = (opts) => renderLayout({ ...opts, activePanel: "artifacts", panels: [artifactsPanel], lang: "en" });
+  const layout = (opts) => renderLayout({ ...opts, csrf: CSRF, activePanel: "artifacts", panels: [artifactsPanel], lang: "en" });
+  // The token endpoint a page rendered without the layout's meta tag (the
+  // standalone viewer) fetches once via /csrf-client.js.
+  app.get("/dashboard/csrf", (_req, res) => { res.setHeader("cache-control", "no-store"); res.json({ token: CSRF }); });
+  app.get("/csrf-client.js", (_req, res) => {
+    res.setHeader("content-type", "application/javascript");
+    res.end(readFileSync(join(ROOT, "servers/gateway/public/csrf-client.js")));
+  });
   // Another panel, under the GLOBAL policy shape (frame-src 'self' https:) —
   // the Turbo body-swap hazard the reload meta must defeat.
   app.get("/dashboard/other", (_req, res) => {

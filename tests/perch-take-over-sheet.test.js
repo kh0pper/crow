@@ -96,14 +96,14 @@ function mount({ server, clipboard = "ok", search = "", lang = "en" } = {}) {
   const loc = { search, pathname: "/dashboard/perch", hash: "#" + SID };
   const replaced = [];
   const doc = {
-    visibilityState: "visible", cookie: "crow_csrf=tok-9", body: makeEl("body"),
+    visibilityState: "visible", body: makeEl("body"),
     createElement: (t) => makeEl(t),
     addEventListener: (...a) => docT.addEventListener(...a),
     dispatchEvent: (ev) => docT.dispatchEvent(ev),
   };
   const sandbox = {
     console: { log: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) },
-    document: doc, window: { innerWidth: 390 }, API, HUB: { streams: {} }, navigator: nav,
+    document: doc, window: { innerWidth: 390, crowCsrf: () => "tok-9" }, API, HUB: { streams: {} }, navigator: nav,
     location: loc, history: { state: null, replaceState: (st, t, url) => replaced.push(url) },
     current: { sid: SID },
     el: (id) => (id === "perch-hub-root" ? root : id === "perch-transcript" ? transcript : id === "perch-browser-mine" ? mine : null),

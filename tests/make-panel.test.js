@@ -5,6 +5,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,8 +23,8 @@ process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 writeFileSync(join(dir, "instance-id"), "instance-make-panel");
 const REPO = new URL("..", import.meta.url).pathname;
 
-let server, base, make, seen = [];
-const NEW = { crow_session: "new-sess", crow_csrf: "tok" };
+let server, base, port, make, seen = [];
+const NEW = { crow_session: "new-sess" };
 const NET = serveHeaders("operator@example.com");
 
 const item = (o) => ({
@@ -58,14 +59,32 @@ before(async () => {
   const app = express();
   app.use(dashboardRouter((req, res, next) => next(), { renderLayout }));
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
-  base = "http://127.0.0.1:" + server.address().port;
+  port = server.address().port;
+  base = "http://127.0.0.1:" + port;
 });
 after(() => { make?._setMakeSeamsForTest(); if (server) server.close(); rmSync(dir, { recursive: true, force: true }); });
 
-async function get(path, jar = NEW) {
+/**
+ * A request as a BROWSER NAVIGATION sends it (node:http, so the Sec-Fetch-*
+ * headers are ours; Node's fetch writes `sec-fetch-mode: cors` itself). The
+ * make/open route requires a top-level document navigation (review F5), so a
+ * bare fetch() there is refused by design — see tests/side-effect-gets.test.js.
+ */
+const NAVIGATE = { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
+function get(path, jar = NEW, extra = {}) {
   const cookie = Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
-  const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie } });
-  return { status: r.status, location: r.headers.get("location"), body: await r.text() };
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port, path, method: "GET", headers: { ...NET, ...NAVIGATE, ...extra, cookie } },
+      (res) => {
+        let body = "";
+        res.on("data", (c) => { body += c; });
+        res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location, body }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
 }
 const OK = { artifacts: "installed", workspace: "installed" };
 
@@ -215,7 +234,7 @@ test("an unknown ref is 404, and a ref with a slash or a URL is refused", async 
   for (const [k, ref] of refs) {
     const r = await get(`/dashboard/make/open/${k}/${ref}`);
     assert.ok([400, 404].includes(r.status), `${k}/${ref} -> ${r.status}`);
-    assert.equal(r.location, null, `${k}/${ref} must not redirect`);
+    assert.ok(!r.location, `${k}/${ref} must not redirect`);
   }
 });
 

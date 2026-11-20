@@ -51,11 +51,14 @@ before(async () => {
   app.use((req, res, next) => { res.redirectAfterPost = (url) => res.redirect(303, url); next(); });
   app.use("/dashboard", express.urlencoded({ extended: false }));
   app.use("/dashboard", csrfMiddleware);
-  app.get("/login", (req, res) => { res.setHeader("set-cookie", ["crow_session=good; Path=/", "crow_csrf=tok123; Path=/"]); res.end("ok"); });
+  // The dashboard session. No CSRF cookie exists any more (queue item #51 PR-1): the token is
+  // server-bound (HMAC of this session id), and the page gets it the way the real panel dispatcher
+  // gives it to every panel — the layout's `csrf`, from csrfMiddleware's req.csrfToken.
+  app.get("/login", (req, res) => { res.setHeader("set-cookie", ["crow_session=good; Path=/"]); res.end("ok"); });
   const db = { execute: async (q) => ({ rows: /pi_bot_defs/.test(typeof q === "string" ? q : q.sql) ? BOTS : [] }) };
   app.all("/dashboard/skills", async (req, res, next) => {
     const lang = /lang=es/.test(req.headers.cookie || "") ? "es" : "en";
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "skills", panels: [], lang });
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "skills", panels: [], lang, csrf: req.csrfToken || "" });
     try {
       const html = await panel.handler(req, res, { db, layout, lang });
       if (html !== undefined && !res.headersSent) res.type("html").send(html);

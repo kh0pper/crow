@@ -686,7 +686,7 @@ test("auth-network: Forget a summary needs a session (and the CSRF rail)", async
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   const post = (port) => new Promise((resolve, reject) => {
     const req = http.request({ host: "127.0.0.1", port, path: "/dashboard/perch-api/interactive/perchlive-x/forget-summary", method: "POST",
-      headers: { "content-type": "application/json", "x-crow-csrf": "tok", cookie: "crow_csrf=tok" } },
+      headers: { "content-type": "application/json", "x-crow-csrf": "tok" } },
     (res) => { res.resume(); res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location })); });
     req.on("error", reject);
     req.end("{}");
@@ -1299,12 +1299,16 @@ test("auth-network: the Services Private switch refuses SSO, onhost and this-mac
   const app = express();
   app.use(servicesApiRouter({ uiEnabled: () => true, sessionGate: gate, dbFactory: fakeDb }));
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  // The CSRF token is server-bound (HMAC over the session id, dashboard/shared
+  // csrf.js): the pair is computed, never read from a cookie.
+  const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  const TOKEN = csrfTokenForSession("s1");
   const SENS_PATH = "/dashboard/services/api/connection/00000000-0000-4000-8000-000000000001/sensitive";
   const post = (headers, path = SENS_PATH) => new Promise((resolve, reject) => {
     const body = JSON.stringify({ sensitive: false });
     const r = http.request({ host: "127.0.0.1", port: server.address().port, method: "POST",
       path,
-      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), cookie: "crow_session=s1; crow_csrf=c1", "x-crow-csrf": "c1", ...headers } },
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), cookie: "crow_session=s1", "x-crow-csrf": TOKEN, ...headers } },
     (res) => { let t = ""; res.on("data", (c) => (t += c)); res.on("end", () => resolve({ status: res.statusCode, text: t })); });
     r.on("error", reject);
     r.end(body);

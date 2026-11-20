@@ -17,6 +17,7 @@ import { join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
 import { markFromLaptop } from "./helpers/off-box.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "reports-api-"));
 process.env.CROW_DATA_DIR = join(root, "master");
@@ -38,7 +39,6 @@ const { createMailCredentials } = await import("../servers/gateway/mail/credenti
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
-const CSRF = "csrf-token-value";
 const SEED = Buffer.alloc(32, 5);
 const PROJECT = 7;
 const SENDER = "ma-0011223344556677";
@@ -96,13 +96,15 @@ function parseCookies(header) {
   return out;
 }
 
-/** One request. `token: null` sends no session cookie; `csrf: null` sends no CSRF header; `laptop:
- *  false` leaves the request classified as coming from this machine. */
-function call(method, path, { body, headers = {}, token = OWNER, csrf = CSRF, laptop = true } = {}) {
+/** One request. `token: null` sends no session cookie; `csrf: null` sends no CSRF header (the
+ *  default `csrf: true` sends the server-bound token for THIS session, which is what the dashboard's
+ *  own fetch wrapper echoes); `laptop: false` leaves the request classified as coming from this
+ *  machine. */
+function call(method, path, { body, headers = {}, token = OWNER, csrf = true, laptop = true } = {}) {
   const payload = body === undefined ? null : (typeof body === "string" ? body : JSON.stringify(body));
   const h = { ...(payload === null ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }) };
-  if (token) h.cookie = "crow_session=" + token + "; crow_csrf=" + CSRF;
-  if (token && csrf) h["x-crow-csrf"] = csrf;
+  if (token) h.cookie = "crow_session=" + token;
+  if (token && csrf) h["x-crow-csrf"] = csrf === true ? csrfTokenFor(token) : String(csrf);
   if (laptop) h["x-test-from"] = "laptop";
   Object.assign(h, headers);
   return new Promise((resolve, reject) => {

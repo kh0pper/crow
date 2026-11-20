@@ -40,7 +40,9 @@ const { createFakeMailAdapter } = await import("./fixtures/fake-mail-adapter.mjs
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
-const CSRF = "csrf-token-value";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWNER);
 
 const MESSAGES = `${MAIL_API_PREFIX}/messages`;
 const SEARCH = `${MAIL_API_PREFIX}/search`;
@@ -100,10 +102,10 @@ function parseCookies(header) {
 let server = null;
 
 /** One request. `csrf: null` sends no CSRF header; `laptop: false` leaves the request looking local. */
-function call(method, path, { body, headers = {}, token = OWNER, csrf = CSRF, laptop = true } = {}) {
+function call(method, path, { body, headers = {}, token = OWNER, csrf = csrfTokenForSession(token), laptop = true } = {}) {
   const payload = body === undefined ? null : (typeof body === "string" ? body : JSON.stringify(body));
   const h = { ...(payload === null ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }) };
-  if (token) h.cookie = "crow_session=" + token + "; crow_csrf=" + CSRF;
+  if (token) h.cookie = "crow_session=" + token;
   if (token && csrf) h["x-crow-csrf"] = csrf;
   if (laptop) h["x-test-from"] = "laptop";
   Object.assign(h, headers);

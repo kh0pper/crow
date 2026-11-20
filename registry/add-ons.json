@@ -175,7 +175,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.11.0",
+      "version": "0.11.1",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",
@@ -526,7 +526,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.8.3",
+      "version": "1.8.4",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -3028,7 +3028,7 @@
     {
       "id": "kiosk",
       "name": "Kiosk display",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "type": "mcp-server",
       "author": "Crow",
       "category": "hardware",
@@ -6952,7 +6952,7 @@
     {
       "id": "studio",
       "name": "Crow Studio",
-      "version": "0.23.1",
+      "version": "0.23.2",
       "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
       "type": "mcp-server",
       "author": "Crow",

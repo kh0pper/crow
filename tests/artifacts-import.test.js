@@ -15,6 +15,7 @@ import express from "express";
 import { createDbClient } from "../servers/db.js";
 import { markdownBlocks } from "../servers/blog/renderer.js";
 import { csrfMiddleware } from "../servers/gateway/dashboard/shared/csrf.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import * as runtime from "../servers/gateway/artifact-origin/runtime.js";
 import * as policy from "../servers/gateway/artifact-origin/policy.js";
 import { createLocalBlobStore } from "../bundles/artifacts/server/blob-store.js";
@@ -28,6 +29,8 @@ import { VIEWER_STRINGS, renderViewerPage } from "../bundles/artifacts/panel/vie
 const RENDERED = '<svg viewBox="0 0 10 10"><rect id="n1" width="5" height="5"><title>Node one</title></rect></svg>';
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="5" height="5"/></svg>';
+// The server-bound token for the harness's owner session (`crow_session=good`).
+const CSRF = csrfTokenFor("good");
 const s = { engine: [], notes: [] };
 // The Design kit seam: a diagram's { engine, source } renders through it, so
 // an import that keeps the engine is observable here.
@@ -69,7 +72,7 @@ before(async () => {
 });
 after(() => { s.http.close(); runtime._resetForTest(); try { s.db.close(); } catch {} rmSync(s.dir, { recursive: true, force: true }); });
 
-function req(method, path, { body, cookie = "crow_session=good; crow_csrf=tok", csrf = "tok", origin = `http://${s.host}` } = {}) {
+function req(method, path, { body, cookie = "crow_session=good", csrf = CSRF, origin = `http://${s.host}` } = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const headers = { "content-type": "application/json", ...(cookie ? { cookie } : {}), ...(csrf ? { "x-crow-csrf": csrf } : {}), ...(origin ? { origin } : {}) };

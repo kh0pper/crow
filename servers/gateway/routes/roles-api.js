@@ -5,7 +5,8 @@
  *
  * Auth: every route runs the dashboard session gate (`requireDashboardSessionJson`,
  * JSON 401/403, see routes/models.js), and every POST the double-submit CSRF
- * check (`crow_csrf` cookie, `X-Crow-Csrf` header). NEVER add `/api/roles`
+ * check (`dashboard/shared/csrf.js`: server-bound `X-Crow-Csrf` header token).
+ * NEVER add `/api/roles`
  * to PUBLIC_FUNNEL_PREFIXES (CLAUDE.md "Network exposure invariant").
  *
  * Secrets: no answer carries a provider or profile API key. Pick lists and

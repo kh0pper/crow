@@ -230,6 +230,47 @@ export function originIsOwn(req, raw, { env = process.env } = {}) {
 }
 
 /**
+ * Did a BROWSER send this as a top-level document navigation (a page load, a
+ * link click, a typed URL)? Sec-Fetch-Mode/Sec-Fetch-Dest are written by the
+ * network stack, so page script cannot forge them — an `<img src>` embed of the
+ * same URL is `mode: no-cors`, `dest: image`, and a `<link>`/`<script>`/`fetch()`
+ * load is its own dest too.
+ *
+ * Absent headers keep today's behaviour (a non-browser client — curl, a CLI, an
+ * older browser — sends neither), so this only ever REMOVES trust.
+ *
+ * @param {object} req Express request
+ * @returns {boolean}
+ */
+export function isDocumentNavigation(req) {
+  const headers = req?.headers || {};
+  const mode = headerOne(headers["sec-fetch-mode"]).toLowerCase();
+  if (mode && mode !== "navigate") return false;
+  const dest = headerOne(headers["sec-fetch-dest"]).toLowerCase();
+  if (dest && dest !== "document") return false;
+  return true;
+}
+
+/**
+ * The gate for a side-effecting GET that must only ever be a page of this
+ * origin's own: same origin (`isSameOriginRequest`) AND a top-level document
+ * navigation (`isDocumentNavigation`).
+ *
+ * Why both: a same-origin check alone still admits an `<img src>` or `<link>`
+ * embed rendered from untrusted markdown ON the dashboard (a bot's reply whose
+ * "picture" is `/dashboard/make/open/...`, or an SSO launch URL): the browser
+ * reports it as same-origin and happily fetches it. Marking a tile seen or
+ * minting an SSO ticket is not something an image load may do.
+ *
+ * @param {object} req Express request
+ * @param {{ env?: object }} [opts]
+ * @returns {boolean}
+ */
+export function isSameOriginNavigation(req, opts) {
+  return isDocumentNavigation(req) && isSameOriginRequest(req, opts);
+}
+
+/**
  * The first-run gate for a browser-submitted request: true unless the browser
  * says another site sent it (Sec-Fetch-Site) or names another site
  * (Origin). Absent headers keep today's behaviour.

@@ -32,9 +32,10 @@ export function forYouClientJs() {
 (function () {
   var root = document.querySelector('[data-fy]');
   if (!root) return;
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var m = document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function post(url, body, keepalive) {
     return fetch(url, {

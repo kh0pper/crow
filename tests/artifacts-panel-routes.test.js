@@ -11,6 +11,7 @@ import express from "express";
 import { createDbClient } from "../servers/db.js";
 import { markdownBlocks } from "../servers/blog/renderer.js";
 import { csrfMiddleware } from "../servers/gateway/dashboard/shared/csrf.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import * as runtime from "../servers/gateway/artifact-origin/runtime.js";
 import * as policy from "../servers/gateway/artifact-origin/policy.js";
 import { createLocalBlobStore } from "../bundles/artifacts/server/blob-store.js";
@@ -19,6 +20,8 @@ import * as store from "../bundles/artifacts/server/store.js";
 import artifactsRouter from "../bundles/artifacts/panel/routes.js";
 
 const s = { notes: [], spawns: [], frames: [] };
+// The server-bound token for the harness's owner session (`crow_session=good`).
+const CSRF = csrfTokenFor("good");
 before(async () => {
   s.dir = mkdtempSync(join(tmpdir(), "artifacts-routes-"));
   s.db = createDbClient(join(s.dir, "crow.db"));
@@ -47,7 +50,7 @@ before(async () => {
 });
 after(() => { s.http.close(); runtime._resetForTest(); try { s.db.close(); } catch {} rmSync(s.dir, { recursive: true, force: true }); });
 
-function req(method, path, { body, cookie = "crow_session=good; crow_csrf=tok", csrf = "tok", origin = `http://${s.host}` } = {}) {
+function req(method, path, { body, cookie = "crow_session=good", csrf = CSRF, origin = `http://${s.host}` } = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const headers = { "content-type": "application/json", ...(cookie ? { cookie } : {}), ...(csrf ? { "x-crow-csrf": csrf } : {}), ...(origin ? { origin } : {}) };

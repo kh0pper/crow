@@ -120,7 +120,7 @@ const {
   bootSetupToken,
   setupTokenPath,
 } = await import("../servers/gateway/dashboard/setup-token.js");
-const { isSameOriginRequest, configuredOwnOrigins, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } =
+const { isSameOriginRequest, isDocumentNavigation, isSameOriginNavigation, configuredOwnOrigins, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } =
   await import("../servers/gateway/dashboard/same-origin.js");
 // Serve, as the gateway sees it: the network gate allows a verified Serve client
 // (an overlay address behind a tailscaled-owned loopback socket).
@@ -687,6 +687,35 @@ test("N1a-2: the origin rule — Host, a proxy's X-Forwarded-Host, a configured 
   // CROW_OAUTH_ISSUER_URL wins over it, exactly as issuer-url.js resolves it.
   const issuer = { CROW_GATEWAY_URL: "https://public.example", CROW_OAUTH_ISSUER_URL: "https://crow.example.ts.net:8444" };
   assert.deepEqual([...configuredOwnOrigins(issuer)], ["https://crow.example.ts.net:8444"]);
+});
+
+// Review F5: the side-effecting GETs (/dashboard/make/open, /dashboard/sso/launch)
+// also require a TOP-LEVEL DOCUMENT NAVIGATION, so a same-origin <img>/<link>/
+// fetch embed of those URLs — trivially produced by markdown the dashboard
+// renders — cannot mark a tile or mint an SSO ticket. Absent headers still pass:
+// curl and older browsers send neither, and this rule may only REMOVE trust.
+test("F5: a side-effecting GET must be a document navigation, not an embed", () => {
+  const req = (headers) => ({ headers, protocol: "http" });
+  const HOST = { host: "127.0.0.1:3001" };
+  const none = { env: {} };
+  const navigate = { ...HOST, "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
+
+  assert.equal(isDocumentNavigation(req(navigate)), true, "a link click / typed URL");
+  assert.equal(isDocumentNavigation(req(HOST)), true, "no Sec-Fetch headers at all: a script on the box");
+
+  // What the browser sends for each kind of embed. Same-origin, so the origin
+  // rule alone lets them through — the navigation rule is what refuses them.
+  for (const [mode, dest] of [["no-cors", "image"], ["no-cors", "style"], ["cors", "empty"], ["navigate", "iframe"], ["navigate", "frame"], ["navigate", "object"], ["cors", "script"]]) {
+    const headers = { ...HOST, "sec-fetch-site": "same-origin", "sec-fetch-mode": mode, "sec-fetch-dest": dest };
+    assert.equal(isDocumentNavigation(req(headers)), false, `${mode}/${dest} is not a document`);
+    assert.equal(isSameOriginRequest(req(headers), none), true, `${mode}/${dest} still passes the origin rule`);
+    assert.equal(isSameOriginNavigation(req(headers), none), false, `${mode}/${dest} must be refused`);
+  }
+
+  assert.equal(isSameOriginNavigation(req(navigate), none), true);
+  // Both rules apply: a cross-site navigation is still refused.
+  assert.equal(isSameOriginNavigation(req({ ...navigate, "sec-fetch-site": "cross-site", origin: "https://evil.example" }), none), false);
+  assert.equal(isSameOriginNavigation(req({ ...navigate, origin: "https://evil.example" }), none), false);
 });
 
 // ---------------------------------------------------------------------------

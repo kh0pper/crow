@@ -89,20 +89,28 @@ async function outboxKinds(projectUuid) {
   return rows.map((r) => r.kind);
 }
 
-const AUTHED = { cookie: `crow_session=${OWNER_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok" };
+/**
+ * The SERVER-BOUND CSRF token for a session (queue item #51 PR-1): HMAC(secret,
+ * session id), computed per fixture instead of read from a retired cookie.
+ */
+let csrfTokenForSession = () => {
+  throw new Error("the CSRF module is imported in before()");
+};
+const csrfFor = (session) => csrfTokenForSession(session);
+const AUTHED = () => ({ cookie: `crow_session=${OWNER_SESSION}`, "x-crow-csrf": csrfFor(OWNER_SESSION) });
 
-async function post(path, body, headers = AUTHED) {
+async function post(path, body, headers) {
   const r = await fetch(base + path, {
     method: "POST",
     redirect: "manual",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...(headers || AUTHED()) },
     body: JSON.stringify(body ?? {}),
   });
   return { status: r.status, location: r.headers.get("location"), body: await r.json().catch(() => null) };
 }
 
-async function get(path, headers = AUTHED) {
-  const r = await fetch(base + path, { redirect: "manual", headers });
+async function get(path, headers) {
+  const r = await fetch(base + path, { redirect: "manual", headers: headers || AUTHED() });
   return { status: r.status, location: r.headers.get("location"), body: await r.json().catch(() => null) };
 }
 
@@ -144,7 +152,8 @@ before(async () => {
   });
 
   const { c2cApiRouter } = await import("../servers/gateway/routes/c2c-api.js");
-  const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  const { csrfMiddleware, csrfTokenForSession: loadToken } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  csrfTokenForSession = loadToken;
   const { parseCookies } = await import("../servers/gateway/dashboard/auth.js");
   const { default: express } = await import("express");
   // The dashboard's own gate, stubbed: a cookie signs the request in, and the client is
@@ -179,10 +188,10 @@ after(() => {
 test("a request with no session never reaches a route", async () => {
   const p = await newProject();
   const r = await post(`/projects/${p.id}/invite`, { contact_id: BOUND, role: "viewer" },
-    { cookie: "crow_csrf=tok", "x-crow-csrf": "tok" });
+    { cookie: `crow_csrf=${csrfFor(OWNER_SESSION)}`, "x-crow-csrf": csrfFor(OWNER_SESSION) });
   assert.notEqual(r.status, 200);
   assert.equal(r.location, "/dashboard/login");
-  const members = await get(`/projects/${p.id}/members`, { cookie: "crow_csrf=tok" });
+  const members = await get(`/projects/${p.id}/members`, { cookie: `crow_csrf=${csrfFor(OWNER_SESSION)}` });
   assert.notEqual(members.status, 200);
   const { rows } = await db.execute({
     sql: "SELECT COUNT(*) AS n FROM project_members WHERE project_id = ? AND contact_id IS NOT NULL",
@@ -194,7 +203,7 @@ test("a request with no session never reaches a route", async () => {
 test("a state-changing call needs the CSRF token", async () => {
   const p = await newProject();
   const r = await post(`/projects/${p.id}/invite`, { contact_id: BOUND, role: "viewer" },
-    { cookie: `crow_session=${OWNER_SESSION}; crow_csrf=tok` });
+    { cookie: `crow_session=${OWNER_SESSION}` });
   assert.equal(r.status, 403, "the real csrfMiddleware refuses the request before the route");
   const { rows } = await db.execute({
     sql: "SELECT COUNT(*) AS n FROM c2c_outbox WHERE contact_id = ?",
@@ -205,7 +214,7 @@ test("a state-changing call needs the CSRF token", async () => {
 
 test("a peer-SSO session is not the owner: 403 not_owner, nothing read or written", async () => {
   const p = await newProject();
-  const sso = { cookie: `crow_session=${SSO_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok" };
+  const sso = { cookie: `crow_session=${SSO_SESSION}`, "x-crow-csrf": csrfFor(SSO_SESSION) };
   for (const [label, call] of [
     ["invite", () => post(`/projects/${p.id}/invite`, { contact_id: BOUND, role: "viewer" }, sso)],
     ["members", () => get(`/projects/${p.id}/members`, sso)],
@@ -225,9 +234,9 @@ test("a peer-SSO session is not the owner: 403 not_owner, nothing read or writte
 
 test("a dashboard on-host login, a peer-signed request and a self-origin request are each 403 not_owner, writing nothing", async () => {
   const CASES = [
-    ["a dashboard onhost session token row", { cookie: `crow_session=${ONHOST_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok", "x-test-gate": "owner" }],
-    ["a gate that sets req.crossHostAuth", { cookie: `crow_session=${OWNER_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok", "x-test-gate": "crosshost" }],
-    ["a request from this machine itself (self-origin)", { cookie: `crow_session=${OWNER_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok", "x-test-gate": "self-origin" }],
+    ["a dashboard onhost session token row", { cookie: `crow_session=${ONHOST_SESSION}`, "x-crow-csrf": csrfFor(ONHOST_SESSION), "x-test-gate": "owner" }],
+    ["a gate that sets req.crossHostAuth", { cookie: `crow_session=${OWNER_SESSION}`, "x-crow-csrf": csrfFor(OWNER_SESSION), "x-test-gate": "crosshost" }],
+    ["a request from this machine itself (self-origin)", { cookie: `crow_session=${OWNER_SESSION}`, "x-crow-csrf": csrfFor(OWNER_SESSION), "x-test-gate": "self-origin" }],
   ];
   for (const [label, headers] of CASES) {
     const p = await newProject();

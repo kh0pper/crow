@@ -29,7 +29,15 @@
   var BASE = "/api/artifacts/" + encodeURIComponent(ID);
 
   var fmt = function (s, o) { return String(s || "").replace(/\{(\w+)\}/g, function (_, k) { return o && o[k] != null ? String(o[k]) : ""; }); };
-  var csrf = function () { var m = /(?:^|;\s*)crow_csrf=([^;]+)/.exec(document.cookie); return m ? decodeURIComponent(m[1]) : ""; };
+  // The CSRF token is SERVER-BOUND (window.crowCsrf — the page's
+  // <meta name="crow-csrf"> tag or GET /dashboard/csrf, via /csrf-client.js). It
+  // is never read from a cookie: crow_csrf is retired, and a same-site host on
+  // the tailnet could toss one.
+  var csrf = function () {
+    try { if (window.crowCsrf) return window.crowCsrf(); } catch (e) { /* fall through */ }
+    var m = document.querySelector('meta[name="crow-csrf"]');
+    return (m && m.getAttribute("content")) || "";
+  };
   function api(method, path, body) {
     return fetch(path, { method: method, credentials: "same-origin", headers: { "content-type": "application/json", "x-crow-csrf": csrf() }, body: body ? JSON.stringify(body) : undefined })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) { var e = new Error(j.message || j.error || String(r.status)); e.code = j.error; e.status = r.status; throw e; } return j; }); });

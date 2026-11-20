@@ -44,7 +44,9 @@ const REPO = new URL("..", import.meta.url).pathname;
 
 const NET = serveHeaders("operator@example.com");
 const OWNER = "owner-local-password-session";
-const CSRF = "csrf-token-value";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWNER);
 const DAY = 24 * 60 * 60 * 1000;
 /** Short budgets: every connect here is a loopback socket. */
 const FAST = { connectMs: 4000, greetingMs: 4000, socketMs: 4000, commandMs: 8000 };
@@ -237,7 +239,7 @@ function parseCookies(header) {
 async function call(method, path, { body } = {}) {
   const headers = {
     ...NET,
-    cookie: `crow_session=${OWNER}; crow_csrf=${CSRF}; ${MODE}=new`,
+    cookie: `crow_session=${OWNER}; ${MODE}=new`,
     "x-crow-csrf": CSRF,
     "x-test-from": "laptop",
   };

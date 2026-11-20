@@ -32,8 +32,8 @@
  * `routes/push.js`/`routes/notifications.js`, state-changing JSON routes
  * mounted at the app root, outside the `/dashboard` router `csrfMiddleware`
  * is scoped to). Every mutating route plan 3a adds (provider start/stop/
- * unregister, register, adopt, hf-adopt) runs the same double-submit check
- * (`dashboard/shared/csrf.js`: cookie `crow_csrf`, header `X-Crow-Csrf`) per
+ * unregister, register, adopt, hf-adopt) runs the same CSRF check
+ * (`dashboard/shared/csrf.js`: server-bound HMAC token in `X-Crow-Csrf`) per
  * route: they start processes, run code paths with operator-supplied launch
  * args, and delete files, and a sibling port on the same site could otherwise
  * ride the SameSite=Lax session cookie.
@@ -60,10 +60,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { createDbClient, resolveDataDir } from "../../db.js";
-import { isAllowedNetwork, verifySession, parseCookies } from "../dashboard/auth.js";
+import { isAllowedNetwork, verifySession, sessionTokenFromRequest } from "../dashboard/auth.js";
 // One Crow cookie-name list (../cookie-names.js), shared with every setter and
 // with the extension proxy that strips these cookies before forwarding.
-import { SESSION_COOKIE } from "../cookie-names.js";
 import { listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { getCachedProbe, reprobe, fitBadge } from "../models/probe.js";
@@ -105,7 +104,7 @@ export function requireDashboardSessionJson(req, res, next) {
   if (!isAllowedNetwork(req)) {
     return res.status(403).json({ error: "Not reachable from this network", code: "NETWORK_DENIED" });
   }
-  const token = parseCookies(req)[SESSION_COOKIE];
+  const token = sessionTokenFromRequest(req);
   verifySession(token)
     .then((valid) => {
       if (!valid) return res.status(401).json({ error: "Not authenticated", code: "UNAUTHENTICATED" });

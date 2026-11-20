@@ -44,8 +44,9 @@ test("no requestAnimationFrame and no video/iframe creation anywhere in the page
 });
 
 // Fetched only through kiosk.js's dynamic import(), never part of a plain page load: agent-link.js + speaker-view.js by a
-// Pi launched with ?agent=1 (DV13), bar-link.js by a dashboard session frame opened with ?bar=1 (B3; a Pi never fetches it).
-const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js", "osk.js", "osk.css"]);
+// Pi launched with ?agent=1 (DV13), bar-link.js by a dashboard session frame opened with ?bar=1 (B3; a Pi never fetches it),
+// session-csrf.js by the same session path's hello (it fetches /dashboard/csrf; a paired display never asks).
+const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js", "session-csrf.js", "osk.js", "osk.css"]);
 
 // 98,261 → 100 KB (2026-11-18, queue item 17 review fixes: chip clearance, caption cap, output setup, stop while quiet):
 // the review of item 17 took the page from 98,261 of 98,304 bytes to just over 96 KB — the now-playing chip's clearance
@@ -301,14 +302,15 @@ test("lever D: the page reports speech_pause from the VAD and the bytes sent at 
 
 // ---- Session mode (the dashboard's Talk to Crow overlay, /display/session) ----
 
-test("session mode: no pairing and no stored token — the socket is the dashboard session's, and hello echoes the CSRF cookie", () => {
+test("session mode: no pairing and no stored token — the socket is the dashboard session's, and hello carries the server-bound CSRF token", () => {
   const src = read("kiosk.js");
   assert.match(src, /const SESSION = document\.documentElement\.dataset\.mode === "session";/);
   const connect = src.slice(src.indexOf("function connect()"), src.indexOf("const send = "));
   assert.match(connect, /const id = SESSION \? null : ls\.get\(LS_DEV\), tok = SESSION \? null : ls\.get\(LS_TOK\);/, "session mode never reads a device token");
   assert.match(connect, /if \(!SESSION && \(!id \|\| !tok\)\) \{ pair\(\); return; \}/, "session mode never pairs");
   assert.match(connect, /\/api\/kiosk\/session\$\{SESSION \? "\/dashboard" : ""\}/);
-  assert.match(connect, /\{ type: "hello", mode: "session", csrf: cookie\("crow_csrf"\), caps: CAPS, tz: TZ, owner: barOwner \}/, "session mode reports the browser's time zone too (and, in bar mode, the tab's owner nonce)");
+  assert.match(connect, /const csrf = await loadCsrf\(\);/, "the token comes from GET /dashboard/csrf, never a cookie");
+  assert.match(connect, /\{ type: "hello", mode: "session", csrf, caps: CAPS, tz: TZ, owner: barOwner \}/, "session mode reports the browser's time zone too (and, in bar mode, the tab's owner nonce)");
   assert.match(connect, /closeDecision\(ev\.code, ev\.reason, SESSION \? "session" : "paired"\)/);
   assert.doesNotMatch(src, /ls\.set\([^)]*\)[^\n]*SESSION|SESSION[^\n]*ls\.set\(/, "nothing is stored for a session display");
   assert.doesNotMatch(read("kiosk.html"), /data-mode/, "the mode is stamped by the server on /display/session only");

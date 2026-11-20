@@ -325,7 +325,10 @@ export function perchHubJs(lang = "en") {
      patch; do not "simplify" by dropping it on the assumption the shell's
      patch alone covers it — that couples this file to being loaded only
      inside the shell, which is more fragile than just keeping the header. */
-  function csrf(){ var m=document.cookie.match(/(?:^|; )crow_csrf=([^;]*)/); return m?decodeURIComponent(m[1]):''; }
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie: crow_csrf is
+  // retired, and a same-site host on the tailnet could toss one.
+  function csrf(){ try{ return window.crowCsrf?window.crowCsrf():''; }catch(e){ return ''; } }
   function perchApi(method,path,body){
     var opts={method:method,headers:{'X-Crow-Csrf':csrf()}};
     if(body!==undefined){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }

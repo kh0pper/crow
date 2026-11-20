@@ -51,6 +51,7 @@ const { createDbClient } = await import("../servers/db.js");
 const { run: migrate } = await import("../scripts/migrations/0024-item-versions.mjs");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
 const { hashToken } = await import("../servers/gateway/dashboard/auth.js");
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
 const { translations, t } = await import("../servers/gateway/dashboard/shared/i18n.js");
 const { escapeHtml } = await import("../servers/gateway/dashboard/shared/components.js");
 const { withWriteContext, sessionHash8 } = await import("../servers/shared/history/write-context.js");
@@ -68,7 +69,7 @@ const MASTER = { crow: join(root, "master", "crow.db") };
 const OWN = "history-owner-session";
 const SSO = "history-sso-session";
 const ONHOST = "history-onhost-session";
-const CSRF = "history-csrf-token";
+const CSRF = csrfTokenFor(OWN);
 const OWNER_CTX = { authorKind: "owner", authorId: sessionHash8(OWN), jobId: `session:${sessionHash8(OWN)}` };
 const BOT = { authorKind: "bot", authorId: "helper", jobId: "card:9" };
 
@@ -159,14 +160,16 @@ function stubAuth(req, res, next) {
   res.redirect(303, "/dashboard/login");
 }
 
-const cookieFor = (session) => `crow_session=${session}; crow_csrf=${CSRF}`;
+const cookieFor = (session) => `crow_session=${session}`;
 
 async function getPage(base, path, session = OWN) {
   return fetch(base + path, { headers: { cookie: cookieFor(session) }, redirect: "manual" });
 }
 
-async function postForm(base, path, fields, { session = OWN, csrf = CSRF } = {}) {
-  const headers = { cookie: cookieFor(session), "content-type": "application/x-www-form-urlencoded" };
+async function postForm(base, path, fields, { session = OWN, csrf = csrfTokenFor(session) } = {}) {
+  // A browser's own form submit: same-origin (the fetch-metadata headers) and the session's
+  // server-bound token in X-Crow-Csrf.
+  const headers = { cookie: cookieFor(session), "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded" };
   if (csrf) headers["x-crow-csrf"] = csrf;
   return fetch(base + path, { method: "POST", headers, body: new URLSearchParams(fields), redirect: "manual" });
 }
@@ -655,7 +658,7 @@ test("the Settings section renders for the owner with the size line and the read
     const size = await historySize(s.db);
     assert.ok(size.versions > 0);
     assert.match(html, new RegExp(`${size.versions} versions, about`));
-    assert.match(html, /name="_csrf" value="history-csrf-token"/);
+    assert.match(html, new RegExp(`name="_csrf" value="${CSRF}"`));
   } finally {
     s.close();
   }

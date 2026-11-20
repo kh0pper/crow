@@ -1,15 +1,16 @@
 /**
  * The Bot Board API mounts at the app root, before the dashboard router's
- * csrfMiddleware, so it runs the double-submit check itself: a session
- * request that changes state must echo the crow_csrf cookie as X-Crow-Csrf.
- * Every probe below fails validation BEFORE any DB access when the CSRF
- * check passes (400), so a 403 can only come from the CSRF rail.
+ * csrfMiddleware, so it runs the CSRF check itself: a session request that
+ * changes state must echo the SERVER-BOUND token (HMAC of the session id) as
+ * X-Crow-Csrf. Every probe below fails validation BEFORE any DB access when the
+ * CSRF check passes (400), so a 403 can only come from the CSRF rail.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "bot-board-api-csrf-"));
 process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
@@ -27,7 +28,8 @@ before(async () => {
 });
 after(() => server && server.close());
 
-const SESSION = "crow_session=s1; crow_csrf=tok123";
+const SESSION = "crow_session=s1";
+const CSRF = csrfTokenFor("s1");
 function post(path, body, headers = {}) {
   return fetch(base + path, { method: "POST",
     headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
@@ -55,7 +57,7 @@ test("a session POST with a wrong token is refused 403", async () => {
 
 test("a session POST carrying the matching X-Crow-Csrf reaches the route", async () => {
   for (const [path, body] of PROBES) {
-    const r = await post(path, body, { cookie: SESSION, "x-crow-csrf": "tok123" });
+    const r = await post(path, body, { cookie: SESSION, "x-crow-csrf": CSRF });
     assert.equal(r.status, 400, path + " got past the CSRF rail to its own validation");
   }
 });

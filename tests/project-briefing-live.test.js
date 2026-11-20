@@ -119,9 +119,14 @@ before(async () => {
 
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+  const { csrfTokenForRequest } = await import("../servers/gateway/dashboard/shared/csrf.js");
   perchServer = http.createServer(async (req, res) => {
     if (req.url.startsWith("/dashboard/perch-api/")) return serveApi(req, res);
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: perchLang });
+    // What dashboardAuth + csrfMiddleware do for a real panel request: the CSRF token is derived from
+    // the request's own session (server-bound, queue item #51 PR-1) and the dispatcher hands it to the
+    // panel's layout(), which renders the page's <meta name="crow-csrf">.
+    req.csrfToken = csrfTokenForRequest(req);
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: perchLang, csrf: req.csrfToken });
     const html = await perchHubPanel.handler(req, res, { lang: perchLang, layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
@@ -173,7 +178,9 @@ async function open(url, { width, height, ready }) {
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 900 });
   if (width < 900) await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
   const origin = new URL(url).origin;
-  for (const ck of [{ name: "crow_session", value: "new-sess" }, { name: "crow_csrf", value: "tok" }]) {
+  // The dashboard session only: there is no CSRF cookie any more (queue item #51 PR-1). The token is
+  // in the page's <meta name="crow-csrf">, and the page's own helper echoes it.
+  for (const ck of [{ name: "crow_session", value: "new-sess" }]) {
     await send("Network.setCookie", { ...ck, url: origin, path: "/" });
   }
   await send("Page.navigate", { url });
@@ -221,7 +228,7 @@ for (const lang of ["en", "es"]) {
         await p.until("window.__ph.length", "the start request");
         const [call] = await p.ev("window.__ph");
         assert.equal(call.url, "/dashboard/perch-api/bots/hank/interactive");
-        assert.equal(call.csrf, "tok");
+        assert.equal(call.csrf, await p.ev("document.querySelector('meta[name=\"crow-csrf\"]').getAttribute('content')"), "the layout's token rides the header");
         assert.match(call.body, /^\{"project_id":\d+,"briefing":true\}$/, "a flag, never briefing text");
       } finally { await p.close(); }
     });
@@ -255,7 +262,7 @@ for (const lang of ["en", "es"]) {
         await p.ev("document.getElementById('perch-summary-forget').click(), 1");
         await p.until("document.getElementById('perch-summary').hidden", "the summary hidden after Forget");
         const forget = perchCalls.find((x) => x.url.endsWith("/forget-summary"));
-        assert.deepEqual(forget, { method: "POST", url: `/dashboard/perch-api/interactive/${SID}/forget-summary`, csrf: "tok" });
+        assert.deepEqual(forget, { method: "POST", url: `/dashboard/perch-api/interactive/${SID}/forget-summary`, csrf: await p.ev("document.querySelector('meta[name=\"crow-csrf\"]').getAttribute('content')") });
         assert.equal(await p.ev("document.getElementById('perch-summary-status').textContent"), t("perch.summaryForgotten", lang));
       } finally { await p.close(); }
     });

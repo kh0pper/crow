@@ -2702,12 +2702,12 @@ export function messagesClientJS(opts) {
         form.appendChild(crowIdInput);
         // _csrf body fallback: a dynamically built form bypasses Turbo's
         // header hook unless submitted via requestSubmit; carry the
-        // double-submit token either way (cookie value is hex — no decode).
+        // server-bound token either way (window.crowCsrf — the page's meta tag
+        // or GET /dashboard/csrf; never a cookie).
         var csrfEl = document.createElement('input');
         csrfEl.type = 'hidden';
         csrfEl.name = '_csrf';
-        var csrfM = document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);
-        csrfEl.value = csrfM ? csrfM[1] : '';
+        try { csrfEl.value = window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { csrfEl.value = ''; }
         form.appendChild(csrfEl);
         document.body.appendChild(form);
         if (form.requestSubmit) form.requestSubmit(); else form.submit();

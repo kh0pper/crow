@@ -498,6 +498,7 @@ test("bot-world.mjs resolves its world root through worldRootFor (one resolution
 test("board_on through the dashboard's CSRF rail: 403 without the token, a redirect with it", async () => {
   const express = (await import("express")).default;
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
   const { default: panel } = await import("../servers/gateway/dashboard/panels/bot-builder.js");
   await addBot("rail-bot", "Rail Bot", BASE_DEF());
   const app = express();
@@ -514,14 +515,20 @@ test("board_on through the dashboard's CSRF rail: 403 without the token, a redir
   await new Promise((r) => srv.once("listening", r));
   const url = `http://127.0.0.1:${srv.address().port}/dashboard/bot-builder`;
   try {
-    const cookie = "crow_session=s1; crow_csrf=tok-abc";
+    // The dashboard page's own form POST: the session cookie, the SERVER-BOUND token (HMAC of
+    // that session, delivered in the page and echoed in `_csrf`) and the headers a browser's
+    // network stack writes on a same-origin submit.
+    const session = "s1";
+    const token = csrfTokenFor(session);
+    const cookie = `crow_session=${session}`;
+    const browser = { "sec-fetch-site": "same-origin", origin: new URL(url).origin };
     const form = (extra) => new URLSearchParams({ action: "board_on", bot_id: "rail-bot", return: "list", ...extra }).toString();
-    const denied = await fetch(url, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: form({}) });
+    const denied = await fetch(url, { method: "POST", redirect: "manual", headers: { ...browser, cookie, "content-type": "application/x-www-form-urlencoded" }, body: form({}) });
     assert.equal(denied.status, 403);
     assert.equal((await bot("rail-bot")).project_id, null, "nothing happened");
-    const wrong = await fetch(url, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: form({ _csrf: "nope" }) });
+    const wrong = await fetch(url, { method: "POST", redirect: "manual", headers: { ...browser, cookie, "content-type": "application/x-www-form-urlencoded" }, body: form({ _csrf: "nope" }) });
     assert.equal(wrong.status, 403);
-    const ok = await fetch(url, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: form({ _csrf: "tok-abc" }) });
+    const ok = await fetch(url, { method: "POST", redirect: "manual", headers: { ...browser, cookie, "content-type": "application/x-www-form-urlencoded" }, body: form({ _csrf: token }) });
     assert.equal(ok.status, 303);
     assert.equal(ok.headers.get("location"), "/dashboard/bot-builder?saved=1");
     assert.notEqual((await bot("rail-bot")).project_id, null);

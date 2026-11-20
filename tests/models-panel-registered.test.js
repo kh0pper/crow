@@ -154,7 +154,9 @@ function boot(rows, fetchImpl, { withCatalogClient = false, catalogData = null }
   const timers = [];
   let reloaded = 0;
   const location = { href: "https://crow.test/dashboard/model-catalog", reload() { reloaded += 1; } };
-  Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page
+  // (the <meta name="crow-csrf"> tag) — never read from a cookie.
+  window.crowCsrf = () => "tok123";
   const ctx = vm.createContext({
     window, document, location, console,
     fetch: (url, init) => {

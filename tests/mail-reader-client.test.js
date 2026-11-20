@@ -148,7 +148,7 @@ const jsonResponse = (status, body) => ({ ok: status < 400, status, json: () => 
  * test says exactly when something would have fired; every iframe the script builds is recorded with
  * its attribute order and a stand-in contentWindow, so a message can be posted from it.
  */
-function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = "/dashboard/mail", cookie = "crow_session=abc;  crow_csrf=tok%2042" } = {}) {
+function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = "/dashboard/mail", cookie = "crow_session=abc", csrf = "tok 42" } = {}) {
   const { window: dom, document } = parseHTML(`<!doctype html><html><head></head><body>${html}</body></html>`);
   Object.defineProperty(document, "cookie", { configurable: true, get: () => cookie });
   // The reader marks a message read only while the page is visible, so the page's own reading of
@@ -181,6 +181,8 @@ function boot(html, { fetchImpl = () => jsonResponse(200, { ok: true }), href = 
   // so two visits share it while the document is the real linkedom one.
   const window = {
     Turbo: { visit: (url) => visits.push(String(url)) },
+    // The server-bound CSRF token, as /csrf-client.js would expose it.
+    crowCsrf: () => csrf,
     btoa: (text) => Buffer.from(String(text), "binary").toString("base64"),
     scrollY: 0,
     __mlTimer: null,
@@ -320,13 +322,12 @@ test("static: every request URL starts with /dashboard/mail/api/", () => {
   assert.ok(places.size >= 3, [...places].join(", "));
 });
 
-test("S8 static: the source holds the doubled backslashes of the cookie regex", () => {
+test("S8 static: the client takes the CSRF token from window.crowCsrf, never from a cookie", () => {
   const source = readFileSync(CLIENT_FILE, "utf8");
   const body = source.slice(source.indexOf("export function mailClientJs"));
-  assert.ok(body.includes(";\\\\s*"), "client.js is inside a template literal: the regex is written with two backslashes");
-  assert.equal(body.includes(";\\\\\\\\s*"), false, "and not with four, which would leave the script a stray backslash");
-  assert.ok(mailClientJs("en").includes(";\\s*"), "the emitted script holds the one backslash the browser's regex needs");
-  assert.equal(mailClientJs("en").includes(";\\\\s*"), false);
+  assert.ok(body.includes("window.crowCsrf"), "the server-bound token helper (queue item #51 PR-1)");
+  assert.equal(/crow_csrf\s*=/.test(body), false, "no cookie read for a CSRF value (the cookie is retired)");
+  assert.equal(mailClientJs("en").includes("crow_csrf"), false, "the emitted script never names the retired cookie");
 });
 
 test("S7 static: the stylesheet contains itself on .ml, and the page-level rule ships with the script", () => {

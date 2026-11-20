@@ -22,7 +22,12 @@ let assertAssignableBot, cdb, tdb, tools, server, boardBase, PID;
 const raw = () => new Database(DB_FILE);
 const rawTasks = () => new Database(TASKS);
 const cards = () => { const t = rawTasks(); const r = t.prepare("SELECT * FROM tasks_items ORDER BY id").all(); t.close(); return r; };
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)),
+// so the fixture computes it for its own session instead of reading a cookie.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "good";
+const TOKEN = csrfTokenForSession(SESSION);
+const AUTHED = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": TOKEN };
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: REPO });

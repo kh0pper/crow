@@ -414,9 +414,13 @@ test("the guard's texts are the exact constraint texts", () => {
   assert.deepEqual(TEXTS, { busy: BUSY, held: HELD, handedBack: HANDED_BACK, genChanged: GEN_CHANGED, taken: TAKEN });
 });
 
-test("manifest is at least 1.7.1 and the registry is in sync", () => {
+test("the manifest is at least 1.7.1 (the lease-guard release) and the registry is in sync", () => {
   const mf = JSON.parse(readFileSync(join(ROOT, "bundles/browser/manifest.json"), "utf8"));
-  assertAtLeast(mf.version, "1.7.1", "the manifest version");
+  assertAtLeast(mf.version, "1.7.1", "the manifest version (1.7.1 shipped the lease guard)");
+  const reg = JSON.parse(readFileSync(join(ROOT, "registry/add-ons.json"), "utf8"));
+  const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "browser");
+  assert.ok(entry, "the registry lists the browser");
+  assert.equal(entry.version, mf.version, "the registry mirrors the manifest (rerun `npm run build-registry`)");
   execFileSync(process.execPath, ["scripts/build-registry.mjs", "--check"], { cwd: ROOT, stdio: "pipe" });
 });
 

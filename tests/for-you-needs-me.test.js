@@ -254,7 +254,7 @@ function rig(responses) {
       </section>
     </div>
   </body></html>`);
-  Object.defineProperty(document, "cookie", { value: "crow_csrf=tok%2B1; other=1", configurable: true });
+  Object.defineProperty(document, "cookie", { value: "other=1", configurable: true });
   const root = document.querySelector("[data-fy]");
   const listeners = {};
   root.addEventListener = (type, fn) => { listeners[type] = fn; };
@@ -269,7 +269,9 @@ function rig(responses) {
       json: () => (r.json == null ? Promise.reject(new Error("no json")) : Promise.resolve(r.json)),
     });
   };
-  vm.runInContext(SCRIPT, vm.createContext({ document, window: {}, fetch: fetchStub, console }));
+  // The server-bound CSRF token, as /csrf-client.js would expose it on the page.
+  const window = { crowCsrf: () => "tok+1" };
+  vm.runInContext(SCRIPT, vm.createContext({ document, window, fetch: fetchStub, console }));
   const click = (el) => listeners.click({ target: el });
   return { document, root, calls, click, widget: document.querySelector("[data-fy-needs]") };
 }
@@ -292,7 +294,7 @@ test("a tap posts its key, action and nonce with the CSRF header, then repaints 
   assert.equal(r.calls.length, 1);
   assert.equal(r.calls[0].url, "/dashboard/widgets-api/needs-me/act");
   assert.equal(r.calls[0].opts.method, "POST");
-  assert.equal(r.calls[0].opts.headers["x-crow-csrf"], "tok+1", "the page's CSRF cookie, decoded");
+  assert.equal(r.calls[0].opts.headers["x-crow-csrf"], "tok+1", "the page's server-bound CSRF token");
   assert.equal(r.calls[0].opts.credentials, "same-origin");
   assert.deepEqual(r.calls[0].body, { key: "card:7:decision", action: "option:0", nonce: "abc123" });
   // The answer's summary is what the widget now shows: the answered row is gone, all clear.

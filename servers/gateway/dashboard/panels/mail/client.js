@@ -119,9 +119,10 @@ export function mailClientJs(lang = "en") {
     (document.head || document.documentElement).appendChild(overscroll);
   }
 
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var m = document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function request(method, url, body) {
     var options = { method: method, credentials: 'same-origin', headers: { 'x-crow-csrf': csrf() } };

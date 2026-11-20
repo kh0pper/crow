@@ -61,7 +61,9 @@ export default {
       res.redirectAfterPost("/dashboard/settings?section=password&error=mismatch");
       return true;
     }
-    await setPassword(password);
+    // Keeping THIS session (the one making the change) revokes every other
+    // dashboard session: changing the password signs the other devices out.
+    await setPassword(password, { keepSession: req?.dashboardSession || null });
     res.redirectAfterPost("/dashboard/settings?section=password&success=password");
     return true;
   },

@@ -18,15 +18,15 @@
  */
 
 import express, { Router } from "express";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { createDbClient } from "../db.js";
 import { isAllowedNetwork, parseCookies, sessionFromRequest } from "./dashboard/auth.js";
 import { isLocalPasswordSessionOn } from "./dashboard/local-session.js";
 import { escapeHtml } from "./dashboard/shared/components.js";
 import { SUPPORTED_LANGS, t } from "./dashboard/shared/i18n.js";
-// The one Crow cookie-name list (./cookie-names.js), shared with the setters
-// and with the extension proxy that strips these cookies.
-import { CSRF_COOKIE } from "./cookie-names.js";
+// The server-bound CSRF token for this request's session (shared/csrf.js). No
+// cookie is read: `crow_csrf` is retired.
+import { csrfTokenForRequest, csrfTokenMatches } from "./dashboard/shared/csrf.js";
 
 const CONSENT_PATH = "/dashboard/oauth/consent";
 const PENDING_TTL_MS = 10 * 60 * 1000;
@@ -99,14 +99,14 @@ function takePending(id) {
   return entry.expiresAt <= Date.now() ? null : entry;
 }
 
-/** Constant-time compare of the body's `_csrf` against the crow_csrf cookie. */
+/** Constant-time compare of the body's `_csrf` against the SERVER-BOUND token
+ *  for this request's session (HMAC over the session id — shared/csrf.js). No
+ *  cookie is read: `crow_csrf` is retired, and a same-site host on the tailnet
+ *  could toss one. `csrfTokenMatches` ignores the CROW_CSRF_STRICT kill-switch on
+ *  purpose: turning the dashboard's forgery rail off must not turn a credential
+ *  grant into a one-click cross-site action. */
 function csrfMatches(req, presented) {
-  const cookie = parseCookies(req)[CSRF_COOKIE];
-  if (typeof cookie !== "string" || !cookie || typeof presented !== "string" || !presented) return false;
-  const a = Buffer.from(cookie);
-  const b = Buffer.from(presented);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  return csrfTokenMatches(req, presented);
 }
 
 function langOf(req) {
@@ -254,7 +254,7 @@ export function createOAuthConsentRouter() {
     } catch {
       origin = String(entry.params.redirectUri || "");
     }
-    const csrf = parseCookies(req)[CSRF_COOKIE] || "";
+    const csrf = csrfTokenForRequest(req);
     const hidden = `<input type="hidden" name="req" value="${escapeHtml(id)}">
           <input type="hidden" name="_csrf" value="${escapeHtml(csrf)}">`;
 

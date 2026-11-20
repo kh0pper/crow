@@ -14,6 +14,7 @@ import { createClient } from "@libsql/client";
 
 import modelsRouter from "../../servers/gateway/routes/models.js";
 import { setProviderSyncManager } from "../../servers/shared/providers-db.js";
+import { csrfTokenFor } from "../helpers/csrf-token.mjs";
 import { actAsServe, serveHeaders } from "./serve-peer.mjs";
 actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
@@ -48,14 +49,12 @@ export async function seedSession(db, token = "test-session-token") {
   return token;
 }
 
-export const CSRF = "test-csrf-value";
-
-/** Session + tailnet identity + the double-submit CSRF pair. */
+/** Session + tailnet identity + the SERVER-BOUND CSRF token (HMAC of the session). */
 export function authHeaders(token, extra = {}) {
   return {
     ...serveHeaders("test@example.com"),
-    cookie: `crow_session=${token}; crow_csrf=${CSRF}`,
-    "x-crow-csrf": CSRF,
+    cookie: `crow_session=${token}`,
+    "x-crow-csrf": csrfTokenFor(token),
     "content-type": "application/json",
     ...extra,
   };

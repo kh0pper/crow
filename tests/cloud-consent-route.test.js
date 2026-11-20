@@ -38,6 +38,9 @@ test("a session POST of llm_provider_bots_allow without the CSRF token is 403; w
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
   await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token: session } = await mintSsoSession("test");
+  // The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+  const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  const CSRF = csrfTokenForSession(session);
 
   const express = (await import("express")).default;
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
@@ -48,7 +51,7 @@ test("a session POST of llm_provider_bots_allow without the CSRF token is 403; w
   process.env.CROW_DASHBOARD_PUBLIC = "true"; // past the network gate; the session and CSRF rails still apply
   try {
     const url = `http://127.0.0.1:${server.address().port}/dashboard/settings?section=llm&tab=providers`;
-    const cookie = `crow_session=${session}; crow_csrf=csrf-abc`;
+    const cookie = `crow_session=${session}`;
     const send = (fields) => fetch(url, {
       method: "POST", redirect: "manual",
       headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
@@ -61,7 +64,7 @@ test("a session POST of llm_provider_bots_allow without the CSRF token is 403; w
     assert.equal(wrong.status, 403);
     assert.deepEqual(await readCloudConsent(db), {}, "nothing recorded");
 
-    const ok = await send({ action: "llm_provider_bots_allow", id: "cloud-p", consent_token: token, _csrf: "csrf-abc" });
+    const ok = await send({ action: "llm_provider_bots_allow", id: "cloud-p", consent_token: token, _csrf: CSRF });
     assert.equal(ok.status, 303);
     assert.match(ok.headers.get("location"), /section=llm&tab=providers$/);
     assert.ok((await readCloudConsent(db))["cloud-p"], "the grant landed");

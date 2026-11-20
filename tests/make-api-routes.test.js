@@ -68,7 +68,12 @@ before(async () => {
 after(() => { if (server) server.close(); try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
 beforeEach(() => { globalThis.__mkStub = { calls: [], mkcols: [], next: 40, notReady: false }; installWorkspace(true); });
 
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)),
+// so the fixture computes it for its own session instead of reading a cookie.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "good";
+const TOKEN = csrfTokenForSession(SESSION);
+const AUTHED = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": TOKEN };
 async function post(path, body, headers = AUTHED) {
   const r = await fetch(base + path, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   return { status: r.status, body: await r.json().catch(() => null) };
@@ -220,9 +225,9 @@ test("a title with a slash or backslash is 400 bad_title, and a tool bad_path ma
 });
 
 test("CSRF is required, and so is a session", async () => {
-  const noCsrf = await post("/blank", { kind: "docx", title: "X" }, { cookie: "crow_session=good; crow_csrf=tok" });
+  const noCsrf = await post("/blank", { kind: "docx", title: "X" }, { cookie: `crow_session=${SESSION}` });
   assert.equal(noCsrf.status, 403);
-  const noSession = await post("/blank", { kind: "docx", title: "X" }, { cookie: "crow_csrf=tok", "x-crow-csrf": "tok" });
+  const noSession = await post("/blank", { kind: "docx", title: "X" }, { cookie: `crow_csrf=${TOKEN}`, "x-crow-csrf": TOKEN });
   assert.notEqual(noSession.status, 200);
   assert.equal(rec().calls.length, 0);
 });
@@ -257,7 +262,9 @@ function bootClient(model, bots = [{ id: "b1", name: "Bee", perch_attached: true
   const html = renderMakePage({ model: { items: [], ...model }, filter: "all", lang: "en", project: { id: P1, name: "Garden" }, projects: [{ id: 2, slug: "g", name: "Garden" }, { id: 3, slug: "o", name: "Orchard" }], startCard: opts.card ?? null });
   const { window, document } = parseHTML(`<html><body>${html}</body></html>`);
   const calls = [];
-  Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
+  // The server-bound CSRF token, as /csrf-client.js exposes it (the page's
+  // <meta name="crow-csrf"> tag). Never read from a cookie.
+  window.crowCsrf = () => "tok123";
   const loc = { href: "/dashboard/make", hash: "", reload() {} };
   let opened = 0;
   window.open = () => { opened += 1; };

@@ -39,7 +39,9 @@ before(async () => {
 });
 after(() => { s.http.close(); try { s.db.close(); } catch {} rmSync(s.dir, { recursive: true, force: true }); });
 
-const H = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok", "content-type": "application/json" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const H = { cookie: "crow_session=good", "x-crow-csrf": csrfTokenForSession("good"), "content-type": "application/json" };
 const get = async () => (await fetch(s.base + "/api/artifacts/house-style", { headers: H })).json();
 const post = async (body, headers = H) => { const r = await fetch(s.base + "/api/artifacts/house-style", { method: "POST", headers, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
 
@@ -123,9 +125,9 @@ test("bots: only a bot that uses Artifacts can be given one; any bot can be clea
 });
 
 test("owner-only: no dashboard session is refused before anything is written", async () => {
-  const r = await fetch(s.base + "/api/artifacts/house-style", { method: "POST", headers: { ...H, cookie: "crow_csrf=tok" }, body: JSON.stringify({ scope: "project", id: 1, theme: "ocean-depths" }) });
+  const r = await fetch(s.base + "/api/artifacts/house-style", { method: "POST", headers: { ...H, cookie: `crow_csrf=${csrfTokenForSession("good")}` }, body: JSON.stringify({ scope: "project", id: 1, theme: "ocean-depths" }) });
   assert.equal(r.status, 401);
-  assert.equal((await fetch(s.base + "/api/artifacts/house-style", { headers: { cookie: "crow_csrf=tok" } })).status, 401);
+  assert.equal((await fetch(s.base + "/api/artifacts/house-style", { headers: { cookie: `crow_csrf=${csrfTokenForSession("good")}` } })).status, 401);
 });
 
 test("the Crow voice bot has no house style: set and clear are refused and its row is untouched", async () => {

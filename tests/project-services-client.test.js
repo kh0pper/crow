@@ -63,7 +63,9 @@ function boot({ pageData = page(), lang = "en", fetchImpl } = {}) {
     });
   };
   const location = { href: "https://crow.example.ts.net/dashboard/project/spring/services", reload() { reloads++; } };
-  document.cookie = "crow_csrf=csrf-abc";
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page
+  // (the <meta name="crow-csrf"> tag) — never read from a cookie.
+  window.crowCsrf = () => "csrf-abc";
   const logs = [];
   const consoleStub = { log: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")), error: (...a) => logs.push(a.join(" ")) };
   window.location = location;

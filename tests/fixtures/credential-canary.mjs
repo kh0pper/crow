@@ -39,6 +39,7 @@ import { format } from "node:util";
 import http from "node:http";
 
 import { findSecrets } from "../../servers/shared/secret-detect.js";
+import { csrfTokenFor } from "../helpers/csrf-token.mjs";
 
 const REPO = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -320,7 +321,17 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
   const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const port = server.address().port;
 
-  const AUTH = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+  // The dashboard page's own submit: a session cookie, that session's SERVER-BOUND CSRF token
+  // (HMAC of the session id, computed from the scratch home's key — not a cookie value), and the
+  // headers a browser writes on a same-origin request. CROW_HOME is the scratch home by now, so
+  // the helper mints against the same key csrfMiddleware will check against.
+  const SESSION_ID = "good";
+  const AUTH = {
+    cookie: `crow_session=${SESSION_ID}`,
+    "x-crow-csrf": csrfTokenFor(SESSION_ID),
+    "sec-fetch-site": "same-origin",
+    origin: `http://127.0.0.1:${port}`,
+  };
 
   /** POST `body` (an object is JSON-encoded; a string is sent as-is, so a malformed body is a
    *  plain string). Returns { status, text, json }. */
@@ -347,7 +358,7 @@ export async function createCanaryHarness({ services = true, teeConsole = false,
 
   /** GET `path` with the session cookie. Returns { status, headers, text, json }. */
   async function get(path, { headers = {} } = {}) {
-    const res = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { cookie: AUTH.cookie, ...headers } });
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { ...AUTH, ...headers } });
     const text = await res.text();
     let json;
     try { json = JSON.parse(text); } catch { /* not JSON */ }

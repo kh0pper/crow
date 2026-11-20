@@ -95,9 +95,16 @@ for (const sameIdentity of [true, false]) {
         assert.equal(ok.code, 0, ok.out);
         const fence = JSON.parse(A.sql("SELECT last_applied_seq_per_peer AS b FROM sync_state WHERE instance_id = ?", [A.id])[0]?.b || "{}");
         assert.equal(fence[B.id]?.ff, 1, "the enroll route fenced the revoked → active move");
-        assert.equal(A.row(B.id).status, "active");
+        // The enroll CAS un-revokes the row (`status = CASE WHEN status = 'revoked' THEN 'active'`).
+        // Only a LIVENESS value is asserted: `pairInto` reboots A, and A's boot federation probe
+        // (proxy.js loadRemoteInstances) marks a peer it cannot dial 'offline' — this fixture
+        // advertises undialable tailnet URLs on purpose, so 'offline' here is the probe telling the
+        // truth, not a trust decision. 'revoked' can never come back except through a revoke.
+        assert.notEqual(A.row(B.id).status, "revoked", "re-pairing un-revoked the row");
+        assert.ok(["active", "offline"].includes(A.row(B.id).status), A.row(B.id).status);
         assert.equal(Number(A.row(B.id).trusted), 1);
-        assert.equal(B.row(A.id).status, "active");
+        assert.notEqual(B.row(A.id).status, "revoked", "B's own row for A after its pair CLI");
+        assert.ok(["active", "offline"].includes(B.row(A.id).status), B.row(A.id).status);
         const newOnB = B.tokens()[A.id];
         assert.notEqual(newOnB.signing_key, oldOnB.signing_key, "a new signing key");
         assert.notEqual(newOnB.auth_token, oldOnB.auth_token, "a new bearer");

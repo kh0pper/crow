@@ -99,7 +99,12 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)),
+// so the fixture computes it for its own session instead of reading a cookie.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "good";
+const TOKEN = csrfTokenForSession(SESSION);
+const AUTHED = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": TOKEN };
 async function post(path, body, headers = AUTHED) {
   const r = await fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   return { status: r.status, body: await r.json().catch(() => null) };
@@ -174,8 +179,8 @@ test("the review routes need a session and CSRF", async () => {
   const id = addCard();
   const rid = addResult(id);
   assert.equal((await accept(id, { result_id: rid }, {})).status, 401);
-  assert.equal((await accept(id, { result_id: rid }, { cookie: "crow_session=good; crow_csrf=tok" })).status, 403);
-  assert.equal((await change(id, { result_id: rid, text: "x" }, { cookie: "crow_session=good; crow_csrf=tok" })).status, 403);
+  assert.equal((await accept(id, { result_id: rid }, { cookie: `crow_session=${SESSION}` })).status, 403);
+  assert.equal((await change(id, { result_id: rid, text: "x" }, { cookie: `crow_session=${SESSION}` })).status, 403);
   assert.equal((await get("/perch-api/interactive/perchlive-z/card", {})).status, 401);
   assert.equal(result(rid).status, "recorded");
   assert.equal(card(id).status, "todo");

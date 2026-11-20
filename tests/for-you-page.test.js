@@ -103,12 +103,14 @@ beforeEach(() => {
 });
 
 const NET = serveHeaders("operator@example.com");
-const jar = (sess) => `crow_session=${sess}; crow_csrf=tok; ${MODE}=new`;
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const jar = (sess) => `crow_session=${sess}; ${MODE}=new`;
 async function get(path, sess = "owner-sess") {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: jar(sess) } });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
 }
-async function save(fields, { sess = "owner-sess", csrf = "tok" } = {}) {
+async function save(fields, { sess = "owner-sess", csrf = csrfTokenForSession(sess) } = {}) {
   const body = new URLSearchParams({ ...(csrf ? { _csrf: csrf } : {}), ...fields });
   const r = await fetch(base + "/dashboard/for-you", {
     method: "POST", redirect: "manual",
@@ -1127,9 +1129,13 @@ function listenRig({ withBar, withShows = false }) {
     a.play = () => { inline.push(a.id); return Promise.resolve(); };
     a.pause = () => {};
   }
-  // A plain object: linkedom's window is shared between parses, so a stub set on it would leak.
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page.
+  // (A plain object: linkedom's window is shared between parses, so a stub set on
+  // it would leak.)
   const queued = [];
-  const win = withBar ? { crowPlayer: { load: (src, title, sub) => loads.push({ src, title, sub }), queue: (items) => queued.push(items) } } : {};
+  const win = withBar
+    ? { crowPlayer: { load: (src, title, sub) => loads.push({ src, title, sub }), queue: (items) => queued.push(items) }, crowCsrf: () => "t" }
+    : { crowCsrf: () => "t" };
   const fetchStub = (url, opts) => { posts.push({ url, body: JSON.parse(opts.body) }); return Promise.resolve({ ok: true, status: 200 }); };
   const ctx = vm.createContext({ window: win, document, fetch: fetchStub, JSON, encodeURIComponent, decodeURIComponent });
   const { forYouClientJs } = forYouClientMod;

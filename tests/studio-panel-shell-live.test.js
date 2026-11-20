@@ -67,10 +67,30 @@ const TURBO_FILE = new URL(
   import.meta.url,
 ).pathname;
 
+/** The dashboard's CSRF helper, as the layout serves it (`<script src="/csrf-client.js">`). */
+const CSRF_CLIENT_FILE = new URL(
+  "../servers/gateway/public/csrf-client.js",
+  import.meta.url,
+).pathname;
+
+/**
+ * The token the stand-in dashboard auth accepts, and the layout delivers.
+ *
+ * The real layout (servers/gateway/dashboard/shared/layout.js) renders the
+ * SERVER-BOUND token into `<meta name="crow-csrf">` and loads
+ * /csrf-client.js, which is what makes `window.crowCsrf()` answer on the page.
+ * The Studio client echoes that token in its WebSocket hello frame, so a
+ * stand-in layout without those two lines is not a stand-in for the dashboard
+ * at all: the hub closes the socket 4401 and the page never gets its song.
+ */
+const CSRF = "csrf-ok";
+
 /** The stand-in dashboard layout: a bare document around the panel content. */
 function minimalLayout({ title, content }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">`
     + `<meta name="viewport" content="width=device-width, initial-scale=1.0">`
+    + `<meta name="crow-csrf" content="${CSRF}">`
+    + `<script src="/csrf-client.js"></script>`
     + `<title>${title}</title></head><body>${content}</body></html>`;
 }
 
@@ -137,7 +157,7 @@ before(async () => {
       isAllowedNetwork: () => true,
       sessionFromRequest: (req) => cookieOf(req.headers.cookie, "crow_session"),
       verifySession: async (token) => token === "good",
-      csrfTokenAccepted: (_req, presented) => presented === "csrf-ok",
+      csrfTokenAccepted: (_req, presented) => presented === CSRF,
       classifyPeer: () => ({ via: "local" }),
     },
     crowHome: join(dir, "home"),
@@ -200,6 +220,12 @@ before(async () => {
     res.setHeader("content-type", "application/javascript");
     res.end("self.addEventListener('install', function () {});");
   });
+  // The dashboard's CSRF helper, served for real: the page's token is the
+  // layout's <meta name="crow-csrf"> tag read through it, never a cookie.
+  app.get("/csrf-client.js", (_req, res) => {
+    res.setHeader("content-type", "application/javascript");
+    res.end(readFileSync(CSRF_CLIENT_FILE, "utf8"));
+  });
   const dashboardAuth = (req, res, next) => {
     if (!cookieOf(req.headers.cookie, "crow_session")) return res.status(401).json({ error: "unauthorized" });
     return next();
@@ -217,8 +243,11 @@ before(async () => {
   app.get("/dashboard/studio-dash", async (req, res, next) => {
     try {
       const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+      // The panel dispatcher's own token (dashboard/index.js: `csrf:
+      // req.csrfToken`), so the page the real layout makes is the page under
+      // test: its meta tag carries the token the hub will accept.
       const layout = (options) =>
-        renderLayout({ ...options, activePanel: "studio", panels: [], lang: "en" });
+        renderLayout({ ...options, activePanel: "studio", panels: [], lang: "en", csrf: CSRF });
       await studioPanel.handler(req, res, { db, layout });
     } catch (err) {
       next(err);
@@ -328,9 +357,10 @@ async function openPage(url, { width = 1280, height = 900 } = {}) {
     // meta, and the width under test would never reach the page.
     width, height, deviceScaleFactor: 1, mobile: false,
   });
-  for (const [name, value] of [["crow_session", "good"], ["crow_csrf", "csrf-ok"]]) {
-    await send("Network.setCookie", { name, value, url: `${base}/` });
-  }
+  // The session cookie, and deliberately NOT a CSRF cookie: crow_csrf is
+  // retired, and the page's token comes from the layout's meta tag through
+  // /csrf-client.js. A page that had to read a cookie would fail here.
+  await send("Network.setCookie", { name: "crow_session", value: "good", url: `${base}/` });
   await send("Page.navigate", { url });
 
   return {
@@ -564,6 +594,20 @@ async function waitForStudio(page) {
   assert.ok(
     await waitFor(page, "!!document.querySelector('.studio [data-role=studio-top]')", 30000),
     "the studio shell mounted",
+  );
+  // The token the page echoes in its WebSocket hello is the layout's own
+  // (the <meta name="crow-csrf"> tag through /csrf-client.js), never a cookie.
+  // Asserted here, by name, because without it the page still mounts its shell
+  // and draws an EMPTY grid — the hub closes the socket 4401 — so every later
+  // failure would be reported about a control that never became pressable.
+  assert.equal(
+    await waitFor(
+      page,
+      "(function () { return typeof window.crowCsrf === 'function' ? window.crowCsrf() : ''; })()",
+      10000,
+    ),
+    CSRF,
+    "the page carries the dashboard layout's server-bound CSRF token",
   );
   assert.ok(
     await waitFor(page, "!!document.querySelector('[data-role=grid] .st-corner')", 30000),

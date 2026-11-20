@@ -32,7 +32,10 @@ writeFileSync(join(process.env.CROW_HOME, "installed.json"), JSON.stringify([{ i
 const BASE_URL = "https://crow-artifacts.example.ts.net";
 const INFO = { baseUrl: BASE_URL, port: 3059, bindHost: "127.0.0.1" };
 const NET = serveHeaders("operator@example.com");
-const JAR = { crow_session: "prev-sess", crow_csrf: "tok" };
+const JAR = { crow_session: "prev-sess" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(JAR.crow_session);
 const PNG = createCanvas(64, 40).toBuffer("image/png");
 const HASH = (c) => c.repeat(64);
 
@@ -538,14 +541,14 @@ test("the button needs CSRF", async () => {
   assert.equal(r.status, 403);
   assert.notEqual(await readSetting(db, "previews_enabled"), "true");
   assert.equal(S.prepares, 0);
-  r = await req("POST", "/dashboard/make/previews/enable", { body: { _csrf: "tok", back: "/dashboard/make?filter=pages" } });
+  r = await req("POST", "/dashboard/make/previews/enable", { body: { _csrf: CSRF, back: "/dashboard/make?filter=pages" } });
   assert.equal(r.status, 303);
   assert.equal(r.location, "/dashboard/make?filter=pages");
   assert.equal(await readSetting(db, "previews_enabled"), "true");
   assert.equal(S.prepares, 1);
   assert.equal(S.clears, 1, "the start backoff is cleared on enable");
   for (const back of ["//evil.example/x", "https://evil.example/", "/dashboard/../x", "/\\evil.example", "javascript:alert(1)", ""]) {
-    r = await req("POST", "/dashboard/make/previews/enable", { body: { _csrf: "tok", back } });
+    r = await req("POST", "/dashboard/make/previews/enable", { body: { _csrf: CSRF, back } });
     assert.equal(r.status, 303);
     assert.equal(r.location, "/dashboard/make", back);
   }

@@ -36,7 +36,9 @@ function boot(models, fetchImpl) {
   const dlgHtml = dialogClientJS("en");
   const dlgJs = dlgHtml.slice(dlgHtml.indexOf("<script>") + 8, dlgHtml.lastIndexOf("</script>"));
   const { window, document } = parseHTML(`<html><body>${renderCuratedTab({ models, hfTokenConfigured: false }, "en")}${overlay}</body></html>`);
-  Object.defineProperty(document, "cookie", { configurable: true, get: () => "crow_session=s; crow_csrf=tok123" });
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page
+  // (the <meta name="crow-csrf"> tag) — never read from a cookie.
+  window.crowCsrf = () => "tok123";
   const calls = [];
   let reloaded = 0;
   const stored = {};

@@ -24,7 +24,9 @@ const hoursAgo = (h) => new Date(NOW - h * 3600000).toISOString();
 // scope, "sso" was minted by a paired instance's sign-in. The stub auth admits all three, as
 // dashboardAuth does (its verifier ignores scopes).
 const SESSIONS = { owner: "dashboard", plain: "", sso: "dashboard sso src:instance-peer" };
-const AUTH = { Cookie: "crow_session=owner; crow_csrf=tok", "Content-Type": "application/json" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const AUTH = { Cookie: "crow_session=owner", "Content-Type": "application/json" };
 const auth = (req, res, next) => {
   const m = /crow_session=([a-z]+)/.exec(String(req.headers.cookie || ""));
   if (!m || !(m[1] in SESSIONS)) return res.status(401).json({ error: "login required" });
@@ -141,11 +143,11 @@ test("POST /api/media/sources/:id/hidden: a session, the owner only, CSRF, then 
   const post = (path, body, headers = AUTH) => fetch(base + path, { method: "POST", headers, body: JSON.stringify(body) });
   assert.equal((await post(`/api/media/sources/${s}/hidden`, { hidden: true }, { "Content-Type": "application/json" })).status, 401);
   assert.equal((await post(`/api/media/sources/${s}/hidden`, { hidden: true })).status, 403, "no CSRF header: the owner's request without the token is refused");
-  const H = { ...AUTH, "X-Crow-Csrf": "tok" };
+  const H = { ...AUTH, "X-Crow-Csrf": csrfTokenForSession("owner") };
   // Only the owner: a session without the password scope, or a paired instance's SSO session,
   // gets 404 and changes nothing.
   for (const who of ["plain", "sso"]) {
-    const r = await post(`/api/media/sources/${s}/hidden`, { hidden: true }, { ...H, Cookie: `crow_session=${who}; crow_csrf=tok` });
+    const r = await post(`/api/media/sources/${s}/hidden`, { hidden: true }, { ...H, Cookie: `crow_session=${who}`, "X-Crow-Csrf": csrfTokenForSession(who) });
     assert.equal(r.status, 404, who);
   }
   assert.deepEqual(await hiddenSources(db), [], "no non-owner change landed");

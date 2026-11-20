@@ -589,7 +589,9 @@ test("boot registers the account-removal guard with mail on even when sync is of
 /* ------------------------------------------------------------------ the settings routes */
 
 const OWNER = "owner-local-password-session";
-const CSRF = "csrf-token-value";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWNER);
 let server = null;
 let apiDb = null;
 let apiPath = null;
@@ -632,14 +634,14 @@ beforeEach(() => {
   process.env.CROW_MAIL = "1";
 });
 
-function call(method, path, { body, token = OWNER, csrf = CSRF, laptop = true } = {}) {
+function call(method, path, { body, token = OWNER, csrf = csrfTokenForSession(token), laptop = true } = {}) {
   const payload = body === undefined ? null : JSON.stringify(body);
   const headers = {};
   if (payload !== null) {
     headers["content-type"] = "application/json";
     headers["content-length"] = String(Buffer.byteLength(payload));
   }
-  if (token) headers.cookie = "crow_session=" + token + "; crow_csrf=" + CSRF;
+  if (token) headers.cookie = "crow_session=" + token;
   if (token && csrf) headers["x-crow-csrf"] = csrf;
   if (laptop) headers["x-test-from"] = "laptop";
   return new Promise((resolve, reject) => {

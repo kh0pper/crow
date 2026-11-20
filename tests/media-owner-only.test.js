@@ -29,7 +29,8 @@ let db, server, base, mediaRouter;
 // was minted by a paired instance's sign-in. The stub auth admits all three, as dashboardAuth does
 // (its verifier ignores scopes); the router's owner check is what tells them apart.
 const SESSIONS = { owner: "dashboard", plain: "", sso: "dashboard sso src:instance-peer" };
-const TOKEN = "tok";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id), per session.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
 const OWNER_REFUSAL = { error: "Not found" };
 // A request that really is from this box: it gets no peer-class memo, so its loopback socket makes
 // self-origin read it as this machine and the owner's turn is refused.
@@ -77,14 +78,14 @@ beforeEach(async () => {
     "media_audio_cache", "media_articles", "media_briefings", "media_sources"]) await db.execute(`DELETE FROM ${t}`);
 });
 
-const headersFor = (who, extra = {}) => ({ Cookie: `crow_session=${who}; crow_csrf=${TOKEN}`, ...extra });
+const headersFor = (who, extra = {}) => ({ Cookie: `crow_session=${who}`, ...extra });
 const get = (path, who, extra = {}) => fetch(base + path, { headers: headersFor(who, extra) });
 const post = (path, who, body, extra = {}) => fetch(base + path, {
   method: "POST",
-  headers: headersFor(who, { "Content-Type": "application/json", "X-Crow-Csrf": TOKEN, ...extra }),
+  headers: headersFor(who, { "Content-Type": "application/json", "X-Crow-Csrf": csrfTokenForSession(who), ...extra }),
   body: JSON.stringify(body ?? {}),
 });
-const del = (path, who, extra = {}) => fetch(base + path, { method: "DELETE", headers: headersFor(who, { "X-Crow-Csrf": TOKEN, ...extra }) });
+const del = (path, who, extra = {}) => fetch(base + path, { method: "DELETE", headers: headersFor(who, { "X-Crow-Csrf": csrfTokenForSession(who), ...extra }) });
 
 const TABLES = ["media_sources", "media_articles", "media_article_states", "media_audio_cache", "media_playlists", "media_playlist_items", "media_briefings"];
 async function tally() {

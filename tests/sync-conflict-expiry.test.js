@@ -34,6 +34,7 @@ const { discoverMigrations, runMigrations } = await import("../scripts/migration
 const section = (await import("../servers/gateway/dashboard/settings/sections/sync-conflicts.js")).default;
 const { SYNCED_TABLES } = await import("../servers/sharing/instance-sync.js");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
 const { collectHealthSignals, invalidateHealthCache } = await import(
   "../servers/gateway/dashboard/panels/nest/health-signals.js"
 );
@@ -132,21 +133,23 @@ function fakeRes() {
   };
 }
 
+/** The dashboard session these settings forms are submitted with. */
+const SESSION = "sess";
+/** That session's SERVER-BOUND token: HMAC of the session id, delivered in the page's
+ *  `<meta name="crow-csrf">` tag — never a value a cookie could hand an attacker. */
+const CSRF = csrfTokenFor(SESSION);
+
 /**
  * Post a settings action through the REAL CSRF rail, exactly as the dashboard
  * mounts it, then hand the request to the section's handleAction.
  */
-async function postSettings(db, body, { cookieToken = "csrf-token", includeCsrfCookie = true } = {}) {
+async function postSettings(db, body, { token = CSRF, includeToken = true } = {}) {
   const req = {
     method: "POST",
-    headers: {
-      cookie: includeCsrfCookie
-        ? `crow_session=sess; crow_csrf=${cookieToken}`
-        : "crow_session=sess",
-    },
-    // A real form echoes the cookie value in the hidden field; the CSRF rail
-    // compares the two, so the default here is the matching token.
-    body: { _csrf: cookieToken, ...body },
+    // A browser's own form submit: same-origin, session cookie, and the hidden field the
+    // page rendered from its meta tag.
+    headers: { cookie: `crow_session=${SESSION}`, "sec-fetch-site": "same-origin" },
+    body: includeToken ? { _csrf: token, ...body } : { ...body },
     query: {},
   };
   const res = fakeRes();
@@ -415,18 +418,18 @@ test("the opened action is refused without a valid CSRF token", async () => {
     const row = await seed(db, { ageDays: 30 });
     const bad = await postSettings(
       db,
-      { action: "sync_conflicts_opened", conflict_id: String(row.id), _csrf: "wrong" },
-      { cookieToken: "csrf-token" },
+      { action: "sync_conflicts_opened", conflict_id: String(row.id) },
+      { token: "wrong" },
     );
     assert.equal(bad.reachedAction, false, "the real csrfMiddleware refuses the POST");
     assert.equal(bad.res.statusCode, 403);
     assert.equal((await reload(db, row.id)).opened_at, null);
 
-    // No cookie at all (a cross-site form post carries no crow_csrf value).
+    // No token echoed at all (a cross-site form post cannot compute this session's token).
     const noCookie = await postSettings(
       db,
       { action: "sync_conflicts_opened", conflict_id: String(row.id) },
-      { includeCsrfCookie: false },
+      { includeToken: false },
     );
     assert.equal(noCookie.reachedAction, false);
     assert.equal(noCookie.res.statusCode, 403);

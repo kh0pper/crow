@@ -62,8 +62,10 @@ after(() => { if (server) server.close(); rmSync(dir, { recursive: true, force: 
 
 const NET = serveHeaders("operator@example.com");
 const cookieHeader = (jar) => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
-const OLD = { crow_session: "old-sess", crow_csrf: "tok" };
-const NEW = { crow_session: "new-sess", crow_csrf: "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const OLD = { crow_session: "old-sess" };
+const NEW = { crow_session: "new-sess" };
 
 async function get(path, jar) {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: cookieHeader(jar) } });
@@ -72,7 +74,7 @@ async function get(path, jar) {
 async function post(path, form, jar = OLD) {
   const r = await fetch(base + path, {
     method: "POST", redirect: "manual",
-    headers: { ...NET, "content-type": "application/x-www-form-urlencoded", cookie: cookieHeader(jar), "x-crow-csrf": jar.crow_csrf },
+    headers: { ...NET, "content-type": "application/x-www-form-urlencoded", cookie: cookieHeader(jar), "x-crow-csrf": csrfTokenForSession(jar.crow_session) },
     body: new URLSearchParams(form).toString(),
   });
   return { status: r.status, location: r.headers.get("location") };

@@ -33,7 +33,10 @@ function mkStorage(map) {
 function harness({ local = new Map(), session = new Map(), respond, BroadcastChannel, queuedPause = false } = {}) {
   session.set("crow-glasses-bundle", "false");          // no glasses probe traffic
   const { document, window } = parseHTML(`<html><head></head><body>${playerBarHtml("en")}</body></html>`);
-  Object.defineProperty(document, "cookie", { configurable: true, get: () => "other=1; crow_csrf=csrf-abc; x=2" });
+  // The SERVER-BOUND token the bar's controls echo (window.crowCsrf). It is
+  // never read from a cookie: crow_csrf is retired.
+  const csrf = "csrf-abc";
+  Object.defineProperty(document, "cookie", { configurable: true, get: () => "other=1; x=2" });
   const audio = document.getElementById("crow-audio");
   const calls = [];
   let src = "";
@@ -80,6 +83,7 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
   const listeners = {};
   const win = {
     innerWidth: 1200,
+    crowCsrf: () => csrf,
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
   };
   const crypto = { getRandomValues: (a) => { for (let i = 0; i < a.length; i++) a[i] = (i * 37 + 11) % 256; return a; } };
@@ -92,7 +96,7 @@ function harness({ local = new Map(), session = new Map(), respond, BroadcastCha
   const attach = () => P.kioskAttach((m) => posted.push(m), () => live);
   const $ = (id) => document.getElementById(id);
   return {
-    P, win, window, document, audio, calls, fire, drain, fetches, posted, advance, handlers, local, session, attach, $,
+    P, win, window, document, csrf, audio, calls, fire, drain, fetches, posted, advance, handlers, local, session, attach, $,
     setLive: (v) => { live = v; },
     fireWin: (type, ev = {}) => (listeners[type] || []).forEach((fn) => fn(ev)),
     shown: () => $("crow-player-bar").style.display !== "none",
@@ -299,13 +303,17 @@ test("detached: every control POSTs {do, id, owner} with the CSRF header; ⏯ pa
   h.P.prev(); await flush();
   const posts = h.fetches.filter((f) => f.method === "POST");
   assert.deepEqual(posts.map((f) => f.body.do), ["pause", "resume", "next", "previous"]);
+  // The token posted is the SERVER-BOUND one the page handed the bar (window.crowCsrf), not the
+  // retired double-submit crow_csrf cookie: this document carries no CSRF cookie at all, so a
+  // cookie read would post an empty (or another tab's) header and fail below.
+  assert.ok(!String(h.document.cookie).includes(h.csrf), "the token is not in a cookie");
   for (const f of posts) {
     n++;
     assert.equal(f.url, "/api/kiosk/session/media");
     assert.equal(f.body.id, "m1");
     assert.match(f.body.owner, OWNER_RE);
     assert.equal(f.body.owner, h.P.kioskOwner());
-    assert.equal(f.headers["X-Crow-Csrf"], "csrf-abc");
+    assert.equal(f.headers["X-Crow-Csrf"], h.csrf);
     assert.equal(f.headers["Content-Type"], "application/json");
     assert.deepEqual(Object.keys(f.body).sort(), ["do", "id", "owner"]);
   }

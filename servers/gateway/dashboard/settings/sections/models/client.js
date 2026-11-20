@@ -100,15 +100,10 @@ export function modelsClientJS({ lang = "en" } = {}) {
     return n;
   }
   function str(v) { return typeof v === 'string' && v.trim() && v !== 'null' ? v.trim() : ''; }
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var parts = String(document.cookie || '').split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var p = parts[i].trim();
-      if (p.indexOf('crow_csrf=') === 0) {
-        try { return decodeURIComponent(p.slice(10)); } catch (e) { return p.slice(10); }
-      }
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   /** Never parses a non-JSON answer: data is null for those (and for network errors). */
   function call(method, path, body) {
@@ -556,15 +551,10 @@ export function customRolesClientJS({ lang = "en" } = {}) {
     return n;
   }
   function str(v) { return typeof v === 'string' && v.trim() && v !== 'null' ? v.trim() : ''; }
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var parts = String(document.cookie || '').split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var p = parts[i].trim();
-      if (p.indexOf('crow_csrf=') === 0) {
-        try { return decodeURIComponent(p.slice(10)); } catch (e) { return p.slice(10); }
-      }
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function call(method, path, body) {
     var headers = { 'Accept': 'application/json', 'X-Crow-Csrf': csrf() };

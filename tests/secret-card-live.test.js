@@ -19,8 +19,15 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 process.env.PIBOT_PI_CLI = "/nonexistent/pi-never-spawned-by-this-file.js";
+
+// The dashboard session this page is served under, and the CSRF token it yields: the token is
+// server-bound (HMAC of the session id, shared/csrf.js — queue item #51 PR-1), so the page's
+// <meta name="crow-csrf"> carries this value and the card's fetch echoes it.
+const SESSION = "live-secret-session";
+const CSRF = csrfTokenFor(SESSION);
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SID = "perchlive-33333333";
@@ -93,6 +100,7 @@ before(async () => {
   CDP = chrome.cdp; HOST = chrome.pageHost; BIND_HOST = chrome.bindHost;
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+  const { csrfTokenForRequest } = await import("../servers/gateway/dashboard/shared/csrf.js");
   const { tamagotchiHtml, tamagotchiTrayHtml } = await import("../servers/gateway/dashboard/shared/notifications.js");
   const turbo = readFileSync(join(REPO, "servers/gateway/public/vendor/turbo-8.0.5.umd.js"));
   server = http.createServer(async (req, res) => {
@@ -110,12 +118,15 @@ before(async () => {
     req.crowMode = { mode: "new" };
     const scope = { all: true };
     req.crowScope = scope;
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang,
+    // What csrfMiddleware + the panel dispatcher do for a real panel request: the token is derived
+    // from this request's session and handed to layout(), which renders the page's meta tag.
+    req.csrfToken = csrfTokenForRequest(req);
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang, csrf: req.csrfToken,
       headerIcons: tamagotchiHtml(lang, { sheet: true }),
       variant: "shell", shell: { scope, projects: [], tab: "chat", getPanel: () => null, tray: tamagotchiTrayHtml(lang) } });
     const db = { execute: async () => ({ rows: [] }) };
     const html = await perchHubPanel.handler(req, res, { lang, layout, db });
-    if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html", "set-cookie": "crow_csrf=tok; Path=/" }); res.end(html); }
+    if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
   await new Promise((r) => server.listen(0, BIND_HOST, r));
   port = server.address().port;
@@ -171,6 +182,8 @@ async function tab({ width, height, lang = "en" }) {
   await cdp("Runtime.enable");
   await cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
   await cdp("Page.enable");
+  await cdp("Network.enable");
+  await cdp("Network.setCookie", { name: "crow_session", value: SESSION, url: `http://${HOST}:${port}`, path: "/" });
   await cdp("Page.navigate", { url: `http://${HOST}:${port}/dashboard/perch${lang === "es" ? "?lang=es" : ""}#${SID}` });
   await waitFor("!!document.querySelector('#perch-secret .secret-card')", "the password card");
   await evalIn(SETTLED);
@@ -252,7 +265,7 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
       assert.equal(m.inputs, 0, "the field is gone");
       assert.equal(await s.evalIn("window.__f.value"), "", "the old field holds nothing");
       assert.equal(await s.evalIn("window.__f.isConnected"), false);
-      assert.deepEqual(posts.map((p) => [p.url, p.body, p.csrf]), [[`/dashboard/perch-api/secret/${ID1}?sid=${SID}`, '{"cancel":true}', "tok"]]);
+      assert.deepEqual(posts.map((p) => [p.url, p.body, p.csrf]), [[`/dashboard/perch-api/secret/${ID1}?sid=${SID}`, '{"cancel":true}', CSRF]]);
       assert.ok(!(await s.evalIn("document.documentElement.outerHTML")).includes(SECRET));
       assertFits(m, width + " settled");
     } finally { await s.close(); }
@@ -276,7 +289,7 @@ test("390 px: Save sends the value in the body only; it never reaches the DOM, s
     assert.equal(posts.length, 1);
     assert.equal(posts[0].url, `/dashboard/perch-api/secret/${ID1}?sid=${SID}`, "the value is never in the URL");
     assert.deepEqual(JSON.parse(posts[0].body), { value: SECRET });
-    assert.equal(posts[0].csrf, "tok", "the X-Crow-Csrf header");
+    assert.equal(posts[0].csrf, CSRF, "the X-Crow-Csrf header");
     const where = await s.json(`JSON.stringify({ html: document.documentElement.outerHTML.indexOf(${JSON.stringify(SECRET)})>=0,
       local: JSON.stringify(Object.assign({}, localStorage)).indexOf(${JSON.stringify(SECRET)})>=0,
       session: JSON.stringify(Object.assign({}, sessionStorage)).indexOf(${JSON.stringify(SECRET)})>=0,

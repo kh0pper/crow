@@ -44,14 +44,24 @@ const TABLE = {
 };
 const useTable = (t = TABLE) => setInterfaceTableForTests(() => t);
 useTable();
-afterEach(() => useTable());
+afterEach(async () => { useTable(); await seedSessions(); });
 after(() => { setInterfaceTableForTests(null); try { db.close(); } catch {} rmSync(tmpDir, { recursive: true, force: true }); });
 
 const hash = (t) => createHash("sha256").update(t).digest("hex");
 const until = new Date(Date.now() + 3_600_000).toISOString();
-for (const [tok, scopes] of [["s-owner", "dashboard"], ["s-onhost", "dashboard onhost"], ["s-sso", "dashboard sso"]]) {
-  await db.execute({ sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)", args: [hash(tok), scopes, until] });
+/** The three fixed session tokens this file asks about, freshly seeded.
+ *
+ *  Seeded, not seeded-once: `setPassword` revokes every dashboard session by design (the first-run
+ *  setup and the forgot-password reset sign every device out; dashboard/auth.js), so a test that sets
+ *  the password mid-file would delete these rows and every later assertion would read "not the
+ *  owner" for the wrong reason. afterEach puts them back, exactly as a fresh instance would offer
+ *  them. */
+async function seedSessions() {
+  for (const [tok, scopes] of [["s-owner", "dashboard"], ["s-onhost", "dashboard onhost"], ["s-sso", "dashboard sso"]]) {
+    await db.execute({ sql: "INSERT OR REPLACE INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, ?)", args: [hash(tok), scopes, until] });
+  }
 }
+await seedSessions();
 
 /** A plain request from a direct TCP peer. */
 const direct = (addr, extra = {}) => ({ socket: { remoteAddress: addr }, headers: {}, ...extra });

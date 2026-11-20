@@ -57,12 +57,10 @@ function restartScript() {
     try { labels = JSON.parse(box.getAttribute('data-labels') || '{}'); } catch (e) { labels = {}; }
     var want = !!box.checked;
     box.disabled = true;
+    // The server-bound CSRF token (window.crowCsrf — the page's meta tag or
+    // GET /dashboard/csrf). Never a cookie.
     var csrf = '';
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var kv = parts[i].trim().split('=');
-      if (kv[0] === 'crow_csrf') csrf = decodeURIComponent(kv.slice(1).join('='));
-    }
+    try { csrf = window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { csrf = ''; }
     fetch('/dashboard/services/api/connection/' + encodeURIComponent(box.getAttribute('data-int-private')) + '/sensitive', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf },

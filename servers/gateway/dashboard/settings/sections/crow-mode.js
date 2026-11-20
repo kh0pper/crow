@@ -20,7 +20,7 @@ export default {
   async getPreview() { return ""; },
 
   async render({ req, lang }) {
-    const fill = "var f=this.querySelector('input[name=_csrf]');var m=document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);if(f&&m)f.value=decodeURIComponent(m[1]);";
+    const fill = "var f=this.querySelector('input[name=_csrf]');if(f)f.value=(window.crowCsrf?window.crowCsrf():'');";
     // On a device already in the new shell the switch goes the other way.
     const isNew = req && req.crowMode && req.crowMode.mode === "new";
     const target = isNew ? "classic" : "new";

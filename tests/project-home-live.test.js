@@ -141,7 +141,10 @@ async function open(path, { width, height }) {
   await send("Network.setExtraHTTPHeaders", { headers: serveHeaders("operator@example.com") });
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 900 });
   if (width < 900) await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
-  for (const ck of [{ name: "crow_session", value: "new-sess" }, { name: "crow_csrf", value: "tok" }]) {
+  // The dashboard session only. The CSRF token is NOT a cookie any more (queue item #51 PR-1): it is
+  // the server-bound HMAC of this session id, delivered in the page's <meta name="crow-csrf">, and
+  // the page's own helper echoes it.
+  for (const ck of [{ name: "crow_session", value: "new-sess" }]) {
     await send("Network.setCookie", { ...ck, url: base, path: "/" });
   }
   await send("Page.navigate", { url: base + path });
@@ -203,7 +206,11 @@ for (const lang of ["en", "es"]) {
         await p.until("document.querySelector('[data-ph-status]').textContent !== '' && window.__ph.length", "the start result");
         const [call] = await p.ev("window.__ph");
         assert.equal(call.url, "/dashboard/perch-api/bots/ivy/interactive", "the picked bot, for this session");
-        assert.equal(call.csrf, "tok", "the dashboard CSRF token rides the header");
+        // The token is the one the page was served (the layout's meta tag, csrfMiddleware's HMAC of
+        // this session), not a cookie value: nothing else can be accepted, and nothing else is sent.
+        const meta = await p.ev("document.querySelector('meta[name=\"crow-csrf\"]').getAttribute('content')");
+        assert.ok(meta && meta.length >= 32, `the page carries a CSRF token (${meta})`);
+        assert.equal(call.csrf, meta, "the dashboard CSRF token rides the header");
         assert.match(call.body, /^\{"project_id":\d+\}$/);
         // Past CSRF and auth, the spawn route ran: this scratch gateway's engine refuses with perch_disabled.
         assert.deepEqual([call.status, JSON.parse(call.text).error], [503, "perch_disabled"]);

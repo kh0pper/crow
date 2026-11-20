@@ -766,6 +766,8 @@ test("rails: no session → refused; session without X-Crow-Csrf → 403; with i
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
   await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token } = await mintSsoSession("test");
+  const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
+  const csrf = csrfTokenFor(token);
   const { srv, base } = await realRailsApp();
   const net = { ...serveHeaders("someone@example.com") };
   try {
@@ -773,14 +775,14 @@ test("rails: no session → refused; session without X-Crow-Csrf → 403; with i
     assert.equal(anonGet.status, 303, "no session → login");
     const anonPost = await fetch(base, { method: "POST", headers: { ...net, "content-type": "audio/webm" }, body: WEBM, redirect: "manual" });
     assert.equal(anonPost.status, 303);
-    const cookie = `crow_session=${token}; crow_csrf=csrf-abc`;
+    const cookie = `crow_session=${token}`;
     const probeR = await fetch(base, { headers: { ...net, cookie } });
     assert.equal(probeR.status, 200);
     const tag = (await probeR.json()).profileTag;
     const noCsrf = await fetch(base, { method: "POST", headers: { ...net, cookie, "content-type": "audio/webm", "x-crow-dictation-profile": tag }, body: WEBM });
     assert.equal(noCsrf.status, 403);
     assert.equal(local.hits.transcribe, 0);
-    const ok = await fetch(base, { method: "POST", headers: { ...net, cookie, "x-crow-csrf": "csrf-abc", "content-type": "audio/webm", "x-crow-dictation-profile": tag }, body: WEBM });
+    const ok = await fetch(base, { method: "POST", headers: { ...net, cookie, "x-crow-csrf": csrf, "content-type": "audio/webm", "x-crow-dictation-profile": tag }, body: WEBM });
     assert.equal(ok.status, 200);
   } finally { srv.close(); }
 });

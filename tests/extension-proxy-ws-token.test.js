@@ -229,9 +229,14 @@ test("upgrade routing has a path boundary: /proxy/browser-x/… goes to browser-
   });
   const w = console.warn; console.warn = () => {};
   try {
-    // A foreign origin: the browser's origin check must NOT be the one answering browser-x.
-    const r = await fire("/proxy/browser-x/ws", { host: "h", origin: "https://evil.example" });
-    assert.match(r, /^HTTP\/1\.1 401/, "browser-x's own path: session check (no browser origin check) — " + r);
+    // A foreign origin is refused on EVERY proxied path now (queue item #51 PR-1:
+    // the Origin must name the dashboard on any cookie-authenticated upgrade).
+    const foreign = await fire("/proxy/browser-x/ws", { host: "h", origin: "https://evil.example" });
+    assert.match(foreign, /^HTTP\/1\.1 403/, "a foreign Origin is refused — " + foreign);
+    // The right origin with no session still reaches the session check (401), which
+    // is what proves the boundary routed browser-x's path to browser-x.
+    const ownOrigin = await fire("/proxy/browser-x/ws", { host: "h", origin: "http://h" });
+    assert.match(ownOrigin, /^HTTP\/1\.1 401/, "browser-x's own path: session check — " + ownOrigin);
     assert.match(await fire("/proxy/browser/websockify", { host: "h", origin: "https://evil.example" }), /^HTTP\/1\.1 403/);
     assert.match(await fire("/proxy/browser?x=1", { host: "h", origin: "https://evil.example" }), /^HTTP\/1\.1 403/);
     assert.deepEqual(hits, []);

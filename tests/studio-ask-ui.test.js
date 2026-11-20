@@ -23,6 +23,11 @@ import express, { Router } from "express";
 import { CLIENT_SCRIPT } from "../bundles/studio/panel/client.js";
 import { newSongDoc, encodeDocState } from "../bundles/studio/server/doc.js";
 import studioPanel from "../bundles/studio/panel/studio.js";
+// The CSRF token is SERVER-BOUND (HMAC of the session id under the instance's
+// secrets/csrf.key) and reaches a page in `<meta name="crow-csrf">`, never in a
+// cookie: `crow_csrf` is retired, because a same-site host on the tailnet could
+// toss one. The token is computed here through the real module.
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 
 /** The song the page is opened on. */
 const SONG = "song-ask-1";
@@ -40,8 +45,12 @@ const WITH_TOOLS = Object.freeze({
   setup_url: null,
 });
 
-/** The CSRF token this page's cookie carries, and the fake route accepts. */
-const CSRF = "csrf-ok";
+/**
+ * The CSRF token the page carries and the fake route accepts: the session-bound
+ * token, delivered the way the dashboard layout delivers it (a
+ * `<meta name="crow-csrf">` tag, read by the page's helper — csrf-client.js).
+ */
+const CSRF = csrfTokenFor("studio-ask-ui-session");
 
 /**
  * The Studio routes the page drives, all answering from state the test owns.
@@ -237,11 +246,14 @@ async function bootAskPage(t, { base, perch, studio, seed = [] }) {
   const html = await songPage(SONG);
   const { document, window: domWindow } = parseHTML(html);
 
-  // The page's own cookie, which the studio-tools press has to send back.
-  Object.defineProperty(document, "cookie", {
-    configurable: true,
-    get: () => `crow_csrf=${CSRF}`,
-  });
+  // The page's own token, delivered exactly as the dashboard layout delivers it:
+  // the `<meta name="crow-csrf">` tag the page's helper reads
+  // (public/csrf-client.js), which the studio-tools press echoes as X-Crow-Csrf.
+  // No cookie is involved: `crow_csrf` is retired.
+  const meta = document.createElement("meta");
+  meta.setAttribute("name", "crow-csrf");
+  meta.setAttribute("content", CSRF);
+  document.head.appendChild(meta);
 
   const stored = new Map();
   const sessionStorage = {
@@ -287,6 +299,8 @@ async function bootAskPage(t, { base, perch, studio, seed = [] }) {
     removeEventListener() {},
     sessionStorage,
     EventSource: FakeEventSource,
+    // public/csrf-client.js, as the page sees it: the token the meta tag carries.
+    crowCsrf: () => CSRF,
   };
 
   // The page imports Yjs from the dashboard's asset route; here the same module
@@ -840,7 +854,7 @@ test("a bot without Studio tools offers the grant and posts nothing until it is 
   assert.equal(studio.gives.length, 1, "exactly one press reached the route");
   assert.equal(studio.gives[0].song, SONG, "for this song");
   assert.deepEqual(studio.gives[0].body, { bot_id: BOT.bot_id }, "naming the bot the page shows");
-  assert.equal(studio.gives[0].csrf, CSRF, "with the CSRF header the cookie carries");
+  assert.equal(studio.gives[0].csrf, CSRF, "with the server-bound CSRF header the page carries");
 
   await ui.waitFor(() => ui.askInput.disabled === false, "the box to open");
   assert.equal(ui.askInput.getAttribute("placeholder"), "Ask Bass Bot\u2026", "the usual placeholder");

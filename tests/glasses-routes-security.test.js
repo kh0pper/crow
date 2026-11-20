@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import express from "express";
 import { WebSocket } from "ws";
 
@@ -31,7 +32,11 @@ const PHOTO_DIR = join(HOME, "data", "glasses-photos");
 // What Tailscale Serve adds for a tailnet user; this process's client stands in for tailscaled.
 const TAILNET = serveHeaders("tester@example.invalid");
 actAsServe();
-const SESSION = { cookie: "crow_session=test-session; crow_csrf=csrf-abc" };
+// The dashboard session these cookie-authenticated calls carry, and the CSRF token that session
+// yields (server-bound: HMAC of the session id, shared/csrf.js — never a cookie, queue item #51 PR-1).
+const SESSION_ID = "test-session";
+const CSRF = csrfTokenFor(SESSION_ID);
+const SESSION = { cookie: `crow_session=${SESSION_ID}` };
 const ID = "11111111-2222-3333-4444-555555555555";
 
 let srv, base, store, db, routes;
@@ -41,18 +46,31 @@ const tokens = {};
 
 const listen = (handler) => new Promise((res) => { const s = http.createServer(handler); s.listen(0, "127.0.0.1", () => res(s)); });
 const urlOf = (s, path = "") => `http://127.0.0.1:${s.address().port}${path}`;
-const call = (path, { method = "GET", headers = {}, body, tailnet = true } = {}) =>
-  fetch(base + path, { method, headers: { ...(tailnet ? TAILNET : {}), ...headers }, body, redirect: "manual" });
+// Every request in this file is bounded: a request the server refuses without reading its body (a
+// 403 before the parser, a 401 before the upload is drained) must fail the test that made it, never
+// hang the run.
+const TIMEOUT_MS = 20_000;
+/** Every session socket this file opened, so a test that throws before `ws.close()` can never leave
+ *  the run hanging on a live client. */
+const openedSockets = new Set();
+const call = (path, { method = "GET", headers = {}, body, tailnet = true, timeout = TIMEOUT_MS } = {}) =>
+  fetch(base + path, { method, headers: { ...(tailnet ? TAILNET : {}), ...headers }, body, redirect: "manual", signal: AbortSignal.timeout(timeout) });
 
 /** Open the session socket. → { ws, messages, binary } once open, or { status } when the upgrade is refused. */
-function openSession(deviceId, { headers = {}, query = "", tailnet = true } = {}) {
+function openSession(deviceId, { headers = {}, query = "", tailnet = true, timeout = TIMEOUT_MS } = {}) {
   return new Promise((res) => {
     const ws = new WebSocket(`${base.replace("http", "ws")}/api/meta-glasses/session?device_id=${deviceId}${query}`, { headers: { ...(tailnet ? TAILNET : {}), ...headers } });
+    openedSockets.add(ws);
+    ws.on("close", () => openedSockets.delete(ws));
     const messages = [], binary = [];
+    // A handshake that neither opens nor refuses must not leave this promise pending forever.
+    const timer = setTimeout(() => { try { ws.terminate(); } catch { /* gone */ } res({ status: 0, timeout: true }); }, timeout);
+    const done = (v) => { clearTimeout(timer); res(v); };
     ws.on("message", (raw, isBinary) => { if (isBinary) binary.push(raw); else messages.push(JSON.parse(raw.toString("utf8"))); });
-    ws.on("open", () => res({ ws, messages, binary }));
-    ws.on("unexpected-response", (rq, rs) => { rs.resume(); res({ status: rs.statusCode }); });
+    ws.on("open", () => { ws.__opened = true; done({ ws, messages, binary }); });
+    ws.on("unexpected-response", (rq, rs) => { rs.resume(); done({ status: rs.statusCode }); });
     ws.on("error", () => {});
+    ws.on("close", (code) => { if (!ws.__opened) done({ status: 0, closed: code }); });
   });
 }
 const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = fn(); if (v) return v; await new Promise((r) => setTimeout(r, 20)); } return fn(); };
@@ -92,7 +110,7 @@ before(async () => {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
-after(() => { for (const s of [srv, music, storage, evil]) { s?.closeAllConnections?.(); s?.close(); } try { db?.close(); } catch {} });
+after(() => { for (const ws of openedSockets) { try { ws.terminate(); } catch { /* gone */ } } for (const s of [srv, music, storage, evil]) { s?.closeAllConnections?.(); s?.close(); } try { db?.close(); } catch {} });
 
 const upload = (key, id, query, body = Buffer.from("JPEGDATA"), headers = {}) =>
   call(`/api/meta-glasses/photo?device_id=${id}${query}`, { method: "POST", headers: { authorization: `Bearer ${tokens[key]}`, "content-type": "image/jpeg", ...headers }, body });
@@ -149,6 +167,7 @@ const rawGet = (path, headers = SESSION) => new Promise((res, rej) => {
       r.on("end", () => res({ status: r.statusCode, body: Buffer.concat(chunks).toString("utf8"), type: r.headers["content-type"] || "" }));
     }
   );
+  req.setTimeout(TIMEOUT_MS, () => req.destroy(new Error(`no answer to a GET ${path} within ${TIMEOUT_MS} ms`)));
   req.on("error", rej);
   req.end();
 });
@@ -190,13 +209,13 @@ test("session-cookie routes: a state-changing call needs the CSRF token; pairing
   const say = (headers) => call("/api/meta-glasses/say", { method: "POST", headers, body: JSON.stringify({ text: "hello" }) });
   assert.equal((await say(json)).status, 403, "session cookie alone is refused");
   assert.equal((await say({ ...json, "x-crow-csrf": "wrong" })).status, 403);
-  const ok = await say({ ...json, "x-crow-csrf": "csrf-abc" });
+  const ok = await say({ ...json, "x-crow-csrf": CSRF });
   assert.equal(ok.status, 200);
   assert.equal((await ok.json()).delivered, 0);
   assert.equal((await call("/api/meta-glasses/turn", { method: "POST", headers: json, body: JSON.stringify({ action: "begin" }) })).status, 403);
   assert.equal((await call("/api/meta-glasses/media/control", { method: "POST", headers: json, body: JSON.stringify({ device_id: "glasses-a", action: "stop" }) })).status, 403);
   assert.equal((await call("/api/meta-glasses/devices/glasses-a", { method: "DELETE", headers: SESSION })).status, 403);
-  assert.equal((await call("/api/meta-glasses/capture", { method: "POST", headers: { ...SESSION, "x-crow-csrf": "csrf-abc" } })).status, 404);
+  assert.equal((await call("/api/meta-glasses/capture", { method: "POST", headers: { ...SESSION, "x-crow-csrf": CSRF } })).status, 404);
   assert.equal((await call("/api/meta-glasses/devices", { headers: {} })).status, 302, "no session: the login redirect, as before");
   // Pairing: the phone app sends the cookie and JSON, no CSRF header.
   const pair = await call("/api/meta-glasses/pair", { method: "POST", headers: json, body: JSON.stringify({ id: "glasses-new", name: "New", generation: "gen2" }) });
@@ -208,12 +227,12 @@ test("session-cookie routes: a state-changing call needs the CSRF token; pairing
   assert.equal((await cross({ "sec-fetch-site": "cross-site" })).status, 403);
   assert.equal((await cross({ "sec-fetch-site": "same-site" })).status, 403);
   assert.equal((await cross({ origin: "https://evil.example.invalid" })).status, 403);
-  assert.equal((await cross({ origin: "https://evil.example.invalid", "x-crow-csrf": "csrf-abc" })).status, 200, "with the CSRF token it is an ordinary dashboard call");
+  assert.equal((await cross({ origin: "https://evil.example.invalid", "x-crow-csrf": CSRF })).status, 200, "with the CSRF token it is an ordinary dashboard call");
   assert.equal((await cross({ "sec-fetch-site": "same-origin", origin: base })).status, 200, "the dashboard page itself");
 });
 
 test("the device list and every device route see glasses only; a display's record cannot be re-paired, changed or removed here", async () => {
-  const csrf = { ...SESSION, "content-type": "application/json", "x-crow-csrf": "csrf-abc" };
+  const csrf = { ...SESSION, "content-type": "application/json", "x-crow-csrf": CSRF };
   const list = await (await call("/api/meta-glasses/devices", { headers: SESSION })).json();
   assert.ok(list.devices.some((d) => d.id === "glasses-a"));
   assert.ok(!list.devices.some((d) => d.id === "kiosk-1"), "the display is not listed as glasses");
@@ -228,7 +247,7 @@ test("the device list and every device route see glasses only; a display's recor
 });
 
 test("the audio relay requests only the music server's listen path, sends its credential nowhere else, and never follows a redirect off the storage origin", async () => {
-  const csrf = { ...SESSION, "content-type": "application/json", "x-crow-csrf": "csrf-abc" };
+  const csrf = { ...SESSION, "content-type": "application/json", "x-crow-csrf": CSRF };
   const s = await openSession("glasses-a", { headers: { authorization: `Bearer ${tokens.a}` } });
   await until(() => s.messages[0]);
   const stream = async (body) => (await call("/api/meta-glasses/stream", { method: "POST", headers: csrf, body: JSON.stringify({ device_id: "glasses-a", codec: "mp3", ...body }) })).json();
@@ -331,7 +350,7 @@ test("the device list: fit, a playable-voice flag, recent turns and the voice pi
 });
 
 test("media control from the dashboard: one implementation with the voice shortcuts; a device that is not connected is a 404", async () => {
-  const csrf = { ...SESSION, "content-type": "application/json", "x-crow-csrf": "csrf-abc" };
+  const csrf = { ...SESSION, "content-type": "application/json", "x-crow-csrf": CSRF };
   const ctl = (device_id, action) => call("/api/meta-glasses/media/control", { method: "POST", headers: csrf, body: JSON.stringify({ device_id, action }) });
   assert.equal((await ctl("glasses-b", "stop")).status, 404);
   assert.equal((await ctl("glasses-a", "explode")).status, 400);

@@ -114,6 +114,10 @@ before(async () => {
       res.writeHead(200, { "content-type": "application/javascript" });
       return res.end(turbo);
     }
+    if (req.url.startsWith("/csrf-client.js")) {
+      res.writeHead(200, { "content-type": "application/javascript" });
+      return res.end(readFileSync(join(REPO, "servers/gateway/public/csrf-client.js")));
+    }
     if (!req.url.startsWith("/dashboard/perch")) {
       res.writeHead(200, { "content-type": "text/html" });
       return res.end("<!doctype html><title>blank</title><p>blank</p>");
@@ -123,7 +127,7 @@ before(async () => {
     const hit = PROJECTS.find((p) => new RegExp("[?&]project=" + p.slug + "\\b").test(req.url));
     const scope = hit ? { projectId: hit.id, slug: hit.slug } : /[?&]unassigned=1\b/.test(req.url) ? { unassigned: true } : { all: true };
     req.crowScope = scope;
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang,
+    const layout = (opts) => renderLayout({ ...opts, csrf: CSRF_TOKEN, activePanel: "perch", panels: [perchHubPanel], lang,
       headerIcons: tamagotchiHtml(lang, { sheet: true }),
       variant: "shell", shell: { scope, projects: PROJECTS, tab: "chat", getPanel: () => null, tray: tamagotchiTrayHtml(lang) } });
     const db = { execute: async (q) => {
@@ -376,7 +380,7 @@ const START_CASES = [
   { name: "Unassigned", path: "/dashboard/perch?unassigned=1", minRows: 1, body: { project_id: "unassigned" }, scope: "?scope=unassigned" },
   { name: "a project", path: "/dashboard/perch?project=sunvox", minRows: 2, body: { project_id: 2, briefing: true }, scope: "?scope=2" },
 ];
-const CSRF = "document.cookie='crow_csrf=tok-123; path=/'; 1";
+const CSRF_TOKEN = "tok-123";   // rendered into the layout's <meta name="crow-csrf"> by the harness
 async function untilPosted(n) {
   const end = Date.now() + 5000;
   while (posts.filter((p) => /\/bots\/[^/]+\/interactive$/.test(p.url)).length < n && Date.now() < end) await sleep(25);
@@ -388,7 +392,6 @@ for (const c of START_CASES) {
     const s = await tab({ path: c.path, minRows: c.minRows });
     try {
       posts.length = 0; roosts.length = 0; spawn = { status: 201, delay: 0 };
-      await s.evalIn(CSRF);
       await s.evalIn("document.querySelector('[data-ph-start]').click(), 1");
       const [p] = await untilPosted(1);
       assert.ok(p, "the spawn was posted");
@@ -409,7 +412,6 @@ test("390x844: a refused start (409) says why beside Start, and nothing opens", 
   const s = await tab({ lang: "es" });
   try {
     posts.length = 0; spawn = { status: 409, delay: 0 };
-    await s.evalIn(CSRF);
     await s.evalIn("document.querySelector('[data-ph-start]').click(), 1");
     await s.waitFor("!!document.querySelector('[data-ph-status]').textContent", "the note");
     assert.equal(await s.evalIn("document.querySelector('[data-ph-status]').textContent"), tr("perch.engineRequired", "es"));
@@ -423,7 +425,6 @@ test("390x844: a late start does not pull you out of a session you opened since"
   const s = await tab();
   try {
     posts.length = 0; spawn = { status: 201, delay: 800 };
-    await s.evalIn(CSRF);
     await s.evalIn("document.querySelector('[data-ph-start]').click(), 1");
     await untilPosted(1);
     await s.evalIn(`document.querySelector('a.ph-row[href="#${SIDS.untitled}"]').click(), 1`);

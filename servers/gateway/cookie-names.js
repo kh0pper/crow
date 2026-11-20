@@ -6,20 +6,32 @@
  * serves installed bundles' web UIs at `/proxy/<id>/` on the dashboard's own
  * origin, and used to forward the browser's `Cookie` header unchanged. So every
  * proxied backend — an app nobody audited — received the owner's raw
- * `crow_session` (a live dashboard session, replayable from anywhere) and
- * `crow_csrf`. The proxy now strips these names from the forwarded request (HTTP
- * and the WebSocket upgrade) and refuses to forward a response `Set-Cookie` for
- * any of them. A list that drifted from the setters would silently reopen that
- * hole, so the setters import their names from here and
- * `tests/extension-proxy-cookies.test.js` greps the gateway for any `crow_*` name
- * appearing next to `Set-Cookie` and asserts it is covered.
+ * `crow_session` (a live dashboard session, replayable from anywhere). The proxy
+ * now strips these names from the forwarded request (HTTP and the WebSocket
+ * upgrade) and refuses to forward a response `Set-Cookie` for any of them. A list
+ * that drifted from the setters would silently reopen that hole, so the setters
+ * import their names from here and `tests/extension-proxy-cookies.test.js` greps
+ * the gateway for any `crow_*` name appearing next to `Set-Cookie` and asserts it
+ * is covered.
+ *
+ * `crow_csrf` no longer exists as a cookie (2026-11-19, queue item #51 PR-1: the
+ * CSRF token is server-bound — HMAC(secret, session id), served in a `<meta
+ * name="crow-csrf">` tag and `GET /dashboard/csrf`). It stays on this list so a
+ * release that upgrades from an older build still has the stale cookie stripped
+ * from proxied requests and cannot have it re-set through the proxy.
  *
  * A LEAF module on purpose: it imports nothing, so any gateway module (auth, the
  * shell, the proxy) can import it without an import cycle.
  */
 
-export const SESSION_COOKIE = "crow_session";          // dashboard session token (auth.js)
-export const CSRF_COOKIE = "crow_csrf";                // CSRF double-submit value (auth.js)
+export const SESSION_COOKIE = "crow_session";          // dashboard session token over plain HTTP (auth.js)
+// The same session over HTTPS: a `__Host-` cookie is host-only (no Domain=) and
+// Secure, so a sibling host on the tailnet — `ts.net` is a public suffix, so any
+// `<x>.<tailnet>.ts.net` is the SAME SITE — cannot toss or overwrite it. auth.js
+// sets this one whenever the request arrived over TLS and reads it in preference
+// to the plain name there.
+export const HOST_SESSION_COOKIE = "__Host-crow_session";
+export const CSRF_COOKIE = "crow_csrf";                // retired: never set; still stripped from proxied requests
 export const PENDING_2FA_COOKIE = "crow_pending_2fa";  // in-flight second factor (dashboard/index.js)
 export const TRUSTED_2FA_COOKIE = "crow_2fa_trusted";  // "this device passed 2FA" (dashboard/index.js)
 export const LANG_COOKIE = "crow_lang";                // dashboard language (settings/sections/language.js)
@@ -38,6 +50,7 @@ const INSTANCE_SUFFIX_RE = /_(?:local|[0-9a-f]{8})$/;
 /** Every Crow cookie name, unsuffixed (the shell ones may also appear suffixed). */
 export const CROW_COOKIE_NAMES = Object.freeze([
   SESSION_COOKIE,
+  HOST_SESSION_COOKIE,
   CSRF_COOKIE,
   PENDING_2FA_COOKIE,
   TRUSTED_2FA_COOKIE,

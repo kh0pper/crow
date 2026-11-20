@@ -118,13 +118,13 @@ test("no session refused", async () => {
 
 test("csrf required", async () => {
   await withServer(async (s) => {
-    const cookie = "crow_session=s1; crow_csrf=tok123";
+    const cookie = `crow_session=${SESSION}`;
     const body = { model: "local-chat/m1" };
     const no = await call(s, "POST", "/api/roles/quick/preview", { body, headers: { cookie } });
     assert.equal(no.status, 403);
     const bad = await call(s, "POST", "/api/roles/quick/preview", { body, headers: { cookie, "x-crow-csrf": "other" } });
     assert.equal(bad.status, 403);
-    const ok = await call(s, "POST", "/api/roles/quick/preview", { body, headers: { cookie, "x-crow-csrf": "tok123" } });
+    const ok = await call(s, "POST", "/api/roles/quick/preview", { body, headers: { cookie, "x-crow-csrf": CSRF } });
     assert.equal(ok.status, 200);
     for (const path of ["/api/roles/quick", "/api/roles/stt/profile/preview", "/api/roles/stt/profile"]) {
       const r = await call(s, "POST", path, { body: {}, headers: { cookie } });
@@ -389,7 +389,11 @@ const insOr = (id, models, description = "OpenRouter") => db.execute({
   args: [id, OR_URL, SECRET, "cloud", description, JSON.stringify(models)],
 });
 const providerCount = async () => Number((await db.execute("SELECT COUNT(*) AS n FROM providers")).rows[0].n);
-const csrfHeaders = { cookie: "crow_session=s1; crow_csrf=tok9", "x-crow-csrf": "tok9" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "s1";
+const CSRF = csrfTokenForSession(SESSION);
+const csrfHeaders = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": CSRF };
 const addOpts = (extra = {}) => ({ now: NOW, classifierStatusFn: noClassifier, ...extra });
 // A stored check carries the stamp of the row it ran against (F3): cloud-or is OR_URL with SECRET.
 const OR_STAMP = checkStamp({ apiKey: SECRET, baseUrl: OR_URL });
@@ -541,7 +545,7 @@ test("the provider routes need a session and CSRF", async () => {
   let tested = 0;
   await withServer(async (s) => {
     for (const p of ["/api/providers/test", "/api/providers", "/api/providers/cloud-a/probe", "/api/providers/cloud-a/recommended/preview", "/api/providers/cloud-a/recommended"]) {
-      const r = await call(s, "POST", p, { body: { apiKey: "fixture-pasted-key-777" }, headers: { cookie: "crow_session=s1; crow_csrf=tok9" } });
+      const r = await call(s, "POST", p, { body: { apiKey: "fixture-pasted-key-777" }, headers: { cookie: `crow_session=${SESSION}` } });
       assert.equal(r.status, 403, p);
       assert.ok(!r.text.includes("fixture-pasted-key-777"), p);
     }

@@ -35,11 +35,11 @@ const REPO = new URL("..", import.meta.url).pathname;
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 actAsServe();   // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 const SERVE = serveHeaders("alex@example.com");   // what Tailscale Serve adds for a tailnet user
-const CSRF = "c5f0c5f0c5f0c5f0c5f0c5f0c5f0c5f0";
+let CSRF;   // the SERVER-BOUND token for `sessionToken` (set in before())
 const PAGE = "/display/session";
 const WS_PATH = "/api/kiosk/session/dashboard";
 
-let auth, csrf, store, registry, createDbClient, kiosk, wrapPcmAsWav;
+let auth, csrf, store, registry, createDbClient, kiosk, wrapPcmAsWav, csrfTokenFor;
 let rt, srv, base, sessionToken;
 const conns = new Set();
 const turnCalls = [];
@@ -67,6 +67,8 @@ before(async () => {
   });
   await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   ({ token: sessionToken } = await auth.mintSsoSession("test"));
+  ({ csrfTokenFor } = await import("./helpers/csrf-token.mjs"));
+  CSRF = csrfTokenFor(sessionToken);
 
   rt = kiosk.createKioskRuntime({
     Router: express.Router, json: express.json, WebSocketServer,
@@ -120,7 +122,8 @@ function upgrade(headers, path = WS_PATH) {
 }
 
 /** A logged-in dashboard tab opening the overlay's WebSocket. */
-async function connect({ hello = { type: "hello", mode: "session", csrf: CSRF, caps: {} }, tok = sessionToken, c = CSRF } = {}) {
+async function connect({ hello, tok = sessionToken, c = CSRF } = {}) {
+  const frame = hello === undefined ? { type: "hello", mode: "session", csrf: csrfTokenFor(tok), caps: {} } : hello;
   const ws = new WebSocket(wsUrl(), { headers: { ...SERVE, Cookie: cookie(tok, c), Origin: base } });
   const msgs = [];
   let closed = null;
@@ -128,7 +131,7 @@ async function connect({ hello = { type: "hello", mode: "session", csrf: CSRF, c
   ws.on("close", (code, reason) => { closed = { code, reason: reason.toString() }; });
   ws.on("error", () => {});
   await new Promise((r, j) => { ws.on("open", r); ws.on("unexpected-response", (q, res) => j(new Error("refused " + res.statusCode))); });
-  if (hello) ws.send(JSON.stringify(hello));
+  if (frame) ws.send(JSON.stringify(frame));
   const until = async (fn, ms = 1500) => { for (let i = 0; i < ms / 10 && !fn(); i++) await new Promise((r) => setTimeout(r, 10)); return fn(); };
   await until(() => msgs.some((m) => m.type === "ready") || closed);
   return { ws, msgs, until, get closed() { return closed; } };
@@ -209,7 +212,7 @@ test("ws: a cross-origin page cannot open the session socket, even if the browse
   assert.equal(await upgrade({ ...SERVE, Cookie: cookie(), Origin: "https://crow.example.ts.net:8444", "X-Forwarded-Host": "crow.example.ts.net:8444" }), "open");
 });
 
-test("ws: hello must echo the CSRF cookie (double-submit, same as dashboard POSTs)", async () => {
+test("ws: hello must carry the server-bound CSRF token, same as dashboard POSTs", async () => {
   for (const hello of [
     { type: "hello", mode: "session", caps: {} },
     { type: "hello", mode: "session", csrf: "wrong", caps: {} },
@@ -377,14 +380,16 @@ test("core sessionFromRequest: network rule first, then a live dashboard session
   assert.equal(await auth.sessionFromRequest(req({ cookie: cookie() }, "127.0.0.1")), null);
 });
 
-test("core csrfTokenAccepted: constant-time double-submit against the request's own cookie; honours the strict kill-switch", () => {
+test("core csrfTokenAccepted: server-bound token (HMAC of the session id), never a cookie; honours the strict kill-switch", () => {
   const req = (c) => ({ headers: { cookie: c } });
-  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), "abc"), true);
+  const good = csrfTokenFor("s");
+  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), good), true);
   assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), "abd"), false);
   assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), ""), false);
   assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), undefined), false);
-  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), ["abc"]), false);
-  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s"), ""), false, "no cookie never matches an empty token");
+  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s; crow_csrf=abc"), [good]), false);
+  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s"), ""), false, "no token never matches an empty string");
+  assert.equal(csrf.csrfTokenAccepted(req("crow_session=s"), csrfTokenFor("other")), false, "another session's token never matches");
   process.env.CROW_CSRF_STRICT = "0";
   try { assert.equal(csrf.csrfTokenAccepted(req("crow_session=s"), undefined), true); } finally { delete process.env.CROW_CSRF_STRICT; }
 });
@@ -818,7 +823,7 @@ async function barServe({ verifySession = auth.verifySession, barCheckTimeoutMs 
       ws.on("close", (code, reason) => { closed = { code, reason: reason.toString() }; });
       ws.on("error", () => {});
       await new Promise((r, j) => { ws.on("open", r); ws.on("unexpected-response", (q, res) => j(new Error("refused " + res.statusCode))); });
-      ws.send(JSON.stringify({ type: "hello", mode: "session", csrf: CSRF, ...(bar ? { owner } : {}), caps: { v: 2, kinds: ["card", "timer", "nowplaying"], screen: { w: 800, h: 600 }, ...(bar ? { bar: true } : {}) } }));
+      ws.send(JSON.stringify({ type: "hello", mode: "session", csrf: csrfTokenFor(tok), ...(bar ? { owner } : {}), caps: { v: 2, kinds: ["card", "timer", "nowplaying"], screen: { w: 800, h: 600 }, ...(bar ? { bar: true } : {}) } }));
       const until = async (fn, ms = 1500) => { for (let i = 0; i < ms / 10 && !fn(); i++) await new Promise((r) => setTimeout(r, 10)); return fn(); };
       await until(() => msgs.some((m) => m.type === "ready") || closed);
       const shut = async () => { ws.close(); await until(() => !k.hub.isConnected(rig.idOf(tok))); };
@@ -832,7 +837,7 @@ async function barServe({ verifySession = auth.verifySession, barCheckTimeoutMs 
     get: (tok = sessionToken, headers = H(tok)) => fetch(b + MEDIA, { headers, redirect: "manual" }),
     /** GET as the tab that sent `owner` in its bar hello (X-Crow-Owner): only the owning tab is handed the ticket. */
     getOwned: (owner = OWNER, tok = sessionToken) => fetch(b + MEDIA, { headers: { ...H(tok), "X-Crow-Owner": owner }, redirect: "manual" }),
-    post: (body, { tok = sessionToken, headers } = {}) => fetch(b + MEDIA, { method: "POST", redirect: "manual", headers: headers || { ...H(tok), "Content-Type": "application/json", "X-Crow-Csrf": CSRF }, body: JSON.stringify(body) }),
+    post: (body, { tok = sessionToken, headers } = {}) => fetch(b + MEDIA, { method: "POST", redirect: "manual", headers: headers || { ...H(tok), "Content-Type": "application/json", "X-Crow-Csrf": csrfTokenFor(tok) }, body: JSON.stringify(body) }),
     stream: (path, hold = false) => fetch(b + path, { headers: { ...SERVE, ...(hold ? { "x-test-hold": "1" } : {}) } }),
     /** One minute sweep, awaited. */
     sweep: async () => { for (const fn of sweeps) await fn(); },
@@ -841,7 +846,7 @@ async function barServe({ verifySession = auth.verifySession, barCheckTimeoutMs 
   return rig;
 }
 
-test("B3 endpoint: auth matrix — session cookie (401), CSRF double-submit on POST (403), Funnel and off-network (403); GET needs no CSRF; never cached", async () => {
+test("B3 endpoint: auth matrix — session cookie (401), server-bound CSRF token on POST (403), Funnel and off-network (403); GET needs no CSRF; never cached", async () => {
   const r = await barServe();
   try {
     const c = await r.open();
@@ -852,10 +857,10 @@ test("B3 endpoint: auth matrix — session cookie (401), CSRF double-submit on P
     assert.equal((await r.get(null, SERVE)).status, 401);
     assert.equal((await r.get(null, { ...SERVE, Cookie: "crow_session=not-a-session; crow_csrf=" + CSRF })).status, 401);
     assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: "crow_csrf=" + CSRF, "X-Crow-Csrf": CSRF } })).status, 401);
-    // CSRF: none, wrong, or a header with no cookie to match.
+    // CSRF: none, wrong, or another session's token.
     assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie() } })).status, 403);
     assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": "wrong" } })).status, 403);
-    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: `crow_session=${sessionToken}`, "X-Crow-Csrf": CSRF } })).status, 403);
+    assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers: { ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": csrfTokenFor("another-session") } })).status, 403);
     // The network gate runs first: Funnel and off-network are refused even with a valid session + CSRF.
     for (const headers of [{ ...SERVE, ...json, Cookie: cookie(), "X-Crow-Csrf": CSRF, "Tailscale-Funnel-Request": "?1" }, { ...json, Cookie: cookie(), "X-Crow-Csrf": CSRF }]) {
       assert.equal((await r.post({ do: "pause", id, owner: OWNER }, { headers })).status, 403);

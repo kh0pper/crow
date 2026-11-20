@@ -150,6 +150,22 @@ test("a bare render carries the reload meta in its own head", async () => {
   assert.ok(song.includes('data-studio-song="song-1"'), "the bare song page is still the song page");
 });
 
+test("a bare render loads the CSRF helper, so the page can echo a token at all", async () => {
+  // The dashboard layout delivers the SERVER-BOUND token as a
+  // <meta name="crow-csrf"> tag plus /csrf-client.js. A page rendered without a
+  // layout has no such tag, and /csrf-client.js is what then fetches
+  // GET /dashboard/csrf (public/csrf-client.js) — the only other delivery. Drop
+  // the script and the Studio client's WebSocket hello carries an empty token,
+  // which the hub closes 4401: the page mounts its shell and never gets its
+  // song, so every control a test presses is missing.
+  const song = await renderBare({ song: "song-1" });
+  const helper = song.indexOf('<script src="/csrf-client.js"></script>');
+  const headEnd = song.indexOf("</head>");
+  assert.ok(helper > 0, "the bare page loads the dashboard's CSRF helper");
+  assert.ok(headEnd > 0, "the bare page has a head");
+  assert.ok(helper < headEnd, "and loads the helper in the head, before any panel script");
+});
+
 // --- the gateway's CSP, read as source --------------------------------------
 
 test("the gateway scopes the wasm carve-out to Studio and its assets", () => {

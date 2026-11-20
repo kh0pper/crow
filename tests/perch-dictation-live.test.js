@@ -97,11 +97,15 @@ before(async () => {
       res.writeHead(200, { "content-type": "application/javascript" });
       return res.end(turbo);
     }
+    if (req.url.startsWith("/csrf-client.js")) {
+      res.writeHead(200, { "content-type": "application/javascript" });
+      return res.end(readFileSync(join(REPO, "servers/gateway/public/csrf-client.js")));
+    }
     if (!req.url.startsWith("/dashboard/perch")) {
       res.writeHead(200, { "content-type": "text/html" });
       return res.end("<!doctype html><title>blank</title><p>blank</p>");
     }
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
+    const layout = (opts) => renderLayout({ ...opts, csrf: "csrf-live-token", activePanel: "perch", panels: [perchHubPanel], lang: "en" });
     const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
@@ -119,7 +123,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *  getUserMedia on a deferred promise or make it reject. */
 const INSTRUMENT = `(function(){
   var D=window.__dict={streams:[],ctxs:[],port:[],gum:'real',held:null,gumCalls:0,constraints:null};
-  document.cookie='crow_csrf=csrf-live-token; path=/';
+  var md=navigator.mediaDevices;
   var md=navigator.mediaDevices;
   if(md&&md.getUserMedia){
     var real=md.getUserMedia.bind(md);

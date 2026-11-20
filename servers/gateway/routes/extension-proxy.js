@@ -29,9 +29,10 @@
  * socket itself is filtered (stripSetCookieFromHandshake).
  *
  * The remaining risk is that the app still runs on the dashboard's ORIGIN: a
- * same-origin page can read `crow_csrf` and send dashboard requests with the
- * owner's session. That is only closed by serving extensions from their own
- * origin (queue item #51); stripping the cookies closes the replay half.
+ * same-origin page can call GET /dashboard/csrf (the session cookie rides along)
+ * and send dashboard writes with the owner's session. That is only closed by
+ * serving extensions from their own origin (queue item #51); stripping the
+ * cookies closes the replay half.
  *
  * Dashboard links should use:
  *   /proxy/browser/vnc.html   instead of   http://localhost:6080/vnc.html
@@ -44,9 +45,8 @@ import { Router } from "express";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
+import { isAllowedNetwork, sessionTokenFromRequest, verifySession } from "../dashboard/auth.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
-import { SESSION_COOKIE } from "../cookie-names.js";
 import { scopeProxySetCookieHeader, stripCrowCookiesForBackend, stripSetCookieFromHandshake } from "../proxy-cookie-filter.js";
 import { claimUpgrade } from "../../shared/ws-upgrade-claim.js";
 
@@ -220,9 +220,10 @@ export function readWsHostToken(bundleId, envKey, home = CROW_HOME) {
 }
 
 /**
- * Defence in depth for a token-carrying upgrade: it must come from a page on
- * the dashboard's own origin. The Origin header (always sent by browsers on a
- * WebSocket) must name the host the request was sent to: Host, or the
+ * Defence in depth for a proxied upgrade: it must come from a page on the
+ * dashboard's own origin. The rule applies to EVERY proxied upgrade (the
+ * token-carrying viewer included): the Origin header (always sent by browsers
+ * on a WebSocket) must name the host the request was sent to: Host, or the
  * X-Forwarded-Host a same-box proxy (Tailscale Serve) adds. A missing or
  * foreign Origin is refused. The session check still runs after this.
  */
@@ -289,7 +290,7 @@ export async function authorizeExtensionUpgrade(req) {
   // CROW_DASHBOARD_PUBLIC) — it reads req.headers + req.connection, both
   // present on a raw upgrade request.
   if (!isAllowedNetwork(req)) return false;
-  const token = parseCookies(req)[SESSION_COOKIE];
+  const token = sessionTokenFromRequest(req);
   if (!token) return false;
   try {
     return (await verifySession(token)) === true;
@@ -440,6 +441,12 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
           // Allow embedding in iframes (needed for VNC, MinIO console)
           delete proxyRes.headers["x-frame-options"];
           delete proxyRes.headers["content-security-policy"];
+          // A proxied app must not widen its own service-worker scope:
+          // `Service-Worker-Allowed: /` on a response served from /proxy/<id>/
+          // would let a worker it registers take over the DASHBOARD's scope.
+          // Struck here, and layout.js sweeps any registration that is not
+          // Crow's own /sw.js (queue item #51 PR-1).
+          delete proxyRes.headers["service-worker-allowed"];
           // Backend cookies: never Crow's own names (an app must not be able to
           // set or overwrite Crow's session/CSRF cookies via `/proxy/<id>/`),
           // and everything else is path-scoped to this proxy. The rules are the
@@ -504,8 +511,13 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
           // Ours — claimed before the auth await below, so ws-upgrade-claim.js's fallback
           // (the 404 for an upgrade nobody owns) leaves this socket alone.
           claimUpgrade(req);
-          // A token-carrying upgrade only from a page on the dashboard's own origin.
-          if (ext.wsHostTokenEnv && !upgradeFromOwnOrigin(req)) {
+          // Every proxied upgrade must come from a page on the dashboard's own
+          // origin (queue item #51 PR-1). The session cookie is SameSite=Lax and
+          // `ts.net` is a public suffix, so a sibling host on the tailnet is the
+          // same SITE; the browser-written Origin header is the only thing that
+          // tells the owner's own tab apart from it. A browser always sends one
+          // on a WebSocket, so a missing Origin is refused too.
+          if (!upgradeFromOwnOrigin(req)) {
             socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
             socket.destroy();
             return;
@@ -522,7 +534,7 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
             // accept a peer's SSO session, an on-host login, or a request from this
             // machine. authMiddleware never ran here, so set the session ourselves.
             if (ext.wsHostTokenEnv) {
-              req.dashboardSession = parseCookies(req)[SESSION_COOKIE];
+              req.dashboardSession = sessionTokenFromRequest(req);
               // owner's own sign-in only: the token gives full control of the logged-in browser.
               const owner = await isLocalPasswordSession(req).catch(() => false);
               if (!owner) {

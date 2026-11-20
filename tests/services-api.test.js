@@ -33,8 +33,10 @@ const K = await import("../servers/gateway/keychain/store.js");
 
 const GH = "GITHUB_PERSONAL_ACCESS_TOKEN";
 const CANARY = "canary-7f3a9";
-const COOKIE = "crow_session=s1; crow_csrf=tok9";
-const AUTH = { cookie: COOKIE, "x-crow-csrf": "tok9" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const COOKIE = "crow_session=s1";
+const AUTH = { cookie: COOKIE, "x-crow-csrf": csrfTokenForSession("s1") };
 
 async function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "crow-svcapi-db-"));
@@ -585,7 +587,7 @@ const realGate = (req, res, next) => {
   if (req.headers["x-test-from"] === "laptop") markFromLaptop(req);
   next();
 };
-const as = (tok, { laptop = true } = {}) => ({ cookie: `crow_session=${tok}; crow_csrf=tok9`, "x-crow-csrf": "tok9", ...(laptop ? { "x-test-from": "laptop" } : {}) });
+const as = (tok, { laptop = true } = {}) => ({ cookie: `crow_session=${tok}`, "x-crow-csrf": csrfTokenForSession(tok), ...(laptop ? { "x-test-from": "laptop" } : {}) });
 const sensPath = (uuid) => `/dashboard/services/api/connection/${uuid}/sensitive`;
 const OVERRIDES = join(HOME, "secrets", SENS.SENSITIVITY_OVERRIDES_FILENAME);
 
@@ -669,8 +671,8 @@ test("Task 16c: only the owner: an SSO session, a session from a login on this m
       ["sso", as("sso-1"), 403, { error: "not_owner" }],
       ["onhost", as("onhost-1"), 403, { error: "not_owner" }],
       ["owner session, from this machine", as("own-1", { laptop: false }), 403, { error: "not_owner" }],
-      ["no session", { "x-crow-csrf": "tok9", "x-test-from": "laptop" }, 401, null],
-      ["no csrf", { cookie: "crow_session=own-1; crow_csrf=tok9", "x-test-from": "laptop" }, 403, null],
+      ["no session", { "x-crow-csrf": csrfTokenForSession("own-1"), "x-test-from": "laptop" }, 401, null],
+      ["no csrf", { cookie: "crow_session=own-1", "x-test-from": "laptop" }, 403, null],
       ["peer signed", { ...as("own-1"), "x-crow-signature": "sig" }, 403, null],
     ];
     for (const [label, headers, status, json] of cases) {

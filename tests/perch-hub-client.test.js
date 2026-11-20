@@ -713,7 +713,6 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   // would fail every test in this harness for the wrong reason.
   const docTarget = makeEventTarget();
   const doc = Object.assign(docTarget, {
-    cookie: "crow_csrf=test-csrf-token",
     body: bodyEl,
     // <html>: the dashboard-wide text size lands here as data-text-size.
     documentElement: makeFakeElement("html"),
@@ -749,6 +748,9 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   const win = Object.assign(winTarget, {
     visualViewport, innerHeight: 800,
     matchMedia: () => mq,
+    // The server-bound CSRF token, as /csrf-client.js exposes it on the page
+    // (the <meta name="crow-csrf"> tag). NEVER a cookie: crow_csrf is retired.
+    crowCsrf: () => "test-csrf-token",
   });
   // Phone layout (.perch-narrow) reads innerWidth; left undefined by default
   // so every older test keeps the wide layout it was written against.
@@ -1294,12 +1296,12 @@ test("I3: a native EventSource error prints nothing; a real error FRAME prints i
 
 // ---- I2: bindings a green suite could previously delete undetected ----
 
-test("I2: perchApi sends X-Crow-Csrf carrying the actual cookie value", async () => {
+test("I2: perchApi sends X-Crow-Csrf carrying the page's server-bound token", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch() });
   assert.ok(hub.fetchCalls.length >= 1, "the bootstrap's own loadList() must have fired");
   const headers = hub.fetchCalls[0].opts.headers;
   assert.equal(headers["X-Crow-Csrf"], "test-csrf-token",
-    "must carry the value parsed out of document.cookie, not a hardcoded or absent header");
+    "must carry the token window.crowCsrf() returns, not a hardcoded or absent header");
 });
 
 test("I2: the model/thinking/permission/plan-mode pickers are wired to POST /control", async () => {

@@ -13,6 +13,7 @@ import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { crowTalkCss, crowTalkJs, crowTalkOverlayHtml } from "./crow-talk.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
+import { csrfMetaTag } from "./csrf.js";
 import { textSizeCss, textSizeHeadScript } from "./text-size.js";
 import { appIconSvg } from "./app-icons.js";
 import { shellCss } from "../shell/css.js";
@@ -162,12 +163,14 @@ function csrfTokenString(value) {
  *   defaults to the panel registry's (a test seam).
  * @param {string} [opts.tryNewCard] - Classic-only HTML shown above the content.
  * @param {string} [opts.csrf] - The viewer's CSRF token (req.csrfToken), used by
- *   the sidebar's logout form. Logout is a POST: a GET here used to destroy the
- *   session, which made /dashboard/logout a same-origin image target for
+ *   the sidebar's logout form and rendered as `<meta name="crow-csrf">` for the
+ *   client helper (window.crowCsrf). Logout is a POST: a GET here used to destroy
+ *   the session, which made /dashboard/logout a same-origin image target for
  *   anything that can render in the owner's browser (a bot reply, a shared
  *   page). Every page rendered through the panel dispatcher passes its token;
  *   a page rendered without one keeps a plain link to the GET confirm page
- *   instead, which changes nothing on its own.
+ *   instead, which changes nothing on its own (and its client scripts fall back
+ *   to GET /dashboard/csrf).
  */
 export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs, head, variant = "classic", shell = null, tryNewCard = "", csrf = "" }) {
   // Unified-off class gates the tabs strip visibility via CSS. The strip
@@ -261,6 +264,8 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   ${FONT_LINKS}
   ${dashboardCss()}
+  ${csrfMetaTag(csrf)}
+  <script src="/csrf-client.js"></script>
   ${turboHead()}
   ${head || ""}
   <meta name="crow-mode" content="${isShell ? "shell" : "classic"}" data-turbo-track="reload">${isShell ? `\n  ${shellCss()}` : ""}
@@ -430,23 +435,47 @@ function layoutListenersJs() {
         }
       });
 
-      // CSRF double-submit: attach the crow_csrf cookie value as
-      // X-Crow-Csrf on every state-changing same-origin request.
+      // CSRF: attach the SERVER-BOUND token as X-Crow-Csrf on every
+      // state-changing same-origin request. The token comes from the page
+      // (window.crowCsrf — the <meta name="crow-csrf"> tag, or GET
+      // /dashboard/csrf); it is NEVER read from a cookie. A cookie could be
+      // tossed by any host on the tailnet (ts.net is a public suffix, so every
+      // <x>.<tailnet>.ts.net is the same SITE) — this one is HMAC(secret,
+      // session id) and the secret never leaves the server.
       //   - Turbo form submissions: turbo:submit-start hook.
       //   - Turbo.visit / link prefetch: turbo:before-fetch-request hook.
-      //   - Raw window.fetch() from panel code: wrapped below.
+      //   - Raw window.fetch() from panel code: wrapped below, which also
+      //     refreshes the token once and retries on a 403 CSRF refusal.
       //   - Classic <form data-turbo="false"> submissions: carry a server-
       //     rendered <input name="_csrf"> via csrfInput().
-      function readCookie(name) {
-        var cookies = document.cookie.split(';');
-        for (var i = 0; i < cookies.length; i++) {
-          var p = cookies[i].trim().split('=');
-          if (p[0] === name) return decodeURIComponent(p.slice(1).join('='));
-        }
-        return '';
+      function csrfToken() {
+        if (typeof window.crowCsrf === 'function') return window.crowCsrf();
+        var m = document.querySelector('meta[name="crow-csrf"]');
+        return (m && m.getAttribute('content')) || '';
+      }
+      function csrfRefresh() {
+        if (typeof window.crowCsrfRefresh === 'function') return window.crowCsrfRefresh();
+        return Promise.resolve(csrfToken());
+      }
+      // A refusal names itself in X-Crow-Csrf-Refusal (dashboard/shared/csrf.js),
+      // so a stale token is distinguishable from an ordinary 403.
+      function csrfRefused(resp) {
+        try {
+          return !!(resp && resp.status === 403 && resp.headers && resp.headers.get
+            && resp.headers.get('X-Crow-Csrf-Refusal'));
+        } catch (e) { return false; }
+      }
+      // Same-origin, decided by the browser's OWN URL parser — a leading "/" is
+      // not enough. "/\\evil.example/x" starts with a slash and is an absolute URL
+      // to another origin once parsed (a backslash is a slash in the authority
+      // position), so a string test would hand the token to that origin.
+      function sameOriginUrl(url) {
+        try {
+          return new URL(String(url), window.location.href).origin === window.location.origin;
+        } catch (e) { return false; }
       }
       document.addEventListener('turbo:submit-start', function(event) {
-        var token = readCookie('crow_csrf');
+        var token = csrfToken();
         if (!token) return;
         var fetchReq = event.detail && event.detail.formSubmission &&
                        event.detail.formSubmission.fetchRequest;
@@ -455,49 +484,81 @@ function layoutListenersJs() {
         }
       });
       document.addEventListener('turbo:before-fetch-request', function(event) {
-        var token = readCookie('crow_csrf');
+        var token = csrfToken();
         if (!token) return;
-        var method = (event.detail && event.detail.fetchOptions && event.detail.fetchOptions.method || '').toUpperCase();
+        var opts = event.detail && event.detail.fetchOptions;
+        var method = ((opts && opts.method) || '').toUpperCase();
         if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS' || method === '') return;
-        var headers = event.detail.fetchOptions.headers;
+        // Same rule as the fetch wrapper below: the token never leaves this origin.
+        if (opts && opts.url && !sameOriginUrl(opts.url)) return;
+        var headers = opts && opts.headers;
         if (headers) {
           if (typeof headers.set === 'function') headers.set('X-Crow-Csrf', token);
           else headers['X-Crow-Csrf'] = token;
         }
       });
+      // A CSRF refusal on a Turbo form submission is a STALE TOKEN (the page
+      // outlived the session it was rendered for), not a forgery: fetch a fresh
+      // one and submit once more. Guarded per form so this can never loop.
+      document.addEventListener('turbo:before-fetch-response', function(event) {
+        var fr = event.detail && event.detail.fetchResponse;
+        if (!csrfRefused(fr && fr.response)) return;
+        var form = event.target;
+        if (!form || form.nodeType !== 1 || typeof form.requestSubmit !== 'function') return;
+        if (form.dataset && form.dataset.crowCsrfRetried === '1') return;
+        event.preventDefault();
+        csrfRefresh().then(function() {
+          try { form.dataset.crowCsrfRetried = '1'; form.requestSubmit(); } catch (e) {}
+        });
+      });
 
       // Wrap window.fetch so raw fetch() POST/PUT/DELETE/PATCH calls also
       // carry the CSRF header. Same-origin only (never leak token to
       // third-party origins). Idempotent: guarded by a flag so repeated
-      // layout inclusions (Turbo page navs) don't double-wrap.
+      // layout inclusions (Turbo page navs) don't double-wrap. On a 403 CSRF
+      // refusal it refreshes the token once and retries the same request
+      // (when the body can be replayed).
       if (!window.__crowFetchWrapped) {
         window.__crowFetchWrapped = true;
         var origFetch = window.fetch.bind(window);
         window.fetch = function(input, init) {
+          var token = '';
+          var url = '';
+          var method = 'GET';
           try {
-            var token = readCookie('crow_csrf');
-            if (!token) return origFetch(input, init);
-            var url = typeof input === 'string' ? input : (input && input.url) || '';
-            var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
-              return origFetch(input, init);
-            }
-            // Same-origin check: relative URL (starts with '/') OR matches current origin.
-            var sameOrigin = false;
-            if (url.charAt(0) === '/' && !url.startsWith('//')) {
-              sameOrigin = true;
-            } else {
-              try {
-                var u = new URL(url, window.location.href);
-                sameOrigin = (u.origin === window.location.origin);
-              } catch (e) { sameOrigin = false; }
-            }
-            if (!sameOrigin) return origFetch(input, init);
+            token = csrfToken();
+            url = typeof input === 'string' ? input : (input && input.url) || '';
+            method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          } catch (err) {
+            return origFetch(input, init);
+          }
+          if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+            return origFetch(input, init);
+          }
+          // Same-origin check (review F2): the browser's own URL parser decides.
+          // A leading-slash STRING test was wrong — "/\\evil.example/x" is an
+          // absolute URL to another origin once parsed — so the token could be
+          // sent to a third party.
+          if (!sameOriginUrl(url)) return origFetch(input, init);
+          function send(tok) {
             var newInit = Object.assign({}, init || {});
             var hdrs = new Headers(newInit.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
-            if (!hdrs.has('X-Crow-Csrf')) hdrs.set('X-Crow-Csrf', token);
+            if (tok) hdrs.set('X-Crow-Csrf', tok);
             newInit.headers = hdrs;
             return origFetch(input, newInit);
+          }
+          var body = init && init.body;
+          var replayable = body === undefined || body === null || typeof body === 'string'
+            || (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams)
+            || (typeof FormData !== 'undefined' && body instanceof FormData);
+          try {
+            return send(token).then(function(resp) {
+              if (!csrfRefused(resp) || !replayable) return resp;
+              return csrfRefresh().then(function(fresh) {
+                if (!fresh || fresh === token) return resp;
+                return send(fresh);
+              });
+            });
           } catch (err) {
             return origFetch(input, init);
           }
@@ -658,6 +719,26 @@ function layoutTailJs() {
     if ('serviceWorker' in navigator && !window.__crowSwRegistered) {
       window.__crowSwRegistered = true;
       navigator.serviceWorker.register('/sw.js').catch(function() {});
+    }
+
+    // Service-worker sweep (queue item #51 PR-1). A proxied app served under
+    // /proxy/<id>/ could register a worker that outlives its own page and
+    // intercepts the dashboard's requests on this origin. Unregister every
+    // registration that is not Crow's own /sw.js (same origin, that exact
+    // path), once per document lifetime.
+    if ('serviceWorker' in navigator && !window.__crowSwSwept && navigator.serviceWorker.getRegistrations) {
+      window.__crowSwSwept = true;
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        for (var i = 0; i < regs.length; i++) {
+          try {
+            var reg = regs[i];
+            var worker = reg.active || reg.waiting || reg.installing;
+            var script = (worker && worker.scriptURL) || '';
+            var u = new URL(script, location.href);
+            if (u.origin !== location.origin || u.pathname !== '/sw.js') reg.unregister();
+          } catch (e) { /* a registration we cannot read is left alone */ }
+        }
+      }).catch(function() {});
     }
 
     // ─── Global toast helper (W3-4) ─── idempotent under Turbo Drive navs

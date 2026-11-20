@@ -25,7 +25,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -39,6 +39,9 @@ process.env.CROW_HOME = join(dir, "home");
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 delete process.env.CROW_DB_PATH;
 process.env.PIBOT_PI_CLI = "/nonexistent/pi-never-spawned-by-this-file.js";
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
+// The SERVER-BOUND token for the harness's dashboard session (`live-sess`).
+const CSRF = csrfTokenFor("live-sess");
 const REPO = new URL("..", import.meta.url).pathname;
 const ROOT = join(dir, "delivered");
 
@@ -122,9 +125,10 @@ before(async () => {
     const path = req.url.split("?")[0];
     if (REAL.test(path) || REAL_TAKE_OVER.test(path)) return next();
     if (path === "/proxy/browser/vnc.html") { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>vnc</title><body>vnc stand-in</body>"); return; }
+    if (path === "/csrf-client.js") { res.writeHead(200, { "content-type": "application/javascript" }); res.end(readFileSync(join(REPO, "servers/gateway/public/csrf-client.js"))); return; }
     if (path.startsWith("/dashboard/perch-api/") || path.startsWith("/api/") || path.startsWith("/dashboard/bot-board-api/")) return scripted(req, res);
     if (path === "/dashboard/perch") {
-      const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
+      const layout = (opts) => renderLayout({ ...opts, csrf: CSRF, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
       return Promise.resolve(perchHubPanel.handler(req, res, { lang: "en", layout })).then((html) => {
         if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
       });
@@ -226,7 +230,6 @@ test("live: Live with the hostname and a real frame, then Done with the shot; 44
     await tab.send("Network.enable");
     await tab.send("Network.setExtraHTTPHeaders", { headers: serveHeaders("operator@example.com") });
     await tab.send("Network.setCookie", { name: "crow_session", value: "live-sess", url: base });
-    await tab.send("Network.setCookie", { name: "crow_csrf", value: "tok-live", url: base });
     await tab.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
     await tab.send("Page.enable");
@@ -341,7 +344,6 @@ test("live: Take over opens the sheet with the noVNC iframe; Hand back closes it
     await tab.send("Network.enable");
     await tab.send("Network.setExtraHTTPHeaders", { headers: serveHeaders("operator@example.com") });
     await tab.send("Network.setCookie", { name: "crow_session", value: "live-sess", url: base });
-    await tab.send("Network.setCookie", { name: "crow_csrf", value: "tok-live", url: base });
     await tab.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     await tab.send("Page.enable");
     await tab.send("Page.navigate", { url: base + "/dashboard/perch#" + SID });

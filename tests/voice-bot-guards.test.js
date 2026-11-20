@@ -95,7 +95,12 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)),
+// so the fixture computes it for its own session instead of reading a cookie.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "good";
+const TOKEN = csrfTokenForSession(SESSION);
+const AUTHED = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": TOKEN };
 const fakeRes = () => { const res = { redirected: null }; res.redirectAfterPost = (url) => { res.redirected = url; }; return res; };
 
 test("delete is refused", async () => {

@@ -13,10 +13,9 @@
  *       mount would 429 the lens after a few minutes of ordinary use (200
  *       req / 15 min, and one lens load is already 1 + N fetches);
  *   (b) `/dashboard` carries the repo's real CSRF rail (dashboard/index.js →
- *       shared/csrf.js: cookie `crow_csrf`, header `X-Crow-Csrf`,
- *       constant-time compare). The lens echoes that cookie on every mutating
- *       fetch. There is NO second, bespoke guard here — one rail, or the two
- *       drift;
+ *       shared/csrf.js: server-bound `X-Crow-Csrf` token, constant-time
+ *       compare). The lens echoes that token on every mutating fetch. There is
+ *       NO second, bespoke guard here — one rail, or the two drift;
  *   (c) `/dashboard/*` is funnel-private (PUBLIC_FUNNEL_PREFIXES omits it), so
  *       the network-exposure invariant covers this surface for free —
  *       tests/auth-network.test.js pins the perch paths explicitly.

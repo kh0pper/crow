@@ -161,8 +161,9 @@ export function shellAvatarButton({ lang }) {
  * The project rows, one form POSTing /dashboard/scope for the Everything and
  * Unassigned buttons; each project is a link to its home. `return` is filled
  * by the client with the current path so a scope change lands back here.
- * The hidden _csrf is filled from the crow_csrf cookie at submit time for the
- * Turbo-off case (with Turbo on, the layout's submit hook sends the header).
+ * The hidden _csrf is filled with the server-bound token (window.crowCsrf — the
+ * page's meta tag / GET /dashboard/csrf) at submit time for the Turbo-off case
+ * (with Turbo on, the layout's submit hook sends the header).
  */
 function projectForm({ scope, projects, lang, counts, homeSlug, extraClass = "" }) {
   const cur = currentValue(scope, projects);
@@ -340,10 +341,11 @@ export function shellAvatarSheet({ lang, tray, forYouOwner, getPanel = registryG
  * The one-time "Try the new Crow" card, shown above a classic page's content
  * while crow_try_new is "pending". "Try it" switches this device to the new
  * shell; "Not now" dismisses the card for good. The hidden _csrf is filled
- * from the crow_csrf cookie at submit time (the Turbo-off path).
+ * from the SERVER-BOUND token (window.crowCsrf, filled in at submit time — the
+ * Turbo-off path) — never from a cookie.
  */
 export function tryNewCardHtml(lang) {
-  const fill = "var f=this.querySelector('input[name=_csrf]');var m=document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);if(f&&m)f.value=decodeURIComponent(m[1]);";
+  const fill = "var f=this.querySelector('input[name=_csrf]');if(f)f.value=(window.crowCsrf?window.crowCsrf():'');";
   const style = "display:flex;flex-wrap:wrap;align-items:center;gap:0.75rem 1rem;padding:1rem;margin-bottom:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card)";
   const btn = "min-height:44px;padding:0 1rem;border-radius:var(--crow-radius-control);font:inherit;cursor:pointer";
   return `<aside class="try-new-card" style="${style}">

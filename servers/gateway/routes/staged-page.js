@@ -193,11 +193,15 @@ function renderScript(lang, item = null) {
   var root=document.getElementById('staged-page');
   if(!root) return;
   var id=root.getAttribute('data-id'), hash=root.getAttribute('data-hash');
+  // The CSRF token is SERVER-BOUND (window.crowCsrf reads the page's meta tag, or
+  // this page's /dashboard/csrf endpoint) — never a cookie. The first action
+  // refreshes it if the page was opened without one.
   var csrf='';
-  var m=document.cookie.match(/(?:^|; )crow_csrf=([^;]*)/);
-  if(m) csrf=decodeURIComponent(m[1]);
+  function csrfNow(){ try{ csrf=window.crowCsrf?window.crowCsrf():''; }catch(e){} return csrf; }
+  csrfNow();
+  if(!csrf && window.crowCsrfRefresh){ window.crowCsrfRefresh().then(function(tok){ csrf=tok||csrf; }); }
   function api(method,path,body){
-    var opts={method:method,headers:{'X-Crow-Csrf':csrf}};
+    var opts={method:method,headers:{'X-Crow-Csrf':csrfNow()}};
     if(body!==undefined){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
     return fetch('/dashboard/perch-api'+path,opts).then(function(r){
       return r.json().catch(function(){return null;}).then(function(j){ return {ok:r.ok,status:r.status,j:j}; });
@@ -287,6 +291,7 @@ function page(lang, body, title) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<script src="/csrf-client.js"></script>
 <title>${escapeHtml(title)}</title>
 <style>${CSS}</style>
 </head>

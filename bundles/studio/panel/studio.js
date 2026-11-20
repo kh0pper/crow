@@ -1797,7 +1797,7 @@ function renderer(layout) {
   return ({ title, content, head }) =>
     `<!doctype html><html lang="en"><head><meta charset="utf-8">${
       head || TURBO_RELOAD_HEAD
-    }<title>${escapeHtml(title)}</title></head><body>${content}</body></html>`;
+    }<script src="/csrf-client.js"></script><title>${escapeHtml(title)}</title></head><body>${content}</body></html>`;
 }
 
 /** The song library page. */

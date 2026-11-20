@@ -89,6 +89,7 @@ import { setOAuthProvider } from "./oauth-consent.js";
 import { resolveIssuerUrl, issuerSource } from "./issuer-url.js";
 import { loadDynamicBackends } from "./proxy.js";
 import { dashboardAuth } from "./dashboard/auth.js";
+import { fetchMetadataGate } from "./dashboard/fetch-metadata.js";
 import { SessionManager } from "./session-manager.js";
 import { startParentWatch } from "./parent-watch.js";
 // Boot guard bookkeeping (audit N1c-3 L1): an exit we asked for must not count
@@ -514,6 +515,18 @@ app.use(refuseRelayedInternal);
 // CrowdSec and every rate limiter, which key on req.ip.
 app.use(resolveClientMiddleware());
 
+// Fetch-metadata gate (queue item #51 PR-1): a cookie-authenticated POST / PUT /
+// PATCH / DELETE to a cookie-authenticated mount (/dashboard, /api, the extension
+// proxy /proxy/<id>, the authenticated static apps /apps/<name>) that a BROWSER
+// marks same-site or cross-site is refused before any router sees it. ts.net is a public suffix, so
+// a sibling host on the tailnet is the same site and SameSite=Lax still sends the
+// session; this gate closes that shape, and the server-bound CSRF token
+// (dashboard/shared/csrf.js) closes the rest. Requests with no session cookie
+// (bearer/MCP clients, the login and reset POSTs, HMAC-signed peer calls) are
+// untouched — see the module header. Mounted after resolveClientMiddleware so the
+// peer classification and req.protocol are already resolved.
+app.use(fetchMetadataGate());
+
 // PR 0: CrowdSec gateway-middleware bouncer (no-op when CROW_CROWDSEC_BOUNCER_KEY is unset).
 // Mounted after security headers, before CORS/rate-limit so banned IPs get a fast 403
 // without consuming rate-limit budget. Uses synchronous LAPI lookup with 200ms timeout
@@ -524,8 +537,37 @@ app.use(crowdsecMiddleware({ db: createDbClient() }));
 const corsOrigins = process.env.CORS_ALLOWED_ORIGINS
   ? process.env.CORS_ALLOWED_ORIGINS.split(",").map((o) => o.trim())
   : false;
+// Boot guard (queue item #51 PR-1): the artifacts origin (and, from PR-2, the
+// apps origin) must NEVER be a CORS-allowed origin for the dashboard. A bundle's
+// web UI runs on that origin as third-party code; allowing it here would hand it
+// credentialed cross-origin reads of the dashboard's own API, defeating the
+// whole point of moving it off this origin. Refused entries are dropped with one
+// log line naming the variable — never silently.
+if (Array.isArray(corsOrigins) && corsOrigins.length > 0) {
+  const forbidden = new Set();
+  for (const key of ["CROW_ARTIFACT_ORIGIN_URL", "CROW_APPS_ORIGIN_URL"]) {
+    const raw = String(process.env[key] || "").trim();
+    if (!raw) continue;
+    try { forbidden.add(new URL(raw).origin); } catch { /* not a URL: nothing to compare */ }
+  }
+  if (forbidden.size > 0) {
+    const kept = corsOrigins.filter((entry) => {
+      let origin = null;
+      try { origin = new URL(entry).origin; } catch { /* a bare host is not an origin we compare */ }
+      if (origin && forbidden.has(origin)) {
+        console.warn(`[cors] refusing CORS_ALLOWED_ORIGINS entry ${entry}: it is a Crow app origin (CROW_ARTIFACT_ORIGIN_URL / CROW_APPS_ORIGIN_URL), which must not be CORS-allowed to the dashboard`);
+        return false;
+      }
+      return true;
+    });
+    if (kept.length !== corsOrigins.length) {
+      corsOrigins.length = 0;
+      corsOrigins.push(...kept);
+    }
+  }
+}
 app.use(cors({
-  origin: corsOrigins,
+  origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : false,
   methods: ["GET", "POST", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "mcp-session-id"],
   credentials: true,

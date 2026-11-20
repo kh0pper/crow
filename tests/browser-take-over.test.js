@@ -17,6 +17,7 @@
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, openSync, closeSync, writeSync } from "node:fs";
@@ -715,7 +716,7 @@ async function routeHarness() {
   app.use(router);
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const base = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api/browser/";
-  const AUTH = { ...serveHeaders(), cookie: "crow_session=to-sess; crow_csrf=tok", "x-crow-csrf": "tok" };
+  const AUTH = { ...serveHeaders(), cookie: "crow_session=to-sess", "x-crow-csrf": csrfTokenFor("to-sess") };
   const post = async (op, headers = AUTH, body) => {
     const opts = { method: "POST", headers: body ? { ...headers, "content-type": "application/json" } : headers, redirect: "manual" };
     if (body) opts.body = JSON.stringify(body);
@@ -729,17 +730,17 @@ async function routeHarness() {
 test("routes need CSRF and dashboard auth; a contact or Funnel request is refused; take over / heartbeat / hand back answer the state", async () => {
   const r = await routeHarness();
   try {
-    const noCsrf = await r.post("take-over", { ...serveHeaders(), cookie: "crow_session=to-sess; crow_csrf=tok" });
+    const noCsrf = await r.post("take-over", { ...serveHeaders(), cookie: "crow_session=to-sess" });
     assert.equal(noCsrf.status, 403, "CSRF token missing from the header");
     const wrong = await r.post("take-over", { ...r.AUTH, "x-crow-csrf": "nope" });
     assert.equal(wrong.status, 403);
-    const noSession = await r.post("take-over", { ...serveHeaders(), cookie: "crow_csrf=tok", "x-crow-csrf": "tok" });
+    const noSession = await r.post("take-over", { ...serveHeaders(), "x-crow-csrf": csrfTokenFor("to-sess") });
     assert.ok([302, 303, 401, 403].includes(noSession.status), "no session: " + noSession.status);
     const contact = await r.post("take-over", { ...serveHeaders(), "x-crow-signature": "sig", "x-crow-instance": "peer" });
     assert.ok([302, 303, 401, 403].includes(contact.status), "a signed contact request: " + contact.status);
     const funnel = await r.post("take-over", { ...r.AUTH, "tailscale-funnel-request": "?1" });
     assert.equal(funnel.status, 403, "Funnel");
-    const offNet = await r.post("take-over", { cookie: r.AUTH.cookie, "x-crow-csrf": "tok" });
+    const offNet = await r.post("take-over", { cookie: r.AUTH.cookie, "x-crow-csrf": csrfTokenFor("to-sess") });
     assert.equal(offNet.status, 403, "no Serve headers: off the network");
     assert.equal(r.ctl.state(), "idle", "nothing refused reached the controller");
     assert.deepEqual(r.held, []);
@@ -855,8 +856,9 @@ test("the Browser panel shows \"A bot is using the browser\" with Take over whil
     const vm = await import("node:vm");
     const btn = { disabled: false, l: null, addEventListener(t, f) { this.l = f; } };
     const fetched = []; let reloaded = 0;
-    const ctx = { document: { getElementById: (id) => (id === "browser-hand-back" ? btn : null), cookie: "a=1; crow_csrf=tk%3D" },
-      fetch: (u, o) => { fetched.push({ u, o }); return Promise.resolve({ ok: true }); }, location: { reload: () => { reloaded++; } }, decodeURIComponent };
+    const ctx = { document: { getElementById: (id) => (id === "browser-hand-back" ? btn : null) },
+      window: { crowCsrf: () => "tk=" },
+      fetch: (u, o) => { fetched.push({ u, o }); return Promise.resolve({ ok: true }); }, location: { reload: () => { reloaded++; } } };
     vm.runInNewContext(HAND_BACK_JS, ctx);
     btn.l(); btn.l();
     await tick();

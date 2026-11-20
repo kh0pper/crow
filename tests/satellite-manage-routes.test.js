@@ -27,6 +27,8 @@ const { default: satellitesRouter } = await import("../servers/gateway/routes/sa
 const { createSatelliteManager } = await import("../servers/gateway/satellites/manage.js");
 const { createPairingService } = await import("../servers/gateway/satellites/pairing.js");
 const { createMgmtFake, makeSatelliteRow, demoTools, toolsHash } = await import("./helpers/fake-satellite-mgmt.js");
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
 
 const BOOT = "d".repeat(40);
 const tmp = (p) => { const d = mkdtempSync(join(tmpdir(), p)); dirs.push(d); return d; };
@@ -371,7 +373,7 @@ test("L3: the log text is capped at 256 KiB after parsing", async () => {
 test("L5: every new write route refuses a session-cookie request without the CSRF header, before any network", async () => {
   const s = await setup();
   try {
-    const cookie = { cookie: "crow_session=sess; crow_csrf=tok123" };
+    const cookie = { cookie: "crow_session=sess" };
     const writes = [
       ["POST", "rename", { name: "x" }], ["POST", "update", {}], ["POST", "refresh", {}], ["POST", "renew-cert", {}], ["POST", "rotate-key", {}],
       ["POST", "bundles/install", { bundle: "demo" }], ["POST", "bundles/demo/consent", { token: "x", accept: true }],
@@ -384,7 +386,7 @@ test("L5: every new write route refuses a session-cookie request without the CSR
       assert.equal(r.status, 403, `${m} ${p}`);
     }
     assert.equal(s.fake.state.requests.length, 0);
-    const ok = await s.call("POST", `/api/satellites/${s.sat}/rename`, { name: "x" }, { ...cookie, "x-crow-csrf": "tok123" });
+    const ok = await s.call("POST", `/api/satellites/${s.sat}/rename`, { name: "x" }, { ...cookie, "x-crow-csrf": csrfTokenForSession("sess") });
     assert.equal(ok.status, 200);
   } finally { s.close(); }
 });

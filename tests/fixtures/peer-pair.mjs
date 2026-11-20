@@ -381,14 +381,43 @@ export async function bearerMcp(from, to, bearer = from.tokens()[to.id]?.auth_to
   return { status: init.status, listStatus: list.status, hasTools: /"tools"/.test(text), sessionId: sid };
 }
 
-/** Settings → Paired Instances → Revoke on `on`, as its operator. */
+/**
+ * The operator session's CSRF token, minted by the INSTANCE'S OWN csrf.js in a child with its env:
+ * the token is HMAC(<CROW_HOME>/secrets/csrf.key, session id), and each instance in this fixture
+ * has its own scratch home (and so its own key), so a token computed in the test process would
+ * never match. This is the same door the signer child uses: production code, the instance's env.
+ */
+async function operatorCsrfToken(on, session) {
+  const r = await on.runAs(`
+    const { csrfTokenForSession } = await import(${mod("servers/gateway/dashboard/shared/csrf.js")});
+    console.log("RESULT " + csrfTokenForSession(${JSON.stringify(session)}));
+    process.exit(0);`);
+  const line = r.out.split("\n").find((l) => l.startsWith("RESULT "));
+  if (!line) throw new Error(`csrf token failed: ${r.err.slice(-2000)}`);
+  return line.slice(7).trim();
+}
+
+/**
+ * Settings → Paired Instances → Revoke on `on`, as its operator: the POST the dashboard's own
+ * form makes. The CSRF token is the server-bound one for this session (shared/csrf.js: HMAC of
+ * the session id — there is no cookie to echo since queue item #51 PR-1), and the request carries
+ * the fetch metadata a real browser writes for a form on the page itself (`Sec-Fetch-Site:
+ * same-origin` and an Origin naming the origin it reached the gateway on).
+ */
 export async function settingsRevoke(on, targetId) {
   const session = on.operatorSession();
-  const csrf = randomBytes(16).toString("hex");
-  const r = await fetch(`${await on.urlFor({ ip: "100.64.20.251" })}/dashboard/settings`, {
+  const csrf = await operatorCsrfToken(on, session);
+  const url = `${await on.urlFor({ ip: "100.64.20.251" })}/dashboard/settings`;
+  const r = await fetch(url, {
     method: "POST",
     redirect: "manual",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: `crow_session=${session}; crow_csrf=${csrf}`, "x-crow-csrf": csrf },
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: `crow_session=${session}`,
+      "x-crow-csrf": csrf,
+      Origin: new URL(url).origin,
+      "Sec-Fetch-Site": "same-origin",
+    },
     body: new URLSearchParams({ action: "revoke_instance", instance_id: targetId, _csrf: csrf }).toString(),
   });
   return { status: r.status, location: r.headers.get("location") };

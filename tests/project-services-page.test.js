@@ -84,7 +84,8 @@ after(() => {
 
 const NET = serveHeaders("operator@example.com");
 const cookieHeader = (jar) => Object.entries(jar).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
-async function get(path, jar = { crow_session: "new-sess", crow_csrf: "tok", [MODE]: "new" }) {
+// These requests are reads; the CSRF token is SERVER-BOUND and delivered in the page.
+async function get(path, jar = { crow_session: "new-sess", [MODE]: "new" }) {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: cookieHeader(jar) } });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
 }
@@ -198,7 +199,7 @@ test("an unknown or archived slug is a 404; classic mode goes to Projects", asyn
     }
     const own = await get("/dashboard/project-services");
     assert.equal(own.status, 404, "no slug, no page");
-    const classic = await get("/dashboard/project/spring/services", { crow_session: "new-sess", crow_csrf: "tok", [MODE]: "classic" });
+    const classic = await get("/dashboard/project/spring/services", { crow_session: "new-sess", [MODE]: "classic" });
     assert.equal(classic.status, 302);
     assert.equal(classic.location, "/dashboard/projects");
   });

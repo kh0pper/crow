@@ -11,7 +11,7 @@
 
 import { appImport } from "./app-root.js";
 
-const { verifySession } = await appImport("servers/gateway/dashboard/auth.js");
+const { verifySession, sessionTokenFromRequest } = await appImport("servers/gateway/dashboard/auth.js");
 const { createProjectSpace } = await appImport("servers/shared/project-spaces.js");
 const { classifyPeer } = await appImport("servers/shared/peer-class.js");
 
@@ -117,27 +117,19 @@ export async function listBoundDevices(db) {
 /**
  * Check the request for a valid Crow's Nest session cookie.
  * Used to auto-bind on first visit when the admin is already logged in.
+ *
+ * sessionTokenFromRequest, not a raw cookie read: over HTTPS the session is
+ * `__Host-crow_session` (host-only, so a sibling host on the tailnet cannot toss
+ * a plain one), and only the name that request's channel may carry is read.
  */
 export async function hasAdminSession(req) {
   try {
-    const cookies = parseCookies(req.headers.cookie);
-    const token = cookies.crow_session;
+    const token = sessionTokenFromRequest(req);
     if (!token) return false;
     return await verifySession(token);
   } catch {
     return false;
   }
-}
-
-function parseCookies(header) {
-  const out = {};
-  if (!header) return out;
-  for (const seg of String(header).split(/;\s*/)) {
-    const idx = seg.indexOf("=");
-    if (idx < 0) continue;
-    out[seg.slice(0, idx).trim()] = seg.slice(idx + 1);
-  }
-  return out;
 }
 
 /**

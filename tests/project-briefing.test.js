@@ -211,13 +211,15 @@ beforeEach(async () => {
 });
 
 const NET = serveHeaders("operator@example.com");
-const jar = () => `crow_session=new-sess; crow_csrf=tok; ${MODE}=new`;
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const jar = () => `crow_session=new-sess; ${MODE}=new`;
 async function getHome(slug) {
   const r = await fetch(base + "/dashboard/project/" + slug, { redirect: "manual", headers: { ...NET, cookie: jar() } });
   return { status: r.status, body: await r.text() };
 }
 const section = (html, cls) => (html.match(new RegExp(`<section class="ph-section ${cls}"[^>]*>([\\s\\S]*?)</section>`)) || [])[1] || "";
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+const AUTHED = { cookie: "crow_session=good", "x-crow-csrf": csrfTokenForSession("good") };
 async function spawnPost(body, headers = AUTHED) {
   const r = await fetch(routeBase + "/bots/ivy/interactive", { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   return { status: r.status, body: await r.json().catch(() => null) };
@@ -718,9 +720,9 @@ test("forget deletes the memory and clears the summary", async () => {
 
   // Through the route, behind the session + CSRF rails: the tainted one.
   const post = (path, headers) => fetch(routeBase + path, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...headers }, body: "{}" });
-  const noCsrf = await post(`/interactive/${T.tainted}/forget-summary`, { cookie: "crow_session=good; crow_csrf=tok" });
+  const noCsrf = await post(`/interactive/${T.tainted}/forget-summary`, { cookie: "crow_session=good" });
   assert.equal(noCsrf.status, 403, "no CSRF header: refused");
-  const noSession = await post(`/interactive/${T.tainted}/forget-summary`, { cookie: "crow_csrf=tok", "x-crow-csrf": "tok" });
+  const noSession = await post(`/interactive/${T.tainted}/forget-summary`, { "x-crow-csrf": csrfTokenForSession("good") });
   assert.equal(noSession.status, 302, "no session: to the login page");
   assert.notEqual(one("SELECT summary FROM bot_sessions WHERE gateway_thread_id=?", T.tainted).summary, null, "nothing forgotten yet");
   const ok = await post(`/interactive/${T.tainted}/forget-summary`, AUTHED);
@@ -1006,8 +1008,8 @@ test("the memory panel refuses to edit a session summary, and shows why", async 
   assert.doesNotMatch(html, /name="action" value="edit"/, "no edit form");
   const post = await fetch(base + "/dashboard/memory", {
     method: "POST", redirect: "manual",
-    headers: { ...NET, cookie: jar(), "content-type": "application/x-www-form-urlencoded", "x-crow-csrf": "tok" },
-    body: new URLSearchParams({ action: "edit", id: String(id), content: "hand edit", category: "project", importance: "5", _csrf: "tok" }).toString(),
+    headers: { ...NET, cookie: jar(), "content-type": "application/x-www-form-urlencoded", "x-crow-csrf": csrfTokenForSession("new-sess") },
+    body: new URLSearchParams({ action: "edit", id: String(id), content: "hand edit", category: "project", importance: "5", _csrf: csrfTokenForSession("new-sess") }).toString(),
   });
   assert.ok([302, 303].includes(post.status), String(post.status));
   assert.equal(one("SELECT content FROM memories WHERE id=?", id).content, "PANEL-SUMMARY text", "unchanged");
@@ -1016,8 +1018,8 @@ test("the memory panel refuses to edit a session summary, and shows why", async 
   const plain = Number(run("INSERT INTO memories (content, category, importance, source) VALUES ('plain panel', 'general', 5, 'manual')").lastInsertRowid);
   await fetch(base + "/dashboard/memory", {
     method: "POST", redirect: "manual",
-    headers: { ...NET, cookie: jar(), "content-type": "application/x-www-form-urlencoded", "x-crow-csrf": "tok" },
-    body: new URLSearchParams({ action: "edit", id: String(plain), content: "plain edited", category: "general", importance: "5", _csrf: "tok" }).toString(),
+    headers: { ...NET, cookie: jar(), "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded", "x-crow-csrf": csrfTokenForSession("new-sess") },
+    body: new URLSearchParams({ action: "edit", id: String(plain), content: "plain edited", category: "general", importance: "5", _csrf: csrfTokenForSession("new-sess") }).toString(),
   });
   assert.equal(one("SELECT content FROM memories WHERE id=?", plain).content, "plain edited");
 });

@@ -183,13 +183,11 @@ export function startControlJs(lang = "en") {
   var inPlace = root.hasAttribute('data-ph-in-place');
   var busy = false;
 
+  /** The server-bound CSRF token (window.crowCsrf — the page's <meta
+   *  name="crow-csrf"> tag or GET /dashboard/csrf). NEVER a cookie: crow_csrf is
+   *  retired, and a same-site host on the tailnet could toss one. */
   function csrf() {
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var kv = parts[i].trim().split('=');
-      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function say(text) { if (status) status.textContent = text || ''; }
   function fail(text) { busy = false; btn.removeAttribute('disabled'); say(text); }

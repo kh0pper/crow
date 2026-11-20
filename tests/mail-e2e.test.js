@@ -49,7 +49,9 @@ const {
 } = await import("./fixtures/fake-mail-server.mjs");
 
 const OWNER = "owner-local-password-session";
-const CSRF = "csrf-token-value";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWNER);
 const LOCAL = Object.freeze({ instanceId: "instA", instanceName: "Alpha" });
 const DAY = 24 * 60 * 60 * 1000;
 /** Short budgets: every connect here is a loopback socket. */
@@ -168,7 +170,7 @@ function call(method, path, { body } = {}) {
     h["content-type"] = "application/json";
     h["content-length"] = Buffer.byteLength(payload);
   }
-  h.cookie = `crow_session=${OWNER}; crow_csrf=${CSRF}`;
+  h.cookie = `crow_session=${OWNER}`;
   h["x-crow-csrf"] = CSRF;
   h["x-test-from"] = "laptop";
   return new Promise((resolve, reject) => {

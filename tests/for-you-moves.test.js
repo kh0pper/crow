@@ -27,6 +27,7 @@ import { createClient } from "@libsql/client";
 import vm from "node:vm";
 import { parseHTML } from "linkedom";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 actAsServe();
 
 const dir = mkdtempSync(join(tmpdir(), "for-you-moves-"));
@@ -731,13 +732,15 @@ beforeEach(() => {
 });
 
 const NET = serveHeaders("operator@example.com");
-const jar = (sess) => `crow_session=${sess}; crow_csrf=tok; ${MODE}=new`;
+// The server-bound CSRF token for the harness's owner session.
+const CSRF = csrfTokenFor("moves-owner");
+const jar = (sess) => `crow_session=${sess}; ${MODE}=new`;
 async function get(path, sess = "moves-owner") {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: jar(sess) } });
   return { status: r.status, body: await r.text() };
 }
 async function save(fields) {
-  const body = new URLSearchParams({ _csrf: "tok", ...fields });
+  const body = new URLSearchParams({ _csrf: CSRF, ...fields });
   const r = await fetch(base + "/dashboard/for-you", {
     method: "POST", redirect: "manual",
     headers: { ...NET, cookie: jar("moves-owner"), "content-type": "application/x-www-form-urlencoded" }, body,

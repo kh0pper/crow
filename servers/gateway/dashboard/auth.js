@@ -4,8 +4,20 @@
  * Password-based auth with session cookies.
  * - Password hashed with crypto.scrypt (async)
  * - Session tokens stored in oauth_tokens table (reuses existing infra)
- * - CSRF double-submit cookie pattern
+ * - CSRF: the server-bound token of shared/csrf.js (HMAC of the session id);
+ *   there is no CSRF cookie any more — a cookie could be tossed by any host on
+ *   the tailnet, since `ts.net` is a public suffix and every
+ *   `<x>.<tailnet>.ts.net` is the same SITE as the dashboard
  * - Account lockout: 5 failed attempts → 15 min lock
+ *
+ * Known residual (F3): the plain → `__Host-` migration below has no
+ * per-session "already migrated" marker in this release, so its door stays open
+ * for as long as a browser presents a plain `crow_session`. An attacker who can
+ * evict a victim's `__Host-` cookie (cookie-jar overflow) AND toss a valid
+ * plain session for an account of their own can get that session migrated:
+ * session fixation into the attacker's account (multi-user instances only).
+ * Closing it needs a per-session flag on the session row — a schema change,
+ * tracked separately and deliberately NOT in this change.
  */
 
 import { scrypt, randomBytes, timingSafeEqual, createHash } from "node:crypto";
@@ -24,7 +36,7 @@ import { isDirectLoopback } from "./setup-token.js";
 // The names of the two cookies this file sets live with every other Crow cookie
 // name (../cookie-names.js), because the extension proxy strips the whole list
 // before forwarding a request to a bundle's backend (queue item #51).
-import { SESSION_COOKIE, CSRF_COOKIE } from "../cookie-names.js";
+import { SESSION_COOKIE, HOST_SESSION_COOKIE } from "../cookie-names.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -78,16 +90,129 @@ export function verifyPassword(password, stored) {
 }
 
 /**
- * Parse cookies from request.
+ * Parse a request's Cookie header into `{ cookies, duplicates }`.
+ *
+ * `duplicates` names every cookie that appeared MORE THAN ONCE. Cookie tossing
+ * (a sibling host on the tailnet sets its own `Domain=<tailnet>.ts.net` copy of
+ * a cookie the dashboard also sets) produces exactly that shape: the browser
+ * sends both values under one name. It is never a value a browser meant to
+ * send, so the session reader refuses a `__Host-`-less request outright (see
+ * sessionFromCookies) instead of letting the last one win.
+ *
+ * A tossed PLAIN `crow_session` cannot decide anything while the request also
+ * carries `__Host-crow_session`: that name is host-only and Secure, so no
+ * sibling can set it, let alone duplicate it — the plain copies are then just
+ * noise the reader ignores (see sessionFromCookies).
  */
-function parseCookies(req) {
+function parseCookieJar(req) {
   const header = req.headers.cookie || "";
   const cookies = {};
+  const duplicates = new Set();
   for (const pair of header.split(";")) {
     const [name, ...rest] = pair.trim().split("=");
-    if (name) cookies[name] = rest.join("=");
+    if (!name) continue;
+    if (Object.prototype.hasOwnProperty.call(cookies, name)) duplicates.add(name);
+    cookies[name] = rest.join("=");
   }
-  return cookies;
+  return { cookies, duplicates };
+}
+
+/**
+ * Parse cookies from request. Duplicate names are resolved last-wins for
+ * ordinary lookups (a language cookie, say); the session reader must use
+ * parseCookieJar's `duplicates` instead — see sessionFromCookies.
+ */
+function parseCookies(req) {
+  return parseCookieJar(req).cookies;
+}
+
+/**
+ * Did this request arrive over TLS?
+ *
+ * `req.secure` is authoritative for an Express request: Express derives it from
+ * `trust proxy` (CROW_TRUSTED_PROXIES) only, and resolveClientMiddleware
+ * (servers/shared/peer-class.js) sets it for a verified Tailscale Serve hop and
+ * the installer's Caddy proxy socket, which is where an `X-Forwarded-Proto`
+ * belongs to. A raw upgrade request has no Express getters, so it falls back to
+ * the socket being encrypted — or, behind Serve, the proto that hop stamped.
+ *
+ * The point of knowing: over TLS the session cookie is `__Host-crow_session`
+ * (host-only, Secure), and only that name is read; plain HTTP keeps
+ * `crow_session`.
+ *
+ * The X-Forwarded-Proto fallback is for a raw request that never passed
+ * through Express (a WebSocket upgrade), so it has no `req.secure`. It trusts
+ * the header only when classifyPeer() says a DECLARED proxy or a verified
+ * Serve/proxy-socket hop sent it (servers/shared/peer-class.js); an undeclared
+ * loopback caller — or any other unverified peer — cannot claim HTTPS by
+ * writing the header itself.
+ *
+ * @param {object} [req] Express request or raw IncomingMessage
+ * @returns {boolean}
+ */
+export function requestIsSecure(req) {
+  if (!req) return false;
+  if (typeof req.secure === "boolean") return req.secure;
+  const sock = req.socket || req.connection;
+  if (sock && sock.encrypted === true) return true;
+  const proto = String((req.headers && req.headers["x-forwarded-proto"]) || "")
+    .split(",")[0].trim().toLowerCase();
+  if (proto !== "https") return false;
+  try {
+    const via = classifyPeer(req).via;
+    return via === "serve" || via === "proxy" || via === "funnel";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The session token this request carries, or null.
+ *
+ * Over HTTPS the deciding name is `__Host-crow_session`: host-only (no
+ * `Domain=`), Secure, Path=/, so a sibling host on the same SITE (`ts.net` is a
+ * public suffix, so `<x>.<tailnet>.ts.net` is same-site with the dashboard)
+ * cannot set, overwrite — or DUPLICATE — it. Whenever it is present the request
+ * is read from it and ONLY it: every plain `crow_session` in the jar is ignored,
+ * however many copies a sibling tossed in. Refusing on a duplicated PLAIN name
+ * there was the bug this rule replaces: `__Host-crow_session=<owner>;
+ * crow_session=a; crow_session=b` (`Domain=<tailnet>.ts.net`, two Paths) is
+ * exactly the shape a sibling can arrange, and refusing it locked the owner out
+ * permanently. A duplicated `__Host-` name is still refused — nothing off this
+ * origin can produce one.
+ *
+ * Plain HTTP keeps `crow_session` (a LAN box on bare HTTP has no Secure cookie
+ * at all); there a duplicated plain name is refused, because that is the only
+ * session name such a request can carry.
+ *
+ * Migration: a browser still holding ONLY the old plain cookie on an HTTPS
+ * request is migrated — `migrate` says so, and dashboardAuth re-issues it as
+ * `__Host-` (keeping the session's own remaining lifetime) and expires the
+ * plain name. There is no per-session "already migrated" marker in this
+ * release (that is a schema change, tracked separately — see the header's
+ * known residual), so the door is open whenever a plain value is presented.
+ *
+ * @param {object} req
+ * @returns {{ token: string|null, migrate: boolean }}
+ */
+export function sessionFromCookies(req) {
+  const { cookies, duplicates } = parseCookieJar(req);
+  if (!requestIsSecure(req)) {
+    if (duplicates.has(SESSION_COOKIE)) return { token: null, migrate: false };
+    return { token: cookies[SESSION_COOKIE] || null, migrate: false };
+  }
+  if (duplicates.has(HOST_SESSION_COOKIE)) return { token: null, migrate: false };
+  if (cookies[HOST_SESSION_COOKIE]) return { token: cookies[HOST_SESSION_COOKIE], migrate: false };
+  // No `__Host-` cookie: only a lone plain value may migrate. Duplicates here
+  // are the tossing shape with nothing trustworthy to prefer.
+  if (duplicates.has(SESSION_COOKIE)) return { token: null, migrate: false };
+  if (cookies[SESSION_COOKIE]) return { token: cookies[SESSION_COOKIE], migrate: true };
+  return { token: null, migrate: false };
+}
+
+/** The session token this request carries (see sessionFromCookies), or null. */
+export function sessionTokenFromRequest(req) {
+  return sessionFromCookies(req).token;
 }
 
 /**
@@ -108,8 +233,15 @@ export async function isPasswordSet() {
 
 /**
  * Set the dashboard password.
+ *
+ * `opts.keepSession` is the session doing the change (the Settings → Security
+ * form): every OTHER dashboard session is revoked with it, so a password change
+ * signs out every other device. Without a keepSession (the first-run setup and
+ * the forgot-password reset) every dashboard session goes. This is also the
+ * prerequisite for the apps origin's revocation (a password change revokes the
+ * apps sessions bound to the dashboard sessions it deleted).
  */
-export async function setPassword(password) {
+export async function setPassword(password, { keepSession = null } = {}) {
   const hash = await hashPassword(password);
   const db = createDbClient();
   try {
@@ -117,7 +249,16 @@ export async function setPassword(password) {
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('password_hash', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
       args: [hash, hash],
     });
-    await auditLog(db, 'password_changed', {});
+    let revoked = 0;
+    try {
+      const res = keepSession
+        ? await db.execute({ sql: "DELETE FROM oauth_tokens WHERE client_id = 'dashboard' AND token <> ?", args: [hashToken(keepSession)] })
+        : await db.execute({ sql: "DELETE FROM oauth_tokens WHERE client_id = 'dashboard'", args: [] });
+      revoked = Number(res?.rowsAffected ?? 0) || 0;
+    } catch (err) {
+      console.warn("[auth] could not revoke the other sessions after the password change:", err.message);
+    }
+    await auditLog(db, 'password_changed', { details: { sessions_revoked: revoked } });
   } finally {
     db.close();
   }
@@ -650,21 +791,55 @@ export function ownerRequestWriteContext(req) {
  * where `ssoSrc` is the instance id that minted an SSO session (null for a local
  * password session). One query, so the middleware never reads the session twice.
  * `verifySession` below stays the plain yes/no check for callers that only gate.
+ *
+ * `expiresAt` rides along because the caller needs it and a second query would
+ * be the same row: the `__Host-` migration re-issues the cookie for the lifetime
+ * this session has LEFT, never a fresh week (otherwise a plain cookie could be
+ * kept alive forever by replaying the migration).
  */
 export async function sessionAuth(token) {
-  if (!token) return { valid: false, ssoSrc: null };
+  if (!token) return { valid: false, ssoSrc: null, sso: false, expiresAt: null };
   const db = createDbClient();
   try {
-    const result = await db.execute({
-      sql: "SELECT scopes FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND julianday(expires_at) > julianday('now')",
-      args: [hashToken(token)],
-    });
-    if (result.rows.length === 0) return { valid: false, ssoSrc: null };
-    const scopes = String(result.rows[0].scopes ?? "");
-    return { valid: true, ssoSrc: ssoSourceOf(scopes), sso: /(?:^|\s)sso(?:\s|$)/.test(scopes) };
+    const row = await readSessionRow(db, token);
+    if (!row) return { valid: false, ssoSrc: null, sso: false, expiresAt: null };
+    const scopes = String(row.scopes ?? "");
+    return {
+      valid: true,
+      ssoSrc: ssoSourceOf(scopes),
+      sso: /(?:^|\s)sso(?:\s|$)/.test(scopes),
+      expiresAt: row.expires_at == null ? null : String(row.expires_at),
+    };
   } finally {
     db.close();
   }
+}
+
+/**
+ * The live session row for a token, `null` when there is none.
+ */
+async function readSessionRow(db, token) {
+  const result = await db.execute({
+    sql: "SELECT scopes, expires_at FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND julianday(expires_at) > julianday('now')",
+    args: [hashToken(token)],
+  });
+  return result.rows[0] || null;
+}
+
+/**
+ * How long this session has left, in ms, from its `expires_at` — or 0 when it is
+ * unreadable or already due. SQLite writes two shapes into that column: our own
+ * ISO strings (with a zone) and `datetime('now')` UTC text with no zone, which
+ * Date.parse would read in the host's LOCAL time. A zone-less value is therefore
+ * read as UTC.
+ */
+export function remainingLifetimeMs(expiresAt, now = Date.now()) {
+  const raw = String(expiresAt ?? "").trim();
+  if (!raw) return 0;
+  const zoned = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(raw);
+  const at = Date.parse(zoned ? raw : raw.replace(" ", "T") + "Z");
+  if (!Number.isFinite(at)) return 0;
+  return Math.max(0, at - now);
 }
 
 /**
@@ -728,12 +903,27 @@ export function dashboardAuth(req, res, next) {
     return;
   }
 
-  const cookies = parseCookies(req);
-  const token = cookies[SESSION_COOKIE];
+  const { token, migrate } = sessionFromCookies(req);
+  const secure = requestIsSecure(req);
 
-  sessionAuth(token).then(({ valid, ssoSrc, sso }) => {
+  sessionAuth(token).then(({ valid, ssoSrc, sso, expiresAt }) => {
     if (valid) {
       req.dashboardSession = token;
+      // Migration of the pre-`__Host-` cookie: this browser presented the old
+      // plain `crow_session` over HTTPS. The response re-issues it as
+      // `__Host-crow_session` with the session's OWN remaining lifetime (never a
+      // fresh week) and expires the plain one — host-only and, where the request
+      // host has a parent that is not itself a public suffix, at that parent too
+      // (setSessionCookie) — so a sibling host's `Domain=<tailnet>.ts.net` copy
+      // goes with it. (No per-session marker: see the header's known residual.)
+      if (migrate) {
+        const remaining = remainingLifetimeMs(expiresAt);
+        if (remaining > 0) {
+          try {
+            setSessionCookie(res, token, remaining, { secure, expirePlain: true, req });
+          } catch { /* never block a page on a header */ }
+        }
+      }
       if (ssoSrc) req.dashboardSsoSrc = ssoSrc;
       if (sso) req.dashboardSso = true;
       const ctx = ownerRequestWriteContext(req);
@@ -757,10 +947,12 @@ export function dashboardAuth(req, res, next) {
  */
 export async function sessionFromRequest(req) {
   if (!req || !req.headers || !isAllowedNetwork(req)) return null;
-  const token = parseCookies(req)[SESSION_COOKIE];
+  const { token } = sessionFromCookies(req);
   if (!token) return null;
   try {
-    return (await verifySession(token)) === true ? token : null;
+    const session = await sessionAuth(token);
+    if (!session.valid) return null;
+    return token;
   } catch {
     return null;
   }
@@ -774,22 +966,107 @@ export function cookieSecureSuffix() {
   return process.env.CROW_HOSTED || process.env.NODE_ENV === 'production' ? '; Secure' : '';
 }
 
-export function setSessionCookie(res, token, maxAgeMs = SESSION_MAX_AGE) {
-  const maxAge = maxAgeMs / 1000;
-  const secureSuffix = cookieSecureSuffix();
-  res.setHeader("Set-Cookie", [
-    `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
-    `${CSRF_COOKIE}=${randomBytes(16).toString("hex")}; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
-  ]);
+/**
+ * The `Domain=` a plain `crow_session` may ALSO live under for this request host,
+ * or null when there is none worth expiring.
+ *
+ * Why: a sibling host on the tailnet sets its own copy with
+ * `Domain=<tailnet>.ts.net` (`ts.net` is a public suffix, so it is same-site with
+ * the dashboard). That copy is NOT the host-only cookie this file expires, and
+ * the browser keeps sending it — which is the tossing shape the `__Host-`
+ * cookie and the migration rail fend off. We cannot enumerate every parent a
+ * sibling might have picked, so this is a best effort at the one real installs
+ * produce: the IMMEDIATE parent of the request host
+ * (`<instance>.<tailnet>.ts.net` → `<tailnet>.ts.net`).
+ *
+ * Refused (null): IP-literal and single-label hosts, hosts with fewer than three
+ * labels (there the parent IS the suffix), non-hostname characters, and parents
+ * that are public suffixes in their own right — a tiny PSL-free list, since
+ * browsers reject a `Domain=` naming one anyway.
+ *
+ * @param {string} rawHost the request's Host header (port optional)
+ * @returns {string|null}
+ */
+export function cookieDomainCandidate(rawHost) {
+  const host = String(rawHost ?? "").trim().toLowerCase()
+    .replace(/:\d+$/, "")
+    .replace(/\.$/, "");
+  if (!host || host.startsWith("[")) return null;              // [::1] and friends
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return null;      // an IPv4 literal
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  const labels = host.split(".");
+  if (labels.length < 3) return null;
+  const parent = labels.slice(1).join(".");
+  if (PUBLIC_SUFFIXES.has(parent)) return null;
+  return parent;
 }
 
 /**
- * Clear session cookie on response.
+ * Suffixes that are public suffixes in their own right: a `Domain=` naming one is
+ * refused by browsers, and a host under one has no parent worth expiring.
+ * Tailscale's `ts.net` is the one every Crow install meets; the rest are the
+ * LAN/development names a bare box answers on.
  */
-export function clearSessionCookie(res) {
+const PUBLIC_SUFFIXES = new Set(["ts.net", "localhost", "local", "internal", "home.arpa"]);
+
+/**
+ * Set the session cookie on a response.
+ *
+ * Over HTTPS it is `__Host-crow_session`: Secure, Path=/, and NO Domain — the
+ * `__Host-` prefix makes browsers refuse any other shape, so no sibling host on
+ * the tailnet (same SITE, thanks to the public suffix) can set or overwrite it.
+ * Plain HTTP keeps `crow_session` with today's attributes.
+ *
+ * `opts.secure` is the request's own answer (requestIsSecure(req)): HTTPS gets
+ * the `__Host-` cookie, plain HTTP the plain one. The env fallback is only for
+ * a caller that has no request at all (tests, a CLI); every route passes the
+ * request's answer so Tailscale Serve / Caddy — where TLS ends at the proxy and
+ * the gateway sees loopback — still get `__Host-`.
+ *
+ * `opts.expirePlain` additionally expires a plain `crow_session` left over from
+ * before the `__Host-` cookie existed — once host-only, and once at the request
+ * host's parent domain (`opts.req` or `opts.host` names it; see
+ * cookieDomainCandidate) because that is the shape a sibling host's tossed copy
+ * carries. Best effort: a browser refuses a `Domain=` it does not like, and the
+ * host-only expiry is always sent.
+ */
+export function setSessionCookie(res, token, maxAgeMs = SESSION_MAX_AGE, { secure = null, expirePlain = false, req = null, host = null } = {}) {
+  const maxAge = maxAgeMs / 1000;
+  const isSecure = secure === null ? !!(process.env.CROW_HOSTED || process.env.NODE_ENV === 'production') : !!secure;
+  const secureSuffix = isSecure ? '; Secure' : '';
+  const name = isSecure ? HOST_SESSION_COOKIE : SESSION_COOKIE;
+  const cookies = [
+    `${name}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
+  ];
+  if (expirePlain && name !== SESSION_COOKIE) {
+    const plainExpiry = (domain) =>
+      `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${domain ? `; Domain=${domain}` : ''}${secureSuffix}`;
+    cookies.push(plainExpiry(null));
+    const requestHost = host ?? (req && req.headers ? req.headers.host : null);
+    const parent = cookieDomainCandidate(requestHost);
+    if (parent) cookies.push(plainExpiry(parent));
+  }
+  res.setHeader("Set-Cookie", cookies);
+}
+
+/**
+ * Clear the session cookie on a response.
+ *
+ * Both names are expired: whichever one this browser holds (`__Host-` over
+ * HTTPS, plain over HTTP) has to go, and expiring the other is harmless. Any
+ * leftover `crow_csrf` cookie from before the server-bound token is expired too
+ * — nothing reads it any more, and it should not linger in the jar.
+ *
+ * `opts.secure` is the request's own answer (requestIsSecure(req)); it adds
+ * `Secure` to the plain cookie's expiry over HTTPS, matching how that cookie
+ * was set. The `__Host-` expiry always carries `Secure` — browsers require it
+ * for the prefix.
+ */
+export function clearSessionCookie(res, { secure = false } = {}) {
   res.setHeader("Set-Cookie", [
-    `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,
-    `${CSRF_COOKIE}=; SameSite=Lax; Path=/; Max-Age=0`,
+    `${HOST_SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Secure`,
+    `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? "; Secure" : ""}`,
+    `crow_csrf=; SameSite=Lax; Path=/; Max-Age=0`,
   ]);
 }
 

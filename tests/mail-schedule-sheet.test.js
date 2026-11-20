@@ -92,7 +92,9 @@ const PENDING_COPY = new Set([
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
-const CSRF = "csrf-token-value";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWNER);
 
 const openDbs = [];
 const servers = [];
@@ -180,12 +182,12 @@ async function setupRoute() {
   servers.push(server);
   const port = server.address().port;
 
-  const call = (method, path, { body, token = OWNER, csrf = CSRF, laptop = true } = {}) => {
+  const call = (method, path, { body, token = OWNER, csrf = csrfTokenForSession(token), laptop = true } = {}) => {
     const payload = body === undefined ? null : JSON.stringify(body);
     const h = {
       ...(payload === null ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }),
     };
-    if (token) h.cookie = "crow_session=" + token + "; crow_csrf=" + CSRF;
+    if (token) h.cookie = "crow_session=" + token;
     if (token && csrf) h["x-crow-csrf"] = csrf;
     if (laptop) h["x-test-from"] = "laptop";
     return new Promise((resolve, reject) => {

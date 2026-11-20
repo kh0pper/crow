@@ -471,8 +471,10 @@ test("shapeServiceResult: the mount's rules, with the child's own values passed 
 
 // ---- routes: disconnect, restart; uninstall -------------------------------------------------
 
-const COOKIE = "crow_session=s1; crow_csrf=tok9";
-const AUTH = { cookie: COOKIE, "x-crow-csrf": "tok9" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const COOKIE = "crow_session=s1";
+const AUTH = { cookie: COOKIE, "x-crow-csrf": csrfTokenForSession("s1") };
 const stubGate = (req, res, next) => {
   if (!String(req.headers.cookie || "").includes("crow_session=s1")) return res.status(401).json({ error: "Not authenticated" });
   req.dashboardSession = "s1";

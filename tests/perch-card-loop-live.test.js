@@ -86,8 +86,9 @@ before(async () => {
     if (req.url.startsWith("/dashboard/bot-board-api/")) return api(req, res);
     if (req.url.startsWith("/api/artifacts/")) return json(res, 200, { items: [] });
     if (req.url.startsWith("/vendor/turbo")) { res.writeHead(200, { "content-type": "application/javascript" }); return res.end(turbo); }
+    if (req.url.startsWith("/csrf-client.js")) { res.writeHead(200, { "content-type": "application/javascript" }); return res.end(readFileSync(join(REPO, "servers/gateway/public/csrf-client.js"))); }
     if (!req.url.startsWith("/dashboard/perch")) { res.writeHead(200, { "content-type": "text/html" }); return res.end("<!doctype html><title>blank</title><p>blank</p>"); }
-    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [panel], lang });
+    const layout = (opts) => renderLayout({ ...opts, csrf: "tok", activePanel: "perch", panels: [panel], lang });
     const html = await panel.handler(req, res, { lang, layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
   });
@@ -130,7 +131,6 @@ async function openChat() {
   await cdp("Page.enable"); await cdp("Runtime.enable");
   await cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await cdp("Network.enable");
-  await cdp("Network.setCookie", { name: "crow_csrf", value: "tok", url: base, path: "/" });
   await cdp("Page.navigate", { url: base + "/dashboard/perch#" + SID });
   await until("document.body.getAttribute('data-view')==='chat'&&document.querySelectorAll('#perch-transcript .entry').length>=2", "the chat to load");
   const click = async (sel) => {

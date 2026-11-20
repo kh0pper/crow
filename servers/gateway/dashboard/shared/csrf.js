@@ -1,51 +1,86 @@
 /**
- * CSRF Double-Submit Validator
+ * CSRF validation — a SERVER-BOUND token, not a double-submit cookie.
  *
- * Guards state-changing dashboard requests against cross-site forgery.
+ * How it works now (2026-11-19, queue item #51 PR-1):
  *
- * How it works:
- *   1. `auth.js:setSessionCookie()` sets two cookies on login:
- *        - `crow_session`  (HttpOnly, SameSite=Lax) — the session token
- *        - `crow_csrf`     (not HttpOnly, SameSite=Lax) — a random per-session value
- *   2. Authenticated clients must echo the `crow_csrf` value back on every
- *      state-changing request, either:
- *        - via the `X-Crow-Csrf` header (Turbo-driven or AJAX submits), OR
- *        - via a `_csrf` body field (classic `<form>` POST).
- *   3. The middleware compares `req.cookies.crow_csrf` (which a cross-site
- *      attacker cannot read, even though SameSite=Lax lets it be SENT) against
- *      the echoed value. A mismatch → 403 (the verdict itself is exported as
- *      `csrfRefusal`, so one route — the logout POST — can answer a stale token
- *      by redirecting to a freshly rendered page instead).
+ *   1. The token is `HMAC-SHA256(csrf.key, session id)`, base64url. The secret
+ *      lives in `<CROW_HOME>/secrets/csrf.key` (csrf-secret.js, 0600); the
+ *      session id is the HttpOnly `__Host-crow_session` / `crow_session` cookie.
+ *      Neither is readable by page script, so a token cannot be computed — or
+ *      copied — by anything that can run in the owner's browser.
+ *   2. It is DELIVERED to the page, never left in a cookie: a
+ *      `<meta name="crow-csrf" content="…">` in every dashboard layout and
+ *      `GET /dashboard/csrf` (JSON, no-store) for long-lived pages. The client
+ *      helper is `window.crowCsrf()` / `window.crowCsrfRefresh()`
+ *      (public/csrf-client.js); on a 403 refusal the layout's fetch wrapper
+ *      refreshes it once and retries.
+ *   3. Clients echo it back on every state-changing request, either via the
+ *      `X-Crow-Csrf` header (Turbo, fetch) or a `_csrf` body field (classic
+ *      `<form>`). The middleware recomputes the HMAC from the authenticated
+ *      session and compares in constant time.
+ *
+ * WHY the old double-submit cookie is gone: `ts.net` is a public suffix, so every
+ * host on the tailnet (`<instance>.ts.net`, `<instance>-apps.ts.net`, a
+ * compromised extension's page) is the SAME SITE as the dashboard. A same-site
+ * host can set `Domain=<tailnet>.ts.net` cookies and SameSite=Lax still sends the
+ * session on its POSTs. Comparing the echoed value to a non-HttpOnly cookie was
+ * therefore forgeable by anything same-site; an HMAC keyed by a secret the
+ * attacker never sees is not.
  *
  * Deliberately skipped:
  *   - GET / HEAD / OPTIONS (non-state-changing).
- *   - Requests without `crow_session` cookie: pre-auth flows (login / reset /
- *     2fa setup) don't yet have a CSRF cookie. Those flows have their own
+ *   - Requests with no session cookie: pre-auth flows (login / reset / 2fa
+ *     setup) have no session to bind a token to. Those flows have their own
  *     rate-limit + lockout defenses in `auth.js`.
  *   - HMAC-signed peer calls (`X-Crow-Signature` header): cross-host auth is
  *     a strictly stronger check.
  *   - Ratchet kill-switch: `CROW_CSRF_STRICT=0` disables validation globally.
- *     Cookie is still issued so forms and Turbo listener keep working; the
- *     middleware just no-ops. Read per-request so it responds to a hot flip.
+ *     Read per-request so it responds to a hot flip.
  *
- * Populates `req.csrfToken = req.cookies.crow_csrf` so existing form templates
- * that already reference it (e.g. `notifications.js:215`) render a real token.
+ * Populates `req.csrfToken` so the form templates that reference it render a
+ * real token.
  *
  * Mount AFTER the cross-host bypass and AFTER `dashboardAuth` so it only sees
  * session-authenticated requests.
  */
 
-import { parseCookies } from "../auth.js";
+import { createHmac } from "node:crypto";
+import { sessionTokenFromRequest } from "../auth.js";
 import { escapeHtml } from "./components.js";
-// One list of Crow's cookie names (../../cookie-names.js), shared with every
-// setter and with the extension proxy that strips them.
-import { CSRF_COOKIE } from "../../cookie-names.js";
+import { csrfSecret } from "./csrf-secret.js";
+
 const HEADER_NAME = "x-crow-csrf";
 const BODY_FIELD = "_csrf";
+/** Response header naming WHY a request was refused, so the client wrapper can
+ *  refresh the token once and retry (`X-Crow-Csrf-Refusal: mismatch`). */
+export const REFUSAL_HEADER = "X-Crow-Csrf-Refusal";
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 
 function strictMode() {
   return process.env.CROW_CSRF_STRICT !== "0";
+}
+
+/**
+ * The CSRF token for a session id: base64url HMAC-SHA256 of the session token
+ * under the instance's CSRF secret. Empty string for no session.
+ *
+ * @param {string|null|undefined} sessionToken the raw session cookie value
+ * @returns {string}
+ */
+export function csrfTokenForSession(sessionToken) {
+  if (typeof sessionToken !== "string" || !sessionToken) return "";
+  return createHmac("sha256", csrfSecret()).update(sessionToken).digest("base64url");
+}
+
+/**
+ * The CSRF token the request's own session should echo (see
+ * sessionTokenFromRequest: `__Host-crow_session` over HTTPS, plain otherwise).
+ *
+ * @param {object} req
+ * @returns {string} empty when the request carries no session
+ */
+export function csrfTokenForRequest(req) {
+  return csrfTokenForSession(sessionTokenFromRequest(req));
 }
 
 /**
@@ -65,15 +100,15 @@ function safeEqual(a, b) {
  * CSRF token when the caller is session-authenticated.
  */
 export function csrfMiddleware(req, res, next) {
-  // Always populate req.csrfToken when the cookie is present so templates
-  // can render it, independent of strict-mode or request method.
-  const cookies = parseCookies(req);
-  if (cookies[CSRF_COOKIE]) {
-    req.csrfToken = cookies[CSRF_COOKIE];
-  }
+  // Populate req.csrfToken on every request so templates (and the layout's
+  // <meta name="crow-csrf">) can render it, independent of strict-mode or
+  // request method.
+  const token = csrfTokenForRequest(req);
+  if (token) req.csrfToken = token;
 
   const refusal = csrfRefusal(req);
   if (!refusal) return next();
+  try { res.setHeader(REFUSAL_HEADER, refusal); } catch { /* a bare test response */ }
   return res.status(403).type("text/plain").send(REFUSAL_MESSAGES[refusal]);
 }
 
@@ -84,16 +119,15 @@ const REFUSAL_MESSAGES = {
 };
 
 /**
- * The double-submit verdict for an Express request. `null` when the request may
- * proceed — read-only method, HMAC-signed peer call, pre-auth flow (no session
- * cookie), the `CROW_CSRF_STRICT=0` kill-switch, or a matching token —
- * otherwise WHY it is refused:
- *   - `"missing"`  the session carries no `crow_csrf` cookie at all, so no page
- *                  could have echoed one (reloading would not help);
- *   - `"absent"`   the cookie is there but the request echoed no token;
- *   - `"mismatch"` a token WAS echoed and does not match the cookie — the shape
- *                  of a stale page, and the only case a route can usefully
- *                  answer by sending the viewer back to a freshly rendered one.
+ * The verdict for an Express request. `null` when the request may proceed —
+ * read-only method, HMAC-signed peer call, no session cookie (pre-auth flow),
+ * the `CROW_CSRF_STRICT=0` kill-switch, or a matching token — otherwise WHY it
+ * is refused:
+ *   - `"missing"`  the request's session yields no token at all (no session);
+ *   - `"absent"`   the session is there but the request echoed no token;
+ *   - `"mismatch"` a token WAS echoed and is not this session's — the shape of a
+ *                  stale page, and the only case a route can usefully answer by
+ *                  sending the viewer back to a freshly rendered one.
  * Exported because a route that wants to answer a mismatch its own way must ask
  * the exact same question rather than re-implement the comparison: POST
  * /dashboard/logout redirects a stale form to its confirm page instead of the
@@ -108,38 +142,46 @@ export function csrfRefusal(req) {
   // HMAC-signed peer request → bundle router / federation router handle auth.
   if (req.headers["x-crow-signature"]) return null;
 
-  const cookies = parseCookies(req);
-
   // Pre-auth flow (no session yet) → login/reset/2fa handlers own their own
   // defenses (rate-limit, lockout).
-  if (!cookies.crow_session) return null;
+  const expected = csrfTokenForRequest(req);
+  if (!expected) return null;
 
-  // Rollback escape hatch: cookie still set, validation bypassed.
+  // Rollback escape hatch.
   if (!strictMode()) return null;
-
-  const cookieValue = cookies[CSRF_COOKIE];
-  if (!cookieValue) return "missing";
 
   const headerValue = req.headers[HEADER_NAME];
   const bodyValue = req.body && typeof req.body === "object" ? req.body[BODY_FIELD] : null;
   const presented = headerValue || bodyValue;
 
   if (!presented) return "absent";
-  return safeEqual(String(presented), cookieValue) ? null : "mismatch";
+  return safeEqual(String(presented), expected) ? null : "mismatch";
 }
 
 /**
- * The same double-submit rule for a caller that is not an Express request: a
- * WebSocket whose first frame carries the token. `req` is the upgrade request
- * (its Cookie header holds `crow_csrf`); `presented` is the value the page
- * echoed. Honors the `CROW_CSRF_STRICT=0` kill-switch exactly like the
- * middleware. The caller must already have verified the session.
+ * The same rule for a caller that is not an Express request: a WebSocket whose
+ * first frame carries the token. `req` is the upgrade request (its Cookie header
+ * holds the session); `presented` is the value the page echoed. Honors the
+ * `CROW_CSRF_STRICT=0` kill-switch exactly like the middleware. The caller must
+ * already have verified the session.
  */
 export function csrfTokenAccepted(req, presented) {
   if (!strictMode()) return true;
-  const cookieValue = parseCookies(req)[CSRF_COOKIE];
-  if (!cookieValue || typeof presented !== "string" || !presented) return false;
-  return safeEqual(presented, cookieValue);
+  const expected = csrfTokenForRequest(req);
+  if (!expected || typeof presented !== "string" || !presented) return false;
+  return safeEqual(presented, expected);
+}
+
+/**
+ * The same comparison WITHOUT the `CROW_CSRF_STRICT` kill-switch, for the flows
+ * that must stay forgery-proof even with the dashboard's rollback switch off
+ * (the OAuth consent grant, oauth-consent.js). Still server-bound: it recomputes
+ * the token from the session the caller already verified.
+ */
+export function csrfTokenMatches(req, presented) {
+  const expected = csrfTokenForRequest(req);
+  if (!expected || typeof presented !== "string" || !presented) return false;
+  return safeEqual(presented, expected);
 }
 
 /**
@@ -149,4 +191,9 @@ export function csrfTokenAccepted(req, presented) {
 export function csrfInput(req) {
   const token = req && req.csrfToken ? String(req.csrfToken) : "";
   return `<input type="hidden" name="_csrf" value="${escapeHtml(token)}">`;
+}
+
+/** The bytes for the `<meta name="crow-csrf">` tag a page renders (layout.js). */
+export function csrfMetaTag(token) {
+  return `<meta name="crow-csrf" content="${escapeHtml(typeof token === "string" ? token : "")}">`;
 }

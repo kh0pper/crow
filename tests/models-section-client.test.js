@@ -108,7 +108,9 @@ function harness(routes, { kind = "chat", role = "quick", label = "Scout" } = {}
     if (!r) throw new Error("no stub for " + url);
     return r.reply(url, init);
   };
-  const win = { Turbo: { visit: (href, opts) => visits.push({ href, opts }) } };
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page
+  // (the <meta name="crow-csrf"> tag) — never read from a cookie.
+  const win = { Turbo: { visit: (href, opts) => visits.push({ href, opts }) }, crowCsrf: () => "tok-1" };
   const loc = { href: "https://crow.example.ts.net/dashboard/settings?section=models", reload() { visits.push({ reload: true }); } };
   const src = modelsClientJS({ lang: "en" });
   new Function("document", "fetch", "window", "location", src)(doc, fetchStub, win, loc);

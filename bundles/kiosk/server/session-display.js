@@ -3,7 +3,8 @@
  * user talks through the kiosk page without pairing; these are the pure pieces
  * (what the display is called, is the WebSocket
  * handshake from this origin). The auth itself is the gateway's own dashboard
- * session + CSRF cookie, injected into runtime.js — no token is minted here.
+ * session plus its server-bound CSRF token (HMAC of the session id — there is no
+ * CSRF cookie), injected into runtime.js — no token is minted here.
  */
 import { createHash } from "node:crypto";
 

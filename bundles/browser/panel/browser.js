@@ -24,11 +24,11 @@ export function takeOverHref(holding) {
   return /^perchlive-[0-9a-f]{8}$/.test(sid || "") ? "/dashboard/perch?take-over=1#" + sid : "/dashboard/perch?take-over=panel";
 }
 
-/** The panel's Hand back: the same route as the chat's sheet (CSRF header from the cookie). No backtick or dollar-brace. */
+/** The panel's Hand back: the same route as the chat's sheet (the SERVER-BOUND CSRF header from window.crowCsrf — the page's meta tag / GET /dashboard/csrf, never a cookie). No backtick or dollar-brace. */
 export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-hand-back');if(!b)return;" +
   "b.addEventListener('click',function(){if(b.disabled)return;b.disabled=true;" +
-  "var m=document.cookie.match(/(?:^|; )crow_csrf=([^;]*)/);" +
-  "fetch('/dashboard/perch-api/browser/hand-back',{method:'POST',headers:{'X-Crow-Csrf':m?decodeURIComponent(m[1]):''}})" +
+  "var tok='';try{tok=window.crowCsrf?window.crowCsrf():'';}catch(e){}" +
+  "fetch('/dashboard/perch-api/browser/hand-back',{method:'POST',headers:{'X-Crow-Csrf':tok}})" +
   ".then(function(r){if(r.ok){location.reload();}else{b.disabled=false;}},function(){b.disabled=false;});});})();";
 
 /**

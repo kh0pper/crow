@@ -75,12 +75,16 @@ before(async () => {
 after(() => { server?.closeAllConnections?.(); server?.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const NET = serveHeaders("operator@example.com");
-const jar = (extra = {}) => Object.entries({ crow_session: "new-sess", crow_csrf: "tok", [MODE]: "new", ...extra }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "new-sess";
+const CSRF = csrfTokenForSession(SESSION);
+const jar = (extra = {}) => Object.entries({ crow_session: SESSION, [MODE]: "new", ...extra }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
 async function get(path, extra) {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: jar(extra) } });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
 }
-async function post(path, fields, { csrf = "tok", cookie = jar() } = {}) {
+async function post(path, fields, { csrf = CSRF, cookie = jar() } = {}) {
   const body = new URLSearchParams({ ...fields, ...(csrf ? { _csrf: csrf } : {}) });
   const r = await fetch(base + path, { method: "POST", redirect: "manual", headers: { ...NET, cookie, "content-type": "application/x-www-form-urlencoded" }, body });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
@@ -143,7 +147,7 @@ test("confirm names the bot, where it is, and the project; Cancel goes back", as
   assert.match(s, /Move Cook from Kitchen to Garden &lt;b&gt;\?/);
   assert.match(s, /It will work from this project's board, and its working folder \(sessions, outputs, settings\) moves here\. Its past sessions and cards stay where they are\./);
   assert.match(s, /<form method="POST" action="\/dashboard\/project\/garden"/);
-  assert.match(s, /name="_csrf" value="tok"/);
+  assert.match(s, new RegExp(`name="_csrf" value="${CSRF}"`));
   assert.match(s, /name="action" value="move_bot"/);
   assert.match(s, /name="bot_id" value="cook"/);
   assert.match(s, /<button type="submit"[^>]*>Move</);

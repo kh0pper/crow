@@ -1916,6 +1916,7 @@ function rawRequest(port, path, { method = "GET", headers = {}, body } = {}) {
 
 test("CSRF: POST without X-Crow-Csrf is refused by the real csrfMiddleware; GET/SSE pass through unaffected", async () => {
   const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
   const { default: express } = await import("express");
 
@@ -1930,7 +1931,8 @@ test("CSRF: POST without X-Crow-Csrf is refused by the real csrfMiddleware; GET/
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const port = srv.address().port;
   try {
-    const cookie = "crow_session=abc; crow_csrf=tok-value";
+    const cookie = "crow_session=abc";
+    const csrf = csrfTokenFor("abc");
 
     // POST with a session cookie present but no X-Crow-Csrf header/body field.
     const post = await rawRequest(port, "/dashboard/perch-api/interactive/sess-1/abort", {
@@ -1946,7 +1948,7 @@ test("CSRF: POST without X-Crow-Csrf is refused by the real csrfMiddleware; GET/
     // let it through, which is all this half of the test is for).
     const postOk = await rawRequest(port, "/dashboard/perch-api/interactive/sess-1/abort", {
       method: "POST",
-      headers: { cookie, "content-type": "application/json", "content-length": "2", "x-crow-csrf": "tok-value" },
+      headers: { cookie, "content-type": "application/json", "content-length": "2", "x-crow-csrf": csrf },
       body: "{}",
     });
     assert.notEqual(postOk.status, 403);

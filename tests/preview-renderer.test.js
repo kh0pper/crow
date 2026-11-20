@@ -22,6 +22,7 @@ import { _setPreviewSeccompPathForTest } from "../servers/gateway/compose-guard.
 import previewsSection from "../servers/gateway/dashboard/settings/sections/previews.js";
 import onboardingPanel, { STEP_KEYS, handlePreviewsPost } from "../servers/gateway/dashboard/panels/onboarding.js";
 import { csrfMiddleware } from "../servers/gateway/dashboard/shared/csrf.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import { readFileSync } from "node:fs";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 import { escapeHtml } from "../servers/gateway/dashboard/shared/components.js";
@@ -832,7 +833,10 @@ async function renderStep(query, db) {
   return typeof out === "string" ? out : captured;
 }
 
-const SESSION = { cookie: "crow_session=s1; crow_csrf=tok123" };
+const SESSION_ID = "s1";
+/** The onboarding form's own submit: the session cookie plus that session's SERVER-BOUND token. */
+const CSRF = csrfTokenFor(SESSION_ID);
+const SESSION = { cookie: `crow_session=${SESSION_ID}`, "sec-fetch-site": "same-origin" };
 /** The previews POST through the real csrfMiddleware, as dashboard/index.js mounts it. */
 async function postPreviews(body, db, headers = SESSION) {
   const req = { method: "POST", headers, body, query: {} };
@@ -857,7 +861,7 @@ test("onboarding shows the toggle on, and finishing it writes previews_enabled=\
     assert.match(html, /form="onboarding-previews-form"/, "Next submits the toggle");
     assert.equal(db.get("previews_enabled"), null, "showing the step writes nothing");
 
-    const res = await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    const res = await postPreviews({ previews: "on", _csrf: CSRF }, db);
     assert.equal(res.statusCode, null);
     assert.equal(res.redirected, `/dashboard/onboarding?step=${starter + 1}`);
     assert.equal(db.get("previews_onboarding_choice"), "on");
@@ -875,7 +879,7 @@ test("onboarding shows the toggle on, and finishing it writes previews_enabled=\
     // Turned off at the starter step: finishing leaves previews off.
     const off = setup({ enabled: false, imageReady: false });
     _setPreviewRendererForTest(off.r);
-    await postPreviews({ _csrf: "tok123" }, off.db);
+    await postPreviews({ _csrf: CSRF }, off.db);
     assert.equal(off.db.get("previews_onboarding_choice"), "off");
     await renderStep({ step: done }, off.db);
     assert.notEqual(off.db.get("previews_enabled"), "true");
@@ -926,7 +930,7 @@ test("onboarding replayed after completion shows the current switch and applies 
     assert.match(html, /<input type="checkbox" name="previews" value="on" style/, "unchecked: previews are off now");
     assert.doesNotMatch(html, /name="previews" value="on" checked/);
 
-    const res = await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    const res = await postPreviews({ previews: "on", _csrf: CSRF }, db);
     assert.equal(res.statusCode, null);
     assert.equal(db.get("previews_enabled"), "true", "applied by the POST itself");
     await flush();
@@ -941,7 +945,7 @@ test("onboarding replayed after completion shows the current switch and applies 
     assert.ok(lease.cdp, JSON.stringify(lease));
     lease.release();
     assert.equal(r.state(), "running");
-    await postPreviews({ _csrf: "tok123" }, db);
+    await postPreviews({ _csrf: CSRF }, db);
     assert.equal(db.get("previews_enabled"), "false");
     assert.equal(r.state(), "stopped");
     // A GET still writes nothing.
@@ -958,7 +962,7 @@ test("onboarding on a fresh install: the toggle is on and is not applied before 
   try {
     const html = await renderStep({ step: String(STEP_KEYS.indexOf("starter")) }, db);
     assert.match(html, /name="previews" value="on" checked/);
-    await postPreviews({ previews: "on", _csrf: "tok123" }, db);
+    await postPreviews({ previews: "on", _csrf: CSRF }, db);
     assert.equal(db.get("previews_enabled"), null);
   } finally {
     _setPreviewRendererForTest(null);

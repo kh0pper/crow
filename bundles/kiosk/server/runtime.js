@@ -81,6 +81,7 @@ export const ASSETS = {
   "resample.js": "text/javascript", "pcm-worklet.js": "text/javascript", "vad.js": "text/javascript",
   "wm-view.js": "text/javascript", "bird-view.js": "text/javascript", "metrics.js": "text/javascript", "media-view.js": "text/javascript",
   "agent-link.js": "text/javascript", "speaker-view.js": "text/javascript", "bar-link.js": "text/javascript",
+  "session-csrf.js": "text/javascript",
   "osk.js": "text/javascript", "osk.css": "text/css",
   "kiosk.css": "text/css",
 };
@@ -1177,7 +1178,8 @@ export function createKioskRuntime(deps) {
       if (path === "/api/kiosk/session") return accept(req, socket, head);   // paired displays: the token arrives in hello
       // Session mode. Everything is decided BEFORE the upgrade: a browser page on another site can
       // make the browser send the cookie, so the handshake must come from this origin, and the
-      // cookie must be a live dashboard session. hello then has to echo the CSRF cookie.
+      // cookie must be a live dashboard session. hello then has to echo the server-bound CSRF
+      // token (HMAC of the session id — never a CSRF cookie; there is none any more).
       if (!sessionMode) return refuse(socket, 404, "Not Found");
       if (!sameOriginUpgrade(req)) {
         log(`[kiosk] session display refused: Origin ${String(req.headers.origin || "(none)").slice(0, 120)} is not this host (${String(req.headers.host || "").slice(0, 120)}); a reverse proxy must forward Host or X-Forwarded-Host`);

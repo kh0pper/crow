@@ -79,7 +79,12 @@ beforeEach(() => {
   };
 });
 
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)),
+// so the fixture computes it for its own session instead of reading a cookie.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "good";
+const TOKEN = csrfTokenForSession(SESSION);
+const AUTHED = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": TOKEN };
 async function call(method, path, headers = AUTHED) {
   const r = await fetch(base + path, { method, headers });
   return { status: r.status, body: await r.json().catch(() => null) };
@@ -187,9 +192,9 @@ test("delete is scoped", async () => {
   const noSession = await call("DELETE", "/interactive/nosuch/browser-shots/" + mine.id);
   assert.equal(noSession.status, 404);
   // CSRF required: no echo, or a wrong echo, is refused
-  const noEcho = await call("DELETE", "/interactive/" + SID + "/browser-shots/" + mine.id, { cookie: "crow_session=good; crow_csrf=tok" });
+  const noEcho = await call("DELETE", "/interactive/" + SID + "/browser-shots/" + mine.id, { cookie: `crow_session=${SESSION}` });
   assert.equal(noEcho.status, 403);
-  const wrongEcho = await call("DELETE", "/interactive/" + SID + "/browser-shots/" + mine.id, { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "nope" });
+  const wrongEcho = await call("DELETE", "/interactive/" + SID + "/browser-shots/" + mine.id, { cookie: `crow_session=${SESSION}`, "x-crow-csrf": "nope" });
   assert.equal(wrongEcho.status, 403);
   assert.deepEqual(q("SELECT id FROM perch_session_files ORDER BY id").map((r) => r.id), before.rows, "nothing removed");
   assert.deepEqual(filesIn(), before.files);

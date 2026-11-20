@@ -85,7 +85,9 @@ beforeEach(() => {
   ({ id } = store.createSecretRequest({ sessionId: SID, threadId: SID, botId: "bot-a", kind: "password", target: "keychain", label: "Example site" }));
 });
 
-const as = (tok, { laptop = true } = {}) => ({ cookie: `crow_session=${tok}; crow_csrf=tok9`, "x-crow-csrf": "tok9", ...(laptop ? { "x-test-from": "laptop" } : {}) });
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const as = (tok, { laptop = true } = {}) => ({ cookie: `crow_session=${tok}`, "x-crow-csrf": csrfTokenForSession(tok), ...(laptop ? { "x-test-from": "laptop" } : {}) });
 const submitPath = () => `/secret/${id}?sid=${encodeURIComponent(SID)}`;
 const openPath = `/perch-api/interactive/${SID}/secret`;
 
@@ -128,7 +130,7 @@ test("an SSO session, an on-machine login and a sessionless request are refused 
     ["peer SSO", as("sso-1")],
     ["login on this machine", as("onhost-1")],
     ["owner session from this machine", as("own-1", { laptop: false })],
-    ["no session", { "x-crow-csrf": "tok9", "x-test-from": "laptop" }],
+    ["no session", { "x-crow-csrf": csrfTokenForSession("own-1"), "x-test-from": "laptop" }],
   ]) {
     const open = await getOpen(headers);
     assert.equal(open.status, 403, `${label} GET: ${open.text}`);

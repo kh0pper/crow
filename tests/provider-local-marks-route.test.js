@@ -39,6 +39,8 @@ test("a session POST of llm_provider_mark_local without the CSRF token is 403; w
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
   await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token: session } = await mintSsoSession("test");
+  const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
+  const CSRF = csrfTokenFor(session);
 
   const express = (await import("express")).default;
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
@@ -49,7 +51,7 @@ test("a session POST of llm_provider_mark_local without the CSRF token is 403; w
   process.env.CROW_DASHBOARD_PUBLIC = "true"; // past the network gate; the session and CSRF rails still apply
   try {
     const url = `http://127.0.0.1:${server.address().port}/dashboard/settings?section=llm&tab=providers`;
-    const cookie = `crow_session=${session}; crow_csrf=csrf-abc`;
+    const cookie = `crow_session=${session}`;
     const send = (fields, headers = { cookie }) => fetch(url, {
       method: "POST", redirect: "manual",
       headers: { ...headers, "content-type": "application/x-www-form-urlencoded" },
@@ -62,11 +64,11 @@ test("a session POST of llm_provider_mark_local without the CSRF token is 403; w
     assert.equal(wrong.status, 403);
     assert.deepEqual(await readLocalMarks(db), {}, "nothing marked");
 
-    const anon = await send({ action: "llm_provider_mark_local", id: "other-dns", local_token: token, _csrf: "csrf-abc" }, { cookie: "crow_csrf=csrf-abc" });
+    const anon = await send({ action: "llm_provider_mark_local", id: "other-dns", local_token: token, _csrf: CSRF }, { cookie: "" });
     assert.ok(anon.status === 302 || anon.status === 303);
     assert.deepEqual(await readLocalMarks(db), {}, "no session: nothing marked");
 
-    const ok = await send({ action: "llm_provider_mark_local", id: "other-dns", local_token: token, _csrf: "csrf-abc" });
+    const ok = await send({ action: "llm_provider_mark_local", id: "other-dns", local_token: token, _csrf: CSRF });
     assert.equal(ok.status, 303);
     assert.match(ok.headers.get("location"), /section=llm&tab=providers$/);
     assert.equal((await readLocalMarks(db))["other-dns"]?.host, "nas.example.internal");
@@ -74,7 +76,7 @@ test("a session POST of llm_provider_mark_local without the CSRF token is 403; w
     const unmarkNoCsrf = await send({ action: "llm_provider_unmark_local", id: "other-dns" });
     assert.equal(unmarkNoCsrf.status, 403);
     assert.ok((await readLocalMarks(db))["other-dns"], "still marked");
-    const unmark = await send({ action: "llm_provider_unmark_local", id: "other-dns", _csrf: "csrf-abc" });
+    const unmark = await send({ action: "llm_provider_unmark_local", id: "other-dns", _csrf: CSRF });
     assert.equal(unmark.status, 303);
     assert.deepEqual(await readLocalMarks(db), {});
   } finally {

@@ -3,7 +3,7 @@
  *
  * Row menu (Task 10): Test again POSTs /dashboard/services/api/connection/<uuid>/test, Disconnect
  * asks first (the row's data-confirm, escaped server-side) and POSTs .../disconnect; both send the
- * dashboard CSRF token (X-Crow-Csrf, from the crow_csrf cookie). A passed test or a disconnect
+ * dashboard CSRF token (X-Crow-Csrf, the server-bound HMAC from window.crowCsrf). A passed test or a disconnect
  * re-renders the page from the server, so the pill and "Tested ..." show the stored state. A
  * failed test stays on the page: the pill takes the answered status and the row shows the error
  * class's copy (Task 11). Opening one row's menu closes the others.
@@ -163,13 +163,10 @@ export function projectServicesClientJs() {
   }
   function clearKids(n) { while (n.firstChild) n.removeChild(n.firstChild); }
 
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var kv = parts[i].trim().split('=');
-      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function reload() {
     if (window.Turbo && window.Turbo.visit) window.Turbo.visit(location.href, { action: 'replace' });

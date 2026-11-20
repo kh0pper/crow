@@ -1075,13 +1075,10 @@ export function c2cClientJs(lang) {
   var VISIT_ACTS = { invited: ['accept', 'decline'], active: ['leave'] };
   var API = '/dashboard/c2c-api';
 
+  // The server-bound CSRF token (window.crowCsrf — the page's <meta
+  // name="crow-csrf"> tag or GET /dashboard/csrf). Never a cookie.
   function csrf() {
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var kv = parts[i].trim().split('=');
-      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
-    }
-    return '';
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   function say(el, text) { if (el) el.textContent = text || ''; }
   function post(url, body) {

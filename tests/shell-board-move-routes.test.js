@@ -99,7 +99,12 @@ before(async () => {
 
 after(() => { if (server) server.close(); rmSync(dir, { recursive: true, force: true }); });
 
-const AUTHED = { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok" };
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1: HMAC(secret, session id)),
+// so the fixture computes it for its own session instead of reading a cookie.
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "good";
+const TOKEN = csrfTokenForSession(SESSION);
+const AUTHED = { cookie: `crow_session=${SESSION}`, "x-crow-csrf": TOKEN };
 /**
  * What the Board rendered for a card (finding 1): its newest result id and
  * its ask version, read from stored state now, as the page would show them.
@@ -208,9 +213,9 @@ test("two parallel drops into Done make one move", async () => {
 
 test("the lane route needs CSRF", async () => {
   const id = addCard();
-  const r = await move(id, { to: "done", from: "up_next" }, { cookie: "crow_session=good; crow_csrf=tok" });
+  const r = await move(id, { to: "done", from: "up_next" }, { cookie: `crow_session=${SESSION}` });
   assert.equal(r.status, 403);
-  const forged = await move(id, { to: "done", from: "up_next" }, { cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "other" });
+  const forged = await move(id, { to: "done", from: "up_next" }, { cookie: `crow_session=${SESSION}`, "x-crow-csrf": "other" });
   assert.equal(forged.status, 403);
   assert.equal(card(id).status, "pending");
   assert.deepEqual(verbs(id), []);

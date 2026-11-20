@@ -75,8 +75,9 @@ before(async () => {
     }
     if (url.startsWith("/api/")) { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify({ notifications: [], items: [] })); }
     if (url.startsWith("/vendor/turbo")) { res.writeHead(200, { "content-type": "application/javascript" }); return res.end(turbo); }
+    if (url.startsWith("/csrf-client.js")) { res.writeHead(200, { "content-type": "application/javascript" }); return res.end(readFileSync(join(REPO, "servers/gateway/public/csrf-client.js"))); }
     if (!url.startsWith("/dashboard/")) { res.writeHead(404); return res.end(); }
-    const html = renderLayout({ title: "Attention", content: '<p id="body-p">page</p>', activePanel: "perch", panels: [], lang, scripts: tamagotchiJs(lang),
+    const html = renderLayout({ title: "Attention", content: '<p id="body-p">page</p>', activePanel: "perch", panels: [], lang, csrf: "tok-live", scripts: tamagotchiJs(lang),
       headerIcons: tamagotchiHtml(lang, { sheet: true }),
       variant: "shell", shell: { scope: { all: true }, projects: [], tab: "chat", getPanel: () => null, tray: tamagotchiTrayHtml(lang) } });
     res.writeHead(200, { "content-type": "text/html" });
@@ -135,7 +136,6 @@ async function tab(path, { width = 390, height = 844, dark = false } = {}) {
   await cdp("Network.enable");
   await cdp("Network.clearBrowserCookies");
   if (/[?&]lang=es\b/.test(path)) await cdp("Network.setCookie", { name: "crow_lang", value: "es", url: `http://${HOST}:${port}/` });
-  await cdp("Network.setCookie", { name: "crow_csrf", value: "tok-live", url: `http://${HOST}:${port}/` });
   await cdp("Page.navigate", { url: `http://${HOST}:${port}${path}` });
   await until("document.readyState==='complete'&&!!document.getElementById('crow-bird-btn')", "the page");
   // Fonts and two frames settle before any layout check.

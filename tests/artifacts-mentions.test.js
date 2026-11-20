@@ -59,12 +59,14 @@ before(async () => {
   s.http = app.listen(0, "127.0.0.1"); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
 });
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
 after(() => { s.http.close(); runtime._resetForTest(); try { s.db.close(); } catch {} rmSync(s.dir, { recursive: true, force: true }); });
 
 function req(method, path, body) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
-    const headers = { "content-type": "application/json", cookie: "crow_session=good; crow_csrf=tok", "x-crow-csrf": "tok", origin: `http://127.0.0.1:${s.port}` };
+    // The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+    const headers = { "content-type": "application/json", cookie: "crow_session=good", "x-crow-csrf": csrfTokenForSession("good"), origin: `http://127.0.0.1:${s.port}` };
     const r = http.request({ host: "127.0.0.1", port: s.port, path, method, headers }, (res) => {
       let b = ""; res.on("data", (d) => (b += d)); res.on("end", () => { let j = null; try { j = JSON.parse(b); } catch {} resolve({ status: res.statusCode, body: j }); });
     });

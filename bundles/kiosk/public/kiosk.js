@@ -1,6 +1,9 @@
-/** Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8); a Pi (?agent=1) also gets the speaker chip.
- * In session mode (/display/session, the dashboard's Talk to Crow overlay) there is no pairing and no stored token:
- * the socket is authorised by the dashboard session cookie, and hello echoes the CSRF cookie. */
+/**
+ * Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8). A Pi (?agent=1) also gets the speaker chip.
+ * Session mode (/display/session, inside the dashboard's Talk to Crow overlay): the viewer is already
+ * logged in to the dashboard, so there is no pairing and no stored token — the socket is authorised by
+ * the dashboard session cookie and hello echoes the server-bound CSRF token.
+ */
 import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
@@ -91,7 +94,6 @@ if (audioPort) {
     audioPort.postMessage('{"op":"hello"}');
   } catch {}
 }
-const cookie = (name) => { for (const c of document.cookie.split(";")) { const [k, ...v] = c.trim().split("="); if (k === name) return v.join("="); } return ""; };
 /** Halt / unpaired / page hidden for good: turn the mic off (the phone's indicator); the next tap reopens it. */
 function releaseAudio({ keepMedia = false } = {}) {
   if (turn && !turn.ended) endTurn("manual", null);
@@ -181,10 +183,20 @@ function connect() {
   ws = sock;
   sock.binaryType = "arraybuffer";
   let opened = false;
-  sock.onopen = () => {
+  sock.onopen = async () => {
     opened = true;
     if (ws !== sock) return;
-    const hello = SESSION ? { type: "hello", mode: "session", csrf: cookie("crow_csrf"), caps: CAPS, tz: TZ, owner: barOwner } : { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ };
+    if (!SESSION) {
+      const hello = { type: "hello", device_id: id, token: tok, caps: CAPS, tz: TZ };
+      if (voiceOff) hello.voice_off = true;   // item 17 (B9): the server knows before its first line
+      sock.send(JSON.stringify(hello));
+      return;
+    }
+    // The session hello echoes the server-bound CSRF token (GET /dashboard/csrf).
+    const { loadCsrf } = await import("./session-csrf.js");   // session mode only: a paired display never loads it
+    const csrf = await loadCsrf();
+    if (ws !== sock) return;
+    const hello = { type: "hello", mode: "session", csrf, caps: CAPS, tz: TZ, owner: barOwner };
     if (voiceOff) hello.voice_off = true;   // item 17 (B9): the server knows before its first line
     sock.send(JSON.stringify(hello));
   };

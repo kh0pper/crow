@@ -73,12 +73,16 @@ before(async () => {
 after(() => { server?.closeAllConnections?.(); server?.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const NET = serveHeaders("operator@example.com");
-const jar = (extra = {}) => Object.entries({ crow_session: "new-sess", crow_csrf: "tok", [MODE]: "new", ...extra }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const SESSION = "new-sess";
+const CSRF = csrfTokenForSession(SESSION);
+const jar = (extra = {}) => Object.entries({ crow_session: SESSION, [MODE]: "new", ...extra }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
 async function get(path, extra) {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: jar(extra) } });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
 }
-async function post(path, fields, { csrf = "tok", cookie = jar() } = {}) {
+async function post(path, fields, { csrf = CSRF, cookie = jar() } = {}) {
   const body = new URLSearchParams({ ...fields, ...(csrf ? { _csrf: csrf } : {}) });
   const r = await fetch(base + path, { method: "POST", redirect: "manual", headers: { ...NET, cookie, "content-type": "application/x-www-form-urlencoded" }, body });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
@@ -149,7 +153,7 @@ test("delete confirm shows counts, the warning and the notes", async () => {
   assert.match(r.body, />Cancel</);
   // On a phone the actions stack in source order: Cancel comes first, never the red button right under the field.
   assert.match(r.body, /data-pl-name>[\s\S]*?<div class="pl-actions pl-actions--confirm"><a class="pl-link pl-link--quiet"[^>]*>Cancel<\/a><button type="submit" class="pl-btn pl-btn--danger"/);
-  assert.match(r.body, /name="_csrf" value="tok"/);
+  assert.match(r.body, new RegExp(`name="_csrf" value="${CSRF}"`));
   const panel = await get(`/dashboard/projects?delete=${P.alpha}`);
   assert.match(panel.body, /data-pl-confirm/);
   assert.match(panel.body, /action="\/dashboard\/projects"/);

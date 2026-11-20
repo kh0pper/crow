@@ -175,9 +175,10 @@ export function registeredClientJS(lang) {
 
         ${roleNamesJs(lang)}
 
+        // The server-bound CSRF token (window.crowCsrf — the page's meta tag or
+        // GET /dashboard/csrf). Never a cookie: crow_csrf is retired.
         function csrf() {
-          var m = (document.cookie || "").match(/(?:^|;\\s*)crow_csrf=([^;]*)/);
-          return m ? decodeURIComponent(m[1]) : "";
+          try { return window.crowCsrf ? window.crowCsrf() : ""; } catch (e) { return ""; }
         }
         function fill(s, p) {
           var out = String(s);

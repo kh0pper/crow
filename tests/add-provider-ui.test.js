@@ -144,7 +144,6 @@ function harness(routes, { open = false } = {}) {
   const opener = new El("button");
   opener.setAttribute("data-models-add", "");
   const doc = {
-    cookie: "crow_lang=en; crow_csrf=tok%2D1",
     createElement: (t) => new El(t),
     getElementById: (id) => (id === "models-add" ? dialog : null),
     querySelectorAll: (sel) => (sel === "[data-models-add]" ? [opener] : []),
@@ -158,7 +157,9 @@ function harness(routes, { open = false } = {}) {
     if (!r) throw new Error("no stub for " + url);
     return r.reply(url, init);
   };
-  const win = { Turbo: { visit: (href, o) => visits.push({ href, o }) } };
+  // window.crowCsrf is what /csrf-client.js exposes on the dashboard page: the
+  // SERVER-BOUND token (the <meta name="crow-csrf"> tag), never a cookie.
+  const win = { Turbo: { visit: (href, o) => visits.push({ href, o }) }, crowCsrf: () => "tok-1" };
   const loc = { href: "https://crow.example.ts.net/dashboard/settings?section=models", reload() { visits.push({ reload: true }); } };
   new Function("document", "fetch", "window", "location", addProviderClientJS({ lang: "en" }))(doc, fetchStub, win, loc);
   return { dialog, parts, opener, calls, visits };

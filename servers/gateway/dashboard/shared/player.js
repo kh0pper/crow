@@ -610,13 +610,11 @@ ${PLAYER_RESERVE_JS}
     try { ch.postMessage({ q: 1, n: o }); } catch (e) { end(); return; }
     timer = setTimeout(end, KIOSK_CLAIM_MS);
   }
-  function kioskCookie(name) {
-    var parts = String(document.cookie || '').split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var p = parts[i].replace(/^ +/, '');
-      if (p.indexOf(name + '=') === 0) return p.slice(name.length + 1);
-    }
-    return '';
+  /** The server-bound CSRF token (window.crowCsrf: the page's meta tag / the
+   *  /dashboard/csrf endpoint). It used to come from the (now retired) crow_csrf
+   *  cookie, which a same-site host on the tailnet could toss. */
+  function kioskCsrf() {
+    try { return window.crowCsrf ? window.crowCsrf() : ''; } catch (e) { return ''; }
   }
   /** Attached = a frame registered AND it is still the live frame (Android Back can swap the body without a close). */
   function kioskAttached() {
@@ -721,7 +719,7 @@ ${PLAYER_RESERVE_JS}
     fetch(KIOSK_URL, {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': kioskCookie('crow_csrf') },
+      headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': kioskCsrf() },
       body: JSON.stringify({ do: verb, id: kioskItem.id, owner: owner }),
     }).then(kioskAnswer(kioskEpoch, verb)).catch(function () {});
   }

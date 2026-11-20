@@ -307,7 +307,7 @@ test("route order", async () => {
 
 test("custom routes are CSRF gated and session gated", async () => {
   await withServer(async (s) => {
-    const cookie = "crow_session=s1; crow_csrf=tok123";
+    const cookie = "crow_session=s1";
     for (const [method, path] of [["POST", "/api/roles/custom"], ["POST", "/api/roles/custom/c-coder/preview"], ["DELETE", "/api/roles/custom/c-coder"]]) {
       const r = await call(s, method, path, { body: { label: "Coder", capability: "chat" }, headers: { cookie } });
       assert.equal(r.status, 403, `${method} ${path}`);
@@ -402,7 +402,7 @@ function sheet(replies, lang = "en") {
   const edit = new El("button");
   for (const [k, v] of Object.entries({ "data-custom-edit": "c-coder", "data-custom-label": "Coder", "data-custom-job": "Writes code", "data-custom-capability": "chat", "data-custom-heavy": "true" })) edit.setAttribute(k, v);
   const doc = {
-    cookie: "crow_csrf=tok%2D1", createElement: (t) => new El(t),
+    createElement: (t) => new El(t),
     getElementById: (id) => (id === "models-custom" ? dialog : null),
     querySelectorAll: (sel) => (sel === "[data-custom-add], [data-custom-edit]" ? [add, edit] : []),
     addEventListener() {},
@@ -412,7 +412,8 @@ function sheet(replies, lang = "en") {
     calls.push({ url, method: init.method, headers: init.headers, body: init.body ? JSON.parse(init.body) : undefined });
     return replies.shift()(url, init);
   };
-  new Function("document", "fetch", "window", "location", customRolesClientJS({ lang }))(doc, fetchStub, { Turbo: { visit: (h) => visits.push(h) } }, { href: "/x", reload() {} });
+  // The server-bound CSRF token, as /csrf-client.js exposes it on the page.
+  new Function("document", "fetch", "window", "location", customRolesClientJS({ lang }))(doc, fetchStub, { Turbo: { visit: (h) => visits.push(h) }, crowCsrf: () => "tok-1" }, { href: "/x", reload() {} });
   return { dialog, add, edit, calls, visits };
 }
 

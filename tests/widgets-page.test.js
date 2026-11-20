@@ -28,6 +28,11 @@ import Database from "better-sqlite3";
 import { parseHTML } from "linkedom";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+// The CSRF token is SERVER-BOUND (HMAC of the session id, secrets/csrf.key) and is
+// never read from a cookie: `crow_csrf` is retired, and a same-site host on the
+// tailnet could toss one. A test that drives the real csrfMiddleware computes it
+// here, through the real module.
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 import { loadToday, _setTodaySeamsForTest, CALENDAR_TIMEOUT_MS } from "../servers/gateway/for-you/today.js";
 import { todayHtml } from "../servers/gateway/dashboard/panels/for-you/html.js";
 import { gridClientJs } from "../servers/gateway/widgets/grid-client.js";
@@ -101,15 +106,23 @@ beforeEach(() => {
 });
 
 const NET = serveHeaders("operator@example.com");
-const jar = (sess) => `crow_session=${sess}; crow_csrf=tok; ${MODE}=new`;
+const jar = (sess) => `crow_session=${sess}; ${MODE}=new`;
 async function get(path, sess = "owner-sess") {
   const r = await fetch(base + path, { redirect: "manual", headers: { ...NET, cookie: jar(sess) } });
   return { status: r.status, location: r.headers.get("location"), body: await r.text() };
 }
-async function post(path, sess = "owner-sess") {
+async function post(path, sess = "owner-sess", { csrf = csrfTokenFor(sess) } = {}) {
   const r = await fetch(base + path, {
     method: "POST", redirect: "manual",
-    headers: { ...NET, cookie: jar(sess), "content-type": "application/x-www-form-urlencoded" }, body: "_csrf=tok",
+    headers: {
+      ...NET,
+      cookie: jar(sess),
+      "content-type": "application/x-www-form-urlencoded",
+      // A form the page itself submits: same-origin, so the fetch-metadata rail
+      // has nothing to refuse (fetch-metadata.js).
+      "sec-fetch-site": "same-origin",
+    },
+    body: new URLSearchParams(csrf ? { _csrf: csrf } : {}).toString(),
   });
   return { status: r.status, body: await r.text() };
 }
@@ -154,7 +167,10 @@ test("flag on: the owner's own local password session gets it; a plain or an SSO
       assert.equal(r.status, 404, sess);
       assert.doesNotMatch(r.body, /wg-grid/, sess);
     }
-    // The page has no form: any state-changing method is a 404, never a silent no-op.
+    // The page has no form: any state-changing method the CSRF rail lets through is a
+    // 404 at the panel's own gate, never a silent no-op — and one the rail refuses
+    // (no token echoed at all) is a 403 before the panel is reached.
+    assert.equal((await post("/dashboard/widgets", "owner-sess", { csrf: null })).status, 403);
     assert.equal((await post("/dashboard/widgets")).status, 404);
   });
 });
@@ -373,7 +389,7 @@ test("390×844: the widgets page is two columns wide and does not scroll sideway
       await send("Network.enable");
       await send("Network.clearBrowserCookies");
       await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-      for (const ck of [{ name: "crow_session", value: "owner-sess" }, { name: "crow_csrf", value: "tok" }, { name: MODE, value: "new" }]) {
+      for (const ck of [{ name: "crow_session", value: "owner-sess" }, { name: MODE, value: "new" }]) {
         await send("Network.setCookie", { ...ck, url: base, path: "/" });
       }
       // The page exists only with For You on (cleared in `after`), and a browser carries no Serve

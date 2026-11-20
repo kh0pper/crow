@@ -21,6 +21,10 @@ import { initArtifactsTables } from "../bundles/artifacts/server/init-tables.js"
 import * as store from "../bundles/artifacts/server/store.js";
 import artifactsRouter from "../bundles/artifacts/panel/routes.js";
 import panel from "../bundles/artifacts/panel/artifacts.js";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
+
+// The server-bound token for the harness's owner session (`crow_session=good`).
+const CSRF = csrfTokenFor("good");
 
 const s = { spawns: [], messages: [] };
 let chrome;
@@ -49,9 +53,13 @@ before(async () => {
   };
   const dashboardAuth = (req, res, next) => (/crow_session=good/.test(req.headers.cookie || "") ? next() : res.status(401).end());
   const app = express();
-  app.get("/login", (req, res) => { res.setHeader("set-cookie", ["crow_session=good; HttpOnly; Path=/", "crow_csrf=tok; Path=/"]); res.end("ok"); });
+  app.get("/login", (req, res) => { res.setHeader("set-cookie", ["crow_session=good; HttpOnly; Path=/"]); res.end("ok"); });
+  // The gateway serves this static helper in production; the viewer page loads it.
+  app.get("/csrf-client.js", (_req, res) => { res.setHeader("content-type", "application/javascript"); res.end(readFileSync(join(ROOT, "servers/gateway/public/csrf-client.js"))); });
   app.use(artifactsRouter(dashboardAuth, { db: s.db, blobs: s.blobs, runtime, policy, csrf: csrfMiddleware, renderDeps: { markdownBlocks }, engine, loadBotDef: async (botId) => (botId === "notools" ? { tools: { crow_mcp: ["gmail/send"] } } : { tools: { crow_mcp: ["artifacts/artifact_update"] } }) }));
-  app.get("/dashboard/artifacts", dashboardAuth, (req, res) => panel.handler(req, res, { lang: "en", layout: ({ content }) => `<!doctype html><html><head><meta charset="utf-8"></head><body>${content}</body></html>` }));
+  app.get("/dashboard/artifacts", dashboardAuth, (req, res) => panel.handler(req, res, { lang: "en", layout: ({ head, content }) => `<!doctype html><html><head><meta charset="utf-8">${head || ""}<meta name="crow-csrf" content="${CSRF}"></head><body>${content}</body></html>` }));
+  // The token endpoint the standalone viewer page fetches via /csrf-client.js.
+  app.get("/dashboard/csrf", dashboardAuth, (req, res) => { res.setHeader("cache-control", "no-store"); res.json({ token: CSRF }); });
   // (the viewer page itself is served by artifactsRouter)
   s.http = app.listen(0, "127.0.0.1"); await new Promise((r) => s.http.once("listening", r));
   s.port = s.http.address().port;
@@ -173,7 +181,7 @@ test("a flagged version is not re-framed: the reload shows the tripwire banner a
     await t.send("Page.navigate", { url: `http://dash.test:${s.port}/login` }); await sleep(300);
     // The tripwire fired (as the viewer would report it): flag + revoke.
     const rep = await t.evalIn(`(async () => {
-      const csrf = decodeURIComponent(/crow_csrf=([^;]+)/.exec(document.cookie)[1]);
+      const csrf = ${JSON.stringify(CSRF)};
       const r = await fetch("/api/artifacts/${art.id}/versions/1/tripwire", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-crow-csrf": csrf }, body: JSON.stringify({ reason: "second-load" }) });
       return r.status;
     })()`);

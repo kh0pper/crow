@@ -61,6 +61,9 @@ test("Disable: without confirm=1 the tab lists the roles and nothing is disabled
   const { mintSsoSession } = await import("../servers/gateway/dashboard/auth.js");
   await (await import("./fixtures/sso-source.mjs")).trustedSsoSource("test");
   const { token: session } = await mintSsoSession("test");
+  // The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+  const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+  const CSRF = csrfTokenForSession(session);
   const express = (await import("express")).default;
   const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
   const app = express();
@@ -70,7 +73,7 @@ test("Disable: without confirm=1 the tab lists the roles and nothing is disabled
   process.env.CROW_DASHBOARD_PUBLIC = "true";
   try {
     const url = `http://127.0.0.1:${server.address().port}/dashboard/settings?section=llm&tab=providers`;
-    const cookie = `crow_session=${session}; crow_csrf=csrf-abc`;
+    const cookie = `crow_session=${session}`;
     const send = (fields, headers = { cookie }) => fetch(url, {
       method: "POST", redirect: "manual",
       headers: { ...headers, "content-type": "application/x-www-form-urlencoded" },
@@ -81,7 +84,7 @@ test("Disable: without confirm=1 the tab lists the roles and nothing is disabled
     assert.equal(noCsrf.status, 403);
     assert.equal(await disabledOf("local-chat"), 0, "no CSRF: still enabled");
 
-    const first = await send({ action: "llm_provider_disable", id: "local-chat", _csrf: "csrf-abc" });
+    const first = await send({ action: "llm_provider_disable", id: "local-chat", _csrf: CSRF });
     assert.equal(first.status, 200, "re-rendered, not redirected");
     const html = await first.text();
     assert.ok(html.includes("Builder") && html.includes("Orchestrator"), "names the roles");
@@ -89,11 +92,11 @@ test("Disable: without confirm=1 the tab lists the roles and nothing is disabled
     assert.match(html, /Turning this off moves:/);
     assert.equal(await disabledOf("local-chat"), 0, "not disabled yet");
 
-    const plain = await send({ action: "llm_provider_disable", id: "local-cls", _csrf: "csrf-abc" });
+    const plain = await send({ action: "llm_provider_disable", id: "local-cls", _csrf: CSRF });
     assert.equal(plain.status, 303, "no roles bound: straight through");
     assert.equal(await disabledOf("local-cls"), 1);
 
-    const ok = await send({ action: "llm_provider_disable", id: "local-chat", confirm: "1", _csrf: "csrf-abc" });
+    const ok = await send({ action: "llm_provider_disable", id: "local-chat", confirm: "1", _csrf: CSRF });
     assert.equal(ok.status, 303);
     assert.equal(await disabledOf("local-chat"), 1);
   } finally {

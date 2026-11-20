@@ -44,7 +44,9 @@ const NOW = Date.parse("2026-11-03T12:00:00Z");
 const CLOCK = { t: NOW };
 
 const OWN = "owner-sess";
-const CSRF = "csrf-token-1";
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const CSRF = csrfTokenForSession(OWN);
 
 const P = {};
 let server, base, M, express;
@@ -240,7 +242,7 @@ function setting(table, key) {
 
 // ---- the API -----------------------------------------------------------------
 
-const jar = (session) => `crow_session=${session}; crow_csrf=${CSRF}`;
+const jar = (session) => `crow_session=${session}`;
 
 async function get(path, { session = OWN } = {}) {
   const r = await fetch(base + path, { headers: { cookie: jar(session) } });
@@ -252,7 +254,7 @@ async function get(path, { session = OWN } = {}) {
 
 const summary = (opts) => get("/dashboard/widgets-api/needs-me", opts);
 
-async function post(path, body, { session = OWN, csrf = CSRF, extra = {} } = {}) {
+async function post(path, body, { session = OWN, csrf = csrfTokenForSession(session), extra = {} } = {}) {
   const r = await fetch(base + path, {
     method: "POST",
     headers: {

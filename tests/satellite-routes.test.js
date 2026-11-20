@@ -22,6 +22,7 @@ const { default: satellitesRouter } = await import("../servers/gateway/routes/sa
 const { SATELLITE_REPO, buildInstallCommand } = await import("../servers/gateway/satellites/install-command.js");
 const { createPairingService } = await import("../servers/gateway/satellites/pairing.js");
 const { createFakeSatellite, fakeIdentity, FAKE_HOST } = await import("./helpers/fake-satellite.js");
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
 
 const dirs = [HOME, process.env.CROW_DATA_DIR];
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
@@ -197,11 +198,14 @@ test("CSRF: a session-cookie POST without the matching header is refused before 
   const db = await freshDb();
   const fake = createFakeSatellite({ code: CODE });
   await withServer({ db, fake }, async (s) => {
-    const cookie = "crow_session=sess; crow_csrf=tok123";
-    const no = await call(s, "POST", "/api/satellites/pair/start", { host: FAKE_HOST }, { cookie });
+    // A browser's own fetch from the dashboard: a same-origin request carrying the session
+    // cookie and, when it is the page's own submit, that session's SERVER-BOUND CSRF token.
+    const cookie = "crow_session=sess";
+    const browser = { cookie, "sec-fetch-site": "same-origin" };
+    const no = await call(s, "POST", "/api/satellites/pair/start", { host: FAKE_HOST }, browser);
     assert.equal(no.status, 403);
     assert.equal(fake.state.requests.length, 0);
-    const yes = await call(s, "POST", "/api/satellites/pair/start", { host: FAKE_HOST }, { cookie, "x-crow-csrf": "tok123" });
+    const yes = await call(s, "POST", "/api/satellites/pair/start", { host: FAKE_HOST }, { ...browser, "x-crow-csrf": csrfTokenFor("sess") });
     assert.equal(yes.status, 200);
   });
 });

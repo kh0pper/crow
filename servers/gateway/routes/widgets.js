@@ -25,8 +25,9 @@
  * then, an older phone app would turn every silent ping into a blank notification.
  *
  * MOUNT: inside dashboard/index.js beside voiceHandoffsRouter, i.e. after dashboardAuth AND after the
- * real csrfMiddleware, so a state-changing act carries the crow_csrf double-submit token (header
- * X-Crow-Csrf, or a _csrf body field). The router also installs dashboardAuth on its own prefix, so it
+ * real csrfMiddleware, so a state-changing act carries the server-bound CSRF token (HMAC of the
+ * session; header X-Crow-Csrf, or a _csrf body field). The router also installs dashboardAuth on its
+ * own prefix, so it
  * stays closed wherever it is mounted. Every response is JSON, no-store, and never framed.
  *
  * WHO: the owner at THIS instance's own sign-in, and nobody else (isLocalPasswordSessionOn): an

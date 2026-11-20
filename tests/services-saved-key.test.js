@@ -57,6 +57,8 @@ async function freshDb() {
   return { db, path, dir, ids };
 }
 
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
 /** A session gate that accepts any token; the owner is the "s1" session (the harness's seam). */
 const anyGate = (req, res, next) => {
   const m = /crow_session=([\w-]+)/.exec(String(req.headers.cookie || ""));
@@ -64,7 +66,7 @@ const anyGate = (req, res, next) => {
   req.dashboardSession = m[1];
   next();
 };
-const as = (tok) => ({ cookie: `crow_session=${tok}; crow_csrf=tok9`, "x-crow-csrf": "tok9" });
+const as = (tok) => ({ cookie: `crow_session=${tok}`, "x-crow-csrf": csrfTokenForSession(tok) });
 const OWNER = as("s1");
 const OTHER = as("s2");
 

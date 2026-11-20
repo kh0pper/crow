@@ -154,9 +154,11 @@ beforeEach(() => {
   } finally { c.close(); }
 });
 
-const jar = (sess) => `crow_session=${sess}; crow_csrf=tok; ${MODE}=new`;
+const jar = (sess) => `crow_session=${sess}; ${MODE}=new`;
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
 
-async function call(method, path, { sess = "owner-sess", csrf = "tok", body } = {}) {
+async function call(method, path, { sess = "owner-sess", csrf = csrfTokenForSession(sess), body } = {}) {
   const headers = { ...NET, cookie: jar(sess) };
   if (csrf) headers["x-crow-csrf"] = csrf;
   if (body !== undefined) headers["content-type"] = "application/json";

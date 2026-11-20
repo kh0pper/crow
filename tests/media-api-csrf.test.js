@@ -82,8 +82,10 @@ const articleId = await insert(
 // session that is the owner's (a local password login, from another machine).
 // ---------------------------------------------------------------------------
 const SESSION = "session-test-value";
-const TOKEN = "csrf-test-token-0123456789abcdef";
-const COOKIE = `crow_session=${SESSION}; crow_csrf=${TOKEN}`;
+// The CSRF token is SERVER-BOUND (queue item #51 PR-1): HMAC(secret, session id).
+const { csrfTokenForSession } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const TOKEN = csrfTokenForSession(SESSION);
+const COOKIE = `crow_session=${SESSION}`;
 
 // The owner's session row, as dashboard/auth.js writes one: a local password login, scopes
 // 'dashboard' alone. The router's owner check (dashboard/local-session.js) reads it.
@@ -281,7 +283,7 @@ function fakeEl(extra = {}) {
   return el;
 }
 
-test("panel callers: every state-changing request carries X-Crow-Csrf from the crow_csrf cookie", async () => {
+test("panel callers: every state-changing request carries X-Crow-Csrf (the server-bound token)", async () => {
   const html = renderLayout({ title: "Media", content: "", activePanel: "media", panels: [] });
   const layoutScripts = [...parseHTML(html).document.querySelectorAll("script")]
     .filter((s) => !s.getAttribute("src")).map((s) => s.textContent);
@@ -304,12 +306,15 @@ test("panel callers: every state-changing request carries X-Crow-Csrf from the c
   const sandbox = {
     console, URL, Headers, setTimeout, clearTimeout, Promise,
     setInterval: () => 0, clearInterval() {},
+    // The SERVER-BOUND CSRF token, as /csrf-client.js exposes it on the page
+    // (queue item #51 PR-1: the layout wrapper reads this, never a cookie).
+    crowCsrf: () => TOKEN,
     fetch: (input, init) => {
       sent.push({ url: typeof input === "string" ? input : input.url, init: init || {} });
       return Promise.resolve({ json: async () => json(typeof input === "string" ? input : input.url) });
     },
     document: {
-      cookie: `crow_session=s; crow_csrf=${TOKEN}`,
+      cookie: "crow_session=s",
       addEventListener() {}, removeEventListener() {},
       getElementById: (id) => formEls[id] || null,
       querySelector: () => null, querySelectorAll: () => [],
