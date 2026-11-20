@@ -53,6 +53,12 @@ export const MAX_TEXT_CHARS = 500;
 /** Item 17: trimmed, cut at the cap; "" = nothing to send. */
 export const composeText = (raw) => (typeof raw === "string" ? raw.trim().slice(0, MAX_TEXT_CHARS) : "");
 export const voiceOffFromStorage = (v) => v === "1";   // only the stored "1" means off
+/** Item 69: ?osk decides absolutely; else a session gets none (its phone has one) and a display gets one until a real key is seen. */
+export function oskWanted({ session, param, physicalKey } = {}) {
+  if (param === "1") return true;
+  if (param === "0") return false;
+  return !session && !physicalKey;
+}
 export function tapDecision({ halted, playing, birdState, turnOpen, starting = false, voiceOff = false }) {
   if (halted) return "resume";
   if (voiceOff) return playing || birdState === "speaking" || birdState === "thinking" ? "barge" : "ignore";   // item 17: quiet, but a slow reply can still be cancelled

@@ -1,0 +1,103 @@
+/* The kiosk page's on-screen keyboard (queue item 69). Lazy: it arrives with osk.js, the first time a
+   field that wants a keyboard takes focus. Colors come from theme.css (--k-*), like the rest of the page. */
+#osk {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  background: var(--k-card);
+  border-top: 1px solid var(--k-line);
+  font-size: 20px;
+  overflow: hidden;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#osk[hidden] { display: none; }
+#osk .k-osk-row { display: flex; gap: 6px; }
+/* Ten letter keys fill the width: the row's gaps and the host's padding are all a key may not have.
+   46 px tall everywhere; wide enough at a kiosk's 1024 (and 32 px at 390, which is what ten keys allow). */
+#osk button.k-osk-key {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 46px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--k-ink);
+  background: var(--k-card);
+  border: 1px solid var(--k-line);
+  border-radius: 10px;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#osk .k-osk-key.is-special { flex: 1.5 1 0; }
+#osk .k-osk-key.is-space { flex: 4 1 0; }
+#osk .k-osk-key.is-send {
+  flex: 1.5 1 0;
+  background: var(--k-teal);
+  border-color: var(--k-teal);
+  color: var(--k-card);
+  font-weight: 700;
+}
+#osk .k-osk-key[aria-pressed="true"] { background: var(--k-teal-soft); border-color: var(--k-teal); }
+#osk .k-osk-key:active { opacity: .7; }
+#osk .k-osk-glyph {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── while the keyboard is up, the page makes room for it ─────────────────────────────────────────
+   kiosk.js puts html.k-osk-open on the document and the host publishes its measured height as --osk-h.
+   The composer and the captions above it live in fixed bands stacked on --osk-h (so the composer is
+   never under the keys and its captions are never under the composer), the now-playing chip sits above
+   the composer, and the talk pill and the tools row step aside: the keyboard carries its own Hide key.
+   Every band is anchored bottom-up, so a taller layout (more rows) or a short viewport only moves the
+   page content, never the keyboard. */
+html.k-osk-open,
+html.k-osk-open body { overflow: hidden; }
+html.k-osk-open .k-app {
+  height: calc(100vh - var(--osk-h, 215px) - 8px);
+  min-height: 0;
+  overflow: hidden;
+}
+html.k-osk-open #compose {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: calc(var(--osk-h, 215px) + 8px);
+  margin: 0;
+  z-index: 6;
+}
+/* 8 (over the keys) + the composer's 56 + 8 + the chip's 56 + 8: the captions clear both bands. */
+html.k-osk-open #captions {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: calc(var(--osk-h, 215px) + 136px);
+  min-height: 0;
+  max-height: 40vh;
+  padding-bottom: 0;
+  overflow: auto;
+  z-index: 6;
+}
+html.k-osk-open #np-chip { bottom: calc(var(--osk-h, 215px) + 72px); z-index: 6; }
+html.k-osk-open .k-tools,
+html.k-osk-open .k-mic { display: none; }

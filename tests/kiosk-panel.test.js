@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import panel, { CLIENT_SCRIPT } from "../bundles/kiosk/panel/kiosk.js";
 import { STRINGS } from "../bundles/kiosk/server/strings.js";
 
-const SAME_OK = new Set(["brand", "abil_blog"]);
+const SAME_OK = new Set(["brand", "abil_blog", "osk_letters", "osk_symbols"]);
 
 test("strings: en/es parity — same keys, non-empty, translated, same {placeholders}", () => {
   const en = Object.keys(STRINGS.en).sort(), es = Object.keys(STRINGS.es).sort();

@@ -45,7 +45,7 @@ test("no requestAnimationFrame and no video/iframe creation anywhere in the page
 
 // Fetched only through kiosk.js's dynamic import(), never part of a plain page load: agent-link.js + speaker-view.js by a
 // Pi launched with ?agent=1 (DV13), bar-link.js by a dashboard session frame opened with ?bar=1 (B3; a Pi never fetches it).
-const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js"]);
+const LAZY = new Set(["agent-link.js", "speaker-view.js", "bar-link.js", "osk.js", "osk.css"]);
 
 // 98,261 → 100 KB (2026-11-18, queue item 17 review fixes: chip clearance, caption cap, output setup, stop while quiet):
 // the review of item 17 took the page from 98,261 of 98,304 bytes to just over 96 KB — the now-playing chip's clearance

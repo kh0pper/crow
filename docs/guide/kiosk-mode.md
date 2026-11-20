@@ -26,7 +26,7 @@ Crow can hand a bigger job to one of your bots. A kiosk is a shared screen, so a
 
 ## Typing to Crow, and turning voice off
 
-The keyboard button on the page (**Type a message**) opens a message box: type what you want, tap **Send**, and Crow answers as it would to a spoken question. It is there on the phone's **Talk to Crow**, and on a kiosk display that has a keyboard attached (the Pi kiosk runs the page in cage with Chromium and installs no on-screen keyboard).
+The keyboard button on the page (**Type a message**) opens a message box: type what you want, tap **Send**, and Crow answers as it would to a spoken question. It is there on the phone's **Talk to Crow**, and on a kiosk display. On a display the page shows its own on-screen keyboard when you tap the message box (QWERTY, Shift, a ?123 numbers layer, Space, Backspace and Send; Spanish adds ñ), until a physical keyboard is used, while the phone's Talk to Crow uses the phone's own keyboard. Adding `?osk=1` or `?osk=0` to the display address forces it on or off.
 
 The speaker button turns voice off with one tap (**Turn voice off**): you are not listened to, spoken replies and spoken lines are not spoken, and what Crow would have said appears on the screen as text instead (the timer's chime still sounds). A tap on it again (**Turn voice on**) brings the microphone and the spoken replies back. The choice is kept on that device, so a display set to text comes back in text after a reload.
 

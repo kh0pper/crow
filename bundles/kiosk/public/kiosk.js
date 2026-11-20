@@ -1,16 +1,13 @@
-/**
- * Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8). A Pi (?agent=1) also gets the speaker chip.
- * Session mode (/display/session, inside the dashboard's Talk to Crow overlay): the viewer is already
- * logged in to the dashboard, so there is no pairing and no stored token — the socket is authorised by
- * the dashboard session cookie and hello echoes the CSRF cookie.
- */
+/** Crow kiosk page: pairing → session → tap-to-talk. Phone-friendly (D8); a Pi (?agent=1) also gets the speaker chip.
+ * In session mode (/display/session, the dashboard's Talk to Crow overlay) there is no pairing and no stored token:
+ * the socket is authorised by the dashboard session cookie, and hello echoes the CSRF cookie. */
 import { STRINGS } from "./strings.js";
 import {
   closeDecision, backoffMs, micDecision, isNight, themeFor, msToNextMinute,
   displayedBird, tapDecision, followUpDecision, reportDecision, turnMetrics,
   releasesMic, ttsStartDecision, settleDecision, pairStartDecision, bannerAfterReady, createStatusRing, errorDecision, toolsLine,
   duckDecision, duckBackstop, DUCK_BACKSTOP_MS, noteEffect, micAfterTurn, MEDIA_RECONNECT_CAP_MS, mediaStartGate, releaseForMediaDecision, audioPortLine,
-  composeText, voiceOffFromStorage, LS_VOICE_OFF,
+  composeText, voiceOffFromStorage, LS_VOICE_OFF, oskWanted,
 } from "./state.js";
 import { createVad, TURN_GUARD_MS, VAD_DEFAULTS } from "./vad.js";
 import { openMic, createPlayer, createMicGate } from "./audio.js";
@@ -21,17 +18,13 @@ import { createMediaView } from "./media-view.js";
 const LS_DEV = "crow.kiosk.device_id";
 const LS_TOK = "crow.kiosk.token";
 const SESSION = document.documentElement.dataset.mode === "session";
-/**
- * Caps v2: what THIS page build can draw and this browser has. The server takes the lesser of this and the display's profile.
- * mobile / pointer / platform only feed the server's guess of the display type for a display nobody has typed yet.
- */
+/** Caps v2: what this build can draw and this browser has — the server takes the lesser of it and the display's profile;
+ * mobile / pointer / platform only feed its guess of a display type nobody has set yet. */
 const CAPS = { v: 2, screen: { w: screen.width, h: screen.height, touch: navigator.maxTouchPoints > 0 }, audio: { out: true, in: !!navigator.mediaDevices }, codecs: [], frames: 0, max_windows: 4, input: { wake: false, keyboard: false }, kinds: ["card", "timer", "nowplaying", "morning"],
   mobile: navigator.userAgentData ? navigator.userAgentData.mobile === true : /Mobi|Android/i.test(navigator.userAgent), pointer: matchMedia("(pointer: coarse)").matches ? "coarse" : "fine", platform: String(navigator.platform || "").slice(0, 40) };
-/*
- * B3 bar mode: inside the dashboard's Talk to Crow overlay, opened with ?bar=1 (the dashboard does that only when its
- * player bar has the kiosk backend), the media plays in the player bar through a bar link, and outlives the overlay.
- * The tab's owner nonce comes from the bar (it survives a reload of the tab). Anything missing → today's in-page audio.
- */
+/* B3 bar mode: a session frame opened with ?bar=1 (the dashboard does that only when its player bar has the kiosk
+   backend) plays its media in that bar through a bar link, and outlives the overlay; the bar also supplies the tab's
+   owner nonce. Anything missing → today's in-page audio. */
 const BAR_WANTED = SESSION && window.parent !== window && new URLSearchParams(location.search).get("bar") === "1";
 let barLink = null, barOwner = null;
 if (BAR_WANTED) {
@@ -65,33 +58,24 @@ let mediaView = null, duckSince = null, duckTimer = null, duckOverride = false, 
 let voiceOff = false, typed = null, typedSeq = 0;
 const micGate = createMicGate(() => { captureStarting(); return openMic(ctx, onFrame); });
 
-/*
- * Debug ring (smoke 2026-10-04: an unidentified message flashed after silent taps).
- * Every status the page shows — banner, caption, bird state, mic label, wm and
- * socket events — lands in a 20-entry in-memory ring; a long press on the clock
- * shows it. Nothing is sent or stored.
- */
+/** Debug ring: every status the page shows (banner, caption, bird, mic, wm, socket) in 20 in-memory entries, shown by
+ * a long press on the clock. Nothing is sent or stored. */
 const statuses = createStatusRing(20);
 const note = (kind, text) => { statuses.push(kind, text, Date.now()); if (!$("debug").hidden) showDebug(); };
 function showDebug() { const d = $("debug"); d.textContent = statuses.format(); d.hidden = false; }
 /** Sets the bot caption for a page/system reason (tap hint, error, clear) — fixed strings, so the text is recorded. */
 function caption(text, why) { $("cap-bot").textContent = text; note(`caption:${why}`, text); }
 function banner(key) { bannerKey = key || null; const b = $("banner"); b.textContent = key ? t(key) : ""; b.hidden = !key; note("banner", key ? `${key}: ${b.textContent}` : "(hidden)"); if (key === "session_no_bot") b.append(" ", kioskPanelLink()); }
-/** Session mode: the fix for "no assistant" is one tap away — Crow's voice editor in Bot Builder, in the dashboard itself. */
+/** Session mode: the fix for "no assistant" is one tap away, in the dashboard itself. */
 function kioskPanelLink() { const a = document.createElement("a"); a.href = "/dashboard/bot-builder?bot=crow.voice"; a.target = "_top"; a.textContent = t("session_bot_link"); return a; }
-/*
- * Queue item 21c: the Crow Android app injects window.CrowAudioPort on its paired gateway origin only. Each mic
- * release tells it the capture ended; the app then checks the phone's audio mode (call mode left on sends music
- * to the earpiece) and answers with one line for the debug ring. Elsewhere (a Pi, a browser) there is no port.
- */
+/* Queue item 21c: the Crow Android app injects window.CrowAudioPort on its paired gateway origin. Each mic release
+   tells it the capture ended, and the app answers with one line for the debug ring after checking the phone's audio
+   mode. Elsewhere (a Pi, a browser) there is no port. */
 const audioPort = globalThis.CrowAudioPort || null;
 const captureStarting = () => { try { audioPort?.postMessage('{"op":"captureStarting"}'); } catch {} };
 const captureEnded = () => { try { audioPort?.postMessage('{"op":"captureEnded"}'); } catch {} };
-/**
- * App only (rev 2, R2.1): an idle AudioContext keeps a call-type stream playing; pause it once the mic is gone. Every play
- * path resumes it. suspend() is async (ctx.state still reads "running" for a while), so the request is tracked, not the state:
- * a resume issued after a pending suspend still wins (control messages run in order).
- */
+/** App only (rev 2, R2.1): an idle AudioContext keeps a call-type stream playing, so pause it once the mic is gone (every
+ * play path resumes it). suspend() is async, so the request is tracked, not the state: a later resume still wins. */
 let outputPaused = false;
 function pauseOutput() {
   if (!audioPort || !ctx || outputPaused || ctx.state !== "running" || player?.playing || mic || micGate.opening()) return;
@@ -126,11 +110,8 @@ function setBird(s) {
 }
 /** The server's state, held in "speaking" while local audio still plays (ruling F3). */
 const renderBird = () => { setBird(displayedBird(serverBird, !!player?.playing)); syncDuck(); };
-/**
- * Music is turned down (or paused, with the display's pause_media_on_listen) while a turn is open:
- * the mic, the server's bird, this page's TTS (review C1: never keyed on turn_done). A backstop
- * brings it back after DUCK_BACKSTOP_MS with the bird idle and no TTS, whatever the page thinks.
- */
+/** Music is turned down (or paused) while a turn is open: the mic, the server's bird or this page's TTS (ruling C1).
+ * A backstop brings it back after DUCK_BACKSTOP_MS with the bird idle and no TTS, whatever the page thinks. */
 function syncDuck() {
   if (!mediaView) return;
   const playing = !!player?.playing;
@@ -335,7 +316,7 @@ function mountUi() {
   else if (!$("cap-bot").textContent) caption(t("tap_hint"), "tap_hint");
 }
 
-/** Item 17 (B4): the output side alone — the context and the player, never the microphone: a typed message's reply plays without a mic. */
+/** Item 17 (B4): the output side alone — the context and the player, never the microphone. */
 function ensureOutput() {
   if (!ctx) ctx = new AudioContext({ latencyHint: "interactive" });
   if (!player) {
@@ -423,7 +404,7 @@ function micForMedia() {
   pauseOutput();
   mediaView?.kick();
 }
-/** F6: a phone lets the microphone go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply (r7 G12). */
+/** F6: a phone lets the mic go (Android leaves voice-call audio mode) once the turn has settled — never mid-reply. */
 function releaseMicAfterTurn(phase) {
   if (micAfterTurn(config, { phase }) !== "release" || (!mic && !micGate.opening())) return;
   micGate.release(); captureEnded();
@@ -468,6 +449,7 @@ function setVoiceOff(on, quiet = false) {
   voiceOff = !!on;
   if (voiceOff) ls.set(LS_VOICE_OFF, "1"); else ls.del(LS_VOICE_OFF);
   $("mic").hidden = voiceOff; $("compose").hidden = !voiceOff; $("type-btn").hidden = voiceOff;
+  closeOsk();                                       // item 69: the composer hides on either toggle
   syncVoiceLabels();
   if (turn && !turn.ended) { send({ type: "barge_in" }); turn.ended = turn.barged = turn.reported = true; clearTimeout(turn.guard); turn.guard = null; }   // dropped, never endTurn'd: no turn_end
   micGate.release(); captureEnded();
@@ -479,7 +461,7 @@ function sendTyped() {
   const text = composeText($("compose-text").value), id = `x${Date.now()}-${++typedSeq}`;
   if (!text || !ws || ws.readyState !== 1) return;   // nothing to say, or the socket is down: the words stay
   // Item 17 (B4): with voice on the reply's output is set up here, in this gesture — never the microphone. A reply
-  // still playing is replaced by this message, so it is flushed and the server told first.
+  // still playing is replaced: it is flushed and the server told first.
   if (!voiceOff) { if (player?.playing) { player.flush(); send({ type: "barge_in" }); } ensureOutput(); }
   send({ type: "text_turn", turn_id: id, text });
   typed = { id, text }; $("compose-text").value = "";
@@ -513,9 +495,44 @@ $("bird").addEventListener("click", onTap);
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) $("clock").addEventListener(ev, cancel);
   $("debug").addEventListener("click", () => { $("debug").hidden = true; });
 }
+/* Item 69: the page's own on-screen keyboard (osk.js + osk.css, loaded on demand). */
+const OSK_PARAM = new URLSearchParams(location.search).get("osk");
+let physicalKey = false, oskApi = null, oskLoading = null, oskLang = null;
+const OSK_CSS_ID = "osk-css", OSK_CSS_HREF = "/display/assets/osk.css";
+/** Only a key that types means a real keyboard is here: Escape, the F-keys and the modifiers say nothing. */
+const physicalKeyCounts = (key) => typeof key === "string" && (key.length === 1 || key === "Backspace" || key === "Enter");
+const oskIsWanted = () => oskWanted({ session: SESSION, param: OSK_PARAM, physicalKey });
+const closeOsk = () => { if (oskApi?.isOpen()) oskApi.close(); };
+/** The field asks for no native keyboard while one is wanted — from boot on, not only from the first focus. */
+function syncOskMode() { const i = $("compose-text"); if (oskIsWanted()) i.setAttribute("inputmode", "none"); else i.removeAttribute("inputmode"); }
+function maybeOsk() {
+  const input = $("compose-text");
+  syncOskMode();
+  if (!oskIsWanted() || oskApi?.isOpen()) return;
+  if (oskApi && oskLang === lang) { oskApi.open(); return; }
+  if (oskLoading) return;
+  oskLoading = (async () => {
+    // One link per page load: osk.js adds the same one (by id) when the page has not.
+    if (!document.getElementById(OSK_CSS_ID) && !document.querySelector(`link[href="${OSK_CSS_HREF}"]`)) {
+      const css = document.createElement("link");
+      css.id = OSK_CSS_ID; css.rel = "stylesheet"; css.href = OSK_CSS_HREF; document.head.append(css);
+    }
+    const { mountOsk } = await import("./osk.js");
+    oskApi?.destroy(); oskLang = lang;
+    oskApi = mountOsk({ host: null, input, form: $("compose"), lang, t, onClose: () => {}, doc: document });
+    if (document.activeElement === input && oskIsWanted()) oskApi.open();   // a real key seen meanwhile: not wanted
+  })().catch(() => {}).finally(() => { oskLoading = null; });
+}
+for (const ev of ["focus", "click"]) $("compose-text").addEventListener(ev, maybeOsk);
+// A key never takes the focus, so a blur that lands inside the keyboard is undone; any other blur closes it.
+$("compose-text").addEventListener("focusout", (ev) => {
+  const board = document.getElementById("osk");
+  if (ev.relatedTarget && board?.contains(ev.relatedTarget)) { $("compose-text").focus(); return; }
+  closeOsk();
+});
 $("mic").addEventListener("click", onTap);
 $("voice-btn").addEventListener("click", () => setVoiceOff(!voiceOff));
-$("type-btn").addEventListener("click", () => { $("compose").hidden = !$("compose").hidden; syncVoiceLabels(); if (!$("compose").hidden) $("compose-text").focus(); });
+$("type-btn").addEventListener("click", () => { $("compose").hidden = !$("compose").hidden; syncVoiceLabels(); if ($("compose").hidden) closeOsk(); else $("compose-text").focus(); });
 $("compose").addEventListener("submit", (e) => { e.preventDefault(); sendTyped(); });
 window.addEventListener("pagehide", () => releaseAudio({ keepMedia: BAR }));
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !halted && (SESSION || ls.get(LS_TOK))) connect(); });   // connect() is a no-op while a socket is live
@@ -536,11 +553,18 @@ if (SESSION) {
   // Escape pressed while focus is inside the frame never reaches the dashboard: ask it to close.
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && window.parent !== window) window.parent.postMessage("crow-talk-close", location.origin); });
 }
+// Item 69: a key that types means a keyboard is right there (?osk=1 forces the on-screen one anyway).
+document.addEventListener("keydown", (e) => {
+  if (!e.isTrusted || !physicalKeyCounts(e.key)) return;
+  physicalKey = true;
+  syncOskMode();
+  if (!oskIsWanted()) closeOsk();
+}, true);
 
 mediaView = createMediaView({
   audio: barLink || $("media"), chip: BAR ? document.createElement("button") : $("np-chip"), send, t, bar: BAR,
-  // Item 21: never start over an open capture or within mic_settle_ms of its release; A7's evidence is in the ring.
-  // In bar mode too: the parent bar plays, but this frame's open mic is what puts Android in call mode.
+  // Item 21: never start over an open capture, nor within mic_settle_ms of its release (bar mode too: our own open mic
+  // is what puts Android in call mode).
   canStart: () => { const g = mediaStartGate({ micOpen: !!mic, micOpening: micGate.opening(), releasedAt: micReleasedAt, now: performance.now(), config }); return g.ok || g.waitMs; },
   onPlay: () => note("media", `start mic=${mic || micGate.opening() ? "open" : "closed"}`),
   onState: (id, state) => { if (state === "playing") noteEffect(turn, { kind: "playing", id, at: performance.now() }); },
@@ -548,6 +572,7 @@ mediaView = createMediaView({
   onChipTap: () => send({ type: "wm_event", kind: "nowplaying" }),   // F8: the server opens (or brings forward) the window
 });
 $("mic").textContent = t("mic_talk");
+syncOskMode();                                     // item 69
 setVoiceOff(voiceOffFromStorage(ls.get(LS_VOICE_OFF)), true);
 connect();
 // DV13 speaker chip: a Pi (?agent=1) only; one agent link per page load.
