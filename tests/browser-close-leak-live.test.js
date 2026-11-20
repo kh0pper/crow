@@ -936,13 +936,12 @@ test("live headful: closing the last page exits Chromium; a fresh survivor keeps
     skipOrFail(t, "Xvfb is not installed (no X display for a headful Chromium)");
     return;
   }
+  // CI has a full Chrome via CROW_TEST_FULL_CHROME; a missing one is not a
+  // CI-only skip, it fails under CROW_REQUIRE_TEST_CHROME=1 like any other
+  // missing browser.
   const headfulBin = findHeadfulChrome();
   if (!headfulBin) {
-    if (process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true") {
-      t.skip("headful case needs a full Chromium; CI has only the headless shell (pending the operator's OK to add one to the job image)");
-      return;
-    }
-    skipOrFail(t, "no full Chromium for a headful run (looked for ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome)");
+    skipOrFail(t, "no full Chromium for a headful run (looked for ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; CROW_TEST_FULL_CHROME overrides)");
     return;
   }
   const pw = await loadPlaywright();
