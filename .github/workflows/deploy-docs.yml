@@ -1,5 +1,10 @@
 name: Deploy Docs
 
+# GitHub Pages only. Gitea Actions reads .github/workflows/ too, where the
+# `pages` permission, upload-pages-artifact and the github-pages environment do
+# not exist and the run fails on every push to main — so every job here is
+# gated on github.server_url and simply skips off GitHub.
+
 on:
   push:
     branches: [main]
@@ -16,6 +21,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +40,9 @@ jobs:
 
   deploy:
     needs: build
+    # Stated per job, not just inherited through `needs`: a Pages step must
+    # never run on a forge that has no Pages.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

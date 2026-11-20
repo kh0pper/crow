@@ -13,6 +13,8 @@ name: Tests
 # CI green does NOT cover schema migrations — SCHEMA_GENERATION bumps still
 # require the manual migration rail (scripts/schema-migration-dryrun.sh) on
 # live-shaped data before merge.
+#
+# Gitea Actions names them "<job> (pull_request)": suite (pull_request), static-checks (pull_request), audit (pull_request).
 
 on:
   pull_request:

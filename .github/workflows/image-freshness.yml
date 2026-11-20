@@ -3,9 +3,18 @@ name: Bundle Image Freshness Check
 # Nightly check that every bundle's docker image still pulls.
 # Catches upstream image deletions, repo renames, and tag deprecations.
 #
-# Reporting contract: scheduled failures update ONE pinned issue (found by the
-# bundle-image-stale label) instead of filing a new issue per night; a passing
-# scheduled run closes it. workflow_dispatch runs never touch issues.
+# Reporting contract: scheduled failures update ONE pinned issue instead of
+# filing a new issue per night; a passing scheduled run closes it.
+# workflow_dispatch runs never touch issues.
+#
+# That issue is matched by exact title, plus the bundle-image-stale label when
+# the repo actually has that label. The repository's own Gitea mirror also reads
+# .github/workflows/, and Gitea ignores an unknown `labels:` filter and lists
+# pull requests among issues. Neither is trusted — see the note inside the
+# reporting steps. The job below is gated to GitHub (Gitea's Docker runner and
+# its issue store are not what this check reports to), but the client-side
+# filtering stays: it also protects GitHub from a PR or an unrelated issue that
+# happens to share the title.
 
 on:
   schedule:
@@ -18,6 +27,9 @@ permissions:
 
 jobs:
   check-images:
+    # GitHub only: Gitea Actions reads this file too, and a scheduled pull of
+    # every bundle image is not something a mirror should run (nor report on).
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,6 +88,53 @@ jobs:
             const fs = require('fs');
             const LABEL = 'bundle-image-stale';
             const TITLE = 'Bundle image-freshness check failed';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Gitea compatibility — never "simplify" this back to a server-side
+            // `labels:` filter. This workflow runs on a self-hosted Gitea where
+            // the repository has NO labels, and Gitea IGNORES an unknown label
+            // filter: listForRepo({ labels: LABEL }) then answers with EVERY open
+            // issue AND pull request. Trusting that list (open.data[0]) retitled
+            // and overwrote a pull request's body on 2026-11-20. So the answer is
+            // filtered client-side and only matched on:
+            //   - item.pull_request NOT set: a pull request is never ours;
+            //   - title EXACTLY TITLE: a similarly titled issue/PR is left alone;
+            //   - the label, whenever the label exists in this repo (see
+            //     labelWasPresent: a repo with no labels still gets its one issue).
+            const labelName = (l) => (typeof l === 'string' ? l : (l && l.name) || '');
+            const hasLabel = (item) => (item.labels || []).some((l) => labelName(l) === LABEL);
+            const isPinnedIssue = (item, requireLabel) =>
+              !item.pull_request && item.title === TITLE && (!requireLabel || hasLabel(item));
+
+            // Ensure the label exists before filing anything. Returns whether it
+            // was already there: an issue created in the same run that first
+            // created the label cannot carry it yet, and a repo whose label API
+            // refuses gets its issue without the label — both are then matched by
+            // exact title + not-a-PR on later runs.
+            async function labelWasPresent() {
+              try {
+                const labels = await github.rest.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
+                if ((labels.data || []).some((l) => l && l.name === LABEL)) return { present: true, usable: true };
+              } catch (e) {
+                core.info('Could not list labels (' + e.message + '); trying to create it.');
+              }
+              try {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: LABEL,
+                  color: 'd73a4a',
+                  description: 'The nightly bundle image-freshness check is failing',
+                });
+                core.info('Created the ' + LABEL + ' label.');
+                return { present: false, usable: true };
+              } catch (e) {
+                core.warning('Could not create the ' + LABEL + ' label (' + e.message + '); filing the issue without it and matching it by exact title from now on.');
+                return { present: false, usable: false };
+              }
+            }
+
             let list;
             try {
               const missing = fs.readFileSync('/tmp/missing.txt', 'utf8').trim().split('\n').filter(Boolean);
@@ -83,7 +142,7 @@ jobs:
             } catch (e) {
               list = '_Could not read the missing list — see workflow logs._';
             }
-            const runUrl = context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
+            const runUrl = context.serverUrl + '/' + owner + '/' + repo + '/actions/runs/' + context.runId;
             const body = [
               'Nightly image-freshness check failed.',
               '',
@@ -95,28 +154,26 @@ jobs:
               '',
               '_This issue is updated in place by every scheduled failure and auto-closes when the check passes again._',
             ].join('\n');
-            const open = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: LABEL,
-              state: 'open',
-              per_page: 100,
-            });
-            if (open.data.length > 0) {
+
+            const label = await labelWasPresent();
+            const open = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
+            const matches = (open.data || []).filter((item) => isPinnedIssue(item, label.present));
+            if (matches.length > 0) {
+              // The pinned issue: update in place, never file a second one.
               await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: open.data[0].number,
+                owner,
+                repo,
+                issue_number: matches[0].number,
                 title: TITLE,
                 body,
               });
             } else {
               await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 title: TITLE,
                 body,
-                labels: [LABEL, 'automated'],
+                ...(label.usable ? { labels: [LABEL] } : {}),
               });
             }
 
@@ -126,24 +183,48 @@ jobs:
         with:
           script: |
             const LABEL = 'bundle-image-stale';
-            const runUrl = context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
-            const open = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              labels: LABEL,
-              state: 'open',
-              per_page: 100,
-            });
-            for (const issue of open.data) {
+            const TITLE = 'Bundle image-freshness check failed';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = context.serverUrl + '/' + owner + '/' + repo + '/actions/runs/' + context.runId;
+
+            // Same Gitea caveat as the failure step above: a `labels:` filter is
+            // IGNORED when the label does not exist, and the response mixes
+            // issues with pull requests — commenting on / closing such a row
+            // would hit a PR or an unrelated issue. Filter client-side: never a
+            // pull request, exact title, plus the label when the repo has it.
+            const labelName = (l) => (typeof l === 'string' ? l : (l && l.name) || '');
+            const hasLabel = (item) => (item.labels || []).some((l) => labelName(l) === LABEL);
+            const isPinnedIssue = (item, requireLabel) =>
+              !item.pull_request && item.title === TITLE && (!requireLabel || hasLabel(item));
+
+            // Read-only: this step never creates the label. Where the repo has no
+            // labels (or the label could not be created) the pinned issue was
+            // filed under its exact title, so match on that alone.
+            let requireLabel = false;
+            try {
+              const labels = await github.rest.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
+              requireLabel = (labels.data || []).some((l) => l && l.name === LABEL);
+            } catch (e) {
+              core.info('Could not list labels (' + e.message + '); matching the pinned issue by title.');
+            }
+
+            const open = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
+            const matches = (open.data || []).filter((item) => isPinnedIssue(item, requireLabel));
+            if (matches.length === 0) {
+              core.info('No pinned image-freshness issue to close.');
+              return;
+            }
+            for (const issue of matches) {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 issue_number: issue.number,
                 body: 'Image-freshness check passed again: ' + runUrl + ' — closing.',
               });
               await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 issue_number: issue.number,
                 state: 'closed',
                 state_reason: 'completed',
