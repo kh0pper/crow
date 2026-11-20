@@ -13,7 +13,7 @@ import {
 } from "../servers/shared/project-services-schema.js";
 import { SATELLITE_DDL } from "../servers/shared/satellite-schema.js";
 import { MAIL_DDL, MAIL_ACCOUNT_SEND_COLUMNS, MAIL_DRAFTS_DDL } from "../servers/shared/mail-schema.js";
-import { REPORTS_DDL, REPORTS_RUNS_DDL, REPORTS_VERSIONS_DDL } from "../servers/shared/reports-schema.js";
+import { REPORTS_DDL, REPORTS_RUNS_DDL, REPORTS_VERSIONS_DDL, REPORTS_SEND_DDL } from "../servers/shared/reports-schema.js";
 import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL, NOTE_WITHDRAWAL_COLUMNS } from "../servers/research/provenance-schema.js";
 
 // Ensure data directory exists
@@ -3135,6 +3135,16 @@ await initTable("reports runs tables", REPORTS_RUNS_DDL);
 // which scripts/migrations/0033-reports-versions.mjs also runs — one shape, two rails; additive, no
 // SCHEMA_GENERATION bump. The earlier reports constants are untouched.
 await initTable("reports versions tables", REPORTS_VERSIONS_DDL);
+
+// reports send tables: the owner's recipients for one report (an address lower-cased, at most one row
+// per report and address, the approval nonce and seal, the four state words) and the send log (one row
+// per run, recipient and attempt, carrying the claim token, the Crow-made Message-ID, the provider's id
+// and a short reason). Epoch-ms times; states are validated in the stores (no CHECK, no FK). LOCAL ONLY
+// (instance-sync LOCAL_ONLY_TABLES): a recipient is a person the owner writes to and a send names them,
+// and a report never leaves its instance. Same DDL as REPORTS_SEND_DDL in
+// servers/shared/reports-schema.js, which scripts/migrations/0034-reports-send.mjs also runs — one
+// shape, two rails; additive, no SCHEMA_GENERATION bump. The earlier reports constants are untouched.
+await initTable("reports send tables", REPORTS_SEND_DDL);
 
 // staged_sends: one row per provider draft a bot staged for the operator's yes (spec §12;
 // servers/gateway/staged/store.js). LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): it holds the

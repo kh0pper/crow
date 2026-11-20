@@ -27,6 +27,10 @@
  * `report_run_requests` is the tiny queue a bot tool inserts into when it wants a preview or a run now
  * (it never starts a run itself). A scheduled run's window is unique per report, so a missed window
  * cannot run twice. `trigger` is an SQL keyword, so it is quoted everywhere in SQL.
+ *
+ * REPORTS_SEND_DDL is the send half: the owner's recipients for one report, and the send log (one row
+ * per run, recipient and attempt). Its own comment below spells out the states, the unique keys and why
+ * neither table can ever be resent automatically.
  */
 export const REPORTS_DDL = `
   CREATE TABLE IF NOT EXISTS reports (
@@ -201,3 +205,75 @@ export const REPORTS_VERSIONS_DDL = `
 `;
 
 export const REPORTS_VERSIONS_TABLES = Object.freeze(["report_versions"]);
+
+/**
+ * The send half: who a report goes to, and one row per attempt at mailing one of them.
+ *
+ * `report_recipients` is the owner's list for one report. An address is stored lower-cased, and a
+ * report has at most one row per address (the unique index), so proposing the same person twice
+ * answers the row that exists instead of a second one. `comment_tier` NULL means "the report's own
+ * default" (spec R15). `state` is one of proposed, approved, refused, revoked. An approved row carries
+ * an approval nonce and an approval seal over the report, the row, the address and the tier
+ * (servers/gateway/reports/seal.js, kind "recipient"); refusing or revoking NULLS both, so an old seal
+ * can never re-approve a row. A recipient is NOT part of the live set: adding, approving, refusing or
+ * revoking one never changes the report's status.
+ *
+ * `report_sends` is the send log (spec R3): one row per (run, recipient, attempt), written `pending`
+ * before anything is attempted and moved once by a guarded claim, then settled by its claim token. It
+ * names the sender account so a restart can still say what happened, and it stores both the Crow-made
+ * Message-ID and whatever the provider reported, because later matching looks for either. Statuses are
+ * pending, sending, sent, failed, unknown and refused. A `sending` or `unknown` row is never resent
+ * automatically: only a `pending` row can be claimed.
+ *
+ * Epoch-ms times; statuses and states are validated in the stores (servers/gateway/reports/approvals.js
+ * and the mail module's reports send door), never by a CHECK. No foreign keys: the reports store
+ * removes one report's rows itself. Every table is LOCAL ONLY (instance-sync LOCAL_ONLY_TABLES): a
+ * recipient is a person the owner writes to and a send names that person and the account, so neither
+ * leaves the instance holding the report. Additive, no SCHEMA_GENERATION bump.
+ */
+export const REPORTS_SEND_DDL = `
+  CREATE TABLE IF NOT EXISTS report_recipients (
+    id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL,
+    address TEXT NOT NULL,
+    display_name TEXT,
+    comment_tier TEXT,
+    state TEXT NOT NULL DEFAULT 'proposed',
+    proposed_by TEXT NOT NULL,
+    approval_nonce TEXT,
+    approval_seal TEXT,
+    approved_at INTEGER,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_report_recipients_report_address
+    ON report_recipients(report_id, address);
+
+  CREATE INDEX IF NOT EXISTS idx_report_recipients_report ON report_recipients(report_id);
+
+  CREATE TABLE IF NOT EXISTS report_sends (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    report_id TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    account_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    claim_token TEXT,
+    message_id TEXT,
+    provider_message_id TEXT,
+    reason TEXT,
+    gateway_run_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_report_sends_run_recipient_attempt
+    ON report_sends(run_id, recipient_id, attempt);
+
+  CREATE INDEX IF NOT EXISTS idx_report_sends_report ON report_sends(report_id);
+
+  CREATE INDEX IF NOT EXISTS idx_report_sends_status ON report_sends(status);
+`;
+
+export const REPORTS_SEND_TABLES = Object.freeze(["report_recipients", "report_sends"]);

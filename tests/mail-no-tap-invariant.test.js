@@ -31,7 +31,15 @@ const SCHEDULE_SERVICE = resolve(REPO, "servers/gateway/mail/send/schedule-servi
 const SEAL = resolve(REPO, "servers/gateway/mail/drafts/seal.js");
 const DRAFT_ROUTES = resolve(REPO, "servers/gateway/routes/mail-drafts-api.js");
 const DRAFT_MCP = resolve(REPO, "servers/gateway/mail-draft-mcp.js");
+const DRAFT_STORE = resolve(REPO, "servers/gateway/mail/drafts/store.js");
 const BRIDGE = resolve(REPO, "scripts/pi-bots/bridge.mjs");
+// The reports-only send path (case d): the door that takes a `report_sends` row id, and the delivery
+// seam that will be its only caller (PR 5). Neither may be reachable from a bot door.
+const REPORTS_DOOR = resolve(REPO, "servers/gateway/mail/reports-door.js");
+const REPORTS_DELIVERY = resolve(REPO, "servers/gateway/reports/delivery.js");
+const REPORTS_RUN = resolve(REPO, "servers/gateway/reports/run.js");
+const REPORTS_DIR = resolve(REPO, "servers/gateway/reports");
+const REPORTS_MCP_DOORS = ["servers/gateway/reports/mcp.js", "servers/gateway/reports/pickup-mcp.js"];
 
 /** A tool name that could send or schedule mail, in any spelling a def might use. */
 const TAP_TOOL_NAME = /mail.*(send|schedule)/i;
@@ -121,6 +129,15 @@ function importedNames(file) {
   return names;
 }
 
+/** Does this path name a real file? A door that a later PR has not created yet is not walked. */
+function existsFile(file) {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
 const rel = (file) => relative(REPO, file).split("\\").join("/");
 
 /* ------------------------------------------------------------------------ (a) */
@@ -139,6 +156,10 @@ test("(a) no MCP door the gateway mounts can reach a mail send or schedule path"
     resolve(REPO, "servers/gateway/board-mcp.js"),
     // The drafting turn's door (plan 3, Task 8a): three read/propose tools, and no way to a tap.
     DRAFT_MCP,
+    // The reports MCP doors, the moment PR 7 and PR 9a create them: a door that does not exist yet is
+    // simply not in the walk, and no other line of (a) changes.
+    ...[resolve(REPO, "servers/gateway/reports/mcp.js"), resolve(REPO, "servers/gateway/reports/pickup-mcp.js")]
+      .filter(existsFile),
   ];
   for (const door of doors) {
     assert.ok(statSync(door).isFile(), `${rel(door)} is a real module`);
@@ -262,5 +283,134 @@ test("(c) no bot def, preset or tool allowlist can grant a mail send or schedule
   const templateCsv = toolAllowlist(template);
   for (const name of templateCsv.split(",").map((entry) => entry.trim()).filter(Boolean)) {
     assert.ok(!TAP_TOOL_NAME.test(name), `the template def grants ${name}`);
+  }
+});
+
+/* ------------------------------------------------------------------------ (d) */
+
+// The reports-only send path has one door and one caller. The door takes a `report_sends` row id and
+// never an address, so the only thing an invariant can watch is who may import it: the delivery seam
+// (PR 5), and nothing else in the tree — the installed bundles under `bundles/` included, because a
+// bundle's server code runs on the same box. `delivery.js` lands in PR 5, so each allowed set below may
+// be empty today; what may never happen is a name outside it. The door's module name is watched as a
+// literal string too, not only as an import: a dynamic import or a copied path is still a string.
+const DOOR_IMPORTERS = Object.freeze(["servers/gateway/reports/delivery.js"]);
+const DELIVERY_IMPORTERS = Object.freeze([
+  "servers/gateway/reports/schedule-hook.js",
+  "servers/gateway/routes/reports-api.js",
+  "servers/gateway/boot/post-listen.js",
+]);
+
+/** Every file in the tree that names `target` as a relative import, by its repo-relative path. */
+function importersOf(target, files) {
+  const out = new Set();
+  for (const file of files) {
+    if (file === target) continue;
+    for (const edge of localImports(file)) {
+      if (edge.file === target) {
+        out.add(rel(file));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+test("(d) reports-door is imported only by servers/gateway/reports/delivery.js", () => {
+  const files = [...walk(resolve(REPO, "servers")), ...walk(resolve(REPO, "scripts")), ...walk(resolve(REPO, "bundles"))];
+  assert.ok(files.length > 100, `the server, script and bundle trees were really walked (${files.length} files)`);
+  assert.ok(walk(resolve(REPO, "bundles")).length > 0, "the bundles tree was really walked");
+  assert.ok(statSync(REPORTS_DOOR).isFile(), "the reports send door is a real module");
+
+  const importers = importersOf(REPORTS_DOOR, files);
+  for (const file of importers) {
+    assert.ok(DOOR_IMPORTERS.includes(file), `${file} imports the reports-only send door`);
+  }
+  // And the door is nobody else's to reach: a bot door, a route, a script or an installed bundle naming
+  // it fails above.
+  assert.ok(!importers.has("servers/gateway/routes/reports-api.js"),
+    "no route imports the send door");
+  assert.ok(!importers.has("servers/gateway/reports/run.js"), "the run engine imports no send door");
+  assert.equal([...importers].some((file) => file.startsWith("bundles/")), false,
+    "no bundle imports the reports-only send door");
+});
+
+test("(d) no file outside the door, delivery.js and the tests names reports-door at all", () => {
+  // An import is not the only way to reach a module: a dynamic import, a re-export or a copied path is
+  // a string in a file. The walk therefore covers the installed bundles too, and the literal name may
+  // appear only in the door itself, in the delivery seam that calls it, and in the tests that drive it.
+  const files = [
+    ...walk(resolve(REPO, "servers")),
+    ...walk(resolve(REPO, "scripts")),
+    ...walk(resolve(REPO, "bundles")),
+  ];
+  const bundleFiles = walk(resolve(REPO, "bundles"));
+  assert.ok(files.length > 100, `the server, script and bundle trees were really walked (${files.length} files)`);
+  assert.ok(bundleFiles.length > 0, `the bundles tree was really walked (${bundleFiles.length} files)`);
+
+  const allowed = new Set([rel(REPORTS_DOOR), rel(REPORTS_DELIVERY)]);
+  const naming = files.filter((file) => readFileSync(file, "utf8").includes("reports-door")).map(rel);
+  for (const file of naming) {
+    assert.ok(allowed.has(file), `${file} names the reports-only send door`);
+  }
+  assert.equal(naming.some((file) => file.startsWith("bundles/")), false,
+    "no bundle names the reports-only send door");
+});
+
+test("(d) delivery.js is imported only by schedule-hook.js, reports-api.js and post-listen.js", () => {
+  const files = [...walk(resolve(REPO, "servers")), ...walk(resolve(REPO, "scripts"))];
+  assert.ok(files.length > 100, `the server and script trees were really walked (${files.length} files)`);
+
+  const importers = importersOf(REPORTS_DELIVERY, files);
+  for (const file of importers) {
+    assert.ok(DELIVERY_IMPORTERS.includes(file), `${file} imports reports/delivery.js`);
+  }
+});
+
+test("(d) run.js imports neither delivery.js nor reports-door.js", () => {
+  assert.ok(statSync(REPORTS_RUN).isFile(), "the run engine is a real module");
+  const targets = localImports(REPORTS_RUN).map((edge) => edge.file);
+  assert.ok(targets.length > 0, "the run engine's imports were really read");
+  assert.equal(targets.includes(REPORTS_DELIVERY), false, "run.js imports no delivery seam");
+  assert.equal(targets.includes(REPORTS_DOOR), false, "run.js imports no send door");
+});
+
+test("(d) the door imports no send service, no schedule service, no draft seal, no draft store", () => {
+  assert.ok(statSync(REPORTS_DOOR).isFile(), "the reports send door is a real module");
+  const targets = localImports(REPORTS_DOOR).map((edge) => edge.file);
+  for (const forbidden of [SEND_SERVICE, SCHEDULE_SERVICE, SEAL, DRAFT_STORE]) {
+    assert.equal(targets.includes(forbidden), false,
+      `the reports send door imports ${rel(forbidden)}`);
+  }
+  const names = importedNames(REPORTS_DOOR);
+  assert.ok(!names.includes("requestSend"), "the reports send door names no send tap");
+  assert.ok(!names.includes("scheduleDraft"), "the reports send door names no schedule tap");
+
+  // The bot runtime is behind a bot's turn, never behind the door a report send goes through.
+  const closure = importClosure([REPORTS_DOOR]);
+  assert.ok(closure.files.size > 3,
+    `the reports send door's imports were really walked (${closure.files.size} modules)`);
+  assert.equal(closure.files.has(BRIDGE), false,
+    "the reports send door's import closure does not reach scripts/pi-bots/bridge.mjs");
+  assert.equal(closure.files.has(SEND_SERVICE), false, "and not the mail send service");
+});
+
+test("(d) nothing under servers/gateway/reports registers a tool whose name matches mail send or schedule", () => {
+  const files = walk(REPORTS_DIR);
+  assert.ok(files.length > 5, `the reports tree was really walked (${files.length} files)`);
+  for (const file of files) {
+    for (const name of toolNamesOf(file)) {
+      assert.ok(!TAP_TOOL_NAME.test(name), `${rel(file)} registers ${name}`);
+    }
+  }
+});
+
+test("(d) only reports/mcp.js and reports/pickup-mcp.js may register MCP tools under servers/gateway/reports", () => {
+  const files = walk(REPORTS_DIR);
+  assert.ok(files.length > 5, `the reports tree was really walked (${files.length} files)`);
+  assert.ok(REPORTS_MCP_DOORS.length >= 1, "the allowed doors are named");
+  const registering = files.filter((file) => toolNamesOf(file).length > 0).map(rel);
+  for (const file of registering) {
+    assert.ok(REPORTS_MCP_DOORS.includes(file), `${file} registers MCP tools under servers/gateway/reports`);
   }
 });

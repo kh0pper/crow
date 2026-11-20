@@ -62,7 +62,7 @@ import { makeIsClaimedElsewhere, refreshClaim as refreshOwnClaimInDb } from "../
 import { createMailCredentials, createRotationWriter } from "../mail/credentials.js";
 import { ACCOUNT_REMOVED_REASON, transition } from "../mail/drafts/store.js";
 import { mailEnabled } from "../mail/flag.js";
-import { toMailError } from "../mail/errors.js";
+import { MailError, toMailError } from "../mail/errors.js";
 import { onAccountDeleting } from "../mail/store/accounts.js";
 import { createMailSupervisor, shouldRunMailSync } from "../mail/sync/supervisor.js";
 import { registerMailSendHook } from "../mail/send/hook.js";
@@ -595,4 +595,34 @@ export async function stopMailSync() {
   }
   await handle.stop();
   return true;
+}
+
+/**
+ * The reports send door's adapter source, for a sender that goes through the mail supervisor.
+ *
+ * The reports send door never builds a connection: it calls one injected
+ * `deps.adapterFor(account, fn)` and this is the boot-built one for an IMAP/SMTP sender (a password, an
+ * app password or XOAUTH2). It borrows the running supervisor's own short-lived action adapter through
+ * `withAdapter(account.id, fn)` — the same seam Crow Mail's actions and its own sends use — so a report
+ * mail costs no second connection and no mailbox sync is invented for it. Nothing is imported from
+ * reports here: the door takes the function, this module does not know it exists.
+ *
+ * A gateway that runs no supervisor has nothing to send through, and answers NETWORK/`stopped` rather
+ * than opening a connection of its own.
+ *
+ * A `transport='gmail_api'` branch arrives with PR 2a: the supervisor builds no worker for such an
+ * account and its `withAdapter` answers NOT_FOUND, so that path will build a short-lived adapter off
+ * the boot `adapterFactory` with the registry's `tokenProviderFor(account.id)` instead.
+ *
+ * @param {{id?: string}} account the sender row the door resolved
+ * @param {(adapter: object) => Promise<any>} fn what to do with the borrowed adapter
+ * @returns {Promise<any>}
+ */
+export function reportsAdapterFor(account, fn) {
+  const handle = currentHandle;
+  const supervisor = handle != null && handle.started === true ? handle.supervisor : null;
+  if (supervisor == null || typeof supervisor.withAdapter !== "function") {
+    return Promise.reject(new MailError("NETWORK", "stopped"));
+  }
+  return supervisor.withAdapter(account?.id, fn);
 }

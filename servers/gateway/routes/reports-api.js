@@ -27,17 +27,26 @@
  * secret state, and the owner's card reads `live` (whether it verifies) instead. That boolean is the
  * approvals module's `isLive`, so a report a direct UPDATE or a repointed provider stopped reads
  * `live: false` here.
+ *
+ * NOTHING ON THIS ROUTER SENDS MAIL, and it never imports the send door or a delivery module. An owner
+ * add of a recipient is a propose plus an approve in one tap; "Send to the rest" only writes `pending`
+ * `report_sends` rows for a run (reports/send-log.js); the delivery seam is somebody else's, and it
+ * takes those row ids, never an address from here. No answer on this router ever carries a
+ * `report_recipients` seal or nonce: the recipient view is the approvals module's own, which drops
+ * both.
  */
 import { Router, json as jsonParserOf } from "express";
 import { createDbClient } from "../../db.js";
 import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import {
-  approveGoLive, isLive, ownerSaveRecipe, pauseReport, resumeReport, updateSettings,
+  approveGoLive, approveRecipient, isLive, listRecipients, ownerSaveRecipe, pauseReport,
+  proposeRecipient, refuseRecipient, resumeReport, revokeRecipient, updateSettings,
 } from "../reports/approvals.js";
 import { buildApprovalsDeps } from "../reports/approvals-deps.js";
 import { listRuns } from "../reports/run.js";
 import { requestRun } from "../reports/run-requests.js";
 import { kickReportsHook } from "../reports/schedule-hook.js";
+import { createSendToRest, listSends } from "../reports/send-log.js";
 import { createReport, getReport, listReports } from "../reports/store.js";
 
 /** The mount point. */
@@ -51,6 +60,12 @@ export const OWNER_LABEL = "owner";
 
 /** A report id, exactly what the store mints. Anything else is a 404 here. */
 export const REPORT_ID_RE = /^rpt-[0-9a-f]{16}$/;
+
+/** A recipient id, exactly what approvals.js mints. A malformed one is a 404 here. */
+export const RECIPIENT_ID_RE = /^rrc-[0-9a-f]{16}$/;
+
+/** A run id, exactly what run.js mints. A malformed one in a path is a 404 here. */
+export const RUN_ID_RE = /^rrn-[0-9a-f]{16}$/;
 
 /** The largest body this router accepts. */
 const BODY_LIMIT_BYTES = 256 * 1024;
@@ -69,9 +84,11 @@ const FIXED_TEXT = Object.freeze({
   preview_failed: "That preview did not finish, so this report cannot go live yet.",
   go_live_needed: "Preview and go live again.",
   conflict: "That report changed while this request was in flight. Try again.",
+  recipient_changed: "That report changed while this request was in flight. Try again.",
   no_schedule: "Choose when this report runs before going live.",
   sender_not_ready: "Choose a mail account that is ready to send.",
   model_unresolved: "Crow could not work out which model this report uses, so it cannot go live.",
+  keychain_key_missing: "The keychain key for this password is not on this machine.",
   internal: "Something went wrong.",
 });
 
@@ -87,9 +104,11 @@ const STATUS_BY_CODE = Object.freeze({
   preview_failed: 409,
   go_live_needed: 409,
   conflict: 409,
+  recipient_changed: 409,
   no_schedule: 409,
   sender_not_ready: 409,
   model_unresolved: 409,
+  keychain_key_missing: 409,
 });
 
 function messageFor(code) {
@@ -249,6 +268,30 @@ export function reportsApiRouter(dashboardAuth, deps = {}) {
     return id;
   };
 
+  /** A recipient id in a path: a malformed one is a 404 before anything is read. */
+  const recipientIdOf = (req, res) => {
+    const rid = String(req.params?.rid ?? "");
+    if (!RECIPIENT_ID_RE.test(rid)) {
+      sendError(res, 404, "not_found");
+      return null;
+    }
+    return rid;
+  };
+
+  /**
+   * One recipient of THIS report, or a 404. The recipient list is the approvals module's (it carries
+   * no seal and no nonce), so a rid of another report is simply not in it.
+   */
+  const recipientInReport = async (db, res, reportId, recipientId) => {
+    const recipients = await listRecipients(db, reportId, approvalsDeps);
+    const found = recipients.find((row) => row.id === recipientId) ?? null;
+    if (!found) {
+      sendError(res, 404, "not_found");
+      return null;
+    }
+    return found;
+  };
+
   /* -------------------------------------------------------------------------- reads */
 
   // GET /?project=<id> — one project's reports, newest first, without their recipe bodies.
@@ -400,6 +443,105 @@ export function reportsApiRouter(dashboardAuth, deps = {}) {
     const runs = await listRuns(db, id);
     res.json({ runs });
   }));
+
+  /* -------------------------------------------------------------------- recipients */
+
+  // GET /:id/recipients — who this report goes to. The approval seal and its nonce never leave the
+  // approvals module, so no answer here can carry them; each row carries `verified` (whether its seal
+  // still matches the row as it is now) instead.
+  router.get(`${REPORTS_API_PREFIX}/:id/recipients`, route("GET /:id/recipients", async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    if (!(await getReport(db, id))) return sendError(res, 404, "not_found");
+    res.json({ recipients: await listRecipients(db, id, approvalsDeps) });
+  }));
+
+  // POST /:id/recipients — the owner adds one person: propose, then approve, in this one tap. A bot's
+  // propose-only path is elsewhere; this route is the owner's, so `proposedBy` is always `owner`.
+  router.post(`${REPORTS_API_PREFIX}/:id/recipients`, route("POST /:id/recipients", async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    const body = req.body == null ? {} : req.body;
+    if (typeof body !== "object" || Array.isArray(body)) return sendError(res, 400, "bad_input");
+    const proposed = await proposeRecipient(db, approvalsDeps, {
+      reportId: id,
+      address: body.address,
+      displayName: body.displayName,
+      commentTier: body.commentTier,
+      proposedBy: OWNER_LABEL,
+    });
+    const approved = await approveRecipient(db, approvalsDeps, {
+      recipientId: proposed.id,
+      actor: { kind: "owner" },
+    });
+    res.status(201).json({ recipient: approved });
+  }));
+
+  /** The shared body of approve, refuse and revoke: the same path, one decision each. */
+  const decide = (label, action) => route(label, async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    const rid = recipientIdOf(req, res);
+    if (!rid) return;
+    if (!(await getReport(db, id))) return sendError(res, 404, "not_found");
+    const row = await recipientInReport(db, res, id, rid);
+    if (!row) return;
+    const recipient = await action(db, rid);
+    res.json({ recipient });
+  });
+
+  // POST /:id/recipients/:rid/approve — the owner's approval, with a fresh nonce and seal.
+  router.post(`${REPORTS_API_PREFIX}/:id/recipients/:rid/approve`, decide(
+    "POST /:id/recipients/:rid/approve",
+    (db, rid) => approveRecipient(db, approvalsDeps, { recipientId: rid, actor: { kind: "owner" } }),
+  ));
+
+  // POST /:id/recipients/:rid/refuse — the state and a NULLED seal, so an old approval cannot return.
+  router.post(`${REPORTS_API_PREFIX}/:id/recipients/:rid/refuse`, decide(
+    "POST /:id/recipients/:rid/refuse",
+    (db, rid) => refuseRecipient(db, approvalsDeps, { recipientId: rid, actor: { kind: "owner" } }),
+  ));
+
+  // POST /:id/recipients/:rid/revoke — the same for an approval already given.
+  router.post(`${REPORTS_API_PREFIX}/:id/recipients/:rid/revoke`, decide(
+    "POST /:id/recipients/:rid/revoke",
+    (db, rid) => revokeRecipient(db, approvalsDeps, { recipientId: rid, actor: { kind: "owner" } }),
+  ));
+
+  /* ------------------------------------------------------------------- the send log */
+
+  // GET /:id/sends?run=<runId> — this report's send log, or one run's, bounded to 200 rows. Claim
+  // tokens and gateway run ids stay out of it: they are delivery's own bookkeeping.
+  router.get(`${REPORTS_API_PREFIX}/:id/sends`, route("GET /:id/sends", async (db, req, res) => {
+    const id = idOf(req, res);
+    if (!id) return;
+    if (!(await getReport(db, id))) return sendError(res, 404, "not_found");
+    const runId = req.query?.run;
+    if (runId !== undefined && (typeof runId !== "string" || !RUN_ID_RE.test(runId))) {
+      return sendError(res, 400, "bad_input");
+    }
+    res.json({ sends: await listSends(db, { reportId: id, runId: runId ?? null }) });
+  }));
+
+  // POST /:id/runs/:runId/send-rest — the owner's "Send to the rest": a `pending` row for every
+  // approved recipient this run has not sent to, is not sending to, and holds no row for. It SENDS
+  // nothing; delivery picks the rows up. A malformed run id is a 404, like every other path id here.
+  router.post(`${REPORTS_API_PREFIX}/:id/runs/:runId/send-rest`, route(
+    "POST /:id/runs/:runId/send-rest",
+    async (db, req, res) => {
+      const id = idOf(req, res);
+      if (!id) return;
+      const runId = String(req.params?.runId ?? "");
+      if (!RUN_ID_RE.test(runId)) return sendError(res, 404, "not_found");
+      if (!(await getReport(db, id))) return sendError(res, 404, "not_found");
+      const out = await createSendToRest(db, { approvals: approvalsDeps }, {
+        reportId: id,
+        runId,
+        actor: { kind: "owner" },
+      });
+      res.status(201).json(out);
+    },
+  ));
 
   return router;
 }

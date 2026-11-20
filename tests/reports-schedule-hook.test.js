@@ -844,6 +844,80 @@ test("a stale running run becomes failed with one notice; this process's runs ar
   assert.equal(notes.length, 2, "and a second sweep notifies nothing");
 });
 
+test("a run sweep that throws does not skip the send sweep", async () => {
+  const db = await freshDb();
+  const report = await liveReport(db);
+  await insertRun(db, report, { id: "rrn-0000000000000041", status: "running" });
+  await db.execute({
+    sql: `INSERT INTO report_sends
+            (id, run_id, report_id, recipient_id, attempt, status, claim_token, gateway_run_id,
+             created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, 'sending', ?, 'another-process', ?, ?)`,
+    args: [
+      "rsd-0000000000000041", "rrn-0000000000000041", report.id, "rrc-0000000000000041",
+      "c".repeat(32), NOW, NOW,
+    ],
+  });
+  // A database whose run-sweep statement fails: the send sweep must not be behind it.
+  const refusing = {
+    async execute(arg) {
+      if (/UPDATE report_runs/.test(String(arg?.sql ?? ""))) throw new Error("report_runs is busy");
+      return db.execute(arg);
+    },
+  };
+  const hook = registerReportsHook(db, hookDeps(report));
+
+  const out = await hook.sweep(refusing);
+
+  assert.deepEqual(out, { marked: 0 }, "the run sweep marked nothing");
+  assert.equal((await rows(db, "SELECT status FROM report_runs"))[0].status, "running",
+    "the run row was left for the next try");
+  assert.equal((await rows(db, "SELECT status FROM report_sends"))[0].status, "unknown",
+    "the send sweep ran anyway");
+  assert.equal(notes.length, 1, "one notice: the send sweep's");
+  await hook.stop();
+});
+
+test("a send sweep that throws is retried by the next tick, and marks the row then", async () => {
+  const db = await freshDb();
+  const report = await liveReport(db);
+  await db.execute({
+    sql: `INSERT INTO report_sends
+            (id, run_id, report_id, recipient_id, attempt, status, claim_token, gateway_run_id,
+             created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, 'sending', ?, 'another-process', ?, ?)`,
+    args: [
+      "rsd-0000000000000042", "rrn-0000000000000042", report.id, "rrc-0000000000000042",
+      "d".repeat(32), NOW, NOW,
+    ],
+  });
+  let failures = 1;
+  const flaky = {
+    async execute(arg) {
+      if (failures > 0 && /UPDATE report_sends/.test(String(arg?.sql ?? ""))) {
+        failures -= 1;
+        throw new Error("report_sends is busy");
+      }
+      return db.execute(arg);
+    },
+  };
+  const hook = registerReportsHook(db, hookDeps(report));
+
+  await hook.tick(flaky);
+  assert.equal((await rows(db, "SELECT status FROM report_sends"))[0].status, "sending",
+    "the first sweep threw before marking anything");
+  assert.equal(notes.length, 0);
+
+  await hook.tick(flaky);
+  assert.equal((await rows(db, "SELECT status FROM report_sends"))[0].status, "unknown",
+    "the next tick retried it and marked the row");
+  assert.equal(notes.length, 1, "and the owner heard once");
+
+  await hook.tick(flaky);
+  assert.equal(notes.length, 1, "a successful sweep is not repeated");
+  await hook.stop();
+});
+
 test("two gateway starts on the same kernel boot id: the old pid is gone, so the sweep fires", async () => {
   const db = await freshDb();
   const report = await liveReport(db);

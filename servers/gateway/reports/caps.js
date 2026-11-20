@@ -11,7 +11,8 @@
  * UTC: a cap counter must never throw because a stored zone stopped being valid.
  *
  * `report_usage` holds one row per (report, day) and the writes only ever ADD deltas, so two runs that
- * finish at once cannot lose each other's counts.
+ * finish at once cannot lose each other's counts. The email cap is taken with `claimEmailSlot`, one
+ * conditional increment, so two sends that are claimed at once cannot both pass a cap of one.
  *
  * The per-recipient comment cap is not a per-report counter, so it has no row here: it is only read
  * through `getCaps` by the recipient-facing paths that count a recipient's comments.
@@ -189,6 +190,39 @@ export async function addUsage(db, { reportId, day, emails, botMs, extraStepRuns
     botMs: Number(read.rows[0]?.bot_ms) || 0,
     extraStepRuns: Number(read.rows[0]?.extra_step_runs) || 0,
   };
+}
+
+/**
+ * Take one email slot for the day, or answer false because the cap is already used up. The read and
+ * the increment are ONE batch (one transaction on the client), and the increment itself is
+ * conditional (`emails < max`), so two claims that arrive at the same moment cannot both pass a cap
+ * of one: exactly one of them moves the counter.
+ *
+ * The row is created at zero first (`INSERT OR IGNORE`), so the guarded UPDATE is the only statement
+ * that decides anything and `rowsAffected` is its own answer. There is no way back: a claimed slot is
+ * spent even if the send it was claimed for then fails, which is what a per-day cap counts.
+ *
+ * @param {object} db a libsql-shaped client
+ * @param {{reportId: string, day: string, max: number}} fields
+ * @returns {Promise<boolean>} whether this caller took the slot
+ * @throws {Error} `bad_input` for a bad id, day or bound
+ */
+export async function claimEmailSlot(db, { reportId, day, max } = {}) {
+  reportOf(reportId);
+  dayOf(day);
+  if (typeof max !== "number" || !Number.isFinite(max) || max < 0) throw fail("bad_input", "max");
+  const [, claim] = await db.batch([
+    {
+      sql: "INSERT OR IGNORE INTO report_usage (report_id, day, emails) VALUES (?, ?, 0)",
+      args: [reportId, day],
+    },
+    {
+      sql: `UPDATE report_usage SET emails = emails + 1
+             WHERE report_id = ? AND day = ? AND emails < ?`,
+      args: [reportId, day, max],
+    },
+  ]);
+  return Number(claim?.rowsAffected ?? 0) === 1;
 }
 
 /**

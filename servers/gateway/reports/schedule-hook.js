@@ -53,6 +53,13 @@
  * `failed` with "Crow restarted during this run", so only the process that marked a row notifies, and
  * a second sweep marks nothing. Runs are never resumed: the owner's Run now starts a fresh one.
  *
+ * The same sweep then hands the send log to `reports/send-sweep.js`, under the same lease and the same
+ * process id: a `report_sends` row still `sending` from another process becomes `unknown` (never
+ * resent), and the owner hears the run's counts once. That step carries its OWN flag
+ * (`state.sendSwept`): it is not reached through the run sweep, so a run-sweep throw cannot skip it, and
+ * the flag is set only when it succeeded, so a throwing send sweep is retried by the next tick in this
+ * process rather than waiting for a restart.
+ *
  * The lease is also the sweep's gate: a boot with another live primary on the database waits (and the
  * first tick that takes the lease sweeps once), so a fresh process and the process it replaced can
  * never both sweep.
@@ -88,6 +95,7 @@ import { verifyLive, REPORT_LIVE } from "./approvals.js";
 import { releaseLease, takeLease } from "./lease.js";
 import { executeRun, getRun, getScheduledRun, NOT_LIVE_TEXT, RESTARTED_TEXT, startRun, statusAuditOk } from "./run.js";
 import { claimRunRequests, pruneRunRequests } from "./run-requests.js";
+import { sweepStaleSends } from "./send-sweep.js";
 import { getReport, recordAudit } from "./store.js";
 
 /** The hook id the gateway's scheduler knows this by. */
@@ -220,6 +228,7 @@ export function registerReportsHook(database, deps = {}) {
     warnedNotPrimary: false,
     warnedSweepSkipped: false,
     swept: false,
+    sendSwept: false,
   };
 
   /* ------------------------------------------------------------------- the run queue */
@@ -618,7 +627,8 @@ export function registerReportsHook(database, deps = {}) {
 
   /* -------------------------------------------------------------------- the sweep */
 
-  async function sweepOwned(db) {
+  /** The run rows a restart cut off, marked once. Its flag is set only by the pass that marked them. */
+  async function sweepStaleRuns(db) {
     let rows = [];
     try {
       ({ rows } = await db.execute({
@@ -631,7 +641,7 @@ export function registerReportsHook(database, deps = {}) {
       }));
     } catch (err) {
       console.warn(`[reports] the stale run sweep failed: ${err?.message || err}`);
-      return { marked: 0 };
+      return 0;
     }
     state.swept = true;
     for (const row of rows) {
@@ -647,7 +657,33 @@ export function registerReportsHook(database, deps = {}) {
         reportId: row.report_id,
       });
     }
-    return { marked: rows.length };
+    return rows.length;
+  }
+
+  /**
+   * The send log's own sweep: the same lease gate and the same process id, and its own flag, so it runs
+   * whether or not the run sweep could. A throw leaves the flag unset, so the next tick tries again.
+   */
+  async function sweepStaleSending(db) {
+    if (state.sendSwept) return;
+    try {
+      await sweepStaleSends(db, {
+        gatewayRunId: gatewayRunId(),
+        now: clock(d),
+        notify: (note) => notifyOwner(db, note),
+      });
+    } catch (err) {
+      console.warn(`[reports] the stale send sweep failed: ${err?.message || err}`);
+      return;
+    }
+    state.sendSwept = true;
+  }
+
+  async function sweepOwned(db) {
+    const marked = state.swept ? 0 : await sweepStaleRuns(db);
+    // Independent of the run sweep: a run-sweep throw above changes nothing here.
+    await sweepStaleSending(db);
+    return { marked };
   }
 
   async function sweep(database2) {
@@ -691,8 +727,9 @@ export function registerReportsHook(database, deps = {}) {
     state.warnedNotPrimary = false;
     if (!light) {
       // The boot sweep's second chance: a boot that found another live primary sweeps here instead,
-      // on the first tick that takes the lease.
-      if (!state.swept) await sweepOwned(db);
+      // on the first tick that takes the lease. The flag is per sweep, so a run sweep that succeeded
+      // does not keep a failed (or unlucky) send sweep from being retried.
+      if (!state.swept || !state.sendSwept) await sweepOwned(db);
       await guardLiveReports(db);
     }
     await dispatchDue(db);

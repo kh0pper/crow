@@ -65,11 +65,17 @@
  *
  * Every refusal is an Error with a `code`: `owner_only`, `not_found`, `bad_input`, `bad_recipe`,
  * `keychain_key_missing`, `preview_missing`, `preview_stale`, `preview_failed`, `no_schedule`,
- * `sender_not_ready`, `model_unresolved`, `go_live_needed`, `bad_seal_field`.
+ * `sender_not_ready`, `model_unresolved`, `go_live_needed`, `bad_seal_field`, and `recipient_changed`
+ * for a recipient write whose row moved under the decision.
  *
- * Recipients, custom steps, hosts, credential bindings and proposals are later PRs: they have their
- * own kinds in seal.js and no approval path here yet.
+ * Recipients live at the bottom of this module: propose (by the owner or a bot), approve, refuse and
+ * revoke, plus the list a page reads and the check the send door makes. A recipient is NOT part of the
+ * live set, so adding or changing one never changes the report's status; what an approved row carries is
+ * its own seal over the report, the row, the address and the tier (or the empty string for "the report's
+ * default"). Custom steps, hosts, credential bindings and proposals are later PRs: they have their own
+ * kinds in seal.js and no approval path here yet.
  */
+import { randomBytes } from "node:crypto";
 import { canonicalJson, recipeCallsModel, recipeHash, sourcesHash } from "./recipe-hash.js";
 import { approvalSeal, newApprovalNonce, verifyApprovalSeal } from "./seal.js";
 import { getReport, getRevision, recordAudit, saveRecipe, updateReportColumns } from "./store.js";
@@ -1065,4 +1071,443 @@ export async function updateSettings(db, deps, { reportId, settings, actor } = {
     });
   }
   return updated;
+}
+
+/* ------------------------------------------------------------------------- recipients */
+
+/** The four states a recipient row may hold (this module owns the words; there is no CHECK). */
+export const RECIPIENT_STATES = Object.freeze(["proposed", "approved", "refused", "revoked"]);
+
+/** The longest address kept: the same ceiling every mail address in this tree is held to. */
+const ADDRESS_MAX = 254;
+/** A display name is shown beside an address, never in a header, so it is text with a bound. */
+const DISPLAY_NAME_MAX = 120;
+/** `proposed_by` is the owner or one bot: `bot:<id>`, the same shape a run's requester uses. */
+const PROPOSED_BY_RE = /^bot:[A-Za-z0-9._:-]{1,64}$/;
+/** The same control characters as CONTROL_CHARS_ALL, without its `g` flag (a test needs no state). */
+const RECIPIENT_CONTROL_CHARS = /[\u0000-\u001f\u007f\u0080-\u009f\u2028\u2029]/;
+
+/** The recipient columns a reader needs; the seal and nonce stay off the list a page reads. */
+const RECIPIENT_COLUMNS = `id, report_id, address, display_name, comment_tier, state, proposed_by,
+  approval_nonce, approval_seal, approved_at, created_at`;
+
+function recipientIdOf(value) {
+  if (typeof value !== "string" || !value) throw fail("bad_input", "recipientId");
+  return value;
+}
+
+/**
+ * One address, lower-cased, as the single clean addr-spec a recipient may be: no display name, no
+ * angle brackets, no list, no control character. Validated here rather than through Crow Mail's
+ * parser: this module imports nothing under `mail/`, and the send door's own `validateOutgoing` is the
+ * second, stricter reader at the moment a message is built.
+ */
+function normalizeRecipientAddress(value) {
+  if (typeof value !== "string") throw fail("bad_input", "address");
+  if (RECIPIENT_CONTROL_CHARS.test(value)) throw fail("bad_input", "address");
+  const address = value.trim().toLowerCase();
+  if (!address || address.length > ADDRESS_MAX) throw fail("bad_input", "address");
+  if (/[\s<>()",;:\\[\]]/.test(address)) throw fail("bad_input", "address");
+  const at = address.indexOf("@");
+  if (at <= 0 || at !== address.lastIndexOf("@")) throw fail("bad_input", "address");
+  const local = address.slice(0, at);
+  const domain = address.slice(at + 1);
+  if (!local || !domain || local.startsWith(".") || local.endsWith(".") || local.includes("..")) {
+    throw fail("bad_input", "address");
+  }
+  if (!domain.includes(".") || domain.startsWith(".") || domain.endsWith(".") || domain.includes("..")) {
+    throw fail("bad_input", "address");
+  }
+  return address;
+}
+
+/** A tier is `a`, `b` or `c`; null and "" both mean "the report's own default" (spec R15). */
+function normalizeCommentTier(value) {
+  if (value == null || value === "") return null;
+  if (!COMMENT_TIERS.includes(value)) throw fail("bad_input", "commentTier");
+  return value;
+}
+
+/** A display name with control characters gone and a bound: text, never a header. */
+function normalizeRecipientName(value) {
+  if (value == null) return null;
+  if (typeof value !== "string") throw fail("bad_input", "displayName");
+  const name = value.replace(CONTROL_CHARS_ALL, " ").replace(/\s+/g, " ").trim();
+  if (!name) return null;
+  return name.length > DISPLAY_NAME_MAX ? name.slice(0, DISPLAY_NAME_MAX) : name;
+}
+
+/** Who proposed it: the owner, or one bot by id. */
+function normalizeProposedBy(value) {
+  if (value === "owner") return "owner";
+  if (typeof value === "string" && PROPOSED_BY_RE.test(value)) return value;
+  throw fail("bad_input", "proposedBy");
+}
+
+/** A stored tier as the seal carries it: the empty string when the column is NULL. */
+function tierText(row) {
+  const value = row.comment_tier !== undefined ? row.comment_tier : row.commentTier;
+  return text(value);
+}
+
+/** One row as a caller sees it. The seal and the nonce never leave this module. */
+function mapRecipient(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    reportId: row.report_id,
+    address: row.address,
+    displayName: row.display_name ?? null,
+    commentTier: row.comment_tier == null || row.comment_tier === "" ? null : row.comment_tier,
+    state: row.state,
+    proposedBy: row.proposed_by,
+    approvedAt: row.approved_at == null ? null : Number(row.approved_at),
+    createdAt: Number(row.created_at),
+  };
+}
+
+/** One recipient row as stored (seal and nonce included), or null. */
+async function getRecipientRow(db, recipientId) {
+  if (typeof recipientId !== "string" || !recipientId) return null;
+  const { rows } = await db.execute({
+    sql: `SELECT ${RECIPIENT_COLUMNS} FROM report_recipients WHERE id = ?`,
+    args: [recipientId],
+  });
+  return rows[0] ?? null;
+}
+
+/** One report's row for one address (lower-cased), or null. The unique index makes this at most one. */
+async function recipientByAddress(db, reportId, address) {
+  const { rows } = await db.execute({
+    sql: `SELECT ${RECIPIENT_COLUMNS} FROM report_recipients WHERE report_id = ? AND address = ?`,
+    args: [reportId, address],
+  });
+  return rows[0] ?? null;
+}
+
+/**
+ * Propose one recipient for one report (an owner route, or a bot's tool).
+ *
+ * The address is lower-cased and validated, so the unique (report, address) index really does mean
+ * "one row per person per report". What an address that already has a row answers depends on who is
+ * proposing it, because the owner's add is the owner's word about a person and a bot's proposal is a
+ * suggestion:
+ *
+ *   - the owner (`proposedBy: "owner"`): the submitted name and tier REPLACE whatever the row holds
+ *     before the approval that follows, and `proposed_by` becomes `owner`. A `proposed`, `refused` or
+ *     `revoked` row takes them and (for the last two) goes back to `proposed` with its seal and nonce
+ *     NULLED. An `approved` row whose submitted name or tier differs is RE-SEALED over the owner's
+ *     values with a fresh nonce and an `approved` audit row; one that matches is answered unchanged,
+ *     so a repeated tap is not a second approval.
+ *   - a bot (`bot:<id>`): an address that already has a row is that row, unchanged, when it is
+ *     `approved` or was proposed by the owner; a refused or revoked row of the bot's own goes back to
+ *     `proposed` with the bot's name and tier. A bot can therefore never move an approval, never put
+ *     its own tier on an approved row, and never overwrite what the owner proposed.
+ *
+ * Proposing never changes the report's status and never approves anything: an owner adds and approves
+ * in one action only through the route, which calls this and then `approveRecipient`.
+ *
+ * @param {object} db
+ * @param {object} [deps]
+ * @param {{reportId: string, address: string, displayName?: string|null,
+ *   commentTier?: "a"|"b"|"c"|null, proposedBy: "owner"|"bot:<id>"}} input
+ * @returns {Promise<object>} the recipient row (camelCase, without the seal)
+ * @throws {Error} `bad_input` or `not_found`
+ */
+export async function proposeRecipient(db, deps, {
+  reportId, address, displayName, commentTier, proposedBy,
+} = {}) {
+  const d = resolveDeps(deps);
+  const report = await requireReport(db, reportId);
+  const addr = normalizeRecipientAddress(address);
+  const name = normalizeRecipientName(displayName);
+  const tier = normalizeCommentTier(commentTier);
+  const by = normalizeProposedBy(proposedBy);
+
+  const existing = await recipientByAddress(db, report.id, addr);
+  if (existing) {
+    if (by === "owner") return ownerAddOn(db, d, existing, { name, tier });
+    // A bot's proposal is a suggestion: it never moves an approval and never rewrites the owner's own
+    // proposal. Only the bot's own refused or revoked row may be proposed again.
+    if (existing.state === "approved" || existing.proposed_by === "owner") {
+      return mapRecipient(existing);
+    }
+    if (existing.state === "refused" || existing.state === "revoked") {
+      await db.execute({
+        sql: `UPDATE report_recipients
+                 SET state = 'proposed', approval_nonce = NULL, approval_seal = NULL,
+                     approved_at = NULL, display_name = ?, comment_tier = ?, proposed_by = ?
+               WHERE id = ? AND state = ?`,
+        args: [name, tier, by, existing.id, existing.state],
+      });
+      return mapRecipient(await getRecipientRow(db, existing.id));
+    }
+    return mapRecipient(existing);
+  }
+
+  const id = `rrc-${randomBytes(8).toString("hex")}`;
+  try {
+    await db.execute({
+      sql: `INSERT INTO report_recipients
+              (id, report_id, address, display_name, comment_tier, state, proposed_by, created_at)
+            VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)`,
+      args: [id, report.id, addr, name, tier, by, d.now()],
+    });
+  } catch (err) {
+    // Another propose of the same address won the unique index first: answer that row, the way a
+    // second propose answers the first one's (the owner's values still replace a bot's proposal).
+    const raced = await recipientByAddress(db, report.id, addr);
+    if (!raced) throw err;
+    if (by === "owner") return ownerAddOn(db, d, raced, { name, tier });
+    return mapRecipient(raced);
+  }
+  return mapRecipient(await getRecipientRow(db, id));
+}
+
+/**
+ * The owner's add of an address that already has a row: the owner's name and tier replace whatever is
+ * stored, and an approved row is re-sealed over them so the seal covers the values the owner just
+ * submitted.
+ *
+ * A `proposed`, `refused` or `revoked` row takes the values (and the last two go back to `proposed`,
+ * seal NULLED) for the approval that follows. An `approved` row whose values already match is answered
+ * untouched; one that differs gets a fresh nonce and seal over the owner's values and a fresh `approved`
+ * audit row, because the old seal described a tier or a name the owner has just replaced.
+ *
+ * Every write is guarded by the state this read saw, so a row that moved underneath answers
+ * `recipient_changed` rather than being overwritten.
+ */
+async function ownerAddOn(db, d, existing, { name, tier }) {
+  if (existing.state === "approved") {
+    if (text(existing.display_name) === text(name) && text(existing.comment_tier) === text(tier)) {
+      return mapRecipient(existing);
+    }
+    const seed = await seedOf(d);
+    const nonce = newApprovalNonce();
+    const fields = {
+      reportId: existing.report_id,
+      recipientId: existing.id,
+      address: text(existing.address),
+      commentTier: text(tier),
+      nonce,
+    };
+    const seal = approvalSeal("recipient", fields, seed);
+    const at = d.now();
+    const written = await db.execute({
+      sql: `UPDATE report_recipients
+               SET display_name = ?, comment_tier = ?, proposed_by = 'owner',
+                   approval_nonce = ?, approval_seal = ?, approved_at = ?
+             WHERE id = ? AND state = 'approved'`,
+      args: [name, tier, nonce, seal, at, existing.id],
+    });
+    if (Number(written?.rowsAffected ?? 0) !== 1) throw fail("recipient_changed");
+    await recordAudit(db, {
+      reportId: existing.report_id,
+      kind: "recipient",
+      subject: existing.id,
+      actor: "owner",
+      decided: "approved",
+      at,
+    });
+    return mapRecipient(await getRecipientRow(db, existing.id));
+  }
+
+  const reopened = existing.state === "refused" || existing.state === "revoked";
+  const written = await db.execute({
+    sql: reopened
+      ? `UPDATE report_recipients
+            SET state = 'proposed', approval_nonce = NULL, approval_seal = NULL, approved_at = NULL,
+                display_name = ?, comment_tier = ?, proposed_by = 'owner'
+          WHERE id = ? AND state = ?`
+      : `UPDATE report_recipients
+            SET display_name = ?, comment_tier = ?, proposed_by = 'owner'
+          WHERE id = ? AND state = ?`,
+    args: [name, tier, existing.id, existing.state],
+  });
+  if (Number(written?.rowsAffected ?? 0) !== 1) throw fail("recipient_changed");
+  return mapRecipient(await getRecipientRow(db, existing.id));
+}
+
+/**
+ * The owner's approval of one recipient: a fresh nonce, a seal over the report, the row, the address
+ * and the tier, then the state and the approval time, and an audit row naming the owner.
+ *
+ * An already-approved row whose seal still verifies is answered as it is, so a repeated tap is not a
+ * second approval. Any other state (proposed, refused, revoked) is approved with a FRESH seal: that is
+ * what makes a re-approval after a refusal real work rather than a replay.
+ *
+ * The write is guarded by the state this read saw, so a refuse or a revoke that landed in between
+ * answers `recipient_changed` instead of being overwritten by the approval.
+ *
+ * @param {object} db
+ * @param {object} deps
+ * @param {{recipientId: string, actor: {kind: "owner"}}} input
+ * @returns {Promise<object>} the recipient row after the write
+ * @throws {Error} `owner_only`, `bad_input`, `not_found`, `keychain_key_missing`
+ */
+export async function approveRecipient(db, deps, { recipientId, actor } = {}) {
+  requireOwner(actor);
+  const d = resolveDeps(deps);
+  const id = recipientIdOf(recipientId);
+  const row = await getRecipientRow(db, id);
+  if (!row) throw fail("not_found", "recipient");
+  await requireReport(db, row.report_id);
+  if (row.state === "approved" && (await verifyRecipient(db, d, row))) return mapRecipient(row);
+
+  const seed = await seedOf(d);
+  const nonce = newApprovalNonce();
+  const fields = {
+    reportId: row.report_id,
+    recipientId: row.id,
+    address: text(row.address),
+    commentTier: tierText(row),
+    nonce,
+  };
+  const seal = approvalSeal("recipient", fields, seed);
+  const at = d.now();
+  const written = await db.execute({
+    sql: `UPDATE report_recipients
+             SET state = 'approved', approval_nonce = ?, approval_seal = ?, approved_at = ?
+           WHERE id = ? AND state = ?`,
+    args: [nonce, seal, at, row.id, row.state],
+  });
+  if (Number(written?.rowsAffected ?? 0) !== 1) throw fail("recipient_changed");
+  await recordAudit(db, {
+    reportId: row.report_id,
+    kind: "recipient",
+    subject: row.id,
+    actor: "owner",
+    decided: "approved",
+    at,
+  });
+  return mapRecipient(await getRecipientRow(db, row.id));
+}
+
+/**
+ * Refuse or revoke one recipient: the state in one word, and BOTH the seal and its nonce set to NULL,
+ * so an old seal can never re-approve the row. The audit row says which word was written.
+ *
+ * The write is guarded by the state this read saw: a decision that landed in between answers
+ * `recipient_changed` rather than being overwritten.
+ */
+async function decideRecipient(db, deps, { recipientId, actor, state, decided } = {}) {
+  requireOwner(actor);
+  const d = resolveDeps(deps);
+  const id = recipientIdOf(recipientId);
+  const row = await getRecipientRow(db, id);
+  if (!row) throw fail("not_found", "recipient");
+  await requireReport(db, row.report_id);
+  const at = d.now();
+  const written = await db.execute({
+    sql: `UPDATE report_recipients
+             SET state = ?, approval_nonce = NULL, approval_seal = NULL, approved_at = NULL
+           WHERE id = ? AND state = ?`,
+    args: [state, row.id, row.state],
+  });
+  if (Number(written?.rowsAffected ?? 0) !== 1) throw fail("recipient_changed");
+  await recordAudit(db, {
+    reportId: row.report_id,
+    kind: "recipient",
+    subject: row.id,
+    actor: "owner",
+    decided,
+    at,
+  });
+  return mapRecipient(await getRecipientRow(db, row.id));
+}
+
+/**
+ * The owner's refusal (route `POST /recipients/:rid/refuse`).
+ *
+ * @param {object} db
+ * @param {object} deps
+ * @param {{recipientId: string, actor: {kind: "owner"}}} input
+ * @returns {Promise<object>} the recipient row after the write
+ * @throws {Error} `owner_only`, `bad_input`, `not_found`
+ */
+export async function refuseRecipient(db, deps, { recipientId, actor } = {}) {
+  return decideRecipient(db, deps, { recipientId, actor, state: "refused", decided: "refused" });
+}
+
+/**
+ * The owner's revocation of an approved recipient (route `POST /recipients/:rid/revoke`).
+ *
+ * @param {object} db
+ * @param {object} deps
+ * @param {{recipientId: string, actor: {kind: "owner"}}} input
+ * @returns {Promise<object>} the recipient row after the write
+ * @throws {Error} `owner_only`, `bad_input`, `not_found`
+ */
+export async function revokeRecipient(db, deps, { recipientId, actor } = {}) {
+  return decideRecipient(db, deps, { recipientId, actor, state: "revoked", decided: "revoked" });
+}
+
+/**
+ * One report's recipients, oldest first. The seal and the nonce are never in the answer; each row
+ * carries `verified` instead, which is `verifyRecipient`'s answer: approved AND a seal that still
+ * matches the row's CURRENT address, tier and ids. A row whose seal no longer verifies therefore reads
+ * `state: "approved"` with `verified: false`, so a page never shows an approval that is not one.
+ *
+ * @param {object} db
+ * @param {string} reportId
+ * @param {object} [deps] the approvals deps (the keychain seed decides whether any seal verifies)
+ * @returns {Promise<object[]>}
+ * @throws {Error} `bad_input`
+ */
+export async function listRecipients(db, reportId, deps) {
+  if (typeof reportId !== "string" || !reportId) throw fail("bad_input", "reportId");
+  const d = resolveDeps(deps);
+  const { rows } = await db.execute({
+    sql: `SELECT ${RECIPIENT_COLUMNS} FROM report_recipients
+           WHERE report_id = ? ORDER BY created_at ASC, id ASC`,
+    args: [reportId],
+  });
+  const out = [];
+  for (const row of rows) {
+    out.push({ ...mapRecipient(row), verified: await verifyRecipient(db, d, row) });
+  }
+  return out;
+}
+
+/**
+ * Does this recipient row still hold the owner's approval?
+ *
+ * `true` only when the row's state is `approved` AND its seal verifies over the fields the row holds
+ * NOW: the report id, the row id, the address and the tier (NULL sealed as the empty string). A direct
+ * UPDATE of the address or the tier therefore makes an approved row unapproved, and refusing or
+ * revoking (which nulls the seal) can never be undone by restoring the state word. Never throws: a
+ * broken row, a missing seed and a malformed seal are all `false`.
+ *
+ * The row may be the stored shape (`report_id`, `comment_tier`, `approval_seal`, `approval_nonce`)
+ * or the camelCase one a caller built; the send door reads the stored row itself and passes that.
+ *
+ * @param {object} db
+ * @param {object} [deps]
+ * @param {object|null} recipient a `report_recipients` row
+ * @returns {Promise<boolean>}
+ */
+export async function verifyRecipient(db, deps, recipient) {
+  try {
+    if (recipient == null || typeof recipient !== "object") return false;
+    if (recipient.state !== "approved") return false;
+    const id = typeof recipient.id === "string" ? recipient.id : recipient.recipientId;
+    const reportId = recipient.report_id !== undefined ? recipient.report_id : recipient.reportId;
+    if (typeof id !== "string" || !id) return false;
+    if (typeof reportId !== "string" || !reportId) return false;
+    const seal = recipient.approval_seal !== undefined ? recipient.approval_seal : recipient.approvalSeal;
+    const nonce = recipient.approval_nonce !== undefined ? recipient.approval_nonce : recipient.nonce;
+    if (typeof seal !== "string" || !seal) return false;
+    if (typeof nonce !== "string" || !nonce) return false;
+    const seed = await seedOf(resolveDeps(deps));
+    const fields = {
+      reportId,
+      recipientId: id,
+      address: text(recipient.address),
+      commentTier: tierText(recipient),
+      nonce,
+    };
+    return verifyApprovalSeal("recipient", fields, seal, seed);
+  } catch {
+    return false;
+  }
 }
