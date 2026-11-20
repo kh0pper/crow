@@ -75,6 +75,44 @@
         "http://localhost:5010"
       ]
     },
+    "coinbase": {
+      "CROW_COINBASE_AI_DAILY_NOTIONAL_USD": [
+        "50"
+      ],
+      "CROW_COINBASE_AI_MAX_ORDER_USD": [
+        "25"
+      ],
+      "CROW_COINBASE_AI_ORDERS_PER_HOUR": [
+        "10"
+      ],
+      "CROW_COINBASE_BOT_MAX_ORDER_USD": [
+        "50"
+      ],
+      "CROW_COINBASE_DAILY_NOTIONAL_USD": [
+        "200"
+      ],
+      "CROW_COINBASE_MAKER_FEE_PCT": [
+        "0.5"
+      ],
+      "CROW_COINBASE_MAX_BOT_CAPITAL_USD": [
+        "100"
+      ],
+      "CROW_COINBASE_ORDERS_PER_HOUR": [
+        "30"
+      ],
+      "CROW_COINBASE_POLL_SECONDS": [
+        "60"
+      ],
+      "CROW_COINBASE_PORTFOLIO_DRAWDOWN_PCT": [
+        "20"
+      ],
+      "CROW_COINBASE_PRODUCTS": [
+        "BTC-USDC,ETH-USDC,XRP-USDC"
+      ],
+      "CROW_COINBASE_WATCHDOG_POLICY": [
+        "leave"
+      ]
+    },
     "coturn": {
       "TURN_PORT": [
         "3478"

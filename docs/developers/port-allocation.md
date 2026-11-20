@@ -62,6 +62,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3040 | 127.0.0.1 | gitea (web) | MVP PR 5 |
 | 3050 | 127.0.0.1 | forgejo (web) | MVP PR 5 |
 | 3061 | 127.0.0.1 | rookery (OpenScience reviewer) | PR #157 |
+| 3062 | 127.0.0.1 | coinbase (engine API; loopback only, never Serve/Funnel) | Finance Hub P1 |
 | 3065 | 127.0.0.1 (host network) | phone (crow-phone-runner, assistant calls; binds loopback only) | Phone plan A |
 | 3070 | 127.0.0.1 | workspace (Crow Workspace: Nextcloud web; tailnet via Serve :8456) | W1 2026-10 |
 | 3071 | 127.0.0.1 | workspace (Crow Workspace: ONLYOFFICE Docs; tailnet via Serve :8457) | W1 2026-10 |

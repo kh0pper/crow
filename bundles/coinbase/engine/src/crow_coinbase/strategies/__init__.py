@@ -1,0 +1,1 @@
+"""Trading strategies: the shapes they read and the decisions they return."""
