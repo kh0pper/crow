@@ -32,6 +32,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
+import { csrfTokenFor } from "./helpers/csrf-token.mjs";
 // This process's HTTP client stands in for tailscaled's Serve socket owner, and every request (the
 // browser's included) carries Serve's headers for a tailnet client: the dashboard's network gate
 // allows that source, and the owner check (isLocalPasswordSessionOn) refuses a request that starts
@@ -46,7 +47,6 @@ delete process.env.CROW_DB_PATH;
 process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 const REPO = new URL("..", import.meta.url).pathname;
 const SESSION = "drafts-live-session";
-const CSRF = "drafts-live-csrf";
 
 let server = null;
 let server2 = null;
@@ -251,9 +251,10 @@ async function open(path, { width = 390, height = 844, origin = null } = {}) {
   await send("Network.clearBrowserCookies");
   await send("Network.setExtraHTTPHeaders", { headers: serveHeaders("operator@example.invalid") });
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 900 });
-  for (const ck of [{ name: "crow_session", value: SESSION }, { name: "crow_csrf", value: CSRF }]) {
-    await send("Network.setCookie", { ...ck, url: pageBase, path: "/" });
-  }
+  // The SESSION cookie is all the page gets. The CSRF token is SERVER-BOUND and delivered in the
+  // page's own <meta name="crow-csrf"> (window.crowCsrf()), never in a cookie: the retired `crow_csrf`
+  // cookie authorises nothing, so this harness never sets one and a page that needed it would fail.
+  await send("Network.setCookie", { name: "crow_session", value: SESSION, url: pageBase, path: "/" });
   await send("Page.navigate", { url: pageBase + path });
   await until(READY, "the Messages page");
   await ev(TWO_FRAMES);
@@ -326,6 +327,11 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
       let tab2 = null;
       try {
         assert.equal(await tab1.ev("document.documentElement.lang"), lang, "the page is in the requested language");
+        // The page was handed the SERVER-BOUND token for its session — the one the drafts client
+        // (msgDraftHeaders) sends and the layout's fetch wrapper re-attaches. Nothing in this harness
+        // sets a crow_csrf cookie, so a page reading the token from a cookie could not write a draft.
+        assert.equal(await tab1.ev("window.crowCsrf ? window.crowCsrf() : ''"), csrfTokenFor(SESSION),
+          "the page carries the server-bound CSRF token for its session");
 
         // 1. The section on an empty install.
         await tab1.until(`(function(){ var e=document.querySelector('#msg-drafts-count'); return e && e.textContent === ${JSON.stringify(c.heading(0))}; })()`, "the empty Drafts heading");
@@ -397,7 +403,8 @@ for (const [width, height] of [[390, 844], [1280, 800]]) {
         // by message-drafts-panel), so the race is deterministic instead of two 800 ms timers racing.
         await tab1.typeInto("#msg-input", " plus the first tab");
         const patched = await tab2.ev(`(function(){
-          var csrf = (document.cookie.match(/(?:^|\\s*)crow_csrf=([^;]*)/) || [])[1] || '';
+          // The token the page itself was handed, exactly as the composer's own autosave sends it.
+          var csrf = window.crowCsrf();
           return fetch('/dashboard/messages/api/drafts?conversation=contact%3A1')
             .then(function(r){ return r.json(); })
             .then(function(j){

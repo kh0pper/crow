@@ -305,9 +305,13 @@ export function messagesClientJS(opts) {
     }).join('');
   }
 
-  /** The CSRF double-submit token the drafts API needs on every unsafe method. The token comes from
-   *  window.crowCsrf() when the page provides it (the header's own accessor — the shape PR #11 is
-   *  moving every caller to), and falls back to the crow_csrf cookie for a page built before it. */
+  /** The SERVER-BOUND CSRF token the drafts API needs on every unsafe method.
+   *
+   *  The token is HMAC(secret, session id) and the server hands the page the value it should echo
+   *  (the layout's <meta name="crow-csrf">, read by window.crowCsrf()); it is never a cookie value.
+   *  The crow_csrf cookie is retired and authorises nothing, so reading it is only a last-resort
+   *  fallback for a page so old it has neither the helper nor a meta tag — and even then a stale
+   *  value is answered 403 and the layout's fetch wrapper refreshes the token once and retries. */
   function msgDraftHeaders() {
     var token = '';
     try {

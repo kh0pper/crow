@@ -8,6 +8,13 @@
 // real CSRF middleware, then the real router), the real store and the real seal, and the real owner
 // rule with the request marked as coming from the owner's laptop (tests/helpers/off-box.js).
 //
+// Every request is shaped the way the owner's own dashboard page makes it: the session cookie, the
+// SERVER-BOUND CSRF token for THAT session (tests/helpers/csrf-token.mjs — the HMAC the real
+// csrfMiddleware compares against, never the retired `crow_csrf` cookie, which rides along here to
+// prove it authorises nothing), and the fetch metadata a browser writes for a page on this origin
+// (`Sec-Fetch-Site: same-origin`, `Origin` naming the gateway). A test that is ABOUT a cross-site
+// request overrides one of those headers and means it.
+//
 // What the test injects is the seam around the routes (`setMessagesDraftsRuntime`): a fixed clock, a
 // fixed keychain seed, and — for the send tests — a recorder (the routes' transitions) plus, for the
 // delivery itself, the factory seam the Messages tests already use for crow_send_message.
@@ -34,6 +41,7 @@ const { default: express, json: expressJson } = await import("express");
 const { createHash } = await import("node:crypto");
 const { createDbClient } = await import("../servers/db.js");
 const { csrfMiddleware } = await import("../servers/gateway/dashboard/shared/csrf.js");
+const { csrfTokenFor } = await import("./helpers/csrf-token.mjs");
 const {
   MESSAGES_DRAFTS_API_PREFIX,
   clearMessagesDraftsRuntime,
@@ -47,7 +55,10 @@ const bus = (await import("../servers/shared/event-bus.js")).default;
 
 const OWNER = "owner-local-password-session";
 const SSO = "peer-sso-session";
-const CSRF = "csrf-token-value";
+// The RETIRED double-submit cookie (queue item #51 PR-1). An owner's browser profile still carries
+// one, so every request below sends it — and it must authorise nothing: only the server-bound token
+// in `X-Crow-Csrf` does.
+const RETIRED_CSRF_COOKIE = "retired-double-submit-cookie";
 const DRAFTS = MESSAGES_DRAFTS_API_PREFIX;
 const SEED = Buffer.from("a fixed keychain seed for the draft routes");
 const NOW = 1_767_225_600_000;
@@ -147,6 +158,11 @@ async function setup({ send } = {}) {
   const dash = express.Router();
   dash.use("/dashboard", csrfMiddleware);
   dash.use(router);
+  // dashboard/index.js's slot: the real CSRF middleware, then the real router. The app-wide
+  // fetch-metadata gate (servers/gateway/index.js) is deliberately NOT mounted here: the drafts
+  // router re-applies that same rail on its own prefix, so a request a browser says came from
+  // another site is answered by the route's own code (`cross_site`) — which is what the cross-site
+  // test asserts, and which keeps every other assertion in this file about the route's logic.
   app.use(dash);
 
   const server = await new Promise((resolve) => {
@@ -154,17 +170,33 @@ async function setup({ send } = {}) {
   });
   servers.push(server);
   const port = server.address().port;
+  // The origin the dashboard page itself is served from: what its own fetch metadata names.
+  const origin = "http://127.0.0.1:" + port;
 
-  /** One request. `csrf: null` sends no CSRF header; `token: null` sends no session cookie. */
-  const call = (method, path, { body, headers = {}, token = OWNER, csrf = CSRF, laptop = true } = {}) => {
+  /**
+   * One request, written the way the owner's own dashboard page writes it — a browser request from
+   * THIS origin, for THIS session:
+   *   - the session cookie (plus the retired `crow_csrf` cookie, which authorises nothing);
+   *   - `X-Crow-Csrf`: the SERVER-BOUND token for that session (csrfTokenFor — the same HMAC
+   *     csrfMiddleware computes, so the token is the one the real page is handed in its meta tag);
+   *   - `Sec-Fetch-Site: same-origin` and `Origin: <this gateway>`: what a browser's network stack
+   *     writes on a page's own POST/PUT/PATCH/DELETE, and what the fetch-metadata rail reads.
+   *
+   * `csrf: null` sends no CSRF token at all; `token: null` sends no session cookie; `headers`
+   * overrides any header above, which is how a test speaks as a page on ANOTHER site.
+   */
+  const call = (method, path, { body, headers = {}, token = OWNER, csrf, laptop = true } = {}) => {
     const payload = body === undefined ? null : (typeof body === "string" ? body : JSON.stringify(body));
     const h = {
       ...(payload === null
         ? {}
         : { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }),
     };
-    if (token) h.cookie = "crow_session=" + token + "; crow_csrf=" + CSRF;
-    if (token && csrf) h["x-crow-csrf"] = csrf;
+    if (token) h.cookie = "crow_session=" + token + "; crow_csrf=" + RETIRED_CSRF_COOKIE;
+    const csrfValue = csrf === undefined ? (token ? csrfTokenFor(token) : "") : csrf;
+    if (token && csrfValue) h["x-crow-csrf"] = csrfValue;
+    h["sec-fetch-site"] = "same-origin";
+    h.origin = origin;
     if (laptop) h["x-test-from"] = "laptop";
     Object.assign(h, headers);
     return new Promise((resolve, reject) => {
@@ -254,6 +286,11 @@ test("missing CSRF token is refused before any route runs", async () => {
   assert.equal((await store.listDrafts(s.db, {})).length, 0, "no draft was written");
 });
 
+// The fetch-metadata rail, as the routes apply it on their own prefix (the same rule the app-wide
+// gate in servers/gateway/dashboard/fetch-metadata.js applies to every cookie-authenticated mount).
+// Every request here carries the session's OWN valid server-bound token, so a refusal cannot be the
+// CSRF rail: it is the route refusing a page that says it came from another site, in its own words
+// (`cross_site`), before a body is parsed and before anything is written.
 test("cross-site fetch metadata is refused; a same-origin write is not", async () => {
   const s = await setup();
   const create = { conversationKind: "contact", conversationId: s.contactId, body: "hi", expectVersion: 0 };
@@ -274,7 +311,8 @@ test("cross-site fetch metadata is refused; a same-origin write is not", async (
 
   assert.equal((await store.listDrafts(s.db, {})).length, 0, "nothing was written by a refused write");
 
-  // The owner's own page: `same-origin`, or a request with no fetch metadata at all (curl, a test).
+  // The owner's own page: the same-origin metadata the fixture sends by default (`Sec-Fetch-Site:
+  // same-origin` plus an `Origin` naming this gateway) — and named explicitly here, too.
   const own = await s.call("PUT", DRAFTS, { body: create, headers: { "sec-fetch-site": "same-origin" } });
   assert.equal(own.status, 201, own.text);
   assert.equal(own.json.draft.body, "hi");
