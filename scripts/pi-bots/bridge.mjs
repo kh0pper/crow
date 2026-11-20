@@ -56,7 +56,7 @@ import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REF
   GCLOUD_DIR_REL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal } from "./hidden_files.mjs";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
-import { containSelected, containExcluded, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
+import { containSelected, containExcluded, prepareAgentShadow, sweepStaleContainDirs, containOwnWorldRoot, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
 import { botContainment, defToolNames, recordContainment, formatContainmentLine } from "./containment-status.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
@@ -261,23 +261,23 @@ function containInputs({ nodeBin, cliPath, sessionDir, spawnCwd, piPolicy, opts,
     modelRolesFile: roleSnapshotPath(),
   });
   const extraRw = dirname(TASKS_DB) !== dataDir ? [dirname(TASKS_DB)] : [];
-  // The bot's OWN pre-project world root (<crowHome>/pi-bots/<id>, or a custom
-  // def.session_dir): self-authoring stages skill proposals below it
-  // (<def.session_dir>/proposed-skills) and the Bot Builder's review UI scans
-  // exactly that path, so the contain plan binds that folder writable instead
-  // of dropping the policy write path as a hidden home entry.
-  // The id is validated against the engine's bot-id charset (BOT_ID_RE, the
-  // same pattern botWorkspaceEnv uses) BEFORE it is joined into a path: a def is
-  // bot-writable, so an id carrying a separator or a dot name must never name a
-  // folder of its choosing. An id outside the pattern is refused — no derived
-  // folder at all, one log line — and a custom def.session_dir still applies
-  // (the plan re-checks the resolved root under <crowHome>/pi-bots).
+  // The bot's OWN pre-project world root — <crowHome>/pi-bots/<the id THIS SPAWNER was given>
+  // (opts.botId, from the bot's own pi_bot_defs row). Self-authoring stages skill proposals
+  // below it (def.session_dir/proposed-skills) and the Bot Builder's review UI scans exactly
+  // that path, so the contain plan binds that folder writable instead of dropping the policy
+  // write path as a hidden home entry.
+  // The id is the SPAWNER's, never one a def names: a definition is bot-writable (crow.db, which
+  // holds the defs, is bound read-write into every contained bot), so a def that named another
+  // bot's session_dir must neither make this spawn CREATE that bot's folder nor widen to it —
+  // the git key dir resolves its id the same way. An id outside the engine's bot-id charset
+  // derives no folder at all (one log line), and a custom session dir elsewhere inside pi-bots
+  // keeps the ordinary rules: bound only when it exists, never created, never "own".
   const sandboxBotId = opts.botId || (def && (def.bot_id || def.id)) || null;
-  const stateBotId = typeof sandboxBotId === "string" && BOT_ID_RE.test(sandboxBotId) ? sandboxBotId : null;
-  if (sandboxBotId && !stateBotId) {
-    console.error("[pi-bots] contain: bot id refused for the world root (not a bot id): " + String(sandboxBotId).slice(0, 80));
+  const ownWorldRoot = containOwnWorldRoot({ crowHome, botId: opts.botId });
+  if (opts.botId && !ownWorldRoot) {
+    console.error("[pi-bots] contain: bot id refused for the world root (not a bot id): " + String(opts.botId).slice(0, 80));
   }
-  const botStateDir = (def && def.session_dir) || (stateBotId ? join(crowHome, "pi-bots", stateBotId) : null);
+  const botStateDir = ownWorldRoot;
   const netIn = containNetInputs({ def });
   let relay = null;
   if (netIn) {
@@ -1084,6 +1084,10 @@ export class PiRpc {
           ...(refusal ? [{ reason: refusal }] : []),
         ],
         tools: statusTools,
+        // Configured writable paths the contain plan had to drop because they do not exist
+        // (pi_contain.mjs `droppedWrites`) — the write would "succeed" into the sandbox's tmpfs
+        // and be lost, so the one `[containment]` line names it. Empty for every other tier.
+        droppedWrites: (launch && Array.isArray(launch.droppedWrites)) ? launch.droppedWrites : [],
       });
       try { recordContainment(sandboxBotId, { ...status, tier }); } catch { /* status only */ }
       console.error(formatContainmentLine(sandboxBotId, status));

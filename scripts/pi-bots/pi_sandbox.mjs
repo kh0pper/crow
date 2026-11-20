@@ -111,7 +111,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, fstatSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { containSelected, buildContainPlan, ContainRefused, ensureContainMountPoints } from "./pi_contain.mjs";
+import { containSelected, buildContainPlan, ContainRefused, ensureContainMountPoints, ensureContainOwnWorldRoot } from "./pi_contain.mjs";
 import { buildSeccompProgram, seccompSupported } from "./pi_seccomp.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
 import { fileURLToPath } from "node:url";
@@ -385,8 +385,10 @@ function validExposed(list, { hideDirs, tmpfs, pidns, bindFd, uid = process.getu
  * dirs that really did.
  * In the contain tier `mountPoints` lists the empty dirs this call made before exec for the
  * absent-entry masks (a reserved or installed data-dir name with no folder yet); a mount
- * point it cannot make refuses the spawn.
- * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[], exposed:string[], mountPoints?:string[]}}
+ * point it cannot make refuses the spawn. `ownWorldRoot` is the bot's own pre-project world
+ * root this call created (null when it already existed or is not the bot's own), and
+ * `droppedWrites` names the configured writable paths it had to drop because they do not exist.
+ * @returns {{cmd, args, env, tier:"pidns"|"userns"|"nnp"|"none", sandboxed:boolean, wrapper:"bwrap"|"setpriv"|null, pidNamespace:boolean, reason, masked:string[], exposed:string[], mountPoints?:string[], droppedWrites?:string[], ownWorldRoot?:string|null}}
  * @throws when mode is "required" and bwrap is unavailable.
  */
 export function wrapPiSpawn(cmd, args, opts = {}) {
@@ -408,6 +410,15 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     if (probe.pidns === false) {
       throw new Error("pi contain tier selected but bwrap cannot make a PID namespace here (" + (probe.pidnsReason || "unavailable") + ")");
     }
+    // The bot's OWN pre-project world root (<crowHome>/pi-bots/<the SPAWNER's bot id>) can only
+    // be bound when it EXISTS, and the sandbox's $HOME is an empty
+    // tmpfs: a write into a folder that was never created "succeeded" there and was lost with
+    // the spawn. So it is made HERE, before the plan, and only when it resolves strictly inside
+    // this instance's <crowHome>/pi-bots (never pi-bots itself, never outside, never through a
+    // symlink): 0700, this uid, the same shape ensureContainMountPoints makes. A configured
+    // writable path that stays missing is dropped by the plan and NAMED there (droppedWrites).
+    const ownWorldRoot = ensureContainOwnWorldRoot(opts.contain && opts.contain.botStateDir,
+      { crowHome: opts.contain && opts.contain.crowHome, uid: opts.contain && opts.contain.uid });
     const plan = buildContainPlan(opts.contain);
     // The empty mount points of the absent-entry masks (a reserved data-dir name or an
     // installed bundle id with no folder yet) EXIST BEFORE bwrap runs, or there is no spawn.
@@ -480,7 +491,10 @@ export function wrapPiSpawn(cmd, args, opts = {}) {
     const tier = (seccomp ? "contain" : "contain-noseccomp") + (plan.net ? "" : "-hostnet");
     return { cmd: probe.bwrap, args: [...pre, "--", ...inner], env: { ...scrubSandboxEnv(env), ...plan.env },
       sandboxed: true, wrapper: "bwrap", tier, pidNamespace: true, reason: null,
-      masked, exposed: [], unreachable, refused: plan.refused, seccomp, net: plan.net, mountPoints };
+      masked, exposed: [], unreachable, refused: plan.refused, seccomp, net: plan.net, mountPoints,
+      // Configured writable paths that did not exist and that no writable bind covers; the
+      // containment status names them (the spawner's `[containment]` line).
+      droppedWrites: plan.droppedWrites, ownWorldRoot };
   }
   if (!probe.ok) {
     if (mode === "required" || mode === "contain") {

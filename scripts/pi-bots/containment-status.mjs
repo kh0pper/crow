@@ -75,6 +75,30 @@ export function noDoorLine(provider) {
 }
 
 /**
+ * A CONFIGURED writable path (session dir, cwd, workspace, a write_paths entry) that did not
+ * exist at spawn, so the plan dropped it (pi_contain.mjs `droppedWrites`): inside the sandbox
+ * the empty $HOME is a tmpfs, so a write there still "succeeds" and is discarded with the
+ * spawn — the folder is never created on the host, unlike the loose tier. The line NAMES the
+ * path, so that silent success is never the only evidence (travel-agent, 2026-11-19).
+ *
+ * The path is bot-visible text (an operator's configured path, or one a def named) and it lands
+ * inside the ONE `[containment]` line, whose items are joined with "; " — so a newline there
+ * would forge a log line and a ";" would forge an item. Control characters (C0/C1, \r, \n and
+ * \t included) and the item separator are therefore stripped before it enters the line. The
+ * path the spawn refusal logs stays byte-exact; only this display line is flattened.
+ */
+export function droppedWriteLine(path) {
+  return "the write path " + oneLineItem(path) + " did not exist, so writes there are lost";
+}
+
+/** A path made safe for the single `[containment]` line: no control characters (C0/C1) and no
+ *  `;` (the separator between that line's items), so it cannot open a line or an item of its own. */
+function oneLineItem(path) {
+  // eslint-disable-next-line no-control-regex
+  return String(path == null ? "" : path).replace(/[\u0000-\u001f\u007f-\u009f;]/g, "");
+}
+
+/**
  * Crow's own MCP servers, which run with THIS instance's authority (the DB,
  * the gateway's mounts) rather than with credentials of their own. Anything
  * else in a bot's config is an add-on: it runs inside the sandbox with its own
@@ -149,9 +173,12 @@ function dedupe(lines) {
  * @param {string[]} [a.tools]        tool names, for browser detection
  * @param {boolean} [a.excluded]      the operator exempted this bot from the
  *                                    contain tier (CROW_PI_CONTAIN_EXCLUDE)
+ * @param {string[]} [a.droppedWrites] configured writable paths the plan dropped
+ *                                    because they do not exist (pi_contain.mjs);
+ *                                    each one gets its own open line
  * @returns {{level: string, open: string[]}}
  */
-export function botContainment({ tier = null, mcpServers = [], providerIds = [], missing = [], tools = [], excluded = false } = {}) {
+export function botContainment({ tier = null, mcpServers = [], providerIds = [], missing = [], tools = [], excluded = false, droppedWrites = [] } = {}) {
   // A refused spawn is not a weaker containment: it did not run. Say what stood
   // in the way (the same sentence the failed turn carries).
   const refused = dedupe((Array.isArray(missing) ? missing : []).map((m) => {
@@ -176,6 +203,11 @@ export function botContainment({ tier = null, mcpServers = [], providerIds = [],
   // configured browser has no door. `providerIds` is accepted for the record
   // (and by the settings renderer) but changes no line.
   const open = [OPEN_DATA_DBS];
+  // A configured writable path that did not exist was dropped, not bound: say which one, so
+  // the operator sees why a write there left nothing behind.
+  for (const p of Array.isArray(droppedWrites) ? droppedWrites : []) {
+    if (typeof p === "string" && p) open.push(droppedWriteLine(p));
+  }
   let browser = false;
   for (const name of servers) {
     if (isBrowserServer(name)) { browser = true; continue; }

@@ -23,11 +23,11 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildContainPlan, ensureContainMountPoints } from "../scripts/pi-bots/pi_contain.mjs";
+import { buildContainPlan, ensureContainMountPoints, ensureContainOwnWorldRoot } from "../scripts/pi-bots/pi_contain.mjs";
 import { probePiSandbox } from "../scripts/pi-bots/pi_sandbox.mjs";
 
 const PROBE = probePiSandbox({ force: true });
@@ -63,7 +63,7 @@ writeFileSync(join(crowHome, "installed.json"), JSON.stringify([ABSENT_ADDON]));
  * server block names the DB in its env exactly as `crowServerCatalog` does.
  * node is this process's own binary, so the sandbox holds a real runtime.
  */
-function plan() {
+function plan(over = {}) {
   return buildContainPlan({
     home: H, uid: process.getuid(), nodeBin: process.execPath,
     appRoot: app, piAgentDir: mk(H, ".pi", "agent"), shadowAgentDir: mk(T, "shadow"),
@@ -73,6 +73,7 @@ function plan() {
     mcpServers: [{ command: "node", args: [join(app, "servers", "memory", "index.js")], cwd: app,
       env: { CROW_DB_PATH: join(data, "crow.db"), CROW_DB: join(data, "crow.db") } }],
     systemDirs: ["/usr", "/etc"],
+    ...over,
   });
 }
 
@@ -227,4 +228,38 @@ test("B1/B4 in a real sandbox: crow.db is writable, a masked project folder is N
   const next = plan();
   assert.ok(next.args.some((a, i) => a === "--tmpfs" && next.args[i + 1] === join(data, "totally-new")),
     "the next spawn masks it (a present entry now)");
+});
+
+// The travel-agent finding (2026-11-19): the bot's OWN pre-project world root
+// (<crowHome>/pi-bots/<id>) never existed, so the plan dropped it and the write into the
+// sandbox's tmpfs $HOME "succeeded" and vanished. The spawner now creates it (0700, this uid)
+// before the plan when it is missing and inside pi-bots, and the write must land on the HOST.
+test("the bot's own world root that never existed is created (0700) and a write there lands on the host", { skip, timeout: 60000 }, () => {
+  const ownRoot = join(crowHome, "pi-bots", "travel-agent");
+  assert.equal(existsSync(ownRoot), false, "the fixture starts with no own root: the travel-agent case");
+  const made = ensureContainOwnWorldRoot(ownRoot, { crowHome });
+  assert.equal(made, ownRoot);
+  const st = statSync(ownRoot);
+  assert.ok(st.isDirectory() && (st.mode & 0o777) === 0o700, "the root is a 0700 dir");
+  assert.equal(st.uid, process.getuid());
+  const p = plan({ botStateDir: ownRoot, writePaths: [ownRoot, join(ownRoot, "proposed-skills")] });
+  assert.ok(p.args.some((a, i) => a === "--bind" && p.args[i + 2] === ownRoot), "the root is bound read-write");
+  assert.deepEqual(p.droppedWrites, [], "a missing child UNDER the bound root is not called dropped");
+  ensureContainMountPoints(p.mountPoints);
+  const r = inSandbox(p, `
+const fs = require("node:fs");
+const out = {};
+try {
+  fs.mkdirSync(process.env.CROW_TEST_OWN + "/proposed-skills");
+  fs.writeFileSync(process.env.CROW_TEST_OWN + "/contain-smoke.txt", "smoke");
+  out.write = "ok";
+} catch (e) { out.write = e.code || String(e.message || e); }
+console.log(JSON.stringify(out));
+`, { CROW_TEST_OWN: ownRoot });
+  assert.equal(r.status, 0, "bwrap ran the probe: " + (r.stderr || "") + (r.stdout || ""));
+  const out = JSON.parse(String(r.stdout).trim().split("\n").pop());
+  assert.equal(out.write, "ok");
+  assert.equal(readFileSync(join(ownRoot, "contain-smoke.txt"), "utf8"), "smoke",
+    "the write landed on the HOST, not in the sandbox's throwaway tmpfs");
+  assert.equal(statSync(join(ownRoot, "proposed-skills")).isDirectory(), true, "the folder it made is on the host too");
 });

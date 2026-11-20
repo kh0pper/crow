@@ -9,8 +9,9 @@ import { dirname, join } from "node:path";
 import {
   buildContainPlan, containSelected, containExcluded, containExcludeIds, containExemptedBots,
   _resetPiContainExcludeWarningsForTest, ContainRefused, neverBound, installedBundleIds,
-  ensureContainMountPoints, RESERVED_DATA_ENTRIES, RESERVED_DATA_FILES, isReservedDataEntry,
+  ensureContainMountPoints, ensureContainOwnWorldRoot, containOwnWorldRoot, RESERVED_DATA_ENTRIES, RESERVED_DATA_FILES, isReservedDataEntry,
 } from "../scripts/pi-bots/pi_contain.mjs";
+import { wrapPiSpawn } from "../scripts/pi-bots/pi_sandbox.mjs";
 import { RESERVED_DATA_NAMES } from "../servers/gateway/compose-guard.js";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "crow-contain-plan-")));
@@ -607,6 +608,213 @@ test("B5: the bot's own pi-bots/<id> folder is writable; another bot's is still 
   const elsewhere = mk(crowHome, "state", "hank");
   const notABotRoot = buildContainPlan(base({ botStateDir: join(crowHome, "state"), writePaths: [elsewhere] }));
   assert.ok(!has(notABotRoot.args, "--bind", elsewhere), "a world root outside pi-bots/ widens nothing");
+});
+
+// ---- B13 (contain-tier finding, 2026-11-19): the bot's OWN world root must EXIST before the plan,
+// or it is dropped and the sandbox's empty tmpfs $HOME swallows the write (travel-agent's
+// contain-smoke.txt: the write "succeeded" and vanished, where the loose tier creates the folder).
+// The SPAWNER makes it (pi_contain.mjs ensureContainOwnWorldRoot), strictly inside this instance's
+// <crowHome>/pi-bots and never through a symlink; anything else stays dropped, and the plan now
+// NAMES a dropped writable path (`droppedWrites`) so the containment status can say so.
+
+/** The plan inputs for an own-root case, on its own scratch Crow home. */
+const ownRootBase = (ch, over = {}) => base({
+  crowHome: ch, dataDir: mk(ch, "data"), botCacheDir: mk(ch, "bot-cache"), ...over,
+});
+
+test("B13: a missing own world root inside pi-bots is created (0700, this uid) and bound writable", () => {
+  const ch = mk(T, "b13", "crow");
+  const ownRoot = join(ch, "pi-bots", "travel-agent");
+  assert.equal(existsSync(ownRoot), false, "the fixture starts with no own root: the travel-agent case");
+  const made = ensureContainOwnWorldRoot(ownRoot, { crowHome: ch });
+  assert.equal(made, ownRoot);
+  const st = statSync(ownRoot);
+  assert.equal(st.isDirectory(), true);
+  assert.equal(st.mode & 0o777, 0o700, "0700, the shape every folder this spawner makes for a sandbox has");
+  assert.equal(st.uid, process.getuid());
+  const { args, droppedWrites } = buildContainPlan(ownRootBase(ch, {
+    botStateDir: ownRoot, writePaths: [ownRoot, join(ownRoot, "proposed-skills")],
+  }));
+  assert.ok(has(args, "--bind", ownRoot), "the root is a writable bind");
+  assert.deepEqual(droppedWrites, [], "neither the root nor a missing child UNDER a bound root is dropped");
+});
+
+test("B13b: a symlinked own root pointing outside pi-bots is neither created nor bound", () => {
+  const ch = mk(T, "b13b", "crow");
+  const botsRoot = mk(ch, "pi-bots");
+  const outside = mk(T, "b13b", "outside");
+  const link = join(botsRoot, "wanderer");
+  symlinkSync(outside, link);
+  assert.equal(ensureContainOwnWorldRoot(link, { crowHome: ch }), null, "nothing is created through the link");
+  assert.deepEqual(readdirSync(outside), [], "and nothing appears at what it names");
+  const missing = join(link, "proposed-skills");
+  const { args, refused, droppedWrites } = buildContainPlan(ownRootBase(ch, { botStateDir: link, writePaths: [missing] }));
+  assert.ok(!has(args, "--bind", outside), "what the link names is not bound");
+  assert.ok(!has(args, "--bind", link), "nor the link path");
+  assert.ok(refused.some((r) => r.path === missing && /does not exist/.test(r.reason)),
+    "the write path is refused: " + JSON.stringify(refused));
+  assert.deepEqual(droppedWrites, [missing], "and the drop is named");
+});
+
+test("B13c: a missing write_path outside pi-bots is never created, and the plan reports the drop", () => {
+  const ch = mk(T, "b13c", "crow");
+  const ownRoot = mk(ch, "pi-bots", "smith");
+  const missing = join(T, "b13c", "work", "not-yet");
+  const { args, droppedWrites } = buildContainPlan(ownRootBase(ch, { botStateDir: ownRoot, writePaths: [missing] }));
+  assert.equal(existsSync(missing), false, "building a plan creates nothing");
+  assert.equal(ensureContainOwnWorldRoot(missing, { crowHome: ch }), null, "the spawner creates nothing outside pi-bots");
+  assert.equal(existsSync(missing), false, "an arbitrary write path is never created");
+  assert.ok(!has(args, "--bind", missing));
+  assert.deepEqual(droppedWrites, [missing], "the drop is recorded, so the containment status can name it");
+  // A configured bot path (session dir / cwd) that is gone is reported the same way, once.
+  const gone = join(T, "b13c", "session-gone");
+  const r2 = buildContainPlan(ownRootBase(ch, { botStateDir: ownRoot, sessionDir: gone, cwd: gone }));
+  assert.equal(existsSync(gone), false);
+  assert.deepEqual(r2.droppedWrites, [gone], "deduped, and it is the path the operator configured");
+});
+
+test("B13d: an existing own world root is left exactly as it is", () => {
+  const ch = mk(T, "b13d", "crow");
+  const ownRoot = mk(ch, "pi-bots", "keeper");
+  writeFileSync(join(ownRoot, "keep.txt"), "keep");
+  chmodSync(ownRoot, 0o755);
+  const before = statSync(ownRoot);
+  assert.equal(ensureContainOwnWorldRoot(ownRoot, { crowHome: ch }), null, "nothing to create");
+  const after = statSync(ownRoot);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mode & 0o777, 0o755, "the mode is not rewritten");
+  assert.equal(readFileSync(join(ownRoot, "keep.txt"), "utf8"), "keep");
+  const { args } = buildContainPlan(ownRootBase(ch, { botStateDir: ownRoot, writePaths: [ownRoot] }));
+  assert.ok(has(args, "--bind", ownRoot), "and the plan binds it as before");
+});
+
+test("B13e: the spawner creates a missing own world root BEFORE it builds the plan", () => {
+  const ch = mk(T, "b13e", "crow");
+  const ownRoot = join(ch, "pi-bots", "travel-agent");
+  assert.equal(existsSync(ownRoot), false);
+  const saved = { bots: process.env.CROW_PI_CONTAIN_BOTS, sb: process.env.CROW_PI_SANDBOX };
+  process.env.CROW_PI_CONTAIN_BOTS = "travel-agent";
+  process.env.CROW_PI_SANDBOX = "contain";
+  try {
+    const launch = wrapPiSpawn(process.execPath, ["-e", ""], {
+      env: {}, botId: "travel-agent", probe: { ok: true, pidns: true, bwrap: "/bin/true" },
+      contain: ownRootBase(ch, { botStateDir: ownRoot, writePaths: [ownRoot] }),
+    });
+    assert.equal(existsSync(ownRoot), true, "the spawner made the root before bwrap ran");
+    assert.equal(statSync(ownRoot).mode & 0o777, 0o700);
+    assert.ok(has(launch.args, "--bind", ownRoot), "and the plan bound it writable");
+    assert.equal(launch.ownWorldRoot, ownRoot);
+    assert.deepEqual(launch.droppedWrites, []);
+  } finally {
+    if (saved.bots === undefined) delete process.env.CROW_PI_CONTAIN_BOTS; else process.env.CROW_PI_CONTAIN_BOTS = saved.bots;
+    if (saved.sb === undefined) delete process.env.CROW_PI_SANDBOX; else process.env.CROW_PI_SANDBOX = saved.sb;
+  }
+});
+
+// The id the own root is derived from is the SPAWNER's, never one a def names: a def is
+// bot-writable (crow.db, which holds the defs, is bound read-write into every contained bot), so a
+// def pointing its session_dir at another bot's folder must not make this spawner CREATE it, nor
+// make that folder "this bot's own" in the plan.
+test("B13f: a def's session_dir never decides the own root — the spawner's bot id does", () => {
+  // A scratch Crow home shaped like a real one (a dot folder of $HOME): the hidden-entry rule the
+  // plan applies to policy write paths is about that shape.
+  const ch = mk(H, ".crow-b13f");
+  const theirs = join(ch, "pi-bots", "victim");
+  // A def that names another bot: the exact shape a bot could write into its own definition.
+  const def = { bot_id: "victim", session_dir: theirs };
+  assert.equal(containOwnWorldRoot({ crowHome: ch, botId: "attacker", def }), join(ch, "pi-bots", "attacker"),
+    "the root is <crowHome>/pi-bots/<the id the spawner was given>");
+  assert.equal(containOwnWorldRoot({ crowHome: ch, botId: "../victim" }), null, "a path is not a bot id: no folder is derived");
+  assert.equal(containOwnWorldRoot({ crowHome: ch, botId: "Server Name" }), null);
+  assert.equal(containOwnWorldRoot({ crowHome: ch, botId: null }), null, "no trusted id, no derived folder");
+  assert.equal(containOwnWorldRoot({ crowHome: "", botId: "attacker" }), null);
+
+  // What the spawner creates is exactly that root: the folder the def names is untouched.
+  const own = containOwnWorldRoot({ crowHome: ch, botId: "attacker" });
+  assert.equal(ensureContainOwnWorldRoot(own, { crowHome: ch }), own);
+  assert.equal(existsSync(join(ch, "pi-bots", "attacker")), true);
+  assert.equal(existsSync(theirs), false, "a def pointing session_dir at another bot's missing root creates nothing");
+
+  // … and the plan does not treat the other bot's folder as own: a write path there is refused by
+  // the ordinary hidden-entry rule, not widened (the folder exists here — a def naming it must
+  // never be what makes it, which is what the assertion above just proved).
+  const stage = mk(ch, "pi-bots", "victim", "proposed-skills");
+  const plan = buildContainPlan(ownRootBase(ch, { botStateDir: own, writePaths: [stage] }));
+  assert.ok(!has(plan.args, "--bind", stage), "another bot's folder is never bound as the bot's own world");
+  assert.ok(plan.refused.some((r) => r.path === stage && /hidden entry/.test(r.reason)), JSON.stringify(plan.refused));
+
+  // The wiring itself lives in bridge.mjs's containInputs (not exported): read it, because the
+  // whole point is that a def is not consulted when the own root is derived.
+  const src = readFileSync(join(REPO, "scripts", "pi-bots", "bridge.mjs"), "utf8");
+  const lines = src.split("\n").filter((l) => /\bbotStateDir\b/.test(l));
+  assert.ok(lines.length > 0, "bridge.mjs still carries the own-root input");
+  assert.ok(lines.every((l) => !l.includes("session_dir")), "no botStateDir line reads the def: " + lines.join(" | "));
+  assert.match(src, /botStateDir\s*=\s*ownWorldRoot/, "the plan's own root is the derived one: " + lines.join(" | "));
+  assert.match(src, /containOwnWorldRoot\(\{\s*crowHome,\s*botId:\s*opts\.botId\s*\}\)/,
+    "derived from <crowHome> and THIS spawner's bot id only");
+});
+
+// A Crow home (or an ancestor of it) is often a SYMLINK. The own root then has to be resolved
+// through the home's realpath before the strictly-inside check, or botsRoot (real) and the target
+// (unresolved) never match and NOTHING is created.
+test("B13g: a symlinked Crow home still gets its bot's own root, under the REAL pi-bots", () => {
+  const realHome = mk(T, "b13g", "real-crow");
+  const linkedHome = join(T, "b13g", "linked-crow");
+  symlinkSync(realHome, linkedHome);
+  const ownRoot = join(linkedHome, "pi-bots", "travel-agent");
+  const made = ensureContainOwnWorldRoot(ownRoot, { crowHome: linkedHome });
+  assert.equal(made, join(realHome, "pi-bots", "travel-agent"), "created under the REAL pi-bots");
+  const st = statSync(made);
+  assert.ok(st.isDirectory() && (st.mode & 0o777) === 0o700);
+  assert.equal(st.uid, process.getuid());
+  assert.equal(existsSync(ownRoot), true, "reachable through the linked home as well");
+  assert.deepEqual(readdirSync(join(realHome, "pi-bots")), ["travel-agent"], "exactly the bot's own folder");
+  // The plan over the same linked home binds it at its resolved path and drops nothing.
+  const { args, droppedWrites } = buildContainPlan(ownRootBase(linkedHome, { botStateDir: ownRoot, writePaths: [ownRoot] }));
+  assert.ok(has(args, "--bind", made), "bound at the resolved path");
+  assert.deepEqual(droppedWrites, []);
+  // The real spelling of the same home works too (a caller holding the resolved CROW_HOME).
+  assert.equal(ensureContainOwnWorldRoot(join(realHome, "pi-bots", "second"), { crowHome: realHome }),
+    join(realHome, "pi-bots", "second"));
+});
+
+// Every link on the way is refused rather than followed: a symlinked pi-bots (the whole tree), a
+// symlinked intermediate component of a nested own path, the pi-bots root itself, and a `..`.
+test("B13h: a symlinked pi-bots, a symlinked component, the pi-bots root and a `..` are refused", () => {
+  // pi-bots itself is a symlink: not this instance's own tree, so nothing is created through it.
+  const ch1 = mk(T, "b13h", "linked-bots");
+  const outside = mk(T, "b13h", "outside");
+  symlinkSync(outside, join(ch1, "pi-bots"));
+  assert.equal(ensureContainOwnWorldRoot(join(ch1, "pi-bots", "travel-agent"), { crowHome: ch1 }), null);
+  assert.deepEqual(readdirSync(outside), [], "nothing appears at what the link names");
+  assert.equal(existsSync(join(ch1, "pi-bots", "travel-agent")), false);
+
+  // A symlinked INTERMEDIATE component of a nested own path (its target is INSIDE pi-bots, so the
+  // strictly-inside check alone would accept it): the walk sees the link and refuses.
+  const ch2 = mk(T, "b13h2", "crow");
+  const peer = mk(ch2, "pi-bots", "peer-bot");
+  symlinkSync(peer, join(mk(ch2, "pi-bots"), "linked"));
+  const logs = [];
+  const origError = console.error;
+  console.error = (...a) => { logs.push(a.join(" ")); };
+  try {
+    assert.equal(ensureContainOwnWorldRoot(join(ch2, "pi-bots", "linked", "deep", "root"), { crowHome: ch2 }), null);
+  } finally { console.error = origError; }
+  assert.deepEqual(readdirSync(peer), [], "the link's target is untouched");
+  assert.equal(existsSync(join(ch2, "pi-bots", "linked", "deep")), false, "nothing is created through the link");
+  assert.ok(logs.some((l) => /is a symlink/.test(l)), logs.join(" | "));
+
+  // The pi-bots root itself is never a bot's own root.
+  const ch3 = mk(T, "b13h3", "crow");
+  assert.equal(ensureContainOwnWorldRoot(join(ch3, "pi-bots"), { crowHome: ch3 }), null);
+  assert.equal(existsSync(join(ch3, "pi-bots")), false, "nothing is created for the root itself");
+
+  // A `..` traversal is refused, even one that resolves back inside pi-bots (join() would have
+  // normalised it away, so the spellings are built by hand).
+  const ch4 = mk(T, "b13h4", "crow");
+  assert.equal(ensureContainOwnWorldRoot(ch4 + "/pi-bots/../pi-bots/bot", { crowHome: ch4 }), null);
+  assert.equal(ensureContainOwnWorldRoot(ch4 + "/pi-bots/x/../../escape", { crowHome: ch4 }), null);
+  assert.equal(existsSync(join(ch4, "pi-bots")), false, "and nothing is created");
 });
 
 // ---- contain-tier blockers, fix round 2: B6 (uv binds), B7 (command files) ----

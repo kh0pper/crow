@@ -77,7 +77,16 @@
  *               read-write; read_paths read-only (all realpath'd). A write path
  *               inside the bot's OWN pre-project world root (<crowHome>/pi-bots/<id>,
  *               where self-authoring stages skill proposals) is writable too
- *               (input `botStateDir`).
+ *               (input `botStateDir`). That root is CREATED (0700) by the spawner before
+ *               the plan when it is missing and resolves strictly inside this instance's
+ *               <crowHome>/pi-bots (ensureContainOwnWorldRoot): a path that does not exist
+ *               cannot be bound, and a write into the sandbox's empty tmpfs $HOME is lost.
+ *               The id is the SPAWNER's own (containOwnWorldRoot), never one a def names: a def is
+ *               bot-writable, so a def's session_dir cannot make this spawner create (or widen
+ *               to) another bot's folder.
+ *               A configured writable path that is still missing after that (anything outside
+ *               pi-bots, or a root that could not be made) is listed in the plan's
+ *               `droppedWrites`, so the containment status names it.
  *   MCP         each server's cwd and absolute command read-only: the command's
  *               install root, or — for a launcher in a folder never bound
  *               wholesale (~/.local/bin/uv sits beside the never-bound
@@ -448,13 +457,21 @@ export function makeBindPolicy({ home, crowHome, crowHomeReal, dataDir, appRoot,
     return null;
   }
 
+  /**
+   * Bind `p` at its resolved path, or record the refusal in `refused`.
+   * @returns {"bound"|"missing"|"refused"|"skipped"} what happened to `p`. `missing` (the path is
+   *   not there at all) is the one a caller that NAMES a configured-but-absent writable path needs
+   *   (buildContainPlan's droppedWrites): a structured answer from the bind itself, so no caller
+   *   has to parse the refusal sentence to tell an absent path from a refused one.
+   */
   function add(map, p, { write = false, label = "", policy = false } = {}) {
-    if (!p) return;
+    if (!p) return "skipped";
     const r = real(p, exists, home);
-    if (!r) { refused.push({ path: p, reason: "does not exist" + (label ? " (" + label + ")" : "") }); return; }
+    if (!r) { refused.push({ path: p, reason: "does not exist" + (label ? " (" + label + ")" : "") }); return "missing"; }
     const why = forbidden(r, { write, policy });
-    if (why) { refused.push({ path: p, reason: why }); return; }
+    if (why) { refused.push({ path: p, reason: why }); return "refused"; }
     map.set(r, r);
+    return "bound";
   }
 
   return { forbidden, add, never, others, closedRw };
@@ -589,6 +606,154 @@ export function ensureContainMountPoints(paths, { uid = process.getuid() } = {})
   return made;
 }
 
+/**
+ * The bot's OWN pre-project world root for one contained spawn: `<crowHome>/pi-bots/<bot id>`.
+ *
+ * That folder is the ONE hidden home entry a policy may reach (see the module header):
+ * self-authoring stages skill proposals below it and the Bot Builder's review UI scans exactly
+ * that path, so the contain plan binds it writable and the spawner creates it when it is missing.
+ *
+ * The id is the one the SPAWNER was given (`opts.botId`, taken from the bot's own `pi_bot_defs`
+ * row), NEVER one a def names: a def is bot-writable — `crow.db`, which holds the defs, is bound
+ * read-write into every contained bot — so a def carrying a `session_dir` (or a `bot_id`) for
+ * another bot must never make this spawner create, or widen to, that bot's folder. The id is also
+ * validated against the engine's bot-id charset (BOT_ID_RE, the same rule botWorkspaceEnv
+ * applies) BEFORE it is joined into a path, so an id carrying a separator or a dot name can never
+ * name a folder of its choosing.
+ * @param {{crowHome?: string, botId?: string|null}} a
+ * @returns {string|null} the folder (not resolved: the home is often a symlink, and
+ *   ensureContainOwnWorldRoot resolves the tree), or null when there is no Crow home or the id is
+ *   not a bot id (no derived folder at all).
+ */
+export function containOwnWorldRoot({ crowHome, botId } = {}) {
+  if (typeof crowHome !== "string" || !crowHome) return null;
+  if (typeof botId !== "string" || !BOT_ID_RE.test(botId)) return null;
+  return join(crowHome, "pi-bots", botId);
+}
+
+/**
+ * Make a contained bot's OWN pre-project world root before the plan is built, when it is missing.
+ *
+ * <crowHome>/pi-bots/<id> is the ONE hidden home entry a policy may reach (see the module header):
+ * self-authoring stages skill proposals below it and the Bot Builder's review UI scans exactly
+ * that path. The plan can only bind a path that EXISTS (`add()` drops a missing one), and the
+ * sandbox's $HOME is an empty tmpfs — so a bot whose folder had never been created wrote
+ * `contain-smoke.txt` into scratch and the write vanished with the spawn (travel-agent,
+ * 2026-11-19), while the same write creates the folder on the host in the loose tier. So the
+ * SPAWNER makes it, immediately before the plan is built.
+ *
+ * Only the bot's own root, and only when it resolves strictly inside THIS instance's
+ * <crowHome>/pi-bots: never pi-bots itself, never a path with a `..` in it, never another folder,
+ * never a path outside (a write_path the operator configured elsewhere keeps today's behaviour:
+ * dropped, and the plan reports it), and never through a symlink — each existing component is
+ * lstat-checked and mkdir(2) never follows a final link. The HOME itself (or an ancestor of it)
+ * MAY be a symlink: the target is resolved through its nearest existing ancestor's realpath, so a
+ * linked CROW_HOME/~/.crow still names the folder this instance's pi-bots really lives in, and
+ * the missing tail is appended to that REAL root. Created 0700 and chmod'ed to 0700 (a mkdir mode
+ * is umask's to narrow; every folder this spawner makes for a sandbox has that shape), owned by
+ * this uid because it is made as this uid. An EXISTING root is left exactly as it is: the plan
+ * binds it at its real path (and refuses it when it is a link out of pi-bots). A creation that
+ * fails is logged and left to the plan's own refusal list — never a silent success, never a spawn
+ * refusal the operator did not ask for.
+ * @returns {string|null} the folder this call created, or null (nothing to create, not a bot's
+ *          own root, or it could not be made)
+ */
+export function ensureContainOwnWorldRoot(botStateDir, { crowHome, uid = process.getuid() } = {}) {
+  if (typeof botStateDir !== "string" || !botStateDir || !isAbsolute(botStateDir)) return null;
+  if (typeof crowHome !== "string" || !crowHome) return null;
+  // A `..` component is never a bot's own root: the path has to be SPELLED OUT, not walked through
+  // (a resolved `..` would also hide which folder the caller really meant).
+  if (botStateDir.split(sep).includes("..")) {
+    console.error("[pi-contain] the bot's world root " + botStateDir + " was not created: a `..` in the path");
+    return null;
+  }
+  // The home may itself be a symlink (a home linked onto a data disk), so both spellings are kept:
+  // the lexical one to read the caller's tail below pi-bots from, and the REAL one (its nearest
+  // existing ancestor resolved, the missing tail appended) as the tree everything is made in and
+  // checked against.
+  const homeLex = resolve(String(crowHome));
+  const homeReal = realpathish(homeLex);
+  const botsRootLex = join(homeLex, "pi-bots");
+  const botsRoot = join(homeReal, "pi-bots");
+  const target = resolve(botStateDir);
+  const tail = tailBelow(botsRootLex, target) || tailBelow(botsRoot, target);
+  // Strictly INSIDE this instance's pi-bots, at both spellings: the root itself is never created,
+  // and nothing outside (or an ancestor of) the tree is ever a candidate.
+  if (!tail) return null;
+  const candidate = join(botsRoot, ...tail);
+  if (candidate === botsRoot || !under(candidate, botsRoot)) return null;
+  // What the caller's path really resolves to must be inside this instance's pi-bots too: a link
+  // planted on the way out names a folder this spawner does not own.
+  if (!under(realpathish(target), botsRoot)) {
+    console.error("[pi-contain] the bot's world root " + target + " was not created: it resolves outside " + botsRoot);
+    return null;
+  }
+  // An existing root is the plan's business: bind it, or refuse it when it is a link out.
+  if (lstatOrNull(candidate)) return null;
+  // pi-bots itself: created here when this instance never had one (the loose tier creates it
+  // the same way, through the world root's mkdir), but never followed (a symlinked pi-bots is
+  // not this instance's own tree, so nothing is created through it).
+  const rootAt = lstatOrNull(botsRoot);
+  if (!rootAt) {
+    let err = null;
+    try { mkdirSync(botsRoot, { mode: 0o700 }); } catch (e) { err = e; }
+    if (!err) { try { chmodSync(botsRoot, 0o700); } catch (e) { err = e; } }
+    if (err) {
+      console.error("[pi-contain] the bot's world root " + target + " was not created: " + ((err && err.code) || "error") +
+        " (pi-bots could not be made)");
+      return null;
+    }
+  }
+  const rootNow = lstatOrNull(botsRoot);
+  if (!rootNow || rootNow.isSymbolicLink() || !rootNow.isDirectory()) {
+    if (rootNow) console.error("[pi-contain] the bot's world root " + target + " is not created: " + botsRoot + " is not a plain directory");
+    return null;
+  }
+  // One component at a time, refusing every link: a symlink planted anywhere on the way is a
+  // folder this spawner does not own, so nothing is created through (or into) it.
+  let made = null;
+  let cur = botsRoot;
+  for (const part of tail) {
+    if (!part || part === "." || part === "..") return null;
+    cur = join(cur, part);
+    const at = lstatOrNull(cur);
+    if (at) {
+      if (at.isSymbolicLink() || !at.isDirectory()) {
+        console.error("[pi-contain] the bot's world root " + target + " was not created: " + cur + " is " +
+          (at.isSymbolicLink() ? "a symlink" : "not a directory"));
+        return null;
+      }
+      continue;
+    }
+    let err = null;
+    try { mkdirSync(cur, { mode: 0o700 }); } catch (e) { err = e; }
+    if (!err) { try { chmodSync(cur, 0o700); } catch (e) { err = e; } } // a mkdir mode is umask's to narrow; the shape is not
+    const after = lstatOrNull(cur);
+    if (!after || after.isSymbolicLink() || !after.isDirectory()) {
+      console.error("[pi-contain] the bot's world root " + cur + " was not created: " +
+        (err ? ((err && err.code) || "error") : "not a directory"));
+      return null;
+    }
+    if (after.uid !== uid) {
+      console.error("[pi-contain] the bot's world root " + cur + " belongs to uid " + after.uid + ", not " + uid + "; not used");
+      return null;
+    }
+    made = cur;
+  }
+  // Nothing was missing after all (a peer made it in the same instant): nothing was created.
+  if (!made) return null;
+  // Final proof: the folder really resolves to the path this call meant, still strictly inside
+  // this instance's pi-bots — the same rule the plan applies to `botStateDir`.
+  let realTarget = null;
+  try { realTarget = realpathSync(candidate); } catch { realTarget = null; }
+  if (!realTarget || realTarget !== candidate || realTarget === botsRoot || !under(realTarget, botsRoot)) {
+    console.error("[pi-contain] the bot's world root " + candidate + " did not resolve to itself inside " + botsRoot + "; not bound");
+    return null;
+  }
+  console.error("[pi-contain] created the bot's own world root " + realTarget + " (0700): writes there land on the host");
+  return realTarget;
+}
+
 /** The one refusal for a mount point another uid owns (existing or freshly made). */
 function notThisUid(p, got, want) {
   return new ContainRefused("contain refused: the mount point " + p + " of an empty read-only mask belongs to uid " +
@@ -598,6 +763,31 @@ function notThisUid(p, got, want) {
 /** lstat, or null when the path does not exist (never throws, never follows a link). */
 function lstatOrNull(p) {
   try { return lstatSync(p); } catch { return null; }
+}
+
+/**
+ * `p` with its nearest EXISTING ancestor resolved through realpath(3) and the missing tail
+ * appended: the form a path that does not exist yet will really have once it is made. A symlinked
+ * home (or a symlinked ancestor of it) is therefore resolved even when the leaf is missing, and
+ * nothing that is not there is followed (a dangling link is left in the tail for the caller's own
+ * lstat walk to refuse).
+ */
+function realpathish(p) {
+  const abs = resolve(String(p));
+  const tail = [];
+  for (let cur = abs; ;) {
+    try { return tail.length ? join(realpathSync(cur), ...tail) : realpathSync(cur); } catch { /* not there */ }
+    const up = dirname(cur);
+    if (up === cur) return abs;
+    tail.unshift(basename(cur));
+    cur = up;
+  }
+}
+
+/** The components of `p` below `base`, or null when `p` is not strictly inside it. */
+function tailBelow(base, p) {
+  if (!under(p, base) || p === base) return null;
+  return p.slice(base.length + 1).split(sep);
 }
 
 /**
@@ -713,16 +903,19 @@ export function assembleBindArgs({ ro, rw, masks, extraEntries = [], readonlyDir
  * home or one declared outside $HOME is covered as well as a `$HOME/.crow-*`
  * sibling.
  *
- * `botStateDir` is the bot's OWN pre-project world root (worldRootFor with no
- * workspace: <crowHome>/pi-bots/<id>, or its custom def.session_dir). It is the
- * only path under a hidden home entry a policy write path may reach: the legacy
- * self-authoring staging dir lives there and the Bot Builder's review UI scans
- * it, so it is bound writable instead of being dropped. Optional: without it
- * the hidden-entry rule applies unchanged.
- * @returns {{args: string[], env: object, refused: {path, reason}[], net: object|null, mountPoints: string[]}}
+ * `botStateDir` is the bot's OWN pre-project world root (<crowHome>/pi-bots/<the spawner's bot
+ * id>, containOwnWorldRoot — never a path a def names). It is the only path under a hidden home
+ * entry a policy write path may reach: the legacy self-authoring staging dir lives there and the
+ * Bot Builder's review UI scans it, so it is bound writable instead of being dropped. Optional:
+ * without it the hidden-entry rule applies unchanged.
+ * @returns {{args: string[], env: object, refused: {path, reason}[], net: object|null, mountPoints: string[], droppedWrites: string[]}}
  *   `mountPoints` are the directories that must exist (empty, plain, 0700) before this argv
  *   runs: the destinations of the empty read-only masks over trusted-but-absent data-dir
  *   names. ensureContainMountPoints() is the only thing that may make them.
+ *   `droppedWrites` names every CONFIGURED writable path (session dir, cwd, workspace,
+ *   write_paths) that was dropped because it does not exist and no writable bind covers it:
+ *   a write there would "succeed" into the sandbox's tmpfs and be lost, so the containment
+ *   status names it (the spawner passes it to botContainment).
  */
 export function buildContainPlan(o) {
   const exists = o.exists || existsSync;
@@ -1093,15 +1286,31 @@ export function buildContainPlan(o) {
   if (o.botCacheDir) add(rw, o.botCacheDir, { write: true, label: "bot cache" });
 
   // bot paths
-  for (const p of [o.sessionDir, o.cwd, o.workspaceDir]) if (p) add(rw, p, { write: true });
+  // Every configured writable path whose absence is worth NAMING (a write there still
+  // "succeeds" inside the sandbox — the empty $HOME is a tmpfs — and is lost with the spawn).
+  // Recorded here, filtered at the end to the ones no writable bind really covers.
+  const missingWrites = [];
+  const addWrite = (p, label, opts = {}) => {
+    // The bind itself says whether the path was ABSENT (a structured answer, never the refusal
+    // sentence): only an absent configured path is a write that would be lost in the sandbox.
+    if (add(rw, String(p), { write: true, label, ...opts }) === "missing") missingWrites.push(String(p));
+  };
+  for (const [p, label] of [[o.sessionDir, "session dir"], [o.cwd, "cwd"], [o.workspaceDir, "workspace"]]) {
+    if (p) addWrite(p, label);
+  }
   // The bot's OWN pre-project world root (<crowHome>/pi-bots/<id>): the legacy
   // self-authoring staging dir lives below it (def.session_dir/proposed-skills)
   // and the Bot Builder's review UI scans exactly that path. Mapping it into
   // the project world root instead would be a write-here/scan-there split, so
   // the folder is bound writable — and ONLY it: the root is honoured only when
   // it sits inside this instance's <crowHome>/pi-bots (never the whole pi-bots
-  // tree, never another bot's, never the home itself), and every other rule
-  // (never-bound paths, other homes, code, the Crow home) still applies.
+  // tree, never the home itself), and the caller passes the SPAWNER's own id
+  // (containOwnWorldRoot) rather than a path a def names — so it is never another
+  // bot's folder either. Every other rule (never-bound paths, other homes, code,
+  // the Crow home) still applies.
+  // It must EXIST to be bound: the spawner makes it first when it is missing
+  // (ensureContainOwnWorldRoot), and a root that is still missing is dropped and
+  // reported (droppedWrites), never silently left writable-only-in-scratch.
   const botsRoot = crowHomeReal ? join(crowHomeReal, "pi-bots") : null;
   const botStateReal = o.botStateDir ? real(o.botStateDir, exists) : null;
   const ownStateRoot = botStateReal && botsRoot && under(botStateReal, botsRoot) && botStateReal !== botsRoot ? botStateReal : null;
@@ -1114,10 +1323,10 @@ export function buildContainPlan(o) {
       if (under(c, r)) throw new ContainRefused("contain refused: write_paths names " + r + ", which covers the Crow home (" + c + ") and is never writable under contain");
     }
     if (ownStateRoot && r && under(r, ownStateRoot)) {
-      add(rw, String(p), { write: true, label: "write_paths (the bot's own world)" });
+      addWrite(p, "write_paths (the bot's own world)");
       continue;
     }
-    add(rw, String(p), { write: true, label: "write_paths", policy: true });
+    addWrite(p, "write_paths", { policy: true });
   }
   for (const p of o.readPaths || []) add(ro, String(p), { label: "read_paths" });
   // read-only when also writable: writable wins
@@ -1207,7 +1416,21 @@ export function buildContainPlan(o) {
     });
     net = { sock: NET_RELAY_MOUNT + "/relay.sock", ports, proxyPort };
   }
-  return { args, env, refused, net, mountPoints };
+  // A missing configured writable path is REPORTED (the containment status names it) unless a
+  // writable bind already covers it: a missing child of a bound world root needs no bind of its
+  // own, and calling that "dropped" would misdescribe a write that really lands on the host.
+  const droppedWrites = [];
+  for (const p of missingWrites) {
+    if (droppedWrites.includes(p)) continue;
+    const lexical = resolve(p);
+    // The bind destinations are REAL paths; a missing path's own parent can still be
+    // resolved, so compare both spellings before calling it uncovered.
+    let realish = lexical;
+    try { realish = join(realpathSync(dirname(lexical)), basename(lexical)); } catch { /* parent gone too */ }
+    if ([...rw.keys()].some((d) => under(lexical, d) || under(realish, d))) continue;
+    droppedWrites.push(p);
+  }
+  return { args, env, refused, net, mountPoints, droppedWrites };
 }
 
 /**

@@ -75,6 +75,43 @@ test("an unobserved bot (no record here, or PIBOT_SUPERVISOR=external) is not co
   assert.ok(inst.open.includes("desk: " + DATA), "the observed bot's lines are kept");
 });
 
+test("a configured write path that did not exist is named in the open lines (a write there is lost)", () => {
+  const p = "/home/alex/.crow/pi-bots/travel-agent";
+  const line = CS.droppedWriteLine(p);
+  assert.equal(line, "the write path " + p + " did not exist, so writes there are lost");
+  const s = CS.botContainment({ tier: "contain", mcpServers: [], tools: [], droppedWrites: [p] });
+  assert.equal(s.level, "partly contained");
+  assert.deepEqual(s.open, [DATA, line], "crow.db stays first, then the dropped path");
+  // The one [containment] line keeps its fixed shape.
+  assert.equal(CS.formatContainmentLine("travel-agent", s),
+    "[containment] travel-agent partly contained: 2 open (" + DATA + "; " + line + ")");
+  // Duplicates and empty entries collapse; a non-contain tier carries none.
+  assert.deepEqual(CS.botContainment({ tier: "contain", droppedWrites: [p, p, ""] }).open, [DATA, line]);
+  assert.deepEqual(CS.botContainment({ tier: "pidns", droppedWrites: [p] }).open, [UNCONTAINED]);
+});
+
+test("a dropped path cannot forge a log line or an extra open item", () => {
+  // A path is bot-visible text (an operator's configured path, or one a def named) and the open
+  // lines are joined into ONE `[containment]` line with "; ": a newline would open a log line of
+  // its own, a ";" a fake item (and a \r could rewrite the line in a terminal).
+  const hostile = "/home/alex/.crow/pi-bots/a\n[containment] forged: 0 open;b\tc\r";
+  const line = CS.droppedWriteLine(hostile);
+  // eslint-disable-next-line no-control-regex
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(line), "no control character reaches the line: " + JSON.stringify(line));
+  assert.equal(line.split(";").length, 1, "no item separator comes from the path");
+  assert.equal(line, "the write path /home/alex/.crow/pi-bots/a[containment] forged: 0 openbc did not exist, so writes there are lost");
+  // An ordinary path is unchanged (the words are quoted by the settings page and the docs).
+  assert.equal(CS.droppedWriteLine("/home/alex/.crow/pi-bots/desk"),
+    "the write path /home/alex/.crow/pi-bots/desk did not exist, so writes there are lost");
+  // The assembled one-line status keeps exactly one separator between its two items.
+  const s = CS.botContainment({ tier: "contain", mcpServers: [], tools: [], droppedWrites: [hostile] });
+  assert.equal(s.open.length, 2);
+  const one = CS.formatContainmentLine("travel-agent", s);
+  assert.equal(one.split("; ").length, 2, "one separator, one extra item: " + one);
+  assert.equal(one.includes("\n"), false, "and it stays one line");
+  assert.ok(one.startsWith("[containment] travel-agent partly contained: 2 open ("), one);
+});
+
 test("each credentialed add-on in the bot's config gets its own line; Crow's own servers do not", () => {
   const s = CS.botContainment({
     tier: "contain",
