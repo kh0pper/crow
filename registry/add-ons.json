@@ -175,7 +175,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.11.1",
+      "version": "0.11.2",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",
@@ -192,6 +192,9 @@
       "panelRoutes": "panel/routes.js",
       "skills": [
         "skills/artifacts.md"
+      ],
+      "needs": [
+        "shared-storage"
       ],
       "requires": {
         "min_ram_mb": 128,
@@ -1301,7 +1304,7 @@
     {
       "id": "data-dashboard",
       "name": "Data Dashboard",
-      "version": "1.1.2",
+      "version": "1.1.3",
       "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
       "type": "bundle",
       "author": "Crow",
@@ -1333,6 +1336,9 @@
         ],
         "cwd": "."
       },
+      "needs": [
+        "shared-storage"
+      ],
       "requires": {
         "env": [],
         "min_ram_mb": 128,
@@ -6952,7 +6958,7 @@
     {
       "id": "studio",
       "name": "Crow Studio",
-      "version": "0.23.2",
+      "version": "0.23.3",
       "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6977,6 +6983,9 @@
           "STORAGE_QUOTA_MB"
         ]
       },
+      "needs": [
+        "shared-storage"
+      ],
       "panel": "panel/studio.js",
       "panelRoutes": "panel/routes.js",
       "skills": [
@@ -7017,7 +7026,7 @@
     {
       "id": "sunvox-studio",
       "name": "SunVox Studio",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs (patterns, arrangement, song name). Renders and projects are saved to Crow storage; a render can go straight into a Funkwhale library for glasses playback.",
       "type": "mcp-server",
       "author": "Crow",
@@ -7044,6 +7053,9 @@
           "SUNVOX_MAX_RENDER_SECONDS"
         ]
       },
+      "needs": [
+        "shared-storage"
+      ],
       "skills": [
         "skills/sunvox-studio.md"
       ],

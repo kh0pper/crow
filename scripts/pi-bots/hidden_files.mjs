@@ -81,49 +81,50 @@ export function isIdentityFileName(n) {
 }
 
 /**
- * KNOWN LIMITATION — what a bot still loses when the identity file is hidden.
+ * KNOWN LIMITATION — what the mask changes for the MCP servers a bot runs.
  * Written out here because this is the module that decides the mask, and the
- * honest answer is not "nothing": the mask makes the file read EMPTY inside the
- * sandbox, and a few of the MCP servers a bot itself runs open it at start-up
- * or on first use.
+ * honest answer is not "nothing".
  *
- *  - `crow-storage` (`servers/storage/s3-client.js` initStorageFromInstance →
- *    loadIdentityIfPresent) unseals `storage.shared.*` settings with the
- *    instance identity. Inside a bot's sandbox the identity is absent, so it
- *    logs one line and keeps the ENV fallback (S3_ENDPOINT/S3_ACCESS_KEY/…):
- *    a Crow whose shared storage is configured only in the DB, with no env
- *    credentials, shows no storage from a bot.
- *  - the `studio` bundle (`bundles/studio/server/index.js` storageModule) wires
- *    the same S3 client through loadIdentityIfPresent; with no identity it
- *    keeps the env fallback, and a render save in a bot turn can then report
- *    "Crow storage is not available on this instance".
- *  - `sunvox-studio` (`bundles/sunvox-studio/server/server.js`) opens the same
- *    sealed `storage.shared.*` settings through the instance identity, drops the
- *    identity at once and hands the opened config to the S3 client. With no
- *    identity in a bot's sandbox, a render written to Crow storage fails (or
- *    degrades to the local work dir).
- *  - the `ramble` bundle (`bundles/ramble/server/server.js` getIdentityState →
- *    loadOrCreateIdentity / loadInstanceSeed) needs the seed for its bot
- *    identity. Hidden, the file parses as nothing, so its identity-backed tools
- *    fail on a bot turn; since bundle 0.26.2 that failure is a plain sentence
- *    ("ramble: the instance identity is not available to bots …") instead of
- *    pi's JSON error, and the tool still cannot run there. A gateway door for
- *    bot identity is the follow-up, not this mask.
- *  - the `data-dashboard` bundle (`bundles/data-dashboard/server/server.js`
- *    useInstanceStorage → loadIdentityIfPresent) opens the instance's sealed
- *    `storage.shared.*` settings with the identity, for the chart and map figure
- *    PNGs its case-study tools render and upload. With no identity in a bot's
- *    sandbox it keeps the env fallback (and writes nothing when that env is
- *    empty), so a case-study publish or a figure re-render from a bot turn fails
- *    instead of using a storage configured only in the DB.
+ * Storage is NOT one of the costs any more. The storage-using servers open this
+ * instance's sealed `storage.shared.*` settings, which needs the identity — so
+ * the HOST does that once and pipes only the OPENED config over the fd:
  *
- * None of these is an escape: masking the seed is the point. The follow-up is a
- * GATEWAY DOOR that serves the few identity-backed operations a bot tool needs
- * (the gateway holds the identity), so these servers stop reading the file at
- * all. Until then this is the documented cost of hiding the master seed, and
- * no bot definition can opt out of it.
+ *  - `crow-storage` (`servers/storage/s3-client.js`) gets S3_ENDPOINT,
+ *    S3_USE_SSL, S3_REGION, S3_BUCKET_PREFIX, S3_ACCESS_KEY and S3_SECRET_KEY
+ *    plus CROW_STORAGE_FROM_HOST=1 in its block, and `adoptHostStorage()` takes
+ *    them; inside a bot it never reaches loadIdentityIfPresent.
+ *  - the bundles that read the same client — `studio`
+ *    (`bundles/studio/server/index.js`), `sunvox-studio`
+ *    (`bundles/sunvox-studio/server/server.js`), `data-dashboard`
+ *    (`bundles/data-dashboard/server/server.js`) and `artifacts`
+ *    (`bundles/artifacts/server/blob-store-minio.js`) — are hydrated the same
+ *    way, and only when their manifest declares `needs: ["shared-storage"]`
+ *    AND their id is on the reviewed, code-held allow-list
+ *    (STORAGE_ENV_CONSUMERS / isStorageEnvConsumer in
+ *    servers/gateway/addon-env.js). A manifest `needs` is a REQUEST, not a
+ *    grant: the installed manifest is operator-writable, and a store add-on is
+ *    not reviewed code.
+ *  - storage is OFF — never an env fallback — on a file-delivery turn (a file
+ *    cannot carry credentials) and for a bundle that declared the need without
+ *    being on that list (the marker `0` and one warning naming it). A bot never
+ *    falls back to an inherited `S3_*`/`MINIO_*` endpoint: for a sandboxed bot
+ *    that pointed at a localhost MinIO where nothing listens.
+ *
+ * The one bot-run server that still reads the identity is the `ramble` bundle
+ * (`bundles/ramble/server/server.js` getIdentityState → loadOrCreateIdentity /
+ * loadInstanceSeed): it needs the seed for its bot identity. Hidden, the file
+ * parses as nothing, so its identity-backed tools fail on a bot turn; since
+ * bundle 0.26.2 that failure is a plain sentence ("ramble: the instance
+ * identity is not available to bots …") instead of pi's JSON error, and the
+ * tool still cannot run there. Its public-persona cache (the gateway writes the
+ * authors to ramble_settings and this server reads them) is the follow-up, and
+ * it is the last entry on the seed-import guard's TEMPORARY allow-list
+ * (tests/bot-seed-import-guard.test.js).
+ *
+ * None of this is an escape: masking the seed is the point, and no bot
+ * definition can opt out of it.
  */
-export const IDENTITY_HIDDEN_LIMITATION = "bot-run MCP servers that read the instance identity (crow-storage, studio, sunvox-studio, ramble, data-dashboard) fall back to env credentials or fail their identity-backed tools";
+export const IDENTITY_HIDDEN_LIMITATION = "storage-using bot servers (crow-storage, studio, sunvox-studio, data-dashboard, artifacts) get their storage settings from the host over the fd pipe — storage is off on a file-delivery turn and for an add-on that is not a reviewed storage consumer; ramble's bot server has no identity-backed features until its follow-up";
 
 /** A `.env` name: `.env` or `.env.<anything>` (a .env.bak-2026... copy too). */
 export const BUNDLE_ENV_NAME_RE = /^\.env(\..*)?$/;

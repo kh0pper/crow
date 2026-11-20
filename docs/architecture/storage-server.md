@@ -68,6 +68,69 @@ export async function getBucketSize(client, bucket) { }
 
 Presigned URLs default to 1-hour expiry. The expiry is configurable per request.
 
+## Who opens the settings (and who never does)
+
+The S3 credentials live in `dashboard_settings` as `storage.shared.*`, with the access key and
+secret sealed by `secret-box` — opening them needs the instance identity file. Two paths, one
+decision, taken by `adoptHostStorage()` in `s3-client.js` off the env var
+`CROW_STORAGE_FROM_HOST`:
+
+| Process | `CROW_STORAGE_FROM_HOST` | What it does |
+|---|---|---|
+| The gateway | — | `initStorage({ db, identity })` in-process |
+| An owner's own stdio server (the generated `~/.pi/agent` config) | absent | reads the identity (`loadIdentityIfPresent`), opens the config, keeps only that |
+| A bot's MCP child | `1` | uses the OPENED settings the bot engine piped into its block (`S3_ENDPOINT`, `S3_USE_SSL`, `S3_REGION`, `S3_BUCKET_PREFIX`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`); never reads the identity |
+| A bot's MCP child on a file-delivery turn | `0` | NO shared storage at all — a file cannot carry credentials, so the child refuses instead of falling back to an inherited endpoint |
+| A bot's MCP child whose block declares no shared storage | `0` | NO shared storage and no identity read: such a child never receives settings, so marker-less (the owner path) must never reach it |
+
+Who declares the need, and who is actually granted it. The core `crow-storage` server is
+GRANTED by its registry entry (`needs: ["shared-storage"]` in `scripts/server-registry.js`) —
+that is code in this repo. A bundle is granted only when **both** halves hold: its **installed**
+manifest declares `"needs": ["shared-storage"]` **and** its id is on the reviewed, code-held
+allow-list `STORAGE_ENV_CONSUMERS` in `servers/gateway/addon-env.js` (`isStorageEnvConsumer()`,
+today `studio`, `sunvox-studio`, `data-dashboard`, `artifacts`). A declaration alone grants
+nothing: the installed manifest is operator-writable, and an add-on from the store is not
+reviewed code, so honouring the declaration by itself would hand this instance's storage
+credentials to any add-on that typed `"needs": ["shared-storage"]`. A bundle that declares the
+need and is not on the list is storage-**OFF** — the marker `0` and no credentials, like any
+other block — plus one warning naming it (`<id>: its manifest declares shared storage, but <id>
+is not a reviewed storage consumer, so <id> has no shared storage`). The bot engine's
+owner-side hydration is in `scripts/pi-bots/mcp_writer.mjs` (`sharedStorageUnreviewed` carries
+the refused ids out of the catalog); it pipes only the opened config, never the seed or the seal
+key, and it says so in the spawn log — `shared storage: over fd`, `shared storage: off (file
+delivery)`, `shared storage: off (no Shared Storage settings on this instance)` or
+`shared storage: off (the Shared Storage settings could not be read)`.
+
+Two rules make "only the six S3_* names" true rather than aspirational:
+
+- **No bot block keeps a storage credential name.** Before the marker or the hydration is
+  added — in BOTH delivery modes, for EVERY block of every kind (core, bundle, sealed add-on,
+  canonical copy) — every `MINIO_*` name and the six `S3_*` names are stripped. The core
+  registry's `mcpEnv` template resolves those out of the repo `.env`, where on a MinIO install
+  they are the instance's ROOT credential; a bot's only storage credentials are the scoped
+  settings the engine opens and pipes for that turn.
+- **There is no env fallback for a bot.** No Shared Storage settings (an env-only install, no
+  identity) means storage is OFF with one warning; settings that exist but cannot be read (an
+  unopenable crow.db, a sealed value that would not open, an identity file that will not open)
+  are OFF with a different warning and boot line, because that is a fault rather than a normal
+  state.
+- **Every active bot stdio block carries the marker.** `1` on the blocks the engine hydrated,
+  `0` on every other one — including a bundle that imports `s3-client` without declaring
+  `needs`, an installed copy from before its declaration, and a bundle that declared `needs`
+  but whose id is not on the reviewed allow-list above. Marker-less IS the owner path, so
+  leaving one unmarked would let such a child open the instance identity inside a bot. A
+  `{url, headers}` block spawns no child and is left alone.
+
+Tests: `tests/pibot-shared-storage-hydrate.test.js` (the writer, each child, and a planted
+repo-style `.env` full of MINIO_*/S3_* credentials in both modes) and
+`tests/pi-contain-shared-storage.test.js` (a real bubblewrap sandbox: the identity reads empty
+while the child is configured from the pipe). `tests/bot-seed-import-guard.test.js` walks the
+static import graph TRANSITIVELY from every bot entry and fails on any chain that reaches
+`servers/sharing/identity.js` or `secret-box.js` (reporting the chain), plus any bot-reachable
+file with a non-literal import specifier unless a reviewed entry says why it cannot reach the
+seed. Its limit is stated in the test header: it follows literal specifiers inside this repo's
+bot-reachable trees only.
+
 ## Database Table
 
 ```sql

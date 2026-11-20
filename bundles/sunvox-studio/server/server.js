@@ -57,44 +57,79 @@ export const WORKDIR = path.resolve(workdirSetting && workdirSetting !== LEGACY_
 
 // --- Lazy storage import (works from the repo tree; degrades with a clear error) ---
 let storageMod = null;
-let storageInit = false;
+// A bot turn is decided ONCE: CROW_STORAGE_FROM_HOST cannot change inside one process, and a
+// child that was not hydrated must not keep re-deciding (`off` stays off). undefined = the marker
+// has not been read yet; null = an OWNER's spawn; "hydrated"/"off" = a bot turn.
+let hostStorageMode;
+// The OWNER path's two facts: a SUCCESS is cached for the life of the process, while a FAILURE
+// (a one-off DB error, a backend that is down) is retried on the next call — but not sooner than
+// STORAGE_RETRY_MS, so one bad read cannot pin this process to the inherited environment (and
+// its crow-files bucket) forever, and a broken DB cannot be hammered on every storage call.
+let ownerWired = false;
+let ownerRetryAt = 0;
+/** How long a failed OWNER-path attempt waits before the next call may try again. */
+export const STORAGE_RETRY_MS = 30_000;
+
 /**
  * Crow storage through the app's own s3-client, resolved via the app root
  * (CROW_APP_ROOT, in-repo run, or ~/crow) so installed copies find it too.
  *
- * Storage is usually configured in the Nest (storage.shared.* settings, with
- * sealed secrets), not in the environment. This child opens those settings
- * once with the instance identity (loaded only if it exists, never created),
- * zeroes the identity's key buffers straight away and hands the s3-client only
- * the opened config (useStorageConfig), so the seed is not kept for the life
- * of a process that feeds untrusted tracker files to a native parser. This
- * narrows what a memory-disclosure bug could leak; it is no defence against
- * code execution in this process (the identity file is readable by the same
- * user, and string copies of the seed are not zeroed). With no Nest
- * config it falls back to the MINIO_* environment like the stdio storage server.
+ * Two paths, decided once by servers/storage/s3-client.js adoptHostStorage():
+ *
+ *   - A BOT turn was decided by the spawning process (scripts/pi-bots/mcp_writer.mjs):
+ *     "hydrated" = this instance's OPENED settings are in this process's env, and "off" =
+ *     a file-delivery config could not carry them (no shared storage at all). Neither reads
+ *     the identity file, which is why this child can run with it masked. Read once: the marker
+ *     cannot change within one process.
+ *   - An OWNER's spawn (no marker) opens the storage.shared.* settings through the s3-client
+ *     itself (loaded only if the identity exists, never created), which keeps only the opened
+ *     config and zeroes the identity's key buffers. With no Nest configuration it falls back
+ *     to the MINIO_* environment like the stdio storage server. A success is cached; a failure
+ *     is retried on a later call (see STORAGE_RETRY_MS), so a momentary DB error does not decide
+ *     this process's storage for its whole life.
+ *
+ * @param {{now?: () => number, db?: () => Promise<object>}} [opts] seams: the clock that gates the
+ *   owner-path retry, and the crow.db client (tests inject both; production passes neither).
  */
-async function storage() {
+export async function storage({ now = Date.now, db = sharedDb } = {}) {
   // Only a working client is cached: storage that was down at the first call
   // is retried on the next one instead of staying off for the session.
   if (storageMod) return storageMod;
   try {
     const { appImport } = await import("./app-root.js");
     const mod = await appImport("servers/storage/s3-client.js");
-    if (!storageInit) {
+    // A bot turn was decided by the spawning process (scripts/pi-bots/mcp_writer.mjs):
+    // "hydrated" = this instance's opened settings are in this process's env; "off" = a
+    // file-delivery config (or a block that declares no shared storage at all) could not carry
+    // them. Neither reads the identity — that is the whole point (servers/storage/s3-client.js
+    // adoptHostStorage). null = an OWNER's spawn.
+    if (hostStorageMode === undefined) {
+      hostStorageMode = (typeof mod.adoptHostStorage === "function" ? mod.adoptHostStorage() : null) || null;
+    }
+    if (hostStorageMode) {
+      // The marker decided this process: no retry, no identity read, ever. Only the backend's
+      // availability is re-probed, so a hydrated turn whose MinIO was not up yet is not lost.
+      storageMod = hostStorageMode === "hydrated" && (await mod.isAvailable()) ? mod : null;
+      return storageMod;
+    }
+    if (!ownerWired && now() >= ownerRetryAt) {
+      // The OWNER's path (no hydration marker in this env): the s3-client opens the
+      // instance's sealed settings itself and keeps only the opened config — the one place
+      // that reads the identity, and this child holds no seed reference at all.
+      let wired = false;
       try {
-        const { loadIdentityIfPresent } = await appImport("servers/sharing/identity.js");
-        if (typeof loadIdentityIfPresent === "function" && typeof mod.useStorageConfig === "function") {
-          const identity = loadIdentityIfPresent();
-          if (identity) {
-            let cfg = null;
-            try { cfg = await mod.loadSharedStorageFromDb(await sharedDb(), identity); } finally { wipeKeys(identity); }
-            if (cfg) mod.useStorageConfig(cfg);
-            // No config may be a passing DB error: try again on the next call rather
-            // than settle on the env config (which would upload to another bucket).
-            storageInit = !!cfg;
-          } else storageInit = true;
-        } else storageInit = true;
-      } catch { /* env fallback (MINIO_*) stays active; retried on the next call */ }
+        if (typeof mod.useDbStorageConfigFromInstance === "function") {
+          wired = await mod.useDbStorageConfigFromInstance(await db());
+        }
+      } catch {
+        wired = false; // a DB open that throws is retried below, never fatal
+      }
+      if (wired) {
+        ownerWired = true;
+      } else {
+        ownerRetryAt = now() + STORAGE_RETRY_MS;
+        console.error("[sunvox-studio] no Shared Storage settings could be opened for this instance; the inherited environment stays in effect (retried on a later call)");
+      }
     }
     storageMod = (await mod.isAvailable()) ? mod : null;
   } catch {

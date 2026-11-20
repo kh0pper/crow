@@ -132,6 +132,12 @@ export const CONDITIONAL_SERVERS = [
     // the DB (initStorage). The S3_* / MINIO_* env below is only its fallback, so a
     // checkout .env without MINIO_ENDPOINT no longer drops the server from .mcp.json.
     envKeys: [],
+    // What this child needs the SPAWNER to hydrate into its MCP block
+    // (scripts/pi-bots/crow-server-catalog.mjs → writeBotMcp): the instance's opened
+    // Shared Storage settings, piped over the fd. A bot's child never reads the identity
+    // file; a file-delivery turn leaves it with no shared storage, which the writer says
+    // out loud. A bundle declares the same need in its manifest.
+    needs: ["shared-storage"],
     mcpEnv: {
       CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}",
       S3_ENDPOINT: "${S3_ENDPOINT:-}",

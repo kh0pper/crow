@@ -114,11 +114,16 @@ export const STORAGE_ENV_CONSUMERS = Object.freeze(["artifacts", "data-dashboard
 /**
  * Exactly the env names servers/storage/s3-client.js reads in its env fallback
  * (envStorageConfig: S3_ENDPOINT family first, then the older MINIO_* family).
- * A consumer gets them from the gateway's environment even though several are
- * deny-listed, and no other add-on ever does.
+ * S3_BUCKET_PREFIX belongs here because the env path carries the prefix too —
+ * defaultBucket() derives "<prefix>-files" from it, so a consumer that never
+ * sees it silently writes into crow-files instead of the instance's prefix.
+ * It is the same name the shared-storage hydration pipes (STORAGE_SETTING_ENV_NAMES
+ * in s3-client.js), so the gateway-spawned child and the bot's fd turn agree on
+ * what the storage client gets. A consumer gets these from the gateway's
+ * environment even though several are deny-listed, and no other add-on ever does.
  */
 export const STORAGE_ENV_KEYS = Object.freeze([
-  "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_USE_SSL", "S3_REGION",
+  "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_USE_SSL", "S3_REGION", "S3_BUCKET_PREFIX",
   "MINIO_ENDPOINT", "MINIO_PORT", "MINIO_USE_SSL", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD",
 ]);
 

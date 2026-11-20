@@ -97,10 +97,13 @@
  *    masks nothing) or in the `userns` tier (host /proc is visible) the file IS
  *    readable inside; the bridge logs one WARNING per tier and the
  *    `[containment]` line names it, and the boot check fails with that reason
- *    rather than claiming a pass. Bot-run tool servers that read the identity
- *    (crow-storage, studio, sunvox-studio, ramble, data-dashboard) lose their
- *    identity-backed path inside the sandbox — see IDENTITY_HIDDEN_LIMITATION in
- *    hidden_files.mjs.
+ *    rather than claiming a pass. The storage-using tool servers a bot runs
+ *    (crow-storage, studio, sunvox-studio, data-dashboard, artifacts) do not
+ *    need it: the host opens this instance's Shared Storage settings and pipes
+ *    them over the fd pipe (storage is off on a file-delivery turn and for an
+ *    add-on that is not a reviewed storage consumer), and ramble's bot server
+ *    has no identity-backed features until its follow-up — see
+ *    IDENTITY_HIDDEN_LIMITATION in hidden_files.mjs.
  *
  * Without bubblewrap (e.g. the cloud VM), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.

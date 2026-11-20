@@ -932,6 +932,10 @@ async function writeWorldMcp(a, sessionId) {
       mcpConfig = applySatelliteBlocks(mcpConfig, satb);
     }
     if (w.warnings.length) a.log("mcp.json warnings: " + w.warnings.join("; "));
+    // The shared-storage boot line (the same place the [containment] line goes): one sentence
+    // per bot that has a storage-using server, so a degraded feature is visible instead of a
+    // silent localhost:9000 fallback inside the sandbox (scripts/pi-bots/mcp_writer.mjs).
+    if (w.sharedStorage && w.sharedStorage.note) a.log(w.sharedStorage.note);
     if (w.remoteWarnings && w.remoteWarnings.length) {
       for (const warn of w.remoteWarnings) a.log("remote-tool: " + warn);
     }

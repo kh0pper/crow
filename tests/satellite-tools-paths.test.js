@@ -149,11 +149,17 @@ test("every reader of mcp-addons.json skips a satellite record (never a local EX
   const { crowServerCatalog } = await import("../scripts/pi-bots/crow-server-catalog.mjs");
   const { listInstalledExtensions } = await import("../scripts/pi-bots/ext_registry.mjs");
   const def = { tools: { crow_mcp: ["demo/demo_list"] } };
+  // `needsSharedStorage` rides along as an empty list, exactly like `needsKeys`' empty object,
+  // and so does its sibling `sharedStorageUnreviewed` (the ids that asked for shared storage
+  // but are not reviewed consumers): a satellite record mints nothing of any kind (it has no
+  // local child to hydrate).
   assert.deepEqual(extraServersFromExtensions(def, HOME, { canonical: { mcpServers: {} } }),
-    { servers: {}, needsKeys: {} }, "no pi block is minted");
+    { servers: {}, needsKeys: {}, needsSharedStorage: [], sharedStorageUnreviewed: [] }, "no pi block is minted");
   assert.ok(!listInstalledExtensions(HOME).some((e) => e.id === "demo"), "not an installed local extension");
   const cat = crowServerCatalog(HOME, { node: process.execPath });
   assert.equal(cat.servers.demo, undefined, "no spawnable catalog block");
+  assert.ok(!cat.needsSharedStorage.includes("demo"), "a satellite record owes no storage hydration");
+  assert.ok(!cat.sharedStorageUnreviewed.includes("demo"), "and is never reported as a refused consumer either");
   assert.match(String(cat.unconfigured.demo || ""), /satellite/);
 });
 

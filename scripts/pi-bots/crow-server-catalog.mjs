@@ -40,6 +40,13 @@ import { withoutLoaderEnv } from "../../servers/shared/loader-env.js";
 // there too: the shared module needs the same list to drop a listed instance key, and this
 // module may not be imported BY it (that would be a cycle).
 import { ADDON_KEYCHAIN_FIELD, ADDON_SECRET_SHARES, INSTANCE_ENV_KEYS, keychainEnvNames } from "../../servers/shared/addon-secrets.js";
+// The REVIEWED storage-consumer table (servers/gateway/addon-env.js: STORAGE_ENV_CONSUMERS).
+// A bundle manifest's `needs` is a REQUEST, never a grant: the installed manifest is
+// operator-writable and a store add-on is not reviewed code, so an id must ALSO be on that
+// code-held list before a bot turn pipes it this instance's storage credentials. Imported
+// rather than copied, so the two can never drift; that module pulls only leaf shared/gateway
+// modules (bot-env, bundles-config, addon-secrets), so no cycle back to this file forms.
+import { isStorageEnvConsumer } from "../../servers/gateway/addon-env.js";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -363,6 +370,32 @@ function readAddons(crowHome) {
 }
 
 /**
+ * The manifest `needs` an add-on declares ("shared-storage" today): the app-side pieces a
+ * spawning process must HYDRATE into that server's block, because the child itself may not
+ * read the instance's identity. Empty for an unreadable/absent manifest, so an installed
+ * copy from before the declaration simply gets no hydration (and no warning).
+ *
+ * Read from the INSTALLED copy (`<crowHome>/bundles/<id>/manifest.json`), never the repo: a
+ * manifest bump is what ships the declaration (`refreshVersionedBundle`), and the entry in
+ * mcp-addons.json is written at install time — it may predate the field.
+ *
+ * This is the DECLARATION only. What a bot turn actually grants is decided together with
+ * isStorageEnvConsumer() — see sharedStorageUnreviewed in crowServerCatalog().
+ */
+export function manifestNeeds(crowHome, id) {
+  if (typeof crowHome !== "string" || crowHome === "" || typeof id !== "string" || id === "") return [];
+  try {
+    const m = JSON.parse(readFileSync(join(crowHome, "bundles", id, "manifest.json"), "utf8"));
+    return Array.isArray(m && m.needs) ? m.needs.filter((n) => typeof n === "string" && n !== "") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The one `needs` entry this file knows (see servers/storage/s3-client.js adoptHostStorage). */
+export const SHARED_STORAGE_NEED = "shared-storage";
+
+/**
  * Build a core-server block from its registry entry. Instance-scoped env keys
  * come from the binding; everything else resolves against the repo .env.
  * Returns {block, missing} — `missing` names required templates (no `:-`
@@ -395,6 +428,15 @@ function coreBlock(spec, binding, repoEnv, node) {
  * operator sees "crow-storage: unconfigured, missing MINIO_ENDPOINT" instead
  * of an opaque spawn failure.
  *
+ * `needsKeys` / `needsSharedStorage` are what an EMITTED block needs the spawning
+ * process to hydrate (a sealed add-on's keychain values; this instance's opened Shared
+ * Storage settings). Names only, never a value: nothing is opened here.
+ *
+ * `sharedStorageUnreviewed` is the other half of that decision: bundles whose manifest
+ * declared `needs: ["shared-storage"]` but whose id is NOT on the reviewed code-held
+ * allow-list (servers/gateway/addon-env.js: STORAGE_ENV_CONSUMERS). They owe nothing and get
+ * nothing — the caller leaves them storage-OFF with one warning naming them.
+ *
  * `coreNames` names the subset of `servers` sourced from the registry
  * (CORE_SERVERS + CONDITIONAL_SERVERS, plus the core-mounted `phone` http
  * entry when its token exists) rather than from mcp-addons.json. It
@@ -414,6 +456,18 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   // id -> the env names it owes the keychain. Names only, and only for blocks this catalog
   // actually emitted: the caller hydrates them (or refuses the spawn) — this module never does.
   const needsKeys = {};
+  // Block names whose child needs this instance's OPENED Shared Storage settings piped into
+  // its env. Two grants reach this list: a REGISTRY `needs` (core servers — code in this
+  // repo, reviewed by definition), and a bundle manifest's `needs` ONLY when that bundle id
+  // is also on the reviewed, code-held allow-list (isStorageEnvConsumer). Names only and
+  // emitted blocks only, like needsKeys: the writer opens and pipes them on an fd turn, and a
+  // file turn leaves the child with no shared storage plus one warning — nothing is opened here.
+  const needsSharedStorage = [];
+  // Block names that DECLARED `needs: ["shared-storage"]` and were refused because their id
+  // is not a reviewed storage consumer. The writer leaves each one storage-OFF (marker 0, no
+  // credentials) plus ONE warning naming it — a request from an operator-writable manifest is
+  // not a grant, and silence would look like a working storage block to its author.
+  const sharedStorageUnreviewed = [];
 
   // Board entry FIRST (Track 1 Task 7) — the one {url, headers} block in an
   // otherwise all-stdio catalog. See boardBlock() above.
@@ -435,12 +489,16 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
     const { block } = coreBlock(spec, binding, repoEnv, node);
     servers[spec.name] = block;
     coreNames.push(spec.name);
+    if (Array.isArray(spec.needs) && spec.needs.includes(SHARED_STORAGE_NEED)) needsSharedStorage.push(spec.name);
   }
   for (const spec of CONDITIONAL_SERVERS) {
     if (isBotExcludedServer(spec.name)) continue; // never in a bot's config (BOT_EXCLUDED_SERVERS)
     const { block, missing } = coreBlock(spec, binding, repoEnv, node);
     if (missing.length) unconfigured[spec.name] = `unconfigured: missing ${missing.join(", ")}`;
-    else servers[spec.name] = block;
+    else {
+      servers[spec.name] = block;
+      if (Array.isArray(spec.needs) && spec.needs.includes(SHARED_STORAGE_NEED)) needsSharedStorage.push(spec.name);
+    }
     coreNames.push(spec.name);
   }
   // A service add-on's fields count as set in its entry, the repo .env, or the
@@ -520,7 +578,16 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       // config at all, so there is nothing for the caller to hydrate.
       const needs = addonKeychainNeeds(id, addon, { addons });
       if (needs.length > 0) needsKeys[id] = needs;
+      // The same rule for the app-side hydrations its manifest declares (`needs`):
+      // shared storage is opened by the SPAWNER and piped over the fd — but the manifest only
+      // ASKS. The grant needs both halves: the installed manifest declares the need, AND the
+      // bundle id is on the reviewed code-held list. A store add-on that declares the need is
+      // refused (storage off, one warning), never handed this instance's credentials.
+      if (manifestNeeds(crowHome, id).includes(SHARED_STORAGE_NEED)) {
+        if (isStorageEnvConsumer(id)) needsSharedStorage.push(id);
+        else sharedStorageUnreviewed.push(id);
+      }
     }
   }
-  return { servers, unconfigured, coreNames, needsKeys };
+  return { servers, unconfigured, coreNames, needsKeys, needsSharedStorage, sharedStorageUnreviewed };
 }

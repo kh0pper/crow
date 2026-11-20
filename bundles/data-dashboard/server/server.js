@@ -25,16 +25,57 @@ const storage = await appImport("servers/storage/s3-client.js");
 const { uploadObject, getClient: getStorageClient } = storage;
 // The instance's Shared Storage settings (DB), not the MINIO_* env this child inherits
 // from the gateway (that env pointed at localhost:9000, where nothing listens). Opened
-// once per process with the identity, whose key buffers are wiped straight away.
+// with the identity, whose key buffers are wiped straight away and CACHED for the life of the
+// process once it works — unless a bot turn was HYDRATED by the spawning process, in which case
+// the opened config is already in this process's env and identity.js is never read at all.
 let storageFromDb = false;
-async function useInstanceStorage(db) {
-  if (storageFromDb || typeof storage.useDbStorageConfig !== "function") return;
+// A bot turn is decided ONCE: CROW_STORAGE_FROM_HOST cannot change inside one process, and a
+// child that was not hydrated must not keep re-deciding (`off` stays off). undefined = the marker
+// has not been read yet; null = an OWNER's spawn; "hydrated"/"off" = a bot turn.
+let hostStorageMode;
+// The OWNER path's two facts: a SUCCESS is cached for the life of the process, while a FAILURE
+// (a one-off DB error) is retried on the next call — but not sooner than STORAGE_RETRY_MS, so one
+// bad read cannot pin this process to the inherited environment (and its crow-files bucket) for
+// its whole life, and a broken DB cannot be hammered on every publish.
+let ownerRetryAt = 0;
+/** How long a failed OWNER-path attempt waits before the next call may try again. */
+export const STORAGE_RETRY_MS = 30_000;
+// The last owner-path note, so a retrying process says it once per reason, not once per call.
+let ownerNote = null;
+
+// Exported so tests/pibot-shared-storage-hydrate.test.js can walk the real decision without
+// spawning a stdio child (the same call the publish tools make). `opts.now` is the clock that
+// gates the owner-path retry (tests inject it; production passes nothing).
+export async function useInstanceStorage(db, { now = Date.now } = {}) {
+  if (storageFromDb) return;
+  // "hydrated" (settings piped by the spawning process) or "off" (a file-delivery turn, or a
+  // block that declares no shared storage): decided upstream, and the identity is never read
+  // (s3-client adoptHostStorage). Read once — the marker cannot change inside one process.
+  if (hostStorageMode === undefined) {
+    hostStorageMode = (typeof storage.adoptHostStorage === "function" ? storage.adoptHostStorage() : null) || null;
+  }
+  if (hostStorageMode) return;
+  // The OWNER's own spawn: the s3-client opens the sealed settings itself (the one place that
+  // reads the identity) and keeps only the opened config. A success is cached for this process;
+  // a failure (no settings YET, or a DB open that throws) is retried on a later call instead of
+  // being final — see STORAGE_RETRY_MS.
+  if (typeof storage.useDbStorageConfigFromInstance !== "function") return;
+  if (now() < ownerRetryAt) return;
+  let wired = false;
+  let note = "[data-dashboard] no Shared Storage settings could be opened for this instance; the inherited environment stays in effect (retried on a later call)";
   try {
-    const { loadIdentityIfPresent } = await appImport("servers/sharing/identity.js");
-    const identity = loadIdentityIfPresent();
-    // No identity: no sealed settings exist, so the env fallback is all there is.
-    storageFromDb = identity ? await storage.useDbStorageConfig({ db, identity }) : true;
-  } catch { /* env fallback stays active; retried on the next call */ }
+    wired = await storage.useDbStorageConfigFromInstance(db);
+  } catch {
+    // A DB open that threw: the env fallback stays active and the next call tries again.
+    wired = false;
+    note = "[data-dashboard] the Shared Storage settings could not be opened for this instance; the inherited environment stays in effect (retried on a later call)";
+  }
+  if (wired) {
+    storageFromDb = true;
+    return;
+  }
+  ownerRetryAt = now() + STORAGE_RETRY_MS;
+  if (note !== ownerNote) { ownerNote = note; console.error(note); }
 }
 
 // Read per call (CROW_BLOG_FIGURES_BUCKET / BLOG_FIGURE_GATEWAY_URL, passed

@@ -35,7 +35,29 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | `skills` | `["skills/<id>.md", ...]` | every path exists |
 | `ports` / `port` / `webUI.port` | integers (1–65535); `webUI` may also be `null` | — |
 | `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id is a `bundles/<id>` dir with a `manifest.json` (a real bundle) |
+| `needs` | `["shared-storage"]` (the only value today) | — (see below) |
 | `env_vars` | `[{ "name": "X", "description": "...", "required": false, "secret": false, "default": "" }]` | each entry has a `name` |
+
+**`needs`: what the spawner must hydrate into your MCP block.** A bundle's `server/` runs as a
+stdio MCP child that can NOT read Crow's identity file, so anything it needs *opened* on its
+behalf is declared here. `["shared-storage"]` means the instance's Shared Storage settings
+(endpoint, region, bucket prefix, access/secret key): the bot engine opens them in its own
+process and pipes them into the block's env as `S3_*` with `CROW_STORAGE_FROM_HOST=1`, and your
+child calls `adoptHostStorage()` from the app's `servers/storage/s3-client.js` instead of
+reading the identity. A file-delivery turn cannot carry them: the child gets
+`CROW_STORAGE_FROM_HOST=0` and NO credentials (one warning names it), so treat storage as
+optional and say so when it is missing. An owner's own stdio spawn has no marker and keeps the
+old path (the s3-client opens the settings from the DB itself).
+
+**The declaration is a request, not a grant.** The installed manifest is operator-writable and
+an add-on from the store is not reviewed code, so a bot turn grants shared storage only when
+the id is ALSO on the reviewed, code-held allow-list — `STORAGE_ENV_CONSUMERS` in
+`servers/gateway/addon-env.js`, today `artifacts`, `data-dashboard`, `studio` and
+`sunvox-studio`. Another bundle may declare `needs: ["shared-storage"]` and will be left
+storage-OFF (marker `0`, no credentials) with one warning naming it as *not a reviewed storage
+consumer*; a fork that needs the credentials asks for its id to be added to that table in Crow
+itself. Panels and other code that runs inside the gateway process are not spawned children and
+never take this path.
 
 **No read-write bind into your own folder.** A compose may mount paths inside its own installed folder (`~/.crow/bundles/<id>/`) read-only only — every read-write bind whose path is that folder or anything under it is refused, whatever it is meant to hold. Put data in a named volume or in Crow's data folder (`<CROW_HOME>/<id>`), which are allowed.
 

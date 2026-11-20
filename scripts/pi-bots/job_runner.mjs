@@ -423,6 +423,9 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
         // (mcp-delivery.mjs) — hydrate there, never for a file.
         addonKeys: mcpDelivery === "fd" ? "hydrate" : "omit" });
       mcpConfig = (w && w.json) || null;
+      // The shared-storage line a channel turn logs too (mcp_writer.mjs): a background job on a
+      // file-delivery host must show its degraded storage, not bury it in a silent fallback.
+      if (w && w.sharedStorage && w.sharedStorage.note) log(w.sharedStorage.note);
     } catch (e) { log("job mcp.json write skipped (non-fatal): " + ((e && e.message) || e)); }
     // Project services (Task 18): the owner's connected accounts as labelled blocks, only for a
     // job whose principal is 'owner' and which THIS process claimed (`job` is claimNextJob's

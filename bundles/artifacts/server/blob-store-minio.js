@@ -2,6 +2,15 @@
 // store's async interface (R-H2), backed by the s3-client the gateway already
 // uses, so an install with shared storage keeps artifacts beside its files.
 //
+// A BOT's turn is decided by the spawning process, not here: every bot stdio
+// block carries CROW_STORAGE_FROM_HOST ("1" = the instance's opened settings
+// were piped, "0" = no shared storage at all), and resolveS3 applies it with
+// adoptHostStorage() before anything looks at storage — so this bundle's child
+// never reads the instance identity (its manifest declares
+// needs: ["shared-storage"] for exactly that). With no marker (an owner's own
+// spawn) the s3-client keeps its own path: sealed settings from the DB, then
+// the env.
+//
 // Per-instance isolation (R3-M3): the bucket is `<bucket prefix>-artifacts`
 // (the prefix from `storage.shared.bucket_prefix`, via the s3-client's
 // defaultBucket()) AND every key lives under `<store_id>/`, where store_id is
@@ -149,10 +158,45 @@ export function artifactsBucket(s3) {
  */
 const CACHE = new Map();
 
+/**
+ * The app's storage client for THIS process, and whether the bot decision was already applied.
+ * Both are per-process: the marker cannot change inside one process, and `import()` is cached by
+ * the loader anyway, so resolving it repeatedly costs nothing more than the adoption below.
+ */
+let APP_S3 = null;
+let APP_S3_ADOPTED = false;
+
+/**
+ * The storage client this bundle runs on — with the bot's Shared Storage decision applied FIRST,
+ * exactly like studio, sunvox-studio and data-dashboard do at their bootstrap.
+ *
+ * The spawning process (scripts/pi-bots/mcp_writer.mjs) writes CROW_STORAGE_FROM_HOST on every
+ * bot stdio block: `1` = this instance's OPENED settings are in this env, `0` = a bot turn with
+ * no shared storage at all. adoptHostStorage answers that and never reads the instance identity
+ * — which is the point, because this bundle's manifest declares `needs: ["shared-storage"]` and
+ * a bot child may run with the identity file masked. Null (no marker) is an OWNER's own spawn:
+ * nothing is decided here, and the s3-client takes its own path as before.
+ */
+async function appS3() {
+  if (!APP_S3_ADOPTED) {
+    try {
+      APP_S3 = await appImport("servers/storage/s3-client.js");
+    } catch {
+      APP_S3 = null;
+    }
+    if (APP_S3 && typeof APP_S3.adoptHostStorage === "function") {
+      // Decided once: the marker is the same on every call in this process, and re-running the
+      // adoption would rebuild the client for no gain.
+      APP_S3_ADOPTED = true;
+      try { APP_S3.adoptHostStorage(); } catch { /* the env fallback stands, as before */ }
+    }
+  }
+  return APP_S3;
+}
+
+/** The client to use: an INJECTED one (the tests' seam) or this instance's, adopted as above. */
 async function resolveS3(opts) {
-  let s3 = opts.s3 || null;
-  if (!s3) { try { s3 = await appImport("servers/storage/s3-client.js"); } catch { s3 = null; } }
-  return s3;
+  return opts.s3 || appS3();
 }
 
 /** Does this database already hold artifact versions? (anything to orphan) */
@@ -307,7 +351,11 @@ async function openStore(db, dataDir, opts) {
  * @param {string} dataDir the instance data directory (blobs live under <dataDir>/artifacts)
  * @param {object} [opts]  { s3, noCache, forceKind } — test seams (see CACHE).
  */
-export function createBlobStore(db, dataDir, opts = {}) {
+export async function createBlobStore(db, dataDir, opts = {}) {
+  // The bot's decision comes FIRST — before any backend is chosen. A turn the engine marked off
+  // must not even reach the s3-client's env fallback on the way to "local", and the hydrated
+  // turn's settings must already be in place for the probe below.
+  if (!opts.s3) await appS3();
   if (opts.forceKind) return buildStore(db, dataDir, opts.forceKind, opts);
   const cacheKey = resolve(dataDir);
   if (!opts.noCache && CACHE.has(cacheKey)) return CACHE.get(cacheKey);

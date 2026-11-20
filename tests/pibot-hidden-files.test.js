@@ -13,6 +13,12 @@ import { secretFilesFor, secretPinDirsFor, unmaskableRefusal, SSH_NOT_HIDDEN_REF
   GCLOUD_DIR_REL, GCLOUD_NOT_HIDDEN_REFUSAL, GCLOUD_LINK_REFUSAL, gcloudNotHiddenRefusal,
   BUNDLE_ENV_READABLE, ROOT_SECRET_FILES, isAddonsFileName,
   IDENTITY_FILE_NAME, isIdentityFileName, IDENTITY_HIDDEN_LIMITATION } from "../scripts/pi-bots/hidden_files.mjs";
+// The reviewed lists of bot-reachable code that may still reach the seed, imported (not copied)
+// so this file's derivation below cannot drift from the guard's. Importing it also registers the
+// guard's own tests in this process (they are env-independent and cheap).
+import { ALLOWED_HOST_SIDE } from "./bot-seed-import-guard.test.js";
+// The reviewed, code-held table of bundles that may be handed this instance's storage settings.
+import { STORAGE_ENV_CONSUMERS } from "../servers/gateway/addon-env.js";
 
 test("secretFilesFor: root token files, the appRoot .env and every non-allow-listed bundle .env", () => {
   const root = mkdtempSync(join(tmpdir(), "crow-hidden-files-"));
@@ -93,15 +99,41 @@ test("secretFilesFor: the sharing identity and every copy of it, at THIS home's 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("IDENTITY_HIDDEN_LIMITATION names every bot-run server that reads the identity, data-dashboard included", () => {
-  for (const id of ["crow-storage", "studio", "sunvox-studio", "ramble", "data-dashboard"]) {
+test("IDENTITY_HIDDEN_LIMITATION: storage arrives over the fd pipe, and ramble is the one bot server still without identity-backed features", () => {
+  // The storage-using bot servers, DERIVED: the registry grants the core `crow-storage` the opened
+  // settings (`needs: ["shared-storage"]`, scripts/server-registry.js) and these four are the
+  // reviewed, code-held bundle consumers (servers/gateway/addon-env.js: STORAGE_ENV_CONSUMERS).
+  const storageUsers = ["crow-storage", ...STORAGE_ENV_CONSUMERS];
+  for (const id of storageUsers) {
     assert.ok(IDENTITY_HIDDEN_LIMITATION.includes(id), id + " is named in: " + IDENTITY_HIDDEN_LIMITATION);
   }
-  // The newest entry is not just words: that server really opens the identity,
-  // and really falls back to the env when it is hidden.
+  assert.match(IDENTITY_HIDDEN_LIMITATION, /over the fd pipe/, "the sentence says where their settings come from");
+  assert.match(IDENTITY_HIDDEN_LIMITATION, /storage is off on a file-delivery turn/, "a file turn carries no credentials");
+  assert.match(IDENTITY_HIDDEN_LIMITATION, /not a reviewed storage consumer/, "an unreviewed add-on gets none either");
+
+  // The bot-run servers that STILL read the identity are DERIVED from the one reviewed allow-list
+  // that permits it: a bundle's `server/` file on ALLOWED_HOST_SIDE (the seed-import guard walks
+  // the whole import graph) is exactly a bot-run server that reaches the seed. Ramble is the last
+  // one, so a new entry there fails this test until the limitation names it too.
+  const readers = Object.keys(ALLOWED_HOST_SIDE)
+    .filter((rel) => /^bundles\/[^/]+\/server\//.test(rel))
+    .map((rel) => rel.split("/")[1]);
+  assert.deepEqual(readers, ["ramble"], "ramble is the last bot-run server that reads the identity");
+  for (const id of readers) {
+    assert.ok(IDENTITY_HIDDEN_LIMITATION.includes(id), id + " is named in: " + IDENTITY_HIDDEN_LIMITATION);
+    assert.match(IDENTITY_HIDDEN_LIMITATION, new RegExp(id + "[^;]*identity-backed"),
+      id + " is named as the one losing identity-backed features: " + IDENTITY_HIDDEN_LIMITATION);
+  }
+
+  // Neither claim is words only. Ramble's bot server really reaches the identity and really says
+  // so in plain words when the sandbox makes it unavailable ...
+  const ramble = readFileSync(join(import.meta.dirname, "..", "bundles", "ramble", "server", "server.js"), "utf8");
+  assert.match(ramble, /appImport\("servers\/sharing\/identity\.js"\)/, "ramble's bot server opens the instance identity");
+  assert.match(ramble, /the instance identity is not available to bots/, "and says so when it is hidden");
+  // ... and data-dashboard (the newest storage user) really takes the host's settings instead.
   const src = readFileSync(join(import.meta.dirname, "..", "bundles", "data-dashboard", "server", "server.js"), "utf8");
-  assert.match(src, /loadIdentityIfPresent\(/, "data-dashboard opens the instance identity");
-  assert.match(src, /useDbStorageConfig\(/, "and falls back to the env fallback when it is absent");
+  assert.match(src, /adoptHostStorage\(/, "data-dashboard takes the settings the host piped over the fd");
+  assert.match(src, /useDbStorageConfigFromInstance\(/, "and its OWNER path opens them itself, host-side");
 });
 
 test("secretFilesFor: a .env backup at each ROOT is listed (and refused if it is a link), a .env.example at each root and in a bundle is not", () => {

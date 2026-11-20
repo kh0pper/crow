@@ -92,6 +92,11 @@
         "envKeys": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "needs": {
+      "description": "App-side pieces the process that SPAWNS this bundle's server must hydrate into its MCP block, because the child cannot read them itself: \"shared-storage\" = the instance's opened Shared Storage settings, piped over the fd (a file-delivery turn leaves the child with no shared storage, and it says so).",
+      "type": "array",
+      "items": { "type": "string", "enum": ["shared-storage"] }
+    },
     "sandbox": {
       "type": "object", "additionalProperties": false,
       "properties": {

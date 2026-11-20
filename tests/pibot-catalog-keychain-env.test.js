@@ -210,14 +210,20 @@ test("catalog: an add-on that never got a block owes no keys (nothing to hydrate
 const extraDef = (ids) => ({ tools: { crow_mcp: ids.map((i) => i + "/t") } });
 const NO_CANONICAL = { mcpServers: {} };
 
-test("extraServersFromExtensions: returns { servers, needsKeys } and strips a sealed name the same way", () => {
+test("extraServersFromExtensions: returns { servers, needsKeys, needsSharedStorage, sharedStorageUnreviewed } and strips a sealed name the same way", () => {
   const { home } = instance({ sealed: sealedEntry(), plain: plainEntry() });
   const warn = console.warn; console.warn = () => {};
   let out;
   try {
     out = extraServersFromExtensions(extraDef(["sealed", "plain"]), home, { canonical: NO_CANONICAL });
   } finally { console.warn = warn; }
-  assert.deepEqual(Object.keys(out).sort(), ["needsKeys", "servers"]);
+  // needsSharedStorage is the same kind of report as needsKeys (what a spawn must hydrate),
+  // empty here: neither fixture declares `needs` in its installed manifest.
+  // sharedStorageUnreviewed is its sibling — the ids that DECLARED the need and are not on the
+  // reviewed allow-list — and is empty for the same reason.
+  assert.deepEqual(Object.keys(out).sort(), ["needsKeys", "needsSharedStorage", "servers", "sharedStorageUnreviewed"]);
+  assert.deepEqual(out.needsSharedStorage, []);
+  assert.deepEqual(out.sharedStorageUnreviewed, []);
   assert.equal("keychainEnv" in out.servers.sealed, false, "no keychainEnv field ever goes into a block");
   assert.equal(out.servers.sealed.env.HA_TOKEN, undefined, "the listed name's plain value is dropped");
   assert.equal(out.servers.sealed.env.HA_URL, "http://ha.example:8123");
