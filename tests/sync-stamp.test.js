@@ -10,11 +10,16 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdtempSync, rmSync, readFileSync, readdirSync, writeFileSync, symlinkSync, lstatSync, existsSync,
+  utimesSync, lutimesSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { createDbClient } from "../servers/db.js";
+import { getOrCreateLocalInstanceId } from "../servers/gateway/instance-registry.js";
 import {
   ensureSyncTables,
   mintLamport,
@@ -169,38 +174,305 @@ test("stampSql: returns null for an unknown table with no id", () => {
   assert.equal(stampSql("some_unmapped_table", { name: "x" }, 1), null);
 });
 
-// ── getOrCreateLocalInstanceId concurrent-create race ───────────────────
+// ── getOrCreateLocalInstanceId: first-ever-boot race + the empty-file window ──
 
-test("getOrCreateLocalInstanceId: concurrent first-ever boot — both racers return the SAME id", async () => {
-  const raceDir = mkdtempSync(join(tmpdir(), "crow-instanceid-race-"));
-  const fixture = fileURLToPath(new URL("./fixtures/instance-id-racer.mjs", import.meta.url));
+/**
+ * getOrCreateLocalInstanceId publishes <data dir>/instance-id ATOMICALLY (temp file
+ * + link) and RETRIES an empty read, so a second process racing a first-ever boot
+ * can never observe a half-written id. The CI failure these tests pin: the old
+ * O_EXCL create made the file exist empty and wrote the id afterwards, so the loser
+ * read "" and threw INSTANCE_ID_UNREADABLE.
+ */
 
-  const runRacer = () =>
-    new Promise((resolvePromise, reject) => {
-      const child = spawn(process.execPath, [fixture], {
-        env: { ...process.env, CROW_DATA_DIR: raceDir },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let out = "";
-      let err = "";
-      child.stdout.on("data", (d) => { out += d; });
-      child.stderr.on("data", (d) => { err += d; });
-      child.on("close", (code) => {
-        if (code !== 0) return reject(new Error(`racer exited ${code}: ${err}`));
-        resolvePromise(out.trim());
-      });
-      child.on("error", reject);
+/** Fresh data dirs (= fresh first-ever boots) crossed by two racer processes each. */
+const RACE_ROUNDS = 10;
+
+/** The CROW_* identity env this file borrows and must put back. */
+const IDENTITY_ENV_KEYS = ["CROW_DATA_DIR", "CROW_LOCAL_INSTANCE_ID"];
+
+/**
+ * Run `fn` with CROW_DATA_DIR → dir and NO CROW_LOCAL_INSTANCE_ID: a suite-wide env
+ * id would otherwise answer for a file the test needs the reader to read.
+ */
+async function inScratchDataDir(dir, fn) {
+  const saved = IDENTITY_ENV_KEYS.map((key) => [key, process.env[key]]);
+  process.env.CROW_DATA_DIR = dir;
+  delete process.env.CROW_LOCAL_INSTANCE_ID;
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
+ * Arm the delayed-writer worker: it reports "armed", and on "go" writes `id` into
+ * `idPath` after `delayMs`. The caller runs the (synchronous) reader right after
+ * arming, so the reader's first read lands in the empty window while the worker's
+ * write lands comfortably inside its ~200 ms retry budget.
+ */
+async function armDelayedWriter({ idPath, id, delayMs }) {
+  const worker = new Worker(new URL("./fixtures/instance-id-delayed-writer.mjs", import.meta.url), {
+    workerData: { idPath, id, delayMs },
+  });
+  try {
+    const armed = await new Promise((resolveArmed, reject) => {
+      worker.once("message", resolveArmed);
+      worker.once("error", reject);
+      worker.once("exit", (code) => reject(new Error(`the delayed-writer fixture exited ${code} before arming`)));
     });
+    assert.equal(armed, "armed", "the fixture must arm before the reader runs");
+  } catch (err) {
+    await worker.terminate();
+    throw err;
+  }
+  worker.postMessage("go");
+  return worker;
+}
 
-  const [idA, idB] = await Promise.all([runRacer(), runRacer()]);
+/** The racer fixture, run as its own process; `args` reach it as argv (e.g. --no-hardlinks). */
+const RACER_FIXTURE = fileURLToPath(new URL("./fixtures/instance-id-racer.mjs", import.meta.url));
 
-  assert.ok(idA, "racer A must return a non-empty id");
-  assert.ok(idB, "racer B must return a non-empty id");
-  // The real assertion: both racers RETURN the same id. A file-content-only
-  // check (reading instance-id after both exit) passes vacuously even when
-  // the two in-flight processes disagreed — both "succeeded" with different
-  // ids while whichever wrote last silently overwrote the file.
-  assert.equal(idA, idB, "both concurrent racers must observe the SAME winning id");
+function runRacer(raceDir, args = []) {
+  return new Promise((resolvePromise, reject) => {
+    const env = { ...process.env, CROW_DATA_DIR: raceDir };
+    // The file they race over must be the racers' only identity source, or a
+    // broken read in the loser would be masked by the suite's env id.
+    delete env.CROW_LOCAL_INSTANCE_ID;
+    const child = spawn(process.execPath, [RACER_FIXTURE, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`racer exited ${code}: ${err}`));
+      resolvePromise(out.trim());
+    });
+    child.on("error", reject);
+  });
+}
 
-  rmSync(raceDir, { recursive: true, force: true });
+test(`getOrCreateLocalInstanceId: concurrent first-ever boot — both racers return the SAME id (${RACE_ROUNDS} fresh rounds)`, async () => {
+  for (let round = 1; round <= RACE_ROUNDS; round++) {
+    const raceDir = mkdtempSync(join(tmpdir(), "crow-instanceid-race-"));
+    try {
+      const [idA, idB] = await Promise.all([runRacer(raceDir), runRacer(raceDir)]);
+
+      assert.match(idA, /^[0-9a-f]{32}$/, `round ${round}: racer A must return a 32-hex id, got ${JSON.stringify(idA)}`);
+      assert.match(idB, /^[0-9a-f]{32}$/, `round ${round}: racer B must return a 32-hex id, got ${JSON.stringify(idB)}`);
+      // The real assertion: both racers RETURN the same id. A file-content-only
+      // check (reading instance-id after both exit) passes vacuously even when
+      // the two in-flight processes disagreed — both "succeeded" with different
+      // ids while whichever wrote last silently overwrote the file.
+      assert.equal(idA, idB, `round ${round}: both concurrent racers must observe the SAME winning id`);
+      assert.equal(
+        readFileSync(join(raceDir, "instance-id"), "utf-8").trim(), idA,
+        `round ${round}: the file on disk holds the id both racers returned`,
+      );
+      assert.deepEqual(
+        readdirSync(raceDir).filter((name) => name.endsWith(".tmp")), [],
+        `round ${round}: the atomic publish leaves no temp file behind`,
+      );
+    } finally {
+      rmSync(raceDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("getOrCreateLocalInstanceId: a reader that finds the file briefly EMPTY retries and returns the id (no throw)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-instanceid-empty-"));
+  const idPath = join(dir, "instance-id");
+  const winnerId = "0123456789abcdef0123456789abcdef";
+  // The exact shape an OLD (non-atomic) writer leaves in its window: the file
+  // exists and is empty, and the id lands a moment later.
+  writeFileSync(idPath, "");
+
+  let worker;
+  try {
+    await inScratchDataDir(dir, async () => {
+      worker = await armDelayedWriter({ idPath, id: winnerId, delayMs: 5 });
+      // Start the reader's ~2 s "this entry is being written" window at the call, not
+      // at worker startup: on a loaded box arming a worker can take a while, and the
+      // empty file was created before it.
+      lutimesSync(idPath, new Date(), new Date());
+      assert.equal(existsSync(idPath), true, "precondition: the file exists");
+      assert.equal(readFileSync(idPath, "utf-8"), "", "precondition: the reader starts from an empty file");
+
+      const got = getOrCreateLocalInstanceId(); // blocks in the retry loop while the worker writes
+
+      assert.equal(got, winnerId, "the reader must return the id written into the window, not throw INSTANCE_ID_UNREADABLE");
+    });
+  } finally {
+    if (worker) await worker.terminate();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getOrCreateLocalInstanceId: a create loser (EEXIST) returns the winner's id, never a read of the empty winner", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-instanceid-eexist-"));
+  const idPath = join(dir, "instance-id");
+  const winnerPath = join(dir, "winner-instance-id");
+  const winnerId = "fedcba9876543210fedcba9876543210";
+  // A DANGLING SYMLINK pins the EEXIST branch deterministically: existsSync() is
+  // false (it follows the link to a missing target), so the create path runs,
+  // while link(tmp, idPath) still sees the existing entry and fails EEXIST —
+  // exactly what a losing racer sees. The winner's file then appears where the
+  // link points, a moment later, and must be what the loser returns.
+  symlinkSync(winnerPath, idPath);
+
+  let worker;
+  try {
+    await inScratchDataDir(dir, async () => {
+      assert.equal(existsSync(idPath), false, "precondition: existsSync() is false, so the create path runs");
+      assert.equal(lstatSync(idPath).isSymbolicLink(), true, "precondition: the create target entry exists");
+
+      worker = await armDelayedWriter({ idPath: winnerPath, id: winnerId, delayMs: 5 });
+      // Same as above, for the LINK's own mtime (lutimes: never follows the target).
+      lutimesSync(idPath, new Date(), new Date());
+
+      const got = getOrCreateLocalInstanceId();
+
+      assert.equal(got, winnerId, "the loser must return the id the winner published, never \"\"");
+      assert.deepEqual(
+        readdirSync(dir).filter((name) => name.endsWith(".tmp")), [],
+        "the losing publish unlinks its temp file",
+      );
+    });
+  } finally {
+    if (worker) await worker.terminate();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getOrCreateLocalInstanceId: a create loser whose target never yields an id throws INSTANCE_ID_UNREADABLE, never \"\"", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-instanceid-eexist-empty-"));
+  const idPath = join(dir, "instance-id");
+  symlinkSync(join(dir, "winner-never-written"), idPath);
+  try {
+    await inScratchDataDir(dir, async () => {
+      assert.equal(existsSync(idPath), false, "precondition: the create path runs");
+
+      let returned;
+      assert.throws(
+        () => { returned = getOrCreateLocalInstanceId(); },
+        (err) => {
+          assert.equal(err.code, "INSTANCE_ID_UNREADABLE", "an id-less target is the operator-facing failure, not a silent empty id");
+          assert.match(err.message, /refusing to invent one/, "the operator-facing text is unchanged");
+          return true;
+        },
+      );
+      assert.equal(returned, undefined, "no value — in particular no empty id — escapes the loser");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getOrCreateLocalInstanceId: an empty id file AT REST is not waited on (no ~200 ms stall on a per-request path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-instanceid-at-rest-"));
+  const idPath = join(dir, "instance-id");
+  const envId = "0123456789abcdef0123456789abcdef";
+  writeFileSync(idPath, "");
+  // Nothing is writing this file: push its mtime well outside the ~2 s write window,
+  // which is what a crash leftover or a genuinely empty id looks like at rest — and
+  // what an add-on wall's masked /dev/null reads as too. This function is called on
+  // every dashboard panel read, so waiting out the retry budget each time is a stall.
+  const longAgo = new Date(Date.now() - 60_000);
+  utimesSync(idPath, longAgo, longAgo);
+  try {
+    await inScratchDataDir(dir, async () => {
+      let started = Date.now();
+      assert.throws(() => getOrCreateLocalInstanceId(), { code: "INSTANCE_ID_UNREADABLE" });
+      const thrownIn = Date.now() - started;
+      assert.ok(thrownIn < 50, `an empty file at rest must not be retried; the call took ${thrownIn} ms`);
+
+      process.env.CROW_LOCAL_INSTANCE_ID = envId;
+      started = Date.now();
+      assert.equal(getOrCreateLocalInstanceId(), envId, "the id the gateway handed this process answers, as before");
+      const resolvedIn = Date.now() - started;
+      assert.ok(resolvedIn < 50, `an empty file at rest must not be retried; the call took ${resolvedIn} ms`);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A link(2) that fails for a reason that is NOT a lost race (ENOSPC). With `winnerId`
+ * set it also publishes that id first, which is the whole window being simulated: a
+ * racer published while OUR publish failed for an unrelated reason.
+ */
+function failingLink(winnerId) {
+  return (_tmpPath, idPath) => {
+    if (winnerId) writeFileSync(idPath, winnerId, "utf-8");
+    const err = new Error("ENOSPC: no space left on device, link");
+    err.code = "ENOSPC";
+    throw err;
+  };
+}
+
+test("getOrCreateLocalInstanceId: a publish that FAILS for a non-race reason returns the id that is on disk", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-instanceid-enospc-"));
+  const winnerId = "abcdef0123456789abcdef0123456789";
+  try {
+    await inScratchDataDir(dir, async () => {
+      assert.equal(existsSync(join(dir, "instance-id")), false, "precondition: the create path runs (no id file yet)");
+      // The id on disk is the instance's identity. The in-memory mint must NOT be
+      // returned over it: nobody saved that one, so every per-instance setting
+      // would read as unset against it.
+      const got = getOrCreateLocalInstanceId({ link: failingLink(winnerId) });
+      assert.equal(got, winnerId, "the published id wins over an id nobody saved");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getOrCreateLocalInstanceId: a publish that fails with NO id on disk still returns the minted id (unchanged)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-instanceid-enospc-empty-"));
+  const idPath = join(dir, "instance-id");
+  try {
+    await inScratchDataDir(dir, async () => {
+      const got = getOrCreateLocalInstanceId({ link: failingLink(null) });
+      assert.match(got, /^[0-9a-f]{32}$/, "the unsaved minted id is the last resort");
+      assert.equal(existsSync(idPath), false, "nothing was persisted");
+      assert.deepEqual(
+        readdirSync(dir).filter((name) => name.endsWith(".tmp")), [],
+        "the failed publish unlinks its temp file",
+      );
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("getOrCreateLocalInstanceId: without hard links the exclusive-create fallback still makes two racers agree", async () => {
+  const NO_HARDLINK_ROUNDS = 5;
+  for (let round = 1; round <= NO_HARDLINK_ROUNDS; round++) {
+    const raceDir = mkdtempSync(join(tmpdir(), "crow-instanceid-race-nohl-"));
+    try {
+      const [idA, idB] = await Promise.all([
+        runRacer(raceDir, ["--no-hardlinks"]),
+        runRacer(raceDir, ["--no-hardlinks"]),
+      ]);
+      assert.match(idA, /^[0-9a-f]{32}$/, `round ${round}: racer A must return a 32-hex id, got ${JSON.stringify(idA)}`);
+      assert.match(idB, /^[0-9a-f]{32}$/, `round ${round}: racer B must return a 32-hex id, got ${JSON.stringify(idB)}`);
+      // The wx create is NOT atomic — the winner's file is empty for an instant — so
+      // the loser must be reading it through the retry window, not on the first read.
+      assert.equal(idA, idB, `round ${round}: both racers must observe the SAME id over the exclusive-create fallback`);
+      assert.equal(
+        readFileSync(join(raceDir, "instance-id"), "utf-8").trim(), idA,
+        `round ${round}: the file on disk holds the id both racers returned`,
+      );
+      assert.deepEqual(
+        readdirSync(raceDir).filter((name) => name.endsWith(".tmp")), [],
+        `round ${round}: the fallback publish leaves no temp file behind`,
+      );
+    } finally {
+      rmSync(raceDir, { recursive: true, force: true });
+    }
+  }
 });

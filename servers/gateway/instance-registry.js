@@ -11,7 +11,10 @@
 
 import { randomBytes, createHash } from "crypto";
 import { resolvePeerLabel } from "../shared/peer-label.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, lstatSync, chmodSync } from "fs";
+import {
+  existsSync, readFileSync, writeFileSync, mkdirSync, lstatSync, chmodSync,
+  openSync, closeSync, fsyncSync, linkSync, unlinkSync,
+} from "fs";
 import { resolve, dirname } from "path";
 import { writePrivateFile } from "./bundle-env-secrets.js";
 import { hostname as osHostname, tmpdir } from "os";
@@ -555,23 +558,26 @@ let _unpinnedId = null;
  * row. An unreadable file therefore resolves to the id the gateway handed this process in
  * CROW_LOCAL_INSTANCE_ID (never written anywhere), or throws INSTANCE_ID_UNREADABLE so the
  * caller reports a failure instead of inventing an identity. Only a MISSING file is minted.
+ *
+ * The id is PUBLISHED atomically (temp file + link, see publishInstanceIdAtomically) and
+ * READ through a short retry window (readPublishedInstanceId) that waits only while the
+ * entry looks freshly written, so a second process that races the very first boot can
+ * never observe an empty or half-written id (the CI race test used to fail because O_EXCL
+ * created the file empty and wrote the id afterwards) while an id file at rest — the
+ * common case, on a per-request hot path — costs one read and no sleep.
+ *
+ * @param {object} [opts] test seam only; production callers pass nothing
+ * @param {typeof linkSync} [opts.link] the link(2) the atomic publish uses
  */
-export function getOrCreateLocalInstanceId() {
+export function getOrCreateLocalInstanceId(opts = {}) {
+  const link = typeof opts?.link === "function" ? opts.link : linkSync;
   const dataDir = resolveInstanceDataDir();
   const idPath = resolve(dataDir, "instance-id");
 
   if (existsSync(idPath)) {
-    let fileId = "";
-    try { fileId = readFileSync(idPath, "utf-8").trim(); } catch { /* unreadable: handled below */ }
+    const fileId = readPublishedInstanceId(idPath);
     if (fileId) return fileId;
-    const envId = String(process.env.CROW_LOCAL_INSTANCE_ID || "").trim();
-    if (LOCAL_INSTANCE_ID_RE.test(envId)) return envId;
-    throw instanceError(
-      "INSTANCE_ID_UNREADABLE",
-      `${idPath} exists but its instance id cannot be read (empty or unreadable), and ` +
-      `CROW_LOCAL_INSTANCE_ID is not a 32-character hex instance id; refusing to invent one. ` +
-      `On the gateway itself an EMPTY instance-id file is safe to delete: a missing file is minted again on the next start`,
-    );
+    return envInstanceIdOrThrow(idPath);
   }
 
   // An instance-id is the boot gate's evidence that <CROW_HOME>/data is an
@@ -590,27 +596,222 @@ export function getOrCreateLocalInstanceId() {
   }
 
   const id = generateInstanceId();
+  let published;
   try {
     mkdirSync(dataDir, { recursive: true });
-    // Exclusive create (O_EXCL) — atomic against a concurrent first-ever-boot
-    // racer. A plain writeFileSync (or a rename-over-target) is NOT exclusive:
-    // both racers would "succeed" with different in-memory ids while one
-    // silently clobbers the other's file, so a file-content-only check passes
-    // vacuously. On EEXIST we lost the race — re-read and return the winner's
-    // id so both racers agree.
-    writeFileSync(idPath, id, { flag: "wx" });
+    published = publishInstanceIdAtomically(idPath, id, { link });
   } catch (err) {
-    if (err.code === "EEXIST") {
-      try {
-        return readFileSync(idPath, "utf-8").trim();
-      } catch (readErr) {
-        console.warn("[instance-registry] Failed to re-read winning instance-id:", readErr.message);
+    console.warn("[instance-registry] Failed to persist instance-id:", err.message);
+    return id;
+  }
+
+  if (published.status === "created") return id;
+  if (published.status === "failed") {
+    console.warn("[instance-registry] Failed to persist instance-id:", published.error.message);
+    // The publish failed for a reason that is NOT a lost race (ENOSPC, EIO, a
+    // read-only tree). If an id file exists ANYWAY — a racer published one in the
+    // same window, or an earlier boot did — that file is this instance's identity:
+    // return it instead of the minted id nobody saved, which would make every
+    // per-instance setting read as unset again (see this function's doc).
+    if (existsSync(idPath)) {
+      const existingId = readPublishedInstanceId(idPath);
+      if (existingId) return existingId;
+    }
+    return id;
+  }
+  if (published.status === "no-hardlinks") {
+    // A filesystem without hard links (some FUSE/network mounts): the atomic
+    // publish is unavailable, so fall back to the previous exclusive create.
+    // That write is NOT atomic — the file exists empty for an instant — which is
+    // exactly why a reader retries (readPublishedInstanceId) instead of throwing
+    // on the first empty read.
+    console.warn(
+      `[instance-registry] ${dataDir} does not support hard links (${published.error.code});` +
+      " publishing instance-id with an exclusive create instead",
+    );
+    try {
+      writeFileSync(idPath, id, { flag: "wx" });
+      return id;
+    } catch (err) {
+      if (err.code !== "EEXIST") {
+        console.warn("[instance-registry] Failed to persist instance-id:", err.message);
+        return id;
       }
-    } else {
-      console.warn("[instance-registry] Failed to persist instance-id:", err.message);
     }
   }
-  return id;
+
+  // We lost the race (EEXIST, directly or via the fallback above): return the
+  // winner's id so both racers agree. Never return "" — a loser that hands back
+  // an empty id has an identity nobody persisted.
+  const winnerId = readPublishedInstanceId(idPath);
+  if (winnerId) return winnerId;
+  console.warn(`[instance-registry] Failed to re-read the winning instance-id at ${idPath}`);
+  return envInstanceIdOrThrow(idPath);
+}
+
+/**
+ * How long a reader keeps retrying an instance-id entry that reads EMPTY before it
+ * accepts that the file is empty at rest: 10 × 20 ms ≈ 200 ms total. The window is
+ * for a racer that published with an OLDER, non-atomic writer (file created empty,
+ * id written after) or a crash leftover, not for the current writer — that one is
+ * atomic (publishInstanceIdAtomically), so a reader can never see its gap.
+ *
+ * The retry is GATED by the entry's own freshness (INSTANCE_ID_WRITE_WINDOW_MS). This
+ * function is on a hot path (every dashboard panel read, every proxy target
+ * resolution), and an empty file AT REST used to stall each call for the whole budget.
+ */
+const INSTANCE_ID_READ_RETRY_ATTEMPTS = 10;
+const INSTANCE_ID_READ_RETRY_MS = 20;
+
+/**
+ * How fresh an instance-id entry must look to count as "a writer has just created it and
+ * is about to fill it in". ~2 s is vastly longer than the one 32-byte write that fills a
+ * real id, and short enough that a file at rest is never waited on.
+ */
+const INSTANCE_ID_WRITE_WINDOW_MS = 2000;
+
+/** Block this thread for `ms` — getOrCreateLocalInstanceId is synchronous by design. */
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* Atomics.wait unavailable: spin the last few ms */ }
+  }
+}
+
+/**
+ * Read a COMPLETE instance id from idPath, retrying briefly while the entry reads EMPTY
+ * AND still looks like it is being written (see INSTANCE_ID_READ_RETRY_* and
+ * inInstanceIdWriteWindow). Returns "" when there is nothing to wait for — a crash
+ * leftover, a genuinely empty file at rest, a wall's masked path — so the caller falls
+ * through to the env/throw path with NO sleep. ENOENT is retryable only while the ENTRY is
+ * freshly created (link() said it exists, but what it points at may be published a moment
+ * later); any other read error is not (EISDIR/EACCES: an add-on wall's masked path or a
+ * directory — waiting cannot make it readable).
+ */
+function readPublishedInstanceId(idPath) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const text = readFileSync(idPath, "utf-8").trim();
+      if (text) return text;
+    } catch (err) {
+      // Not ENOENT: a read error waiting cannot fix. Fall through to the caller.
+      if (err.code !== "ENOENT") return "";
+    }
+    // The read came back empty (or the entry is a dangling symlink). Only an entry
+    // that looks freshly written is worth waiting on; an empty file at rest is the
+    // caller's env/throw case, answered at once.
+    if (!inInstanceIdWriteWindow(idPath)) return "";
+    if (attempt >= INSTANCE_ID_READ_RETRY_ATTEMPTS) return "";
+    sleepSync(INSTANCE_ID_READ_RETRY_MS);
+  }
+}
+
+/**
+ * Is idPath an entry a writer has JUST created — a regular file (or a link whose target
+ * is not there yet) whose own mtime is inside INSTANCE_ID_WRITE_WINDOW_MS? That is the
+ * only case where an empty read means "wait": the id itself lands in milliseconds.
+ *
+ * Everything else returns false, so the caller does not sleep: an empty file at rest, a
+ * crash leftover, a directory, an add-on wall's masked /dev/null char device, a deleted
+ * file. lstat (not stat) so a link is judged by its own entry, never by a target whose
+ * mtime says nothing about whether THIS name is about to be filled in.
+ */
+function inInstanceIdWriteWindow(idPath) {
+  try {
+    const st = lstatSync(idPath);
+    if (!st.isFile() && !st.isSymbolicLink()) return false;
+    return Date.now() - st.mtimeMs <= INSTANCE_ID_WRITE_WINDOW_MS;
+  } catch {
+    return false; // gone or unreadable: nothing to wait for
+  }
+}
+
+/**
+ * What is left when a readPublishedInstanceId() call came back empty: the id the
+ * gateway handed this process in CROW_LOCAL_INSTANCE_ID, else INSTANCE_ID_UNREADABLE.
+ * Never returns "". The error text is operator-facing and unchanged: an EMPTY file at
+ * rest is still reported rather than silently replaced by a freshly minted id.
+ */
+function envInstanceIdOrThrow(idPath) {
+  const envId = String(process.env.CROW_LOCAL_INSTANCE_ID || "").trim();
+  if (LOCAL_INSTANCE_ID_RE.test(envId)) return envId;
+  throw instanceError(
+    "INSTANCE_ID_UNREADABLE",
+    `${idPath} exists but its instance id cannot be read (empty or unreadable), and ` +
+    `CROW_LOCAL_INSTANCE_ID is not a 32-character hex instance id; refusing to invent one. ` +
+    `On the gateway itself an EMPTY instance-id file is safe to delete: a missing file is minted again on the next start`,
+  );
+}
+
+/** link(2) failures meaning "this filesystem has no hard links". */
+const NO_HARDLINK_CODES = new Set(["EPERM", "ENOSYS", "EXDEV", "EOPNOTSUPP", "ENOTSUP", "EMLINK"]);
+
+/**
+ * Publish `id` to idPath atomically, keeping the exclusivity a first-ever-boot race
+ * needs. The id goes into a unique temp file in the SAME directory (link(2) cannot
+ * cross filesystems), is fsync'd, and is then linked onto idPath. link is atomic and
+ * fails with EEXIST when idPath already exists, so:
+ *   - a reader can never see an empty or partial id — link exposes a complete file, and
+ *   - exactly one racer wins; the loser learns it lost from the EEXIST.
+ * A plain writeFileSync (or a rename-over-target) would NOT be exclusive: both racers
+ * would "succeed" with different in-memory ids while one silently clobbers the other's
+ * file, so a file-content-only check passes vacuously. The temp file is always
+ * unlinked, including after a successful link (idPath then holds its own link to the inode).
+ *
+ * Returns { status: "created" } | { status: "exists" } (we lost the race) |
+ * { status: "no-hardlinks", error } (caller falls back to the old exclusive create) |
+ * { status: "failed", error }.
+ *
+ * @param {object} [opts] test seam only
+ * @param {typeof linkSync} [opts.link] the link(2) to publish with
+ */
+function publishInstanceIdAtomically(idPath, id, { link = linkSync } = {}) {
+  // Same directory, so the link cannot fail with EXDEV. Mode stays today's default
+  // (0666 minus umask): the content is the instance's id, not a secret.
+  const tmpPath = resolve(dirname(idPath), `.instance-id.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  let fd;
+  try {
+    fd = openSync(tmpPath, "wx");
+    writeFileSync(fd, id);
+    fsyncSync(fd); // the id is durable before any reader can link to it
+  } catch (err) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+    try { unlinkSync(tmpPath); } catch { /* never created */ }
+    return { status: "failed", error: err };
+  }
+  try { closeSync(fd); } catch { /* the write and fsync already succeeded */ }
+  try {
+    link(tmpPath, idPath);
+    // fsync the DIRECTORY too: fsync'ing the file does not make the dirent that names
+    // it durable, so a crash right after a first boot could still lose the id. Best
+    // effort — a filesystem that refuses a directory fsync must never fail the publish.
+    fsyncDirectory(dirname(idPath));
+    return { status: "created" };
+  } catch (err) {
+    if (err.code === "EEXIST") return { status: "exists" };
+    if (NO_HARDLINK_CODES.has(err.code)) return { status: "no-hardlinks", error: err };
+    return { status: "failed", error: err };
+  } finally {
+    try { unlinkSync(tmpPath); } catch { /* already unlinked */ }
+  }
+}
+
+/**
+ * fsync a directory so a freshly linked/renamed dirent inside it survives a crash.
+ * Never throws: the publish itself already succeeded, and a platform or filesystem
+ * that will not fsync a directory (or will not open it) loses durability, not the id.
+ */
+function fsyncDirectory(dir) {
+  let fd;
+  try {
+    fd = openSync(dir, "r");
+    fsyncSync(fd);
+  } catch { /* best effort */ }
+  finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
 }
 
 /**
