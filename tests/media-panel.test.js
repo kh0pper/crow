@@ -8,7 +8,7 @@
  * oauth_tokens row says 'dashboard') used from another machine (tests/helpers/off-box.js).
  */
 import "./helpers/media-isolate.js";   // first: this file's own home, data dir and database
-import { test, before, after } from "node:test";
+import { test, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -26,11 +26,14 @@ import { STRINGS } from "../bundles/media/server/strings.js";
 import panel from "../bundles/media/panel/media.js";
 
 let db, show, ids;
+/** A Wednesday, 12:00 in America/Chicago, with seconds and ms so it never lands on a minute boundary. */
+const PINNED_NOW = Date.parse("2026-10-07T17:00:30.500Z");
 const OWNER_SESSION = "media-panel-owner-session";
 const HOSTILE_URL = "https://media.example.invalid/a.mp3');alert(document.cookie);//";
 const HOSTILE_TITLE = `Rates "rise" </script><img src=x onerror=alert(1)> it's \\ here`;
 
 before(async () => {
+  mock.timers.enable({ apis: ["Date"], now: PINNED_NOW });
   execFileSync(process.execPath, ["scripts/init-db.js"], { cwd: REPO, stdio: "pipe" });
   db = createDbClient();
   // The owner's session: a local password login, scopes 'dashboard' alone, as dashboard/auth.js
@@ -67,7 +70,7 @@ before(async () => {
     ]),
   });
 });
-after(() => { try { db?.close(); } catch {} });
+after(() => { mock.timers.reset(); try { db?.close(); } catch {} });
 
 async function render(query, lang = "en") {
   // The owner's page, asked for from the owner's laptop: the panel answers anyone else (and the
@@ -204,4 +207,10 @@ test("the tab row wraps on a narrow screen instead of widening the page", async 
   assert.ok(nav, "the tab row is there");
   assert.match(nav.getAttribute("style"), /flex-wrap:\s*wrap/);
   assert.ok(nav.querySelectorAll("a").length >= 7);
+});
+
+test("the clock is pinned, so the schedule text does not depend on when the suite runs", async () => {
+  assert.equal(Date.now(), PINNED_NOW);
+  const { html } = await render({ tab: "briefings" });
+  assert.match(html, /Next briefing: Thursday, October 8(,| at) 8:00 AM \(America\/Chicago\)/);
 });

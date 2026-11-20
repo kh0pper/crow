@@ -235,9 +235,11 @@ test("a reader that never reads holds at most the copy limit, with one truncatio
   const done = closed(t);
   await t.start();
   await done;
-  // 20 MiB were written; the copy holds no more than the limit plus the one marker line.
-  assert.ok(copy.writableLength + copy.readableLength <= _STDERR_COPY_LIMIT + 64 * 1024 + 64,
-    "buffered " + (copy.writableLength + copy.readableLength));
+  // 20 MiB were written. The limit is enforced on the writable side (plus the one marker line);
+  // the readable side is the stream's own small read buffer, whose size depends on how the pipe
+  // splits chunks, so it is bounded separately by a few 64 KiB chunks.
+  assert.ok(copy.writableLength <= _STDERR_COPY_LIMIT + 64, "writable side buffered " + copy.writableLength);
+  assert.ok(copy.readableLength <= 3 * 64 * 1024, "readable side buffered " + copy.readableLength);
   const chunks = [];
   copy.on("data", (c) => chunks.push(c));
   await new Promise((r) => copy.on("end", r));
