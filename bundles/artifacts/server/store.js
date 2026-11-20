@@ -254,8 +254,23 @@ export async function approveVersion(db, { artifactId, n, actor }) {
  * the artifact's current version has moved, the result is stored PROPOSED and
  * the owner chooses. `untrusted` marks a version made by a round that held
  * non-owner text (§7.3). A version appears only once all its files are stored.
+ *
+ * `extraStatements(n) => [{sql, args}]` (optional, last input) lets the caller
+ * write its OWN row in the SAME `db.batch`: the reports bridge records which
+ * run produced version n, and that row must exist exactly when the version
+ * does. It cannot be done from outside: `withWriteLock` is a non-reentrant
+ * promise chain that addVersion already takes, so a caller cannot hold the
+ * lock around it (calling in from inside deadlocks), and writing after it
+ * returns leaves a window where a crash leaves a version with no row. The
+ * statements ride the batch, so a failing one rolls the version back with it
+ * (no version row, current_version unchanged, and the blobs written for it are
+ * garbage-collected by the catch path below). A plain `{sql, args}` object.
+ * The callback is called BEFORE the batch, so a callback that throws would
+ * otherwise leave the objects it never referenced: that throw is caught here
+ * too, the same `gcKeys` cleanup runs, and the error is rethrown as it came —
+ * no version, no caller row, no orphan blob.
  */
-export async function addVersion(db, blobs, { artifactId, source, actor, baseVersion = null, roundId = null, madeBy = null, changeNote = null, untrusted = false, proposedReason = null }, deps = {}) {
+export async function addVersion(db, blobs, { artifactId, source, actor, baseVersion = null, roundId = null, madeBy = null, changeNote = null, untrusted = false, proposedReason = null, extraStatements = null }, deps = {}) {
   const art = await requireAccess(db, actor, artifactId);
   if (flagUntrusted(art.received)) throw err("forbidden", "a received artifact cannot be edited");
   // Review M10: an unchanged spec reuses the base version's render.
@@ -302,6 +317,18 @@ export async function addVersion(db, blobs, { artifactId, source, actor, baseVer
     ];
     if (state === "current") {
       stmts.push({ sql: "UPDATE artifact_versions SET state='past' WHERE artifact_id=? AND n=? AND state='current'", args: [artifactId, cur] });
+    }
+    // The caller's own rows (the reports bridge's run→version record) join this
+    // batch BEFORE the CAS, so the CAS result stays the last statement and a
+    // lost CAS rolls the caller's row back too. Built before the batch, so a
+    // callback that throws leaves the version unwritten while its blobs are
+    // already stored: collect them and rethrow.
+    if (typeof extraStatements === "function") {
+      let extra;
+      try { extra = extraStatements(n); } catch (e) { await gcKeys(db, blobs, manifest.map((m) => m.key)); throw e; }
+      for (const st of extra || []) stmts.push(st);
+    }
+    if (state === "current") {
       // The CAS: only moves when current is still what we read.
       stmts.push({ sql: "UPDATE artifacts SET current_version=?, updated_at=datetime('now') WHERE id=? AND current_version=?", args: [n, artifactId, cur] });
     }
@@ -344,14 +371,85 @@ export async function decideProposed(db, { artifactId, n, accept, actor, blobs =
   return { current: n };
 }
 
+/** `until` as the store's own datetime text (`YYYY-MM-DD HH:MM:SS`, UTC).
+ *  prune() compares the column against `datetime('now')`, so a hold written in
+ *  any other shape (an epoch number, an ISO `...T...Z` string, a zone offset)
+ *  would compare as text and either never expire or expire at once: every
+ *  value is normalised here. A number, or a string of digits, is epoch
+ *  MILLISECONDS; any other string is read by SQLite's own `datetime()`. A
+ *  value SQLite cannot read (it answers NULL) is a bad_request, never a hold
+ *  that silently never ends. null/undefined means no end and stays NULL. */
+async function normaliseUntil(db, until) {
+  if (until == null) return null;
+  const raw = typeof until === "string" ? until.trim() : until;
+  const epochMs = typeof raw === "number"
+    ? (Number.isFinite(raw) ? raw : null)
+    : (/^-?\d+$/.test(raw) ? Number(raw) : null);
+  const row = (await db.execute(epochMs == null
+    ? { sql: "SELECT datetime(?) AS t", args: [String(raw)] }
+    : { sql: "SELECT datetime(?/1000,'unixepoch') AS t", args: [epochMs] })).rows[0];
+  const at = row ? row.t : null;
+  if (typeof at !== "string" || !at) throw err("bad_request", "until is not a valid time");
+  return at;
+}
+
+/** Retention (D14): a version that was SENT to anyone, or that a public link
+ *  points at, must keep rendering after it leaves the current slot — a link in
+ *  a mail is a promise. A hold names who holds it (`report-send:<id>`,
+ *  `report-link:<id>`) and until when; `until` NULL means no end. prune()
+ *  skips every live hold. Holds are additive state only: releasing one never
+ *  deletes a version, it only lets the normal retention rule prune it.
+ *  A second hold for the same (version, holder) replaces that holder's own
+ *  row, so the same holder can never extend its own hold by sending twice.
+ *  `until` (a Date-less value: epoch ms, a numeric string, or any string
+ *  SQLite's `datetime()` reads) is stored normalised, and the normalised value
+ *  is what this returns. */
+export async function holdVersion(db, { artifactId, n, holder, until = null }) {
+  if (typeof holder !== "string" || !holder.trim() || holder.length > 200) throw err("bad_request", "a holder is required (200 characters at most)");
+  const art = await getArtifact(db, artifactId);
+  const version = Number(n);
+  const v = art && Number.isInteger(version) ? (await db.execute({ sql: "SELECT 1 FROM artifact_versions WHERE artifact_id=? AND n=?", args: [art.id, version] })).rows[0] : null;
+  if (!v) throw err("not_found", "no such version");
+  const at = await normaliseUntil(db, until);
+  await db.execute({ sql: "INSERT OR REPLACE INTO artifact_version_holds (artifact_id, n, holder, until) VALUES (?,?,?,?)", args: [art.id, version, holder, at] });
+  return { artifactId: art.id, n: version, holder, until: at };
+}
+
+/** Drop one holder's row for one version (a revoked link, a send withdrawn).
+ *  Returns the number of rows removed. */
+export async function releaseVersionHold(db, { artifactId, n, holder }) {
+  const r = await db.execute({ sql: "DELETE FROM artifact_version_holds WHERE artifact_id=? AND n=? AND holder=?", args: [String(artifactId), Number(n), String(holder)] });
+  return Number(r.rowsAffected) || 0;
+}
+
+/** Drop every row of one holder (revoking a recipient releases both its send
+ *  and its link holds). Returns the number of rows removed. */
+export async function releaseHolds(db, { holder }) {
+  if (typeof holder !== "string" || !holder) return 0;
+  const r = await db.execute({ sql: "DELETE FROM artifact_version_holds WHERE holder=?", args: [holder] });
+  return Number(r.rowsAffected) || 0;
+}
+
 /** §4.3 pruning: keep the last N versions; never current, published, proposed
- *  (the owner has not decided), flagged, or the base of an active round. */
+ *  (the owner has not decided), flagged, the base of an active round, or one
+ *  someone still holds (a version that was sent, or that a link points at).
+ *
+ *  HELD VERSIONS COUNT TOWARD `LIMITS.versionsKept`, and this is intended: the
+ *  count is of rows that exist, not of rows eligible to prune, so with many
+ *  live holds (a report sent every week to a recipient who never revokes) the
+ *  excess only ever removes UNHELD past versions — eventually all of them,
+ *  leaving an artifact whose history is nothing but held versions. That is the
+ *  point of a hold: a link in a mail is a promise, and the promise outranks the
+ *  history cap. Releasing a hold restores the normal count on the next prune. */
 export async function prune(db, artifactId) {
   const { rows } = await db.execute({
     sql: `SELECT v.n FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id
           WHERE v.artifact_id=? AND v.state='past' AND v.flagged_reason IS NULL
             AND (a.published_version IS NULL OR a.published_version<>v.n)
             AND v.n NOT IN (SELECT base_version FROM artifact_rounds WHERE artifact_id=? AND status IN ('queued','pending','delivering','working'))
+            AND NOT EXISTS (SELECT 1 FROM artifact_version_holds h
+                             WHERE h.artifact_id=v.artifact_id AND h.n=v.n
+                               AND (h.until IS NULL OR h.until > datetime('now')))
           ORDER BY v.n DESC`,
     args: [artifactId, artifactId],
   });

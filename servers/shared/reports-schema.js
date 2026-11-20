@@ -164,3 +164,40 @@ export const REPORTS_RUNS_DDL = `
 `;
 
 export const REPORTS_RUNS_TABLES = Object.freeze(["report_runs", "report_run_requests"]);
+
+/**
+ * The run-to-version map: which artifact version a run wrote, and which links that version may show.
+ *
+ * One row per (artifact_id, n), written INSIDE the artifact's own version batch (the artifacts store's
+ * `addVersion` `extraStatements` seam), so the row exists exactly when the version does: a failed insert
+ * rolls the version back with it, and a version can never be orphaned from the run that made it. The
+ * PRIMARY KEY is the version's own key, so a version has at most one run and a run cannot claim a
+ * version twice.
+ *
+ * `allowed_links_json` is the run's set of http(s) URLs that appear in its items (de-duplicated, at most
+ * 2,000), the same set the recipient view uses to decide which links become clickable; it is the only
+ * place a report's own links are recorded, so the rendered document stays inert. Times are epoch ms;
+ * `trigger` is an SQL keyword and is quoted everywhere. No CHECKs, no foreign keys: the run engine
+ * validates the trigger word, and the reports store removes a report's rows itself.
+ *
+ * A version in this table was made by a report run, never by the owner, which is why the dashboard and
+ * the report page say "Report run" for it instead of "you". LOCAL ONLY (instance-sync
+ * LOCAL_ONLY_TABLES): a row names a report and its run, and a report never leaves its instance.
+ * Additive, no SCHEMA_GENERATION bump.
+ */
+export const REPORTS_VERSIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS report_versions (
+    artifact_id TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    report_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    "trigger" TEXT NOT NULL,
+    allowed_links_json TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, n)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_report_versions_report ON report_versions(report_id);
+`;
+
+export const REPORTS_VERSIONS_TABLES = Object.freeze(["report_versions"]);

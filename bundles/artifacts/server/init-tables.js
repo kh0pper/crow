@@ -182,6 +182,23 @@ export async function initArtifactsTables(db) {
       theme TEXT NOT NULL,
       set_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- Version holds: a version that was sent to someone, or that a public link
+    -- points at, is never pruned (store.js prune skips it) while its hold is
+    -- live. ADDITIVE ONLY: a new table is the one schema change an installed
+    -- bundle can make (CREATE IF NOT EXISTS reaches every live DB; no CHECK is
+    -- widened and no table is rebuilt here). The until column is a datetime
+    -- text like every other time in this file; NULL means no end. One row per
+    -- (version, holder), so a second send from the same holder replaces its own
+    -- row.
+    CREATE TABLE IF NOT EXISTS artifact_version_holds (
+      artifact_id TEXT NOT NULL,
+      n INTEGER NOT NULL,
+      holder TEXT NOT NULL,
+      until TEXT,
+      PRIMARY KEY (artifact_id, n, holder)
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifact_version_holds_holder ON artifact_version_holds(holder);
+    CREATE INDEX IF NOT EXISTS idx_artifact_version_holds_art ON artifact_version_holds(artifact_id);
   `);
   // Additive migrations for databases created by an earlier version of this
   // bundle (plan review R-L6). CREATE IF NOT EXISTS never adds a column, so

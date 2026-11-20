@@ -175,7 +175,7 @@
     {
       "id": "artifacts",
       "name": "Artifacts",
-      "version": "0.10.4",
+      "version": "0.11.0",
       "description": "Pages, documents and diagrams your bots make. Comment on any part, send feedback, and the bot revises and replies in each thread.",
       "type": "bundle",
       "author": "Crow",

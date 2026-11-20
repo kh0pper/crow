@@ -962,9 +962,10 @@ export async function runPostListenSetup(server, app, deps) {
     setImmediate(async () => {
       let db = null;
       try {
-        const [{ startReportsAtBoot, deliverNotWired }, { buildApprovalsDeps }] = await Promise.all([
+        const [{ startReportsAtBoot, deliverNotWired }, { buildApprovalsDeps }, { makeWriteVersion }] = await Promise.all([
           import("../reports/schedule-hook.js"),
           import("../reports/approvals-deps.js"),
+          import("../reports/artifact-bridge.js"),
         ]);
         db = createDbClient();
         const started = await startReportsAtBoot({
@@ -973,6 +974,10 @@ export async function runPostListenSetup(server, app, deps) {
           deps: {
             deliver: deliverNotWired,
             approvals: buildApprovalsDeps(),
+            // The artifact bridge loads the Artifacts bundle lazily (it is installed at runtime), so a
+            // gateway without that bundle still boots: a run that needs it fails honestly with
+            // artifacts_missing instead.
+            writeVersion: makeWriteVersion({}),
           },
         });
         if (started.started && started.hook) reportsHook = started.hook;

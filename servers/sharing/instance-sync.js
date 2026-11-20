@@ -200,7 +200,11 @@ export const SYNCED_TABLES = [
 // report holds the owner's sources, recipients and credential references, and its approval seals are
 // keyed to this instance's keychain, so neither the report nor its audit trail leaves this machine; the
 // report runs: a run row names the sources it read and carries the redacted error text of one attempt,
-// and its gateway_run_id names a process on this machine;
+// and its gateway_run_id names a process on this machine; the report versions: the run-to-version map
+// names a report and its run, so it stays with them; the artifact family: the Crow Artifacts tables live
+// in crow.db but are not in SYNCED_TABLES at all (nothing about an artifact, its versions or its links
+// replicates), and artifact_version_holds — the retention state that keeps a sent version rendering — is
+// named here so a hold can never be read as something to replicate;
 // project_bot_shares: a bot's grant to reach one project is this instance's own decision, keyed to
 // local ids and to a bot that lives here). The keychain has its own key file, but its rows are
 // still never replicated. Checked at load.
@@ -212,7 +216,8 @@ export const LOCAL_ONLY_TABLES = Object.freeze([
   "mail_sync_state", "mail_image_allow",
   "mail_drafts", "mail_draft_revisions", "mail_draft_comments", "mail_draft_voice",
   "reports", "report_recipe_revisions", "report_state", "report_usage", "report_approvals_audit",
-  "report_runs", "report_run_requests",
+  "report_runs", "report_run_requests", "report_versions",
+  "artifact_version_holds",
   "project_bot_shares",
 ]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
